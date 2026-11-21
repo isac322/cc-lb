@@ -650,7 +650,9 @@ pub(crate) struct RecordedCodexRequest {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct CodexMediaRealtimeState(pub(crate) std::sync::Arc<std::sync::Mutex<Vec<RecordedCodexRequest>>>);
+pub(crate) struct CodexMediaRealtimeState(
+    pub(crate) std::sync::Arc<std::sync::Mutex<Vec<RecordedCodexRequest>>>,
+);
 
 pub(crate) struct CodexMediaRealtimeFake {
     pub(crate) origin: String,
@@ -918,7 +920,14 @@ async fn backend_codex_images_generations_and_edits_preserve_native_contract() {
     let fake = spawn_codex_media_realtime_fake().await;
     let client = Client::new();
     disable_all_seeded_upstreams(&client, &server).await;
-    add_oauth_upstream(&client, &server, "oauth-codex-images", &fake.base, "acct-img").await;
+    add_oauth_upstream(
+        &client,
+        &server,
+        "oauth-codex-images",
+        &fake.base,
+        "acct-img",
+    )
+    .await;
     let key = &server.managed_key.plaintext;
 
     for path in [
@@ -1436,7 +1445,10 @@ async fn backend_codex_hangup_never_routes_to_api_key_owner() {
 
     let key = &server.managed_key.plaintext;
     let public_create = client
-        .post(format!("http://{}/openai/v1/realtime/calls", server.proxy_addr))
+        .post(format!(
+            "http://{}/openai/v1/realtime/calls",
+            server.proxy_addr
+        ))
         .bearer_auth(key)
         .header("content-type", "application/sdp")
         .body("v=0\r\n")

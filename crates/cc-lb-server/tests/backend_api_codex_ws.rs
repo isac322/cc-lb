@@ -157,7 +157,10 @@ async fn backend_codex_websocket_strips_actor_authorization_on_responses() {
     for u in upstreams["upstreams"].as_array().unwrap() {
         let id = u["id"].as_str().unwrap();
         let detail = client
-            .get(format!("http://{}/admin/v1/upstreams/{id}", server.admin_addr))
+            .get(format!(
+                "http://{}/admin/v1/upstreams/{id}",
+                server.admin_addr
+            ))
             .bearer_auth("admin-token")
             .send()
             .await
@@ -293,7 +296,10 @@ async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinni
     )
     .await
     .1;
-    let principal_id = principals["principals"][0]["id"].as_str().unwrap().to_owned();
+    let principal_id = principals["principals"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let (_, _, etag) = crate::openai_oauth_public_compat::admin(
         &client,
         &server,
@@ -398,11 +404,21 @@ async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinni
     let (mut sideband_ws, _) = tokio_tungstenite::connect_async(sideband_default_req)
         .await
         .expect("sideband default alpha connects");
-    let sideband_frame: serde_json::Value =
-        serde_json::from_str(&sideband_ws.next().await.unwrap().unwrap().into_text().unwrap())
-            .unwrap();
+    let sideband_frame: serde_json::Value = serde_json::from_str(
+        &sideband_ws
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(sideband_frame["alpha"], "quicksilver=v2");
-    assert_eq!(sideband_frame["query"], "intent=quicksilver&call_id=rtc_codex_1");
+    assert_eq!(
+        sideband_frame["query"],
+        "intent=quicksilver&call_id=rtc_codex_1"
+    );
 
     let mut sideband_custom_req = format!(
         "ws://{}/openai/backend-api/codex/realtime?intent=quicksilver&call_id=rtc_codex_1",
@@ -544,7 +560,10 @@ async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinni
     let disallowed_err = tokio_tungstenite::connect_async(disallowed_req)
         .await
         .expect_err("disallowed model must be rejected");
-    assert!(disallowed_err.to_string().contains("403"), "{disallowed_err}");
+    assert!(
+        disallowed_err.to_string().contains("403"),
+        "{disallowed_err}"
+    );
 
     let mut allowed_req = format!(
         "ws://{}/openai/backend-api/codex/realtime?intent=quicksilver&model=gpt-realtime",
@@ -637,7 +656,10 @@ async fn backend_codex_realtime_websocket_never_routes_to_api_key_or_api_key_cal
 
     // Public call on API-key upstream cannot be joined on `/backend-api/codex/realtime`.
     let public_call = client
-        .post(format!("http://{}/openai/v1/realtime/calls", server.proxy_addr))
+        .post(format!(
+            "http://{}/openai/v1/realtime/calls",
+            server.proxy_addr
+        ))
         .bearer_auth(key)
         .header("content-type", "application/sdp")
         .body("v=0\r\n")
@@ -767,16 +789,8 @@ async fn backend_codex_root_supports_standalone_realtime_ws_and_rejects_http_wit
     let (mut root_ws, _) = tokio_tungstenite::connect_async(root_ws_req)
         .await
         .expect("root codex realtime ws connects");
-    let frame: serde_json::Value = serde_json::from_str(
-        &root_ws
-            .next()
-            .await
-            .unwrap()
-            .unwrap()
-            .into_text()
-            .unwrap(),
-    )
-    .unwrap();
+    let frame: serde_json::Value =
+        serde_json::from_str(&root_ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
     assert_eq!(frame["type"], "session.created");
     assert_eq!(frame["query"], "intent=quicksilver");
 
@@ -906,7 +920,10 @@ async fn backend_codex_realtime_v3_live_supports_standalone_sideband_and_pinning
     )
     .await
     .1;
-    let principal_id = principals["principals"][0]["id"].as_str().unwrap().to_owned();
+    let principal_id = principals["principals"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let (_, _, etag) = crate::openai_oauth_public_compat::admin(
         &client,
         &server,
@@ -975,7 +992,10 @@ async fn backend_codex_realtime_v3_live_supports_standalone_sideband_and_pinning
 
     // API-key call cannot be joined via `/openai/backend-api/codex/live/{call_id}`.
     let api_call = client
-        .post(format!("http://{}/openai/v1/realtime/calls", server.proxy_addr))
+        .post(format!(
+            "http://{}/openai/v1/realtime/calls",
+            server.proxy_addr
+        ))
         .bearer_auth(key)
         .header("content-type", "application/sdp")
         .body("v=0\r\n")
@@ -995,11 +1015,17 @@ async fn backend_codex_realtime_v3_live_supports_standalone_sideband_and_pinning
     let api_sideband_err = tokio_tungstenite::connect_async(api_sideband_req)
         .await
         .expect_err("API-key call must not join on codex backend /live");
-    assert!(api_sideband_err.to_string().contains("404"), "{api_sideband_err}");
+    assert!(
+        api_sideband_err.to_string().contains("404"),
+        "{api_sideband_err}"
+    );
 
     // Standalone V3 `/live` and root `/openai/backend-api/codex` with `OpenAI-Alpha: quicksilver=v2` reach `/v1/live`.
     for (url, alpha_hdr) in [
-        (format!("ws://{}/openai/backend-api/codex/live", server.proxy_addr), None),
+        (
+            format!("ws://{}/openai/backend-api/codex/live", server.proxy_addr),
+            None,
+        ),
         (
             format!("ws://{}/openai/backend-api/codex", server.proxy_addr),
             Some("quicksilver=v2"),
@@ -1116,17 +1142,17 @@ async fn backend_codex_realtime_v3_live_supports_standalone_sideband_and_pinning
     .await;
     assert_eq!(status, 200);
 
-    let mut restricted_live = format!(
-        "ws://{}/openai/backend-api/codex/live",
-        server.proxy_addr
-    )
-    .into_client_request()
-    .unwrap();
+    let mut restricted_live = format!("ws://{}/openai/backend-api/codex/live", server.proxy_addr)
+        .into_client_request()
+        .unwrap();
     restricted_live
         .headers_mut()
         .insert("authorization", format!("Bearer {key}").parse().unwrap());
     let restricted_err = tokio_tungstenite::connect_async(restricted_live)
         .await
         .expect_err("restricted principal without model on /live must be rejected");
-    assert!(restricted_err.to_string().contains("400"), "{restricted_err}");
+    assert!(
+        restricted_err.to_string().contains("400"),
+        "{restricted_err}"
+    );
 }

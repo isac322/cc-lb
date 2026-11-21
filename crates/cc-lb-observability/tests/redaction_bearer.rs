@@ -38,7 +38,8 @@ fn redacts_openai_actor_authorization_in_header_json_and_text() {
     assert!(!header_redacted.contains("actor-secret-token"));
     assert!(header_redacted.contains(REDACTED));
 
-    let json_redacted = policy.redact_text(r#"{"x-openai-actor-authorization":"actor-json-secret"}"#);
+    let json_redacted =
+        policy.redact_text(r#"{"x-openai-actor-authorization":"actor-json-secret"}"#);
     assert!(!json_redacted.contains("actor-json-secret"));
     assert!(json_redacted.contains(REDACTED));
 

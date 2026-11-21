@@ -256,8 +256,9 @@ impl Lifecycle {
                 });
             } else {
                 match kind {
-                    RealtimeWebSocketKind::Openai => candidates
-                        .retain(|candidate| openai_kind_eligible(candidate.kind)),
+                    RealtimeWebSocketKind::Openai => {
+                        candidates.retain(|candidate| openai_kind_eligible(candidate.kind))
+                    }
                     RealtimeWebSocketKind::Gemini => {
                         let records = view.upstreams_snapshot();
                         candidates.retain(|candidate| {

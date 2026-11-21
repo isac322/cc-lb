@@ -1268,7 +1268,11 @@ mod tests {
         let signed = sign_request(signer.as_ref(), shaped).await.unwrap();
 
         assert!(!signed.headers().contains_key("x-api-key"));
-        assert!(!signed.headers().contains_key("x-openai-actor-authorization"));
+        assert!(
+            !signed
+                .headers()
+                .contains_key("x-openai-actor-authorization")
+        );
         assert!(
             !signed
                 .headers()

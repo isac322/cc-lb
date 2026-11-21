@@ -194,9 +194,9 @@ fn is_valid_live_call_id(call_id: &str) -> bool {
     !call_id.is_empty()
         && call_id != "."
         && call_id != ".."
-        && call_id
-            .bytes()
-            .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'/' | b'\\' | b'?' | b'#' | b'%'))
+        && call_id.bytes().all(|byte| {
+            byte.is_ascii_graphic() && !matches!(byte, b'/' | b'\\' | b'?' | b'#' | b'%')
+        })
 }
 
 pub(super) async fn codex_backend_root_handler(

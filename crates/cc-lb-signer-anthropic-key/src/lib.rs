@@ -1083,7 +1083,11 @@ mod tests {
             Some("sk-ant-configured")
         );
         assert!(!signed.headers().contains_key(AUTHORIZATION));
-        assert!(!signed.headers().contains_key("x-openai-actor-authorization"));
+        assert!(
+            !signed
+                .headers()
+                .contains_key("x-openai-actor-authorization")
+        );
     }
 
     #[tokio::test]
@@ -1123,7 +1127,11 @@ mod tests {
             vec![WORKSPACE]
         );
         assert!(!signed.headers().contains_key(AUTHORIZATION));
-        assert!(!signed.headers().contains_key("x-openai-actor-authorization"));
+        assert!(
+            !signed
+                .headers()
+                .contains_key("x-openai-actor-authorization")
+        );
     }
 
     /// SGN-02 (a): an upstream without a workspace strips every downstream
@@ -1278,7 +1286,11 @@ mod tests {
         assert!(!signed.headers().contains_key("x-api-key"));
         assert!(!signed.headers().contains_key("x-goog-api-key"));
         assert!(!signed.headers().contains_key("api-key"));
-        assert!(!signed.headers().contains_key("x-openai-actor-authorization"));
+        assert!(
+            !signed
+                .headers()
+                .contains_key("x-openai-actor-authorization")
+        );
         assert_eq!(
             signed.headers().get("x-request-id"),
             Some(&HeaderValue::from_static("request"))
@@ -1309,7 +1321,11 @@ mod tests {
         assert!(!signed.headers().contains_key(AUTHORIZATION));
         assert!(!signed.headers().contains_key("x-api-key"));
         assert!(!signed.headers().contains_key("api-key"));
-        assert!(!signed.headers().contains_key("x-openai-actor-authorization"));
+        assert!(
+            !signed
+                .headers()
+                .contains_key("x-openai-actor-authorization")
+        );
     }
 
     #[tokio::test]
@@ -1515,7 +1531,11 @@ mod tests {
         assert!(!signed.headers().contains_key("x-api-key"));
         assert!(!signed.headers().contains_key("x-goog-api-key"));
         assert!(!signed.headers().contains_key("api-key"));
-        assert!(!signed.headers().contains_key("x-openai-actor-authorization"));
+        assert!(
+            !signed
+                .headers()
+                .contains_key("x-openai-actor-authorization")
+        );
         assert_eq!(
             signed.headers().get("x-request-id"),
             Some(&HeaderValue::from_static("request"))
@@ -1579,7 +1599,11 @@ mod tests {
         assert!(!signed.headers().contains_key("x-goog-api-key"));
         assert!(!signed.headers().contains_key("x-api-key"));
         assert!(!signed.headers().contains_key("api-key"));
-        assert!(!signed.headers().contains_key("x-openai-actor-authorization"));
+        assert!(
+            !signed
+                .headers()
+                .contains_key("x-openai-actor-authorization")
+        );
         assert_eq!(
             signed.headers().get("x-request-id"),
             Some(&HeaderValue::from_static("request"))

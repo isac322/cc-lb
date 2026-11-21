@@ -85,6 +85,10 @@ async fn qa_url_1_public_signer_routes_url_and_strips_client_credentials() {
     );
     assert!(!signed.headers().contains_key(AUTHORIZATION));
     assert!(!signed.headers().contains_key("x-api-key"));
-    assert!(!signed.headers().contains_key("x-openai-actor-authorization"));
+    assert!(
+        !signed
+            .headers()
+            .contains_key("x-openai-actor-authorization")
+    );
     assert!(!signed.headers().contains_key("x-goog-user-project"));
 }
