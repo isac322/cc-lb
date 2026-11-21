@@ -1,3 +1,4 @@
+// Warm publish-check benchmark probe (Run #2b).
 #[path = "cache_aware_wasmtime_e2e.rs"]
 mod cache_aware_wasmtime_e2e;
 #[path = "compiled_module_cache.rs"]

@@ -847,6 +847,9 @@ describe('RequestEventsTable', () => {
       expect(
         await screen.findByText('HTTP 499 · client_closed_request'),
       ).toBeDefined();
+      // Let user.click()'s pointerenter 200ms Hint timer flush while the popover is
+      // already open so it cannot reopen immediately after Escape.
+      await new Promise((resolve) => setTimeout(resolve, 220));
       await user.keyboard('{Escape}');
       await waitFor(() => {
         expect(

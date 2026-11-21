@@ -105,7 +105,7 @@ jobs:
           wait "$pid_tc" || rc=1
           exit "$rc"
       - name: Run Vitest suite
-        run: bunx --bun vitest run --passWithNoTests --maxWorkers=4
+        run: bunx --bun vitest run --passWithNoTests --maxWorkers=3
 
   web-visuals-a:
     runs-on: ubuntu-26.04

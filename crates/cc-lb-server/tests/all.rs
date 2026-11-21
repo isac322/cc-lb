@@ -1,3 +1,4 @@
+// Warm CI benchmark probe (Run #2b).
 #[path = "keepalive_support/mod.rs"]
 mod keepalive_support;
 
