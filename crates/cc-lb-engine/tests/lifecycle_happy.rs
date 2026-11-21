@@ -17,7 +17,7 @@ use cc_lb_control::api_keys::principal_view::{
 use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, RequestEventBus};
 use cc_lb_domain::{Principal, TerminalStrategy, Upstream};
 use cc_lb_engine::{
-    DispatchError, Lifecycle, LifecycleConfig, LimitCostEstimator, UpstreamDispatch,
+    DispatchError, Lifecycle, LifecycleConfig, LimitCostEstimator, ProviderScope, UpstreamDispatch,
 };
 use cc_lb_lifecycle::{LifecycleEvent, LimitDecisionKind, RouteInfo};
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion};
@@ -29,7 +29,7 @@ use cc_lb_upstream::{
     DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignedRequest,
     UpstreamDialect,
 };
-use http::StatusCode;
+use http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tokio::time::{Duration, timeout};
 
@@ -610,6 +610,78 @@ fn oauth_upstream_record() -> UpstreamRecord {
         last_warmup_at_unix_secs: None,
         workspace_id: None,
     }
+}
+
+fn openai_oauth_upstream_record() -> UpstreamRecord {
+    let mut record = oauth_upstream_record();
+    record.name = "oauth-openai".to_owned();
+    record.kind = StorageUpstreamKind::OpenaiOauth;
+    record
+}
+
+fn openai_chat_request(body: Bytes) -> Request<Bytes> {
+    let mut request = Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/chat/completions")
+        .header("authorization", format!("Bearer {}", managed_api_key()))
+        .body(body)
+        .expect("test request builds");
+    request
+        .extensions_mut()
+        .insert(ProviderScope(cc_lb_domain::Provider::Openai));
+    request
+}
+
+#[tokio::test]
+async fn oauth_compat_tier_reaches_limit_cost_estimator_as_sent() {
+    let state = TestState::default();
+    let estimator = Arc::new(RecordingLimitCostEstimator::default());
+    let authn = TestAuthn::new(state.clone());
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(vec![openai_oauth_upstream_record()])
+        .build();
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        authn.authn.clone(),
+        Arc::new(DynamicViewHolder::new(view)),
+        Arc::new(MockDispatch {
+            state,
+            mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
+        }),
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .with_static_limit_subject(
+        LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_clock::SystemClock),
+        ),
+        "principal-test".to_owned(),
+        "key-test".to_owned(),
+        StoredApiKeyRecord {
+            key_hash_b64: "key-test".to_owned(),
+            status: KeyStatus::Active,
+            ..StoredApiKeyRecord::default()
+        },
+    )
+    .with_limit_cost_estimator(estimator.clone());
+    let request = openai_chat_request(Bytes::from_static(
+        br#"{"model":"gpt-test","max_completion_tokens":16,"service_tier":"flex","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle
+        .handle(request, &auth)
+        .await
+        .expect("lifecycle handles request");
+    let _ = response;
+    assert_eq!(
+        *estimator.service_tiers.lock().expect("service tier lock"),
+        vec![Some("default".to_owned())]
+    );
 }
 
 // USD limit admission boundary.
