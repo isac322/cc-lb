@@ -89,6 +89,7 @@ import {
   isAnthropicBaseUrl,
   usageFixLine,
 } from '../components/upstreams/connect/apiKeyCopy';
+import { ConsoleLink } from '../components/upstreams/connect/parts';
 import {
   UpstreamConnectDialog,
   type UpstreamConnectTarget,
@@ -2388,15 +2389,11 @@ export function DetailView({
               </p>
               {isVertexCredential ? (
                 <p className="mt-2 text-body-sm text-text-muted">
-                  <a
+                  <ConsoleLink
                     href={vertexBillingUrl(upstream.vertex?.project_id)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 rounded-sm text-accent-text underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
                   >
-                    Open Google Cloud credits{' '}
-                    <ExternalLink className="w-3 h-3" />
-                  </a>{' '}
+                    Open Google Cloud credits
+                  </ConsoleLink>{' '}
                   → see the remaining credit for this project. Google shows it
                   only to an account with billing access.
                 </p>
