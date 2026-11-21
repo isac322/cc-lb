@@ -364,12 +364,12 @@ fn validate_common(v: &Value) -> Result<(), CredentialError> {
 /// wrapped into PKCS#8 so storage and signing see a single format.
 fn decode_pkcs8(pem: &str) -> Result<Vec<u8>, CredentialError> {
     let der = if pem.contains("BEGIN RSA PRIVATE KEY") {
-        let pkcs1 = pem_body(
+        let pkcs1 = Zeroizing::new(pem_body(
             pem,
             "-----BEGIN RSA PRIVATE KEY-----",
             "-----END RSA PRIVATE KEY-----",
-        )?;
-        RsaKeyPair::from_der(&pkcs1).map_err(|_| CredentialError::InvalidPrivateKey)?;
+        )?);
+        // `from_pkcs8` below rejects a malformed inner PKCS#1 key.
         wrap_pkcs1(&pkcs1)
     } else if pem.contains("BEGIN PRIVATE KEY") {
         pem_body(
