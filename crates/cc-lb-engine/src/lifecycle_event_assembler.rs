@@ -549,6 +549,8 @@ impl Partial {
 ///   is merged into the row but published with the final write.
 /// - `Priced` / `CacheObserved`: merged into the row but published only with
 ///   the final write.
+/// - `RequestActivity`: advisory stream heartbeat that refreshes
+///   `last_activity_at` without altering the published row shape.
 fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
     match event {
         LifecycleEvent::RequestStarted { .. } => Some(PartialTrigger::RequestStarted),
@@ -1359,6 +1361,9 @@ async fn handle_event(
 ///   row field.
 /// - `RequestTerminated`: handled by `handle_event`'s dedicated branch before
 ///   `merge` is reached; this arm is unreachable in practice.
+/// - `RequestActivity`: handled by `handle_event`'s dedicated branch before
+///   `merge` is reached; refreshes `last_activity_at` on existing
+///   non-terminating partials only.
 fn merge(partial: &mut Partial, event: LifecycleEvent) {
     match event {
         LifecycleEvent::RequestStarted {
