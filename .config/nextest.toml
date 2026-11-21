@@ -1,6 +1,12 @@
 [profile.default]
 slow-timeout = { period = "60s" }
 
+[test-groups.pg-usage-rollup]
+max-threads = 1
+
+[test-groups.pg-price-catalog]
+max-threads = 1
+
 [[profile.default.overrides]]
 filter = 'test(authn_rail_typestate_contracts)'
 threads-required = 2
@@ -9,6 +15,16 @@ priority = 100
 [[profile.default.overrides]]
 filter = 'test(cache_keepalive_wall_clock)'
 priority = 100
+
+[[profile.default.overrides]]
+filter = 'binary_id(cc-lb-storage-conformance::integration) and test(/storage_roundtrips_postgres::(usage_rollup|upstream_subscription_quota_aggregate_store_postgres)/)'
+test-group = 'pg-usage-rollup'
+priority = 95
+
+[[profile.default.overrides]]
+filter = 'test(/price_catalog_.*_postgres|price_snapshots_retain_three_newest_distinct_payloads/)'
+test-group = 'pg-price-catalog'
+priority = 95
 
 [[profile.default.overrides]]
 filter = 'test(/crash_recovery::|storage_roundtrips_postgres::|upstream_store_postgres|principal_store_postgres/)'

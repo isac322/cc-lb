@@ -4,6 +4,7 @@ import {
   type RenderOptions,
   render as rtlRender,
   screen,
+  waitFor,
   within,
 } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -847,7 +848,11 @@ describe('RequestEventsTable', () => {
         await screen.findByText('HTTP 499 · client_closed_request'),
       ).toBeDefined();
       await user.keyboard('{Escape}');
-      expect(screen.queryByText('HTTP 499 · client_closed_request')).toBeNull();
+      await waitFor(() => {
+        expect(
+          screen.queryByText('HTTP 499 · client_closed_request'),
+        ).toBeNull();
+      });
 
       screen
         .getByRole('button', { name: 'overloaded_error (HTTP 200)' })

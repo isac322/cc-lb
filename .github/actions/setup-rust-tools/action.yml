@@ -11,26 +11,46 @@ runs:
   using: composite
   steps:
     - name: Prepare RUSTUP_HOME
-      id: spec
       shell: bash
       run: |
         set -euo pipefail
-        rustup_home="${RUNNER_TEMP}/rustup"
-        mkdir -p "$rustup_home" "${CARGO_HOME:-$HOME/.cargo}/bin"
-        echo "RUSTUP_HOME=$rustup_home" >> "$GITHUB_ENV"
-        echo "rustup_home=$rustup_home" >> "$GITHUB_OUTPUT"
+        mkdir -p "${RUNNER_TEMP}/rustup" "${CARGO_HOME:-$HOME/.cargo}/bin"
+        echo "RUSTUP_HOME=${RUNNER_TEMP}/rustup" >> "$GITHUB_ENV"
 
     - name: Cache unified Rust toolchain and Cargo CLI tools
       id: tools-cache
       uses: actions/cache@v6
       with:
         path: |
-          ${{ steps.spec.outputs.rustup_home }}
+          ${{ runner.temp }}/rustup
           ~/.cargo/bin
         key: rust-tools-v2-${{ runner.os }}-${{ runner.arch }}-1.99.1
 
+    - name: Verify cached Rust toolchain and Cargo CLI tools
+      id: verify-tools
+      shell: bash
+      run: |
+        set -euo pipefail
+        has_toolchain=false
+        if compgen -G "${RUNNER_TEMP}/rustup/toolchains/1.99.1-*/bin/rustc" >/dev/null && \
+           compgen -G "${RUNNER_TEMP}/rustup/toolchains/1.99.1-*/lib/rustlib/wasm32-unknown-unknown" >/dev/null; then
+          has_toolchain=true
+        fi
+
+        cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+        has_cli_tools=true
+        for tool in cargo-llvm-cov cargo-nextest sccache sqlx cargo-deny cargo-semver-checks; do
+          if [ ! -x "${cargo_bin}/${tool}" ]; then
+            has_cli_tools=false
+            break
+          fi
+        done
+
+        echo "has_toolchain=$has_toolchain" >> "$GITHUB_OUTPUT"
+        echo "has_cli_tools=$has_cli_tools" >> "$GITHUB_OUTPUT"
+
     - name: Install Rust 1.99.1 toolchain
-      if: steps.tools-cache.outputs.cache-hit != 'true'
+      if: steps.verify-tools.outputs.has_toolchain != 'true'
       uses: dtolnay/rust-toolchain@master
       with:
         toolchain: 1.99.1
@@ -38,7 +58,7 @@ runs:
         targets: wasm32-unknown-unknown
 
     - name: Install Cargo CLI tools
-      if: steps.tools-cache.outputs.cache-hit != 'true'
+      if: steps.verify-tools.outputs.has_cli_tools != 'true'
       uses: taiki-e/install-action@v2
       with:
         tool: cargo-llvm-cov,cargo-nextest,sccache,sqlx-cli@0.9.0,cargo-deny@0.20.2,cargo-semver-checks@0.51.0
