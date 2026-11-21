@@ -22,7 +22,6 @@ pub enum CredentialError {
     InvalidTokenUri,
     InvalidServiceAccountEmail,
     InvalidPrivateKey,
-    Pkcs1PrivateKey,
     InvalidPrivateKeyId,
     InvalidProjectId,
     InvalidSecretField,
@@ -45,7 +44,6 @@ impl CredentialError {
             Self::InvalidTokenUri => "credential_invalid_token_uri",
             Self::InvalidServiceAccountEmail => "credential_invalid_service_account_email",
             Self::InvalidPrivateKey => "credential_invalid_private_key",
-            Self::Pkcs1PrivateKey => "credential_pkcs1_private_key",
             Self::InvalidPrivateKeyId => "credential_invalid_private_key_id",
             Self::InvalidProjectId => "credential_invalid_project_id",
             Self::InvalidSecretField => "credential_invalid_secret",
@@ -360,29 +358,25 @@ fn validate_common(v: &Value) -> Result<(), CredentialError> {
     }
     Ok(())
 }
+/// Returns the key as PKCS#8 DER. Google issues PKCS#8 (`BEGIN PRIVATE KEY`),
+/// but Google's own client libraries also accept PKCS#1 (`BEGIN RSA PRIVATE
+/// KEY`), and re-exported files from other tools carry it. A PKCS#1 key is
+/// wrapped into PKCS#8 so storage and signing see a single format.
 fn decode_pkcs8(pem: &str) -> Result<Vec<u8>, CredentialError> {
-    if pem.contains("BEGIN RSA PRIVATE KEY") {
-        return Err(CredentialError::Pkcs1PrivateKey);
-    }
-    let der = if pem.contains("BEGIN PRIVATE KEY") {
-        let begin = "-----BEGIN PRIVATE KEY-----";
-        let end = "-----END PRIVATE KEY-----";
-        let Some(start) = pem.find(begin) else {
-            return Err(CredentialError::InvalidPrivateKey);
-        };
-        let Some(stop) = pem.find(end) else {
-            return Err(CredentialError::InvalidPrivateKey);
-        };
-        if stop <= start + begin.len() {
-            return Err(CredentialError::InvalidPrivateKey);
-        }
-        let body: String = pem[start + begin.len()..stop]
-            .chars()
-            .filter(|c| !c.is_ascii_whitespace())
-            .collect();
-        STANDARD
-            .decode(body.as_bytes())
-            .map_err(|_| CredentialError::InvalidPrivateKey)?
+    let der = if pem.contains("BEGIN RSA PRIVATE KEY") {
+        let pkcs1 = pem_body(
+            pem,
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "-----END RSA PRIVATE KEY-----",
+        )?;
+        RsaKeyPair::from_der(&pkcs1).map_err(|_| CredentialError::InvalidPrivateKey)?;
+        wrap_pkcs1(&pkcs1)
+    } else if pem.contains("BEGIN PRIVATE KEY") {
+        pem_body(
+            pem,
+            "-----BEGIN PRIVATE KEY-----",
+            "-----END PRIVATE KEY-----",
+        )?
     } else {
         STANDARD
             .decode(pem.as_bytes())
@@ -393,6 +387,56 @@ fn decode_pkcs8(pem: &str) -> Result<Vec<u8>, CredentialError> {
         return Err(CredentialError::InvalidPrivateKey);
     }
     Ok(der)
+}
+
+fn pem_body(pem: &str, begin: &str, end: &str) -> Result<Vec<u8>, CredentialError> {
+    let Some(start) = pem.find(begin) else {
+        return Err(CredentialError::InvalidPrivateKey);
+    };
+    let Some(stop) = pem.find(end) else {
+        return Err(CredentialError::InvalidPrivateKey);
+    };
+    if stop <= start + begin.len() {
+        return Err(CredentialError::InvalidPrivateKey);
+    }
+    let body: String = pem[start + begin.len()..stop]
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
+    STANDARD
+        .decode(body.as_bytes())
+        .map_err(|_| CredentialError::InvalidPrivateKey)
+}
+
+/// `PrivateKeyInfo { version 0, rsaEncryption with NULL parameters, OCTET STRING pkcs1 }`
+/// (RFC 5208 §5, RFC 8017 Appendix C).
+fn wrap_pkcs1(pkcs1: &[u8]) -> Vec<u8> {
+    const VERSION_AND_ALGORITHM: [u8; 18] = [
+        0x02, 0x01, 0x00, // INTEGER 0
+        0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05,
+        0x00, // SEQUENCE { OID 1.2.840.113549.1.1.1, NULL }
+    ];
+    let mut octets = vec![0x04];
+    der_length(pkcs1.len(), &mut octets);
+    let inner_len = VERSION_AND_ALGORITHM.len() + octets.len() + pkcs1.len();
+    let mut der = Vec::with_capacity(inner_len + 6);
+    der.push(0x30);
+    der_length(inner_len, &mut der);
+    der.extend_from_slice(&VERSION_AND_ALGORITHM);
+    der.extend_from_slice(&octets);
+    der.extend_from_slice(pkcs1);
+    der
+}
+
+fn der_length(len: usize, out: &mut Vec<u8>) {
+    if len < 0x80 {
+        out.push(len as u8);
+        return;
+    }
+    let bytes = len.to_be_bytes();
+    let skip = bytes.iter().take_while(|byte| **byte == 0).count();
+    out.push(0x80 | (bytes.len() - skip) as u8);
+    out.extend_from_slice(&bytes[skip..]);
 }
 fn parse_service(v: &Value) -> Result<CanonicalCredential, CredentialError> {
     validate_common(v)?;
