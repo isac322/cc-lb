@@ -764,7 +764,15 @@ jobs:
           else
             echo "hit=false" >> "$GITHUB_OUTPUT"
           fi
-      - uses: ./.github/actions/setup-rust-tools
+      # This job skips the full checkout, so a cache miss must fetch the
+      # local action before using it. Check out into a subdirectory: a
+      # workspace-root checkout would delete the merge scripts fetched above.
+      - uses: actions/checkout@v7
+        if: steps.llvm-check.outputs.hit != 'true'
+        with:
+          path: .ci-actions
+          sparse-checkout: .github/actions
+      - uses: ./.ci-actions/.github/actions/setup-rust-tools
         if: steps.llvm-check.outputs.hit != 'true'
         with:
           profile: cov
