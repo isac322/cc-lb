@@ -631,6 +631,7 @@ fn is_stripped_shape_output_header(name: &str) -> bool {
             | "x-api-key"
             | "x-goog-api-key"
             | "api-key"
+            | "x-openai-actor-authorization"
     ) || lower.starts_with("x-anthropic-")
 }
 
@@ -1184,7 +1185,13 @@ mod tests {
 
     #[test]
     fn shape_output_scrubs_provider_credentials() {
-        for name in ["Authorization", "x-api-key", "x-goog-api-key", "api-key"] {
+        for name in [
+            "Authorization",
+            "x-api-key",
+            "x-goog-api-key",
+            "api-key",
+            "X-OpenAI-Actor-Authorization",
+        ] {
             assert!(is_stripped_shape_output_header(name), "{name}");
         }
     }

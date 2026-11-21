@@ -26,7 +26,13 @@ const LEGACY_DAILY_USER_AGENT: &str =
     "antigravity/hub/2.19.1 (aidev_client; os_type=darwin; arch=arm64; cl=963137146)";
 
 fn strip_provider_credential_headers(headers: &mut http::HeaderMap) {
-    for name in ["authorization", "x-api-key", "x-goog-api-key", "api-key"] {
+    for name in [
+        "authorization",
+        "x-api-key",
+        "x-goog-api-key",
+        "api-key",
+        "x-openai-actor-authorization",
+    ] {
         headers.remove(name);
     }
 }
@@ -1036,6 +1042,10 @@ mod tests {
             AUTHORIZATION,
             HeaderValue::from_static("Bearer sk-cclb-downstream"),
         );
+        headers.insert(
+            "x-openai-actor-authorization",
+            HeaderValue::from_static("1"),
+        );
         headers.append(
             ANTHROPIC_WORKSPACE_ID_HEADER,
             HeaderValue::from_static("wrkspc_EVIL"),
@@ -1057,6 +1067,10 @@ mod tests {
             AUTHORIZATION,
             HeaderValue::from_static("Bearer sk-cclb-downstream"),
         );
+        shaped.headers_mut().insert(
+            "x-openai-actor-authorization",
+            HeaderValue::from_static("1"),
+        );
         let signer = AnthropicKeySigner::new("sk-ant-configured", None).expect("signer");
 
         let signed = sign_request(&signer, shaped).await.expect("sign request");
@@ -1069,6 +1083,11 @@ mod tests {
             Some("sk-ant-configured")
         );
         assert!(!signed.headers().contains_key(AUTHORIZATION));
+        assert!(
+            !signed
+                .headers()
+                .contains_key("x-openai-actor-authorization")
+        );
     }
 
     #[tokio::test]
@@ -1108,6 +1127,11 @@ mod tests {
             vec![WORKSPACE]
         );
         assert!(!signed.headers().contains_key(AUTHORIZATION));
+        assert!(
+            !signed
+                .headers()
+                .contains_key("x-openai-actor-authorization")
+        );
     }
 
     /// SGN-02 (a): an upstream without a workspace strips every downstream
@@ -1242,6 +1266,10 @@ mod tests {
         shaped
             .headers_mut()
             .insert("api-key", HeaderValue::from_static("downstream"));
+        shaped.headers_mut().insert(
+            "x-openai-actor-authorization",
+            HeaderValue::from_static("1"),
+        );
         shaped
             .headers_mut()
             .insert("x-request-id", HeaderValue::from_static("request"));
@@ -1258,6 +1286,11 @@ mod tests {
         assert!(!signed.headers().contains_key("x-api-key"));
         assert!(!signed.headers().contains_key("x-goog-api-key"));
         assert!(!signed.headers().contains_key("api-key"));
+        assert!(
+            !signed
+                .headers()
+                .contains_key("x-openai-actor-authorization")
+        );
         assert_eq!(
             signed.headers().get("x-request-id"),
             Some(&HeaderValue::from_static("request"))
@@ -1273,6 +1306,10 @@ mod tests {
         shaped
             .headers_mut()
             .insert("api-key", HeaderValue::from_static("downstream"));
+        shaped.headers_mut().insert(
+            "x-openai-actor-authorization",
+            HeaderValue::from_static("1"),
+        );
         let signer =
             ProviderKeySigner::new(ProviderKeyKind::Gemini, "gemini-secret").expect("signer");
         let signed = sign_request(&signer, shaped).await.expect("sign request");
@@ -1284,6 +1321,11 @@ mod tests {
         assert!(!signed.headers().contains_key(AUTHORIZATION));
         assert!(!signed.headers().contains_key("x-api-key"));
         assert!(!signed.headers().contains_key("api-key"));
+        assert!(
+            !signed
+                .headers()
+                .contains_key("x-openai-actor-authorization")
+        );
     }
 
     #[tokio::test]
@@ -1459,6 +1501,10 @@ mod tests {
         shaped
             .headers_mut()
             .insert("api-key", HeaderValue::from_static("downstream"));
+        shaped.headers_mut().insert(
+            "x-openai-actor-authorization",
+            HeaderValue::from_static("1"),
+        );
         shaped
             .headers_mut()
             .insert("x-request-id", HeaderValue::from_static("request"));
@@ -1485,6 +1531,11 @@ mod tests {
         assert!(!signed.headers().contains_key("x-api-key"));
         assert!(!signed.headers().contains_key("x-goog-api-key"));
         assert!(!signed.headers().contains_key("api-key"));
+        assert!(
+            !signed
+                .headers()
+                .contains_key("x-openai-actor-authorization")
+        );
         assert_eq!(
             signed.headers().get("x-request-id"),
             Some(&HeaderValue::from_static("request"))
@@ -1522,6 +1573,10 @@ mod tests {
         shaped
             .headers_mut()
             .insert("api-key", HeaderValue::from_static("downstream"));
+        shaped.headers_mut().insert(
+            "x-openai-actor-authorization",
+            HeaderValue::from_static("1"),
+        );
         shaped
             .headers_mut()
             .insert("x-request-id", HeaderValue::from_static("request"));
@@ -1544,6 +1599,11 @@ mod tests {
         assert!(!signed.headers().contains_key("x-goog-api-key"));
         assert!(!signed.headers().contains_key("x-api-key"));
         assert!(!signed.headers().contains_key("api-key"));
+        assert!(
+            !signed
+                .headers()
+                .contains_key("x-openai-actor-authorization")
+        );
         assert_eq!(
             signed.headers().get("x-request-id"),
             Some(&HeaderValue::from_static("request"))

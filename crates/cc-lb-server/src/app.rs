@@ -2638,7 +2638,10 @@ fn codex_backend_http_routes(
         .route("/responses", post(lifecycle_handler))
         .route("/models", get(lifecycle_handler))
         .route("/alpha/search", post(lifecycle_handler))
+        .route("/images/generations", post(lifecycle_handler))
+        .route("/images/edits", post(lifecycle_handler))
         .route("/realtime/calls", post(lifecycle_handler))
+        .route("/realtime/calls/{call_id}/hangup", post(lifecycle_handler))
         .with_state(state.clone());
     wrap_scoped_proxy_routes(
         routes,
@@ -2668,13 +2671,72 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
                         ),
                     ),
                 )
-                .layer(Extension(ProviderScope(cc_lb_domain::Provider::Openai))),
-        )
-        .nest(
-            "/backend-api/codex",
-            Router::new()
-                .route("/responses", get(responses_websocket_handler))
-                .layer(middleware::from_fn(rewrite_codex_backend_request))
+                .route(
+                    "/v1/live",
+                    get(openai_live_websocket_handler).layer(
+                        cc_lb_observability::trace_layer().make_span_with(
+                            cc_lb_observability::ProxyMakeSpan::with_route_template(
+                                proxy_route_template,
+                            ),
+                        ),
+                    ),
+                )
+                .route(
+                    "/v1/live/{call_id}",
+                    get(openai_live_call_websocket_handler).layer(
+                        cc_lb_observability::trace_layer().make_span_with(
+                            cc_lb_observability::ProxyMakeSpan::with_route_template(
+                                proxy_route_template,
+                            ),
+                        ),
+                    ),
+                )
+                .nest(
+                    "/backend-api/codex",
+                    Router::new()
+                        .route(
+                            "/",
+                            any(codex_backend_root_handler).layer(
+                                cc_lb_observability::trace_layer().make_span_with(
+                                    cc_lb_observability::ProxyMakeSpan::with_route_template(
+                                        proxy_route_template,
+                                    ),
+                                ),
+                            ),
+                        )
+                        .route("/responses", get(responses_websocket_handler))
+                        .route(
+                            "/realtime",
+                            get(openai_realtime_websocket_handler).layer(
+                                cc_lb_observability::trace_layer().make_span_with(
+                                    cc_lb_observability::ProxyMakeSpan::with_route_template(
+                                        proxy_route_template,
+                                    ),
+                                ),
+                            ),
+                        )
+                        .route(
+                            "/live",
+                            get(openai_live_websocket_handler).layer(
+                                cc_lb_observability::trace_layer().make_span_with(
+                                    cc_lb_observability::ProxyMakeSpan::with_route_template(
+                                        proxy_route_template,
+                                    ),
+                                ),
+                            ),
+                        )
+                        .route(
+                            "/live/{call_id}",
+                            get(openai_live_call_websocket_handler).layer(
+                                cc_lb_observability::trace_layer().make_span_with(
+                                    cc_lb_observability::ProxyMakeSpan::with_route_template(
+                                        proxy_route_template,
+                                    ),
+                                ),
+                            ),
+                        )
+                        .layer(middleware::from_fn(rewrite_codex_backend_request)),
+                )
                 .layer(Extension(ProviderScope(cc_lb_domain::Provider::Openai))),
         )
         .nest(
@@ -2722,13 +2784,14 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             ),
         )
         .nest(
-            "/backend-api/codex",
+            "/openai/backend-api/codex",
             codex_backend_http_routes(state.clone(), request_id_state.clone(), timeout_secs),
         )
         .nest(
-            "/backend-api",
+            "/openai/backend-api",
             wrap_scoped_proxy_routes(
                 Router::new()
+                    .route("/", any(backend_api_not_found))
                     .route("/{*path}", any(backend_api_not_found))
                     .with_state(state.clone()),
                 state.clone(),
@@ -3047,7 +3110,10 @@ mod input_tokens_ws;
 mod realtime_websocket;
 #[path = "app/responses_request_body.rs"]
 mod responses_request_body;
-use realtime_websocket::{gemini_live_websocket_handler, openai_realtime_websocket_handler};
+use realtime_websocket::{
+    codex_backend_root_handler, gemini_live_websocket_handler, openai_live_call_websocket_handler,
+    openai_live_websocket_handler, openai_realtime_websocket_handler,
+};
 
 async fn responses_websocket_handler(
     State(state): State<ProxyState>,

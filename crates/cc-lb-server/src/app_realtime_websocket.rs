@@ -190,16 +190,155 @@ async fn connect_realtime_provider(
     }
 }
 
+fn is_valid_live_call_id(call_id: &str) -> bool {
+    !call_id.is_empty()
+        && call_id != "."
+        && call_id != ".."
+        && call_id.bytes().all(|byte| {
+            byte.is_ascii_graphic() && !matches!(byte, b'/' | b'\\' | b'?' | b'#' | b'%')
+        })
+}
+
+pub(super) async fn codex_backend_root_handler(
+    State(state): State<ProxyState>,
+    OriginalUri(uri): OriginalUri,
+    method: axum::http::Method,
+    headers: HeaderMap,
+    provider_scope: Option<Extension<ProviderScope>>,
+    codex_backend: Option<Extension<cc_lb_engine::CodexBackendSurface>>,
+    websocket: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
+) -> Response<Body> {
+    if method == axum::http::Method::GET
+        && let Ok(websocket) = websocket
+    {
+        let has_intent = uri.query().is_some_and(|query| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .any(|(key, value)| key == "intent" && !value.trim().is_empty())
+        });
+        let uses_live_protocol = !has_intent
+            && headers
+                .get_all("openai-alpha")
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .any(|value| value.to_ascii_lowercase().contains("quicksilver=v2"));
+        let target_path = if uses_live_protocol {
+            "/v1/live"
+        } else {
+            "/v1/realtime"
+        };
+        return openai_realtime_websocket_for_target(
+            state,
+            uri,
+            headers,
+            provider_scope,
+            codex_backend,
+            websocket,
+            Ok(target_path.to_owned()),
+        )
+        .await;
+    }
+
+    if let Err(error) = state.lifecycle.authenticate(&headers).await {
+        return cc_lb_engine::reject_unauthenticated_for_route(
+            &error,
+            &method,
+            uri.path(),
+            Some(cc_lb_domain::Provider::Openai),
+            None,
+        );
+    }
+
+    provider_scope_error_response(
+        cc_lb_domain::Provider::Openai,
+        StatusCode::NOT_FOUND,
+        "operation_not_supported",
+        "requested operation is not supported",
+    )
+}
+
 pub(super) async fn openai_realtime_websocket_handler(
     State(state): State<ProxyState>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     provider_scope: Option<Extension<ProviderScope>>,
+    codex_backend: Option<Extension<cc_lb_engine::CodexBackendSurface>>,
     websocket: WebSocketUpgrade,
+) -> Response<Body> {
+    openai_realtime_websocket_for_target(
+        state,
+        uri,
+        headers,
+        provider_scope,
+        codex_backend,
+        websocket,
+        Ok("/v1/realtime".to_owned()),
+    )
+    .await
+}
+
+pub(super) async fn openai_live_websocket_handler(
+    State(state): State<ProxyState>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+    provider_scope: Option<Extension<ProviderScope>>,
+    codex_backend: Option<Extension<cc_lb_engine::CodexBackendSurface>>,
+    websocket: WebSocketUpgrade,
+) -> Response<Body> {
+    openai_realtime_websocket_for_target(
+        state,
+        uri,
+        headers,
+        provider_scope,
+        codex_backend,
+        websocket,
+        Ok("/v1/live".to_owned()),
+    )
+    .await
+}
+
+pub(super) async fn openai_live_call_websocket_handler(
+    State(state): State<ProxyState>,
+    OriginalUri(uri): OriginalUri,
+    axum::extract::Path(call_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    provider_scope: Option<Extension<ProviderScope>>,
+    codex_backend: Option<Extension<cc_lb_engine::CodexBackendSurface>>,
+    websocket: WebSocketUpgrade,
+) -> Response<Body> {
+    let target_path = if is_valid_live_call_id(&call_id) {
+        Ok(format!("/v1/live/{call_id}"))
+    } else {
+        Err(WebSocketError::new(
+            400,
+            "invalid_request_error",
+            "invalid realtime call id",
+        ))
+    };
+    openai_realtime_websocket_for_target(
+        state,
+        uri,
+        headers,
+        provider_scope,
+        codex_backend,
+        websocket,
+        target_path,
+    )
+    .await
+}
+
+async fn openai_realtime_websocket_for_target(
+    state: ProxyState,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    provider_scope: Option<Extension<ProviderScope>>,
+    codex_backend: Option<Extension<cc_lb_engine::CodexBackendSurface>>,
+    websocket: WebSocketUpgrade,
+    target_path: Result<String, WebSocketError>,
 ) -> Response<Body> {
     let Some(guard) = state.drain_controller.try_track() else {
         return websocket_http_error(&WebSocketError::new(503, "draining", "server is draining"));
     };
+    let auth_path = target_path.as_deref().unwrap_or("/v1/live");
     let auth = match state.lifecycle.authenticate(&headers).await {
         Ok(auth) => auth,
         Err(error) => {
@@ -207,10 +346,14 @@ pub(super) async fn openai_realtime_websocket_handler(
                 .lifecycle
                 .reject_responses_websocket_authentication_for_provider(
                     &error,
-                    "/v1/realtime",
+                    auth_path,
                     provider_scope.as_ref().map(|scope| scope.0.0),
                 );
         }
+    };
+    let target_path = match target_path {
+        Ok(path) => path,
+        Err(error) => return websocket_http_error(&error),
     };
     let model = uri.query().and_then(|query| {
         url::form_urlencoded::parse(query.as_bytes())
@@ -219,7 +362,7 @@ pub(super) async fn openai_realtime_websocket_handler(
     });
     let observation = state
         .lifecycle
-        .begin_realtime_websocket(&auth, "/v1/realtime");
+        .begin_realtime_websocket(&auth, &target_path);
     let mut session = match state
         .lifecycle
         .prepare_realtime_websocket(
@@ -228,9 +371,10 @@ pub(super) async fn openai_realtime_websocket_handler(
             RealtimeWebSocketKind::Openai,
             &headers,
             RealtimeWebSocketTarget {
-                path: "/v1/realtime",
+                path: &target_path,
                 query: uri.query(),
                 model: model.as_deref(),
+                codex_backend: codex_backend.is_some(),
             },
             Bytes::new(),
         )
@@ -386,6 +530,7 @@ pub(super) async fn gemini_live_websocket_handler(
                             path: &path,
                             query: uri.query(),
                             model: model.as_deref(),
+                            codex_backend: false,
                         },
                         setup,
                     )

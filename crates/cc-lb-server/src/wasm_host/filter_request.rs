@@ -492,6 +492,7 @@ pub(super) fn is_stripped_downstream_header(name: &str, cookie_redaction: bool) 
             | "x-api-key"
             | "x-goog-api-key"
             | "api-key"
+            | "x-openai-actor-authorization"
             | "host"
             | "proxy-authorization"
     ) {
@@ -514,7 +515,13 @@ mod security_tests {
 
     #[test]
     fn strips_all_provider_credential_headers() {
-        for name in ["Authorization", "x-api-key", "X-Goog-Api-Key", "api-key"] {
+        for name in [
+            "Authorization",
+            "x-api-key",
+            "X-Goog-Api-Key",
+            "api-key",
+            "X-OpenAI-Actor-Authorization",
+        ] {
             assert!(is_stripped_downstream_header(name, false), "{name}");
         }
     }

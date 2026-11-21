@@ -55,7 +55,7 @@ These boundaries preserve the supported operations and credential classes below.
 
 ### Proxy capability boundary
 
-Provider-prefixed routes select the provider explicitly: `/anthropic/v1/...`, `/openai/v1/...`, and `/gemini/v1beta/...` (plus Gemini `/gemini/v1/...` model catalogs). The tables below list supported operations and eligible credentials. Shared unprefixed routes are kept for backward compatibility and retain their existing operation set only: `POST /v1/messages` and `POST /v1/messages/count_tokens` (Anthropic Messages), `POST /v1/responses` (OpenAI Responses, plus the `GET /v1/responses` WebSocket upgrade), and Gemini `POST /v1beta/models/{model}:generateContent` / `:streamGenerateContent` / `:countTokens`. Every other unprefixed operation returns `404 operation_not_supported`; new operations require a matching provider prefix.
+Provider-prefixed routes select the provider explicitly: `/anthropic/v1/...`, `/openai/v1/...`, `/openai/backend-api/codex/...`, and `/gemini/v1beta/...` (plus Gemini `/gemini/v1/...` model catalogs). The tables below list supported operations and eligible credentials. Shared unprefixed routes are kept for backward compatibility and retain their existing operation set only: `POST /v1/messages` and `POST /v1/messages/count_tokens` (Anthropic Messages), `POST /v1/responses` (OpenAI Responses, plus the `GET /v1/responses` WebSocket upgrade), and Gemini `POST /v1beta/models/{model}:generateContent` / `:streamGenerateContent` / `:countTokens`. Every other unprefixed operation returns `404 operation_not_supported`; new operations require a matching provider prefix.
 
 Provider-owned state referenced inside a supported HTTP generation request is forwarded unchanged and kept on its owning upstream through upstream affinity. cc-lb records a SHA-256 digest of each state id together with the upstream that created it, and routes later requests that reference the id only to that upstream:
 
@@ -84,7 +84,7 @@ Not yet supported: files, message batches, skills, agents, and sessions.
 
 ChatGPT-subscription (`openai_oauth`) upstreams serve the public OpenAI Responses surface as well as the backend-shaped Codex surface. Codex-shaped requests pass through unchanged. Public requests are translated or emulated only for `openai_oauth`; they are never translated across providers. The public `/v1/responses` route (including its WebSocket form) is supported, while unprefixed `/v1/chat/completions`, `/v1/models`, and `/v1/responses/input_tokens` remain unsupported.
 
-The native Codex alias is `/backend-api/codex/*`. Its supported Responses, models, alpha search, and realtime-call create routes are OAuth-only and pass through raw request and response bytes. Codex compaction uses the native `responses` operation; the alias does not expose a separate compact route. Zstd request bodies are decoded before forwarding. Restricted principals receive a filtered native catalog; unrestricted principals receive exact upstream bytes. The alias does not expose hangup, memories, wham, usage, or file routes; unknown `/backend-api/*` paths authenticate first, then return the OpenAI-shaped 404 without contacting an upstream.
+The native Codex alias is `/openai/backend-api/codex/*`. Its supported Responses, models, alpha search, images (`generations` and `edits`), and realtime-call create routes are OAuth-only and pass through raw request and response bytes. Realtime hangup (`POST /openai/backend-api/codex/realtime/calls/{call_id}/hangup`) and realtime WebSocket (`GET /openai/backend-api/codex/realtime`, `/openai/backend-api/codex/live`, `/openai/backend-api/codex/live/{call_id}`, and `/openai/backend-api/codex`, including V1/V2/V3 sideband join) are also OAuth-only, use `openai_public_api.realtime_origin`, and stay pinned to the owning OAuth account without crossing to API-key upstreams. Downstream credential headers, including `x-openai-actor-authorization`, are stripped before upstream signing. Codex compaction uses the native `responses` operation; the alias does not expose a separate compact route. Zstd request bodies are decoded before forwarding. Restricted principals receive a filtered native catalog; unrestricted principals receive exact upstream bytes. The alias does not expose compact, memories, wham, usage, or file routes; unknown `/openai/backend-api/*` paths authenticate first, then return the OpenAI-shaped 404 without contacting an upstream.
 
 HTTP compatibility includes `stream:false` aggregation, model-list/model retrieval conversion, Responses compaction emulation, image generation/edit conversion, and input-token counting through a WebSocket `generate:false` turn. Public `chat/completions` is translated to Responses, including tools, response formats, token limits, streaming, `n` fan-out on one subscription account, and `stop` cutting. Realtime calls are converted to the Codex call shape; hangup, sideband, and realtime WebSocket traffic uses `openai_public_api.realtime_origin` and stays pinned to the account that created the call or session. `audio/transcriptions` is disabled by default; when enabled it uses the subscription dictation endpoint, returns text/JSON only, and the upstream retains submitted audio for 30 days.
 
@@ -102,9 +102,10 @@ Not supported: realtime client secrets and provider operations with no safe tran
 
 | Method | Client path | Credentials |
 |---|---|---|
-| POST / GET WebSocket | `/backend-api/codex/responses` | OAuth only (native passthrough) |
-| POST | `/backend-api/codex/alpha/search`, `/backend-api/codex/realtime/calls` | OAuth only (native passthrough) |
-| GET | `/backend-api/codex/models` | OAuth only (native catalog; allowlists filter entries) |
+| POST / GET WebSocket | `/openai/backend-api/codex/responses` | OAuth only (native passthrough) |
+| POST | `/openai/backend-api/codex/alpha/search`, `/openai/backend-api/codex/images/generations`, `/openai/backend-api/codex/images/edits`, `/openai/backend-api/codex/realtime/calls` | OAuth only (native passthrough) |
+| POST / GET WebSocket | `/openai/backend-api/codex/realtime/calls/{call_id}/hangup`, `/openai/backend-api/codex/realtime`, `/openai/backend-api/codex/live`, `/openai/backend-api/codex/live/{call_id}`, `/openai/backend-api/codex` | OAuth only (pinned call / public API origin) |
+| GET | `/openai/backend-api/codex/models` | OAuth only (native catalog; allowlists filter entries) |
 | POST / GET WebSocket | `/openai/v1/responses` | API key, OAuth |
 | POST | `/openai/v1/responses/input_tokens`, `/openai/v1/responses/compact` | API key, OAuth (emulated) |
 | POST | `/openai/v1/chat/completions` | API key, OAuth (translated) |
@@ -113,7 +114,7 @@ Not supported: realtime client secrets and provider operations with no safe tran
 | GET | `/openai/v1/models`, `/openai/v1/models/{id}` | API key, OAuth |
 | POST | `/openai/v1/images/generations`, `/openai/v1/images/edits` | API key, OAuth |
 | POST | `/openai/v1/audio/transcriptions` | API key; OAuth when enabled |
-| POST | `/openai/v1/realtime/calls`; hangup, sideband, WebSocket | OAuth (calls converted; public API origin) |
+| POST / GET WebSocket | `/openai/v1/realtime/calls`; hangup, sideband, `/openai/v1/realtime`, `/openai/v1/live`, `/openai/v1/live/{call_id}` | OAuth (calls converted; public API origin) |
 | POST | `/openai/v1/embeddings`, `/openai/v1/moderations`, `/openai/v1/audio/speech`, `/openai/v1/audio/translations`, `/openai/v1/images/variations` | API key |
 | Any | `/openai/v1/responses/{id}`, `/openai/v1/responses/{id}/cancel`, `/openai/v1/responses/{id}/input_items` | API key (recorded owner, else single owner) |
 | Any | `/openai/v1/files`, `/uploads`, `/batches`, `/vector_stores`, `/conversations`, `/containers`, `/evals`, `/fine_tuning`, `/assistants`, `/threads`, `/skills`, `/chatkit`, `/videos`, `/audio/voices`, stored `/chat/completions` | API key (single owner) |

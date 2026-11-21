@@ -179,6 +179,7 @@ async fn qa_live_1_vertex_credential_live_uses_regional_bearer_endpoint_and_stri
                 path: "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
                 query: Some("key=client-key&alt=json"),
                 model: Some("gemini-live"),
+                codex_backend: false,
             },
             Bytes::from_static(br#"{"setup":{"model":"models/gemini-live"}}"#),
         )
@@ -242,6 +243,7 @@ async fn qa_live_2_vertex_live_rewrites_text_and_binary_setup_models_only() {
                 path: "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
                 query: None,
                 model: Some("gemini-live"),
+                codex_backend: false,
             },
             Bytes::from_static(br#"{"setup":{"model":"models/gemini-live"}}"#),
         )
@@ -344,6 +346,7 @@ async fn qa_live_4_vertex_live_retries_one_alternate_after_mint_failure() {
                 path: "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
                 query: None,
                 model: Some("gemini-live"),
+                codex_backend: false,
             },
             Bytes::from_static(br#"{"setup":{"model":"models/gemini-live"}}"#),
         )
@@ -394,6 +397,7 @@ async fn qa_live_5_gemini_api_key_live_route_remains_unchanged() {
                 path: "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
                 query: None,
                 model: Some("gemini-live"),
+                codex_backend: false,
             },
             Bytes::from_static(br#"{"setup":{"model":"models/gemini-live"}}"#),
         )

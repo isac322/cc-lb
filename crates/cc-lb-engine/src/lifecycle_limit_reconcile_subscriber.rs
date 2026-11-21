@@ -287,7 +287,10 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             result: Ok(info), ..
         } => {
             partial.websocket = info.method == "GET"
-                && (matches!(info.path.as_str(), "/v1/responses" | "/v1/realtime")
+                && (matches!(
+                    info.path.as_str(),
+                    "/v1/responses" | "/v1/realtime" | "/v1/live"
+                ) || info.path.starts_with("/v1/live/")
                     || info.path.starts_with("/ws/"));
         }
         LifecycleEvent::LimitDecision {

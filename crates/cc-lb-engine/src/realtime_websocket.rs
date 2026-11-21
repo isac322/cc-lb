@@ -321,6 +321,7 @@ pub struct RealtimeWebSocketTarget<'a> {
     pub path: &'a str,
     pub query: Option<&'a str>,
     pub model: Option<&'a str>,
+    pub codex_backend: bool,
 }
 
 impl RealtimeWebSocketKind {
