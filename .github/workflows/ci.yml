@@ -877,6 +877,42 @@ jobs:
             exit 1
           fi
 
+          {
+            IFS= read -r matrix_ports
+            IFS= read -r slots_ports
+            IFS= read -r lifecycle_ports
+          } < <(python3 - <<'PY'
+          import random, socket
+          needed = 45 + 3 + 9
+          socks = []
+          start = random.randrange(12000)
+          try:
+              for step in range(12000):
+                  if len(socks) >= needed:
+                      break
+                  candidate = 20000 + ((start + step) % 12000)
+                  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                  try:
+                      s.bind(('127.0.0.1', candidate))
+                      socks.append(s)
+                  except OSError:
+                      s.close()
+              while len(socks) < needed:
+                  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                  s.bind(('127.0.0.1', 0))
+                  socks.append(s)
+              ports = [str(s.getsockname()[1]) for s in socks]
+          finally:
+              for s in socks:
+                  s.close()
+          matrix = ";".join(" ".join(ports[i:i + 5]) for i in range(0, 45, 5))
+          print(matrix)
+          print(" ".join(ports[45:48]))
+          print(" ".join(ports[48:57]))
+          PY
+          )
+
+          CC_LB_MATRIX_PORTS="$matrix_ports" \
           TMPDIR=/dev/shm/cc-lb-tmp REAL_CLIENT_SKIP_BUILD=1 REAL_CLIENT_SKIP_INSTALL=1 REAL_CLIENT_JOBS=6 \
             tests/real-client/matrix.sh &
           pid_matrix=$!
@@ -885,6 +921,7 @@ jobs:
           CC_LB_PLUGIN_WASM="$PWD/target/wasm32-unknown-unknown/release/wasmtime_dual_slot.wasm" \
           CC_LB_QA_OUTPUT="$PWD/target/test-evidence/real-client/plugin-slots" \
           CC_LB_QA_LEDGER="$RUNNER_TEMP/plugin-slots.ledger" \
+          CC_LB_PLUGIN_SLOTS_PORTS="$slots_ports" \
             node tests/real-client/provider-e2e/plugin-slots.mjs &
           pid_slots=$!
 
@@ -892,6 +929,7 @@ jobs:
           CC_LB_PLUGIN_WASM="$PWD/target/wasm32-unknown-unknown/release/wasmtime_dual_slot.wasm" \
           CC_LB_QA_OUTPUT="$PWD/target/test-evidence/real-client/plugin-slots-lifecycle" \
           CC_LB_QA_LEDGER="$RUNNER_TEMP/plugin-slots-lifecycle.ledger" \
+          CC_LB_PLUGIN_SLOTS_LIFECYCLE_PORTS="$lifecycle_ports" \
             node --test tests/real-client/provider-e2e/plugin-slots.lifecycle.test.mjs &
           pid_lifecycle=$!
 

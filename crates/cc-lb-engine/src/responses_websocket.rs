@@ -233,6 +233,7 @@ struct ResponsesStreamMetrics {
     started: std::time::Instant,
     first_output_ms: Option<u64>,
     last_output_ms: Option<u64>,
+    last_activity_heartbeat_ms: u64,
     event_count: u64,
     total_bytes: u64,
     provider_session_id: Option<String>,
@@ -244,13 +245,33 @@ impl ResponsesStreamMetrics {
             started: std::time::Instant::now(),
             first_output_ms: None,
             last_output_ms: None,
+            last_activity_heartbeat_ms: 0,
             event_count: 0,
             total_bytes: 0,
             provider_session_id: None,
         }
     }
 
-    fn observe(&mut self, frame: &[u8]) {
+    fn maybe_record_heartbeat(&mut self, elapsed_ms: u64, heartbeat_interval_ms: u64) -> bool {
+        if heartbeat_interval_ms > 0
+            && elapsed_ms.saturating_sub(self.last_activity_heartbeat_ms) >= heartbeat_interval_ms
+        {
+            self.last_activity_heartbeat_ms = elapsed_ms;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn observe_heartbeat_only(&mut self, heartbeat_interval_ms: u64) -> bool {
+        if heartbeat_interval_ms == 0 {
+            return false;
+        }
+        let elapsed = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        self.maybe_record_heartbeat(elapsed, heartbeat_interval_ms)
+    }
+
+    fn observe(&mut self, frame: &[u8], heartbeat_interval_ms: u64) -> bool {
         let elapsed = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         self.first_output_ms.get_or_insert(elapsed);
         self.last_output_ms = Some(elapsed);
@@ -265,6 +286,7 @@ impl ResponsesStreamMetrics {
             let fallback_id = sonic_rs::get_from_slice(frame, &["response_id"]).ok();
             self.provider_session_id = bounded(response_id).or_else(|| bounded(fallback_id));
         }
+        self.maybe_record_heartbeat(elapsed, heartbeat_interval_ms)
     }
 
     fn latency(&self, status: u16) -> StreamLatency {
@@ -353,6 +375,7 @@ pub struct ResponsesWebSocketGateway {
     session_oauth: bool,
     connection_signers: HashMap<u64, Arc<dyn Signer>>,
     successors: HashMap<String, u64>,
+    activity_heartbeat_interval_ms: u64,
 }
 impl ResponsesWebSocketGateway {
     pub fn new(
@@ -383,6 +406,10 @@ impl ResponsesWebSocketGateway {
             connections: HashMap::new(),
             connection_signers: HashMap::new(),
             successors: HashMap::new(),
+            activity_heartbeat_interval_ms:
+                cc_lb_lifecycle::DEFAULT_STREAM_ACTIVITY_HEARTBEAT_INTERVAL
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64,
         }
     }
 
@@ -1423,12 +1450,53 @@ impl ResponsesWebSocketGateway {
             && turn.connection_id == Some(connection_id)
             && turn.sent
         {
-            turn.metrics.observe(frame);
+            if turn
+                .metrics
+                .observe(frame, self.activity_heartbeat_interval_ms)
+                && let Some(observer) = turn.prepared.observer.as_ref()
+            {
+                observer.emit_request_activity();
+            }
             if response_id.is_some() && response_id == turn.response_id && lane == turn.lane {
                 return Some(turn_id);
             }
         }
         None
+    }
+
+    /// Record provider WebSocket keepalive `Ping` activity for active turns on
+    /// `connection_id` so long silent pauses with periodic pings still refresh
+    /// lifecycle and reservation idle TTLs.
+    pub fn observe_provider_ping(&mut self, connection_id: u64) {
+        let heartbeat_interval_ms = self.activity_heartbeat_interval_ms;
+        for turn in self.turns.values_mut() {
+            if turn.connection_id == Some(connection_id)
+                && turn.sent
+                && turn.metrics.observe_heartbeat_only(heartbeat_interval_ms)
+                && let Some(observer) = turn.prepared.observer.as_ref()
+            {
+                observer.emit_request_activity();
+            }
+        }
+    }
+
+    /// Returns whether any WebSocket turn is still open (in-flight or queued
+    /// behind an earlier turn in a serialized lane).
+    pub fn has_active_turns(&self) -> bool {
+        !self.turns.is_empty()
+    }
+
+    /// Emit throttled activity heartbeats for active turns even when neither
+    /// upstream frames nor provider `Ping`s arrive during long silent reasoning.
+    pub fn observe_active_turns_heartbeat(&mut self) {
+        let heartbeat_interval_ms = self.activity_heartbeat_interval_ms;
+        for turn in self.turns.values_mut() {
+            if turn.metrics.observe_heartbeat_only(heartbeat_interval_ms)
+                && let Some(observer) = turn.prepared.observer.as_ref()
+            {
+                observer.emit_request_activity();
+            }
+        }
     }
 
     pub async fn provider_message(
@@ -3975,8 +4043,8 @@ pub(crate) mod tests {
     #[test]
     fn responses_metrics_keep_provider_neutral_timing_and_identity() {
         let mut metrics = ResponsesStreamMetrics::new();
-        metrics.observe(br#"{"response":{"id":"resp_123"}}"#);
-        metrics.observe(br#"{"type":"response.output_text.delta","delta":"ok"}"#);
+        metrics.observe(br#"{"response":{"id":"resp_123"}}"#, 0);
+        metrics.observe(br#"{"type":"response.output_text.delta","delta":"ok"}"#, 0);
         let latency = metrics.latency(101);
         assert_eq!(latency.stream_event_count, 2);
         assert!(latency.stream_first_output_ms.is_some());
@@ -3991,7 +4059,7 @@ pub(crate) mod tests {
         let oversized = "x".repeat(513);
         let mut metrics = ResponsesStreamMetrics::new();
         let frame = format!(r#"{{"response":{{"id":"{oversized}"}},"response_id":"fallback"}}"#);
-        metrics.observe(frame.as_bytes());
+        metrics.observe(frame.as_bytes(), 0);
         assert_eq!(
             metrics.provider_session_id.as_deref(),
             Some("fallback"),
@@ -4000,13 +4068,13 @@ pub(crate) mod tests {
 
         let mut metrics = ResponsesStreamMetrics::new();
         let frame = format!(r#"{{"response_id":"{oversized}"}}"#);
-        metrics.observe(frame.as_bytes());
+        metrics.observe(frame.as_bytes(), 0);
         assert_eq!(metrics.provider_session_id, None);
 
         let accepted = "y".repeat(512);
         let mut metrics = ResponsesStreamMetrics::new();
         let frame = format!(r#"{{"response":{{"id":"{accepted}"}}}}"#);
-        metrics.observe(frame.as_bytes());
+        metrics.observe(frame.as_bytes(), 0);
         assert_eq!(
             metrics.provider_session_id.as_deref(),
             Some(accepted.as_str())
@@ -4016,9 +4084,15 @@ pub(crate) mod tests {
     #[test]
     fn responses_timing_tracks_output_events_without_anthropic_counters() {
         let mut metrics = ResponsesStreamMetrics::new();
-        metrics.observe(br#"{"type":"response.created","response":{"id":"resp-native"}}"#);
-        metrics.observe(br#"{"type":"response.output_text.delta","delta":"a"}"#);
-        metrics.observe(br#"{"type":"response.completed","response":{"id":"resp-native"}}"#);
+        metrics.observe(
+            br#"{"type":"response.created","response":{"id":"resp-native"}}"#,
+            0,
+        );
+        metrics.observe(br#"{"type":"response.output_text.delta","delta":"a"}"#, 0);
+        metrics.observe(
+            br#"{"type":"response.completed","response":{"id":"resp-native"}}"#,
+            0,
+        );
         let latency = metrics.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
         assert_eq!(latency.provider_session_id.as_deref(), Some("resp-native"));
         assert_eq!(latency.stream_event_count, 3);
@@ -4059,5 +4133,105 @@ pub(crate) mod tests {
             "API key secret must be redacted: {api_key_secret}"
         );
         assert!(api_key_secret.contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn provider_stream_and_ping_emit_throttled_request_activity() {
+        use cc_lb_control::RequestEventBus;
+        let fixture = DirectAccountingFixture::new().await;
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let mut events = bus.subscribe_lifecycle();
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+        let observer = LifecycleContext::new("ws-activity".to_owned(), bus, &clock);
+        observer.mark_authn_reached();
+        let expected_event_id = observer.event_id().to_owned();
+        let mut gateway = terminal_fixture_gateway(&fixture, Some(observer));
+
+        gateway.turns.get_mut(&1).unwrap().metrics.started = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(65))
+            .expect("65s sub must not underflow");
+        let created =
+            Bytes::from_static(br#"{"type":"response.created","response":{"id":"resp_fixture"}}"#);
+        gateway.provider_message(1, &created).await.unwrap();
+        // Immediate ping inside the same 60s window must be throttled.
+        gateway.observe_provider_ping(1);
+
+        gateway.turns.get_mut(&1).unwrap().metrics.started = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(130))
+            .expect("130s sub must not underflow");
+        gateway.observe_provider_ping(1);
+
+        let mut activity_count = 0usize;
+        while let Ok(event) = events.try_recv() {
+            if let LifecycleEvent::RequestActivity { event_id } = event {
+                assert_eq!(event_id, expected_event_id);
+                activity_count += 1;
+            }
+        }
+        assert_eq!(
+            activity_count, 2,
+            "expected one throttled activity from frame and one from later ping"
+        );
+    }
+
+    #[tokio::test]
+    async fn short_single_frame_turn_emits_no_request_activity() {
+        use cc_lb_control::RequestEventBus;
+        let fixture = DirectAccountingFixture::new().await;
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let mut events = bus.subscribe_lifecycle();
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+        let observer = LifecycleContext::new("ws-short".to_owned(), bus, &clock);
+        observer.mark_authn_reached();
+        let mut gateway = terminal_fixture_gateway(&fixture, Some(observer));
+
+        let completed = Bytes::from_static(
+            br#"{"type":"response.completed","response":{"id":"resp_fixture","usage":{"input_tokens":5,"output_tokens":3}}}"#,
+        );
+        gateway.provider_message(1, &completed).await.unwrap();
+        gateway.observe_provider_ping(1);
+
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                !matches!(event, LifecycleEvent::RequestActivity { .. }),
+                "short turn must not emit RequestActivity before heartbeat interval"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn silent_active_turn_heartbeat_tracks_turn_lifecycle() {
+        use cc_lb_control::RequestEventBus;
+        let fixture = DirectAccountingFixture::new().await;
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let mut events = bus.subscribe_lifecycle();
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+        let observer = LifecycleContext::new("ws-silent".to_owned(), bus, &clock);
+        observer.mark_authn_reached();
+        let expected_event_id = observer.event_id().to_owned();
+        let mut gateway = terminal_fixture_gateway(&fixture, Some(observer));
+        assert!(gateway.has_active_turns());
+
+        gateway.turns.get_mut(&1).unwrap().metrics.started = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(65))
+            .expect("65s sub must not underflow");
+        gateway.observe_active_turns_heartbeat();
+        // Second immediate tick inside same 60s window must be throttled.
+        gateway.observe_active_turns_heartbeat();
+
+        let mut activity_count = 0usize;
+        while let Ok(event) = events.try_recv() {
+            if let LifecycleEvent::RequestActivity { event_id } = event {
+                assert_eq!(event_id, expected_event_id);
+                activity_count += 1;
+            }
+        }
+        assert_eq!(activity_count, 1);
+
+        let completed = Bytes::from_static(
+            br#"{"type":"response.completed","response":{"id":"resp_fixture","usage":{"input_tokens":5,"output_tokens":3}}}"#,
+        );
+        gateway.provider_message(1, &completed).await.unwrap();
+        assert!(!gateway.has_active_turns());
     }
 }

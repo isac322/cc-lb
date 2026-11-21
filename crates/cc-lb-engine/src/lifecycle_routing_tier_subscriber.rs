@@ -9,7 +9,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 pub const DEFAULT_ROUTING_TIER_MAP_CAP: usize = 4096;
-pub const DEFAULT_ROUTING_TIER_TTL: Duration = Duration::from_secs(300);
+pub const DEFAULT_ROUTING_TIER_TTL: Duration = cc_lb_lifecycle::DEFAULT_LIFECYCLE_IDLE_TTL;
+pub const DEFAULT_ROUTING_TIER_MAX_TTL: Duration = cc_lb_lifecycle::DEFAULT_LIFECYCLE_MAX_TTL;
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct RoutingTierSubscriberHandle {
@@ -44,23 +45,53 @@ pub fn spawn_with_config(
     map_cap: usize,
     ttl: Duration,
 ) -> RoutingTierSubscriberHandle {
+    spawn_with_ttls(
+        rx,
+        metrics,
+        map_cap,
+        ttl,
+        ttl.max(DEFAULT_ROUTING_TIER_MAX_TTL),
+    )
+}
+
+pub fn spawn_with_ttls(
+    rx: mpsc::Receiver<LifecycleEvent>,
+    metrics: Arc<dyn EngineMetricsHook>,
+    map_cap: usize,
+    idle_ttl: Duration,
+    max_ttl: Duration,
+) -> RoutingTierSubscriberHandle {
+    let max_ttl = max_ttl.max(idle_ttl);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(subscriber_loop(rx, metrics, map_cap, ttl, shutdown_rx));
+    let join = tokio::spawn(subscriber_loop(
+        rx,
+        metrics,
+        map_cap,
+        idle_ttl,
+        max_ttl,
+        shutdown_rx,
+    ));
     RoutingTierSubscriberHandle { shutdown_tx, join }
 }
 
 #[derive(Default)]
 struct Partial {
-    inserted_at: Option<Instant>,
+    created_at: Option<Instant>,
+    last_activity_at: Option<Instant>,
     principal_id: Option<String>,
 }
 
 impl Partial {
     fn new(now: Instant) -> Self {
         Self {
-            inserted_at: Some(now),
+            created_at: Some(now),
+            last_activity_at: Some(now),
             ..Self::default()
         }
+    }
+
+    fn touch(&mut self, now: Instant) {
+        self.last_activity_at = Some(now);
     }
 }
 
@@ -68,7 +99,8 @@ async fn subscriber_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
     metrics: Arc<dyn EngineMetricsHook>,
     map_cap: usize,
-    ttl: Duration,
+    idle_ttl: Duration,
+    max_ttl: Duration,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut partials: HashMap<EventId, Partial> = HashMap::new();
@@ -85,7 +117,7 @@ async fn subscriber_loop(
                     None => break,
                 }
             }
-            _ = sweeper.tick() => sweep_orphans(&mut partials, ttl),
+            _ = sweeper.tick() => sweep_orphans(&mut partials, idle_ttl, max_ttl),
             _ = &mut shutdown => break,
         }
     }
@@ -101,7 +133,13 @@ fn handle_event(
     map_cap: usize,
     event: LifecycleEvent,
 ) {
+    let now = Instant::now();
     match event {
+        LifecycleEvent::RequestActivity { event_id } => {
+            if let Some(partial) = partials.get_mut(&event_id) {
+                partial.touch(now);
+            }
+        }
         LifecycleEvent::AuthenticationCompleted {
             event_id,
             principal_id,
@@ -109,8 +147,8 @@ fn handle_event(
         } => {
             let partial = partials
                 .entry(event_id)
-                .or_insert_with(|| Partial::new(Instant::now()));
-            partial.inserted_at = Some(Instant::now());
+                .or_insert_with(|| Partial::new(now));
+            partial.touch(now);
             partial.principal_id = Some(principal_id);
             if partials.len() > map_cap {
                 drop_oldest(partials);
@@ -180,10 +218,19 @@ fn tier_to_label(chosen_tier: SubscriptionTier) -> &'static str {
     }
 }
 
-fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
+fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, idle_ttl: Duration, max_ttl: Duration) {
+    let effective_max_ttl = max_ttl.max(idle_ttl);
     let now = Instant::now();
     let before = partials.len();
-    partials.retain(|_, p| p.inserted_at.is_none_or(|t| now.duration_since(t) < ttl));
+    partials.retain(|_, p| {
+        let idle_live = p
+            .last_activity_at
+            .is_none_or(|t| now.duration_since(t) < idle_ttl);
+        let max_live = p
+            .created_at
+            .is_none_or(|t| now.duration_since(t) < effective_max_ttl);
+        idle_live && max_live
+    });
     let removed = before.saturating_sub(partials.len());
     if removed > 0 {
         metrics::counter!(
@@ -197,8 +244,8 @@ fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
 fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     let Some((oldest_key, _)) = partials
         .iter()
-        .min_by_key(|(_, p)| p.inserted_at.unwrap_or_else(Instant::now))
-        .map(|(k, v)| (k.clone(), v.inserted_at))
+        .min_by_key(|(_, p)| p.last_activity_at.unwrap_or_else(Instant::now))
+        .map(|(k, v)| (k.clone(), v.last_activity_at))
     else {
         return;
     };

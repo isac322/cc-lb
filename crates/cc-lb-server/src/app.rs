@@ -1072,10 +1072,18 @@ async fn build_app_with_storage_inner(
         .start_durable_usage_sync(storage.clone())
         .await?;
     let api_key_usage_slot = Arc::new(tokio::sync::Mutex::new(Some(api_key_usage_handle)));
+    let reservation_idle_ttl =
+        std::time::Duration::from_secs(config.limit_reservation_ttl.ttl_secs.max(1));
+    let lifecycle_max_ttl = cc_lb_lifecycle::DEFAULT_LIFECYCLE_MAX_TTL
+        .max(std::time::Duration::from_secs(
+            config.timeouts.upstream_total_secs.max(1),
+        ))
+        .max(reservation_idle_ttl);
     let limit_reservation_ttl_handle = Some(
-        cc_lb_control::api_keys::limit_engine::spawn_reservation_ttl_sweeper(
+        cc_lb_control::api_keys::limit_engine::spawn_reservation_ttl_sweeper_with_max_ttl(
             limit_engine.clone(),
-            std::time::Duration::from_secs(config.limit_reservation_ttl.ttl_secs.max(1)),
+            reservation_idle_ttl,
+            lifecycle_max_ttl,
             std::time::Duration::from_secs(config.limit_reservation_ttl.tick_secs.max(1)),
         ),
     );
@@ -1383,40 +1391,60 @@ async fn build_app_with_storage_inner(
     } else {
         cc_lb_engine::RequestDiagnosticsOptions::default()
     };
-    let lifecycle_event_assembler_handle =
-        cc_lb_engine::spawn_request_event_assembler_with_diagnostics(
-            lifecycle_assembler_rx,
-            storage.clone(),
-            Some(event_bus.clone()),
-            Arc::clone(&metrics_hook),
-            diagnostics,
-        );
+    let lifecycle_event_assembler_handle = cc_lb_engine::lifecycle_event_assembler::spawn_with_ttls(
+        lifecycle_assembler_rx,
+        storage.clone(),
+        Some(event_bus.clone()),
+        Arc::clone(&metrics_hook),
+        cc_lb_engine::lifecycle_event_assembler::DEFAULT_ASSEMBLER_MAP_CAP,
+        cc_lb_engine::lifecycle_event_assembler::DEFAULT_ASSEMBLER_TTL,
+        lifecycle_max_ttl,
+        diagnostics,
+    );
     let lifecycle_pricing_subscriber_handle =
-        cc_lb_pricing::spawn_lifecycle_pricing_subscriber(lifecycle_pricing_rx, event_bus.clone());
+        cc_lb_pricing::lifecycle_pricing_subscriber::spawn_with_ttls(
+            lifecycle_pricing_rx,
+            event_bus.clone(),
+            cc_lb_pricing::lifecycle_pricing_subscriber::DEFAULT_PRICING_MAP_CAP,
+            cc_lb_pricing::lifecycle_pricing_subscriber::DEFAULT_PRICING_TTL,
+            lifecycle_max_ttl,
+        );
     let lifecycle_limit_reconcile_subscriber_handle =
-        cc_lb_engine::spawn_lifecycle_limit_reconcile_subscriber(
+        cc_lb_engine::lifecycle_limit_reconcile_subscriber::spawn_with_ttls(
             lifecycle_limit_reconcile_rx,
             limit_engine.clone(),
+            cc_lb_engine::lifecycle_limit_reconcile_subscriber::DEFAULT_LIMIT_RECONCILE_MAP_CAP,
+            cc_lb_engine::lifecycle_limit_reconcile_subscriber::DEFAULT_LIMIT_RECONCILE_TTL,
+            lifecycle_max_ttl,
         );
     let lifecycle_cache_observation_subscriber_handle =
-        cc_lb_engine::spawn_lifecycle_cache_observation_subscriber(
+        cc_lb_engine::lifecycle_cache_observation_subscriber::spawn_with_ttls(
             lifecycle_cache_obs_rx,
             event_bus.clone(),
+            cc_lb_engine::lifecycle_cache_observation_subscriber::DEFAULT_CACHE_OBS_MAP_CAP,
+            cc_lb_engine::lifecycle_cache_observation_subscriber::DEFAULT_CACHE_OBS_TTL,
+            lifecycle_max_ttl,
         );
     let lifecycle_rate_limit_header_subscriber_handle =
-        cc_lb_engine::spawn_lifecycle_rate_limit_header_subscriber(
+        cc_lb_engine::lifecycle_rate_limit_header_subscriber::spawn_with_ttls(
             lifecycle_rate_limit_header_rx,
             Arc::clone(&initial_view.upstream_rate_limit_cache),
             Some(upstream_rate_limit_sink.clone()),
+            cc_lb_engine::lifecycle_rate_limit_header_subscriber::DEFAULT_RATE_LIMIT_HEADER_MAP_CAP,
+            cc_lb_engine::lifecycle_rate_limit_header_subscriber::DEFAULT_RATE_LIMIT_HEADER_TTL,
+            lifecycle_max_ttl,
         );
     let cache: Arc<dyn cc_lb_control::SubscriptionQuotaCacheLike> =
         subscription_quota_cache.clone();
     let lifecycle_subscription_quota_subscriber_handle =
-        cc_lb_engine::spawn_lifecycle_subscription_quota_subscriber(
+        cc_lb_engine::lifecycle_subscription_quota_subscriber::spawn_with_ttls(
             lifecycle_subscription_quota_rx,
             Some(cache),
             Some(subscription_quota_sink.clone()),
             Some(event_bus.clone()),
+            cc_lb_engine::lifecycle_subscription_quota_subscriber::DEFAULT_SUBSCRIPTION_QUOTA_MAP_CAP,
+            cc_lb_engine::lifecycle_subscription_quota_subscriber::DEFAULT_SUBSCRIPTION_QUOTA_TTL,
+            lifecycle_max_ttl,
         );
     let lifecycle_limit_rejection_audit_subscriber_handle =
         cc_lb_engine::spawn_lifecycle_limit_rejection_audit_subscriber(
@@ -1424,19 +1452,27 @@ async fn build_app_with_storage_inner(
             audit_sink.clone(),
         );
     let lifecycle_api_key_metrics_subscriber_handle =
-        cc_lb_engine::spawn_lifecycle_api_key_metrics_subscriber(
+        cc_lb_engine::lifecycle_api_key_metrics_subscriber::spawn_with_ttls(
             lifecycle_api_key_metrics_rx,
-            event_bus.clone(),
+            cc_lb_engine::lifecycle_api_key_metrics_subscriber::DEFAULT_API_KEY_METRICS_MAP_CAP,
+            cc_lb_engine::lifecycle_api_key_metrics_subscriber::DEFAULT_API_KEY_METRICS_TTL,
+            lifecycle_max_ttl,
         );
     let lifecycle_cache_hit_miss_subscriber_handle =
-        cc_lb_engine::spawn_lifecycle_cache_hit_miss_subscriber(
+        cc_lb_engine::lifecycle_cache_hit_miss_subscriber::spawn_with_ttls(
             lifecycle_cache_hit_miss_rx,
             Arc::clone(&metrics_hook),
+            cc_lb_engine::lifecycle_cache_hit_miss_subscriber::DEFAULT_CACHE_HIT_MISS_MAP_CAP,
+            cc_lb_engine::lifecycle_cache_hit_miss_subscriber::DEFAULT_CACHE_HIT_MISS_TTL,
+            lifecycle_max_ttl,
         );
     let lifecycle_routing_tier_subscriber_handle =
-        cc_lb_engine::spawn_lifecycle_routing_tier_subscriber(
+        cc_lb_engine::lifecycle_routing_tier_subscriber::spawn_with_ttls(
             lifecycle_routing_tier_rx,
             Arc::clone(&metrics_hook),
+            cc_lb_engine::lifecycle_routing_tier_subscriber::DEFAULT_ROUTING_TIER_MAP_CAP,
+            cc_lb_engine::lifecycle_routing_tier_subscriber::DEFAULT_ROUTING_TIER_TTL,
+            lifecycle_max_ttl,
         );
     let lifecycle_event_logger_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::LifecycleEventLoggerHandle>>,
@@ -3748,6 +3784,12 @@ async fn relay_responses_websocket(
     let mut connections = HashMap::new();
     let mut dispatches = VecDeque::new();
     let mut next_connection_id = 1_u64;
+    let heartbeat_period = cc_lb_lifecycle::DEFAULT_STREAM_ACTIVITY_HEARTBEAT_INTERVAL;
+    let mut activity_heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + heartbeat_period,
+        heartbeat_period,
+    );
+    activity_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let body = async {
         'relay: loop {
@@ -3775,6 +3817,9 @@ async fn relay_responses_websocket(
             }
 
             tokio::select! {
+                _ = activity_heartbeat.tick(), if gateway.has_active_turns() => {
+                    gateway.observe_active_turns_heartbeat();
+                }
                 client = client_rx.recv() => {
                     let Some(message) = client else { break };
                     match message {
@@ -3908,6 +3953,7 @@ async fn relay_responses_websocket(
                             }
                         }
                         WsProviderEvent::Ping { connection_id, bytes } => {
+                            gateway.observe_provider_ping(connection_id);
                             if let Some(connection) = connections.get_mut(&connection_id)
                                 && connection.sink.send(UpstreamMessage::Pong(bytes)).await.is_err()
                             {

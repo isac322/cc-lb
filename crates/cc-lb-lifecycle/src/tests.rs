@@ -207,6 +207,10 @@ fn kind_labels_cover_every_variant() {
             funding_ambiguous: false,
         }
         .kind(),
+        LifecycleEvent::RequestActivity {
+            event_id: sample_event_id(),
+        }
+        .kind(),
         LifecycleEvent::Priced {
             event_id: sample_event_id(),
             cost: CostBreakdown::default(),
@@ -234,10 +238,22 @@ fn kind_labels_cover_every_variant() {
             "usage_observed",
             "stream_completed",
             "request_terminated",
+            "request_activity",
             "priced",
             "cache_observed",
         ],
     );
+}
+
+#[test]
+fn request_activity_roundtrip() {
+    let event = LifecycleEvent::RequestActivity {
+        event_id: sample_event_id(),
+    };
+    let json = serde_json::to_string(&event).expect("serialize");
+    let restored: LifecycleEvent = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(event, restored);
+    assert_eq!(restored.kind(), "request_activity");
 }
 
 #[test]

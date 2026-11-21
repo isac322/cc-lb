@@ -15,7 +15,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 pub const DEFAULT_API_KEY_METRICS_MAP_CAP: usize = 4096;
-pub const DEFAULT_API_KEY_METRICS_TTL: Duration = Duration::from_secs(300);
+pub const DEFAULT_API_KEY_METRICS_TTL: Duration = cc_lb_lifecycle::DEFAULT_LIFECYCLE_IDLE_TTL;
+pub const DEFAULT_API_KEY_METRICS_MAX_TTL: Duration = cc_lb_lifecycle::DEFAULT_LIFECYCLE_MAX_TTL;
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct ApiKeyMetricsSubscriberHandle {
@@ -48,14 +49,25 @@ pub fn spawn_with_config(
     map_cap: usize,
     ttl: Duration,
 ) -> ApiKeyMetricsSubscriberHandle {
+    spawn_with_ttls(rx, map_cap, ttl, ttl.max(DEFAULT_API_KEY_METRICS_MAX_TTL))
+}
+
+pub fn spawn_with_ttls(
+    rx: mpsc::Receiver<LifecycleEvent>,
+    map_cap: usize,
+    idle_ttl: Duration,
+    max_ttl: Duration,
+) -> ApiKeyMetricsSubscriberHandle {
+    let max_ttl = max_ttl.max(idle_ttl);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(subscriber_loop(rx, map_cap, ttl, shutdown_rx));
+    let join = tokio::spawn(subscriber_loop(rx, map_cap, idle_ttl, max_ttl, shutdown_rx));
     ApiKeyMetricsSubscriberHandle { shutdown_tx, join }
 }
 
 #[derive(Default)]
 struct Partial {
-    inserted_at: Option<Instant>,
+    created_at: Option<Instant>,
+    last_activity_at: Option<Instant>,
     key_id: Option<String>,
     principal_id: Option<String>,
     model: Option<String>,
@@ -74,16 +86,22 @@ struct Partial {
 impl Partial {
     fn new(now: Instant) -> Self {
         Self {
-            inserted_at: Some(now),
+            created_at: Some(now),
+            last_activity_at: Some(now),
             ..Self::default()
         }
+    }
+
+    fn touch(&mut self, now: Instant) {
+        self.last_activity_at = Some(now);
     }
 }
 
 async fn subscriber_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
     map_cap: usize,
-    ttl: Duration,
+    idle_ttl: Duration,
+    max_ttl: Duration,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut partials: HashMap<EventId, Partial> = HashMap::new();
@@ -100,7 +118,7 @@ async fn subscriber_loop(
                     None => break,
                 }
             }
-            _ = sweeper.tick() => sweep_orphans(&mut partials, ttl),
+            _ = sweeper.tick() => sweep_orphans(&mut partials, idle_ttl, max_ttl),
             _ = &mut shutdown => break,
         }
     }
@@ -117,6 +135,15 @@ fn handle_event(partials: &mut HashMap<EventId, Partial>, map_cap: usize, event:
     let now = Instant::now();
     let event_id = event.event_id().clone();
 
+    if matches!(&event, LifecycleEvent::RequestActivity { .. }) {
+        if let Some(partial) = partials.get_mut(&event_id)
+            && !partial.terminated
+        {
+            partial.touch(now);
+        }
+        return;
+    }
+
     if let LifecycleEvent::RequestTerminated { client_status, .. } = &event {
         let status = *client_status;
         if let Some(partial) = partials.get_mut(&event_id) {
@@ -125,7 +152,7 @@ fn handle_event(partials: &mut HashMap<EventId, Partial>, map_cap: usize, event:
             }
             emit_metrics(partial, status);
             partial.terminated = true;
-            partial.inserted_at = Some(now);
+            partial.touch(now);
             if partial.priced_seen
                 || !partial.usage_seen
                 || partial.model.is_none()
@@ -163,7 +190,7 @@ fn handle_event(partials: &mut HashMap<EventId, Partial>, map_cap: usize, event:
     if partial.terminated {
         return;
     }
-    partial.inserted_at = Some(now);
+    partial.touch(now);
     merge(partial, event);
 
     if partials.len() > map_cap {
@@ -330,12 +357,23 @@ fn increment_token_metric(key_id: &str, kind: &'static str, value: u64) {
     .increment(value);
 }
 
-fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
+fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, idle_ttl: Duration, max_ttl: Duration) {
+    let effective_max_ttl = max_ttl.max(idle_ttl);
     let now = Instant::now();
     partials.retain(|_, partial| {
-        let keep = partial
-            .inserted_at
-            .is_none_or(|t| now.duration_since(t) < ttl);
+        let idle_live = partial
+            .last_activity_at
+            .is_none_or(|t| now.duration_since(t) < idle_ttl);
+        // Once RequestTerminated arrives, keep the completed waiter for late
+        // `Priced` up to `idle_ttl` even if total age was near `max_ttl`.
+        let keep = if partial.terminated {
+            idle_live
+        } else {
+            let max_live = partial
+                .created_at
+                .is_none_or(|t| now.duration_since(t) < effective_max_ttl);
+            idle_live && max_live
+        };
         if !keep {
             record_eviction(partial, "orphan_ttl_evicted");
         }
@@ -348,7 +386,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
         .iter()
         // Completed requests have already contributed request/token metrics.
         // Prefer losing their unresolved cost over an entire in-flight request.
-        .min_by_key(|(_, p)| (!p.terminated, p.inserted_at))
+        .min_by_key(|(_, p)| (!p.terminated, p.last_activity_at))
         .map(|(k, _)| k.clone())
     else {
         return;
