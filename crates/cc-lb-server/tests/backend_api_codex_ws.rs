@@ -1,6 +1,17 @@
 use crate::{common, openai_oauth_public_media};
+use axum::{
+    Router,
+    extract::{
+        State,
+        ws::{Message as AxumMessage, WebSocket as AxumWebSocket, WebSocketUpgrade},
+    },
+    response::IntoResponse,
+};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
+use serde_json::{Value, json};
+use std::sync::{Arc, Mutex};
+use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
 #[tokio::test]
@@ -1178,5 +1189,416 @@ async fn backend_codex_realtime_v3_live_supports_standalone_sideband_and_pinning
     assert!(
         restricted_err.to_string().contains("400"),
         "{restricted_err}"
+    );
+}
+
+#[derive(Clone, Default)]
+struct InteractiveWsState {
+    connections: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+struct InteractiveWsUpstream {
+    base: String,
+    state: InteractiveWsState,
+    task: tokio::task::JoinHandle<Result<(), std::io::Error>>,
+}
+
+impl Drop for InteractiveWsUpstream {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn interactive_ws_handler(
+    State(state): State<InteractiveWsState>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    let conn_idx = {
+        let mut conns = state.connections.lock().unwrap();
+        conns.push(Vec::new());
+        conns.len() - 1
+    };
+    ws.on_upgrade(move |mut socket: AxumWebSocket| async move {
+        let mut active_id: Option<String> = None;
+        while let Some(Ok(AxumMessage::Text(text))) = socket.recv().await {
+            let raw = text.to_string();
+            state.connections.lock().unwrap()[conn_idx].push(raw.clone());
+            let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+                continue;
+            };
+            match value.get("type").and_then(Value::as_str) {
+                Some("response.create") => {
+                    let is_interruptible = value
+                        .get("input")
+                        .map(|input| match input {
+                            Value::String(s) => s == "interruptible",
+                            Value::Array(items) => items.iter().any(|item| {
+                                item.get("text").and_then(Value::as_str) == Some("interruptible")
+                                    || item
+                                        .get("content")
+                                        .and_then(Value::as_array)
+                                        .is_some_and(|parts| {
+                                            parts.iter().any(|part| {
+                                                part.get("text").and_then(Value::as_str)
+                                                    == Some("interruptible")
+                                            })
+                                        })
+                            }),
+                            _ => false,
+                        })
+                        .unwrap_or(false);
+                    if is_interruptible {
+                        let resp_id = format!("resp_int_{conn_idx}");
+                        active_id = Some(resp_id.clone());
+                        let created = json!({
+                            "type": "response.created",
+                            "response": {
+                                "id": resp_id,
+                                "object": "response",
+                                "status": "in_progress"
+                            }
+                        });
+                        if socket
+                            .send(AxumMessage::Text(created.to_string().into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    } else {
+                        let resp_id = format!("resp_done_{conn_idx}");
+                        let created = json!({
+                            "type": "response.created",
+                            "response": {
+                                "id": resp_id,
+                                "object": "response",
+                                "status": "in_progress"
+                            }
+                        });
+                        let completed = json!({
+                            "type": "response.completed",
+                            "response": {
+                                "id": resp_id,
+                                "object": "response",
+                                "status": "completed",
+                                "usage": {"input_tokens": 20, "output_tokens": 5, "total_tokens": 25}
+                            }
+                        });
+                        if socket
+                            .send(AxumMessage::Text(created.to_string().into()))
+                            .await
+                            .is_err()
+                            || socket
+                                .send(AxumMessage::Text(completed.to_string().into()))
+                                .await
+                                .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+                Some("response.interrupt") => {
+                    let resp_id = value
+                        .get("response_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    let ack = json!({
+                        "type": "response.interrupt.accepted",
+                        "response_id": resp_id
+                    });
+                    if socket
+                        .send(AxumMessage::Text(ack.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    if active_id.as_deref() == Some(resp_id.as_str()) {
+                        active_id = None;
+                        let incomplete = json!({
+                            "type": "response.incomplete",
+                            "response": {
+                                "id": resp_id,
+                                "object": "response",
+                                "status": "incomplete",
+                                "error": null,
+                                "incomplete_details": {"reason": "interrupted"},
+                                "usage": {"input_tokens": 10, "output_tokens": 3, "total_tokens": 13}
+                            }
+                        });
+                        if socket
+                            .send(AxumMessage::Text(incomplete.to_string().into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    })
+}
+
+async fn spawn_interactive_ws_upstream() -> InteractiveWsUpstream {
+    let state = InteractiveWsState::default();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let st = state.clone();
+    let task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route(
+                    "/backend-api/codex/responses",
+                    axum::routing::get(interactive_ws_handler),
+                )
+                .with_state(st),
+        )
+        .await
+    });
+    InteractiveWsUpstream {
+        base: format!("http://{addr}/backend-api/codex"),
+        state,
+        task,
+    }
+}
+
+async fn setup_interactive_upstream(
+    server: &common::TestServer,
+    upstream: &InteractiveWsUpstream,
+    client: &Client,
+) {
+    let resp = client
+        .post(format!("http://{}/admin/v1/upstreams", server.admin_addr))
+        .bearer_auth("admin-token")
+        .json(&json!({
+            "name": "oauth-ws-interrupt",
+            "kind": "openai_oauth",
+            "base_url": upstream.base,
+            "oauth_tokens": {
+                "access_token": "test-access",
+                "refresh_token": "",
+                "expires_at_unix_secs": 4102444800u64,
+                "account_id": "acct-test",
+                "scopes": [],
+                "never_refresh": true
+            },
+            "skip_preflight": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "upstream creation failed: {}",
+        resp.status()
+    );
+}
+
+async fn recv_text(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> String {
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+        .await
+        .expect("timed out waiting for WebSocket frame")
+        .expect("WebSocket stream ended unexpectedly")
+        .expect("WebSocket frame error");
+    match msg {
+        Message::Text(text) => text.to_string(),
+        other => panic!("expected text frame, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn backend_codex_websocket_forwards_response_interrupt_and_continues_session() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let upstream = spawn_interactive_ws_upstream().await;
+    let server = common::spawn_test_server_with_openai_budget("").await;
+    let client = Client::new();
+    setup_interactive_upstream(&server, &upstream, &client).await;
+    let key = &server.managed_key.plaintext;
+
+    let mut request = format!(
+        "ws://{}/openai/backend-api/codex/responses",
+        server.proxy_addr
+    )
+    .into_client_request()
+    .unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {key}").parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+
+    // 1. Start an interruptible turn and confirm response.created arrives.
+    socket
+        .send(Message::Text(
+            r#"{"type":"response.create","model":"gpt-test","input":"interruptible"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let created: Value = serde_json::from_str(&recv_text(&mut socket).await).unwrap();
+    assert_eq!(created["type"], "response.created");
+    let response_id = created["response"]["id"].as_str().unwrap().to_owned();
+
+    // 2. Send Codex-native response.interrupt over the same socket.
+    let interrupt_payload = format!(
+        r#"{{"type":"response.interrupt","response_id":"{response_id}","mode":"discard_partial_items"}}"#
+    );
+    socket
+        .send(Message::Text(interrupt_payload.clone().into()))
+        .await
+        .unwrap();
+
+    let ack_raw = recv_text(&mut socket).await;
+    let ack: Value = serde_json::from_str(&ack_raw).unwrap();
+    assert_eq!(ack["type"], "response.interrupt.accepted");
+    assert_eq!(ack["response_id"], response_id);
+
+    let incomplete_raw = recv_text(&mut socket).await;
+    let incomplete: Value = serde_json::from_str(&incomplete_raw).unwrap();
+    assert_eq!(incomplete["type"], "response.incomplete");
+    assert_eq!(incomplete["response"]["id"], response_id);
+    assert_eq!(
+        incomplete["response"]["incomplete_details"]["reason"],
+        "interrupted"
+    );
+
+    // 3. Follow up with a new response.create on the same WebSocket session.
+    socket
+        .send(Message::Text(
+            r#"{"type":"response.create","model":"gpt-test","input":"followup"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let followup_created: Value = serde_json::from_str(&recv_text(&mut socket).await).unwrap();
+    assert_eq!(followup_created["type"], "response.created");
+    let followup_completed: Value = serde_json::from_str(&recv_text(&mut socket).await).unwrap();
+    assert_eq!(followup_completed["type"], "response.completed");
+
+    // Verify all 3 frames went over a single upstream WebSocket connection, and interrupt stayed byte-identical.
+    let recorded = upstream.state.connections.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "expected single owning upstream socket");
+    assert_eq!(recorded[0].len(), 3);
+    assert_eq!(recorded[0][1], interrupt_payload);
+}
+
+#[tokio::test]
+async fn public_responses_websocket_interrupt_enforces_lane_and_reports_unknown_types() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let upstream = spawn_interactive_ws_upstream().await;
+    let server = common::spawn_test_server_with_openai_budget("").await;
+    let client = Client::new();
+    setup_interactive_upstream(&server, &upstream, &client).await;
+    let key = &server.managed_key.plaintext;
+
+    let mut request = format!("ws://{}/openai/v1/responses", server.proxy_addr)
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {key}").parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+
+    // 1. Start a lane-scoped turn.
+    socket
+        .send(Message::Text(
+            r#"{"type":"response.create","stream_id":"lane-a","model":"gpt-test","store":false,"input":"interruptible"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let created: Value = serde_json::from_str(&recv_text(&mut socket).await).unwrap();
+    assert_eq!(created["type"], "response.created");
+    assert_eq!(created["stream_id"], "lane-a");
+    let response_id = created["response"]["id"].as_str().unwrap().to_owned();
+
+    // 2. Mismatched stream_id must be rejected locally without reaching upstream.
+    socket
+        .send(Message::Text(
+            format!(
+                r#"{{"type":"response.interrupt","response_id":"{response_id}","stream_id":"lane-b","mode":"discard_partial_items"}}"#
+            )
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let mismatch_err: Value = serde_json::from_str(&recv_text(&mut socket).await).unwrap();
+    assert_eq!(mismatch_err["type"], "error");
+    assert_eq!(mismatch_err["status"], 400);
+    assert_eq!(mismatch_err["error"]["code"], "response_not_found");
+    assert_eq!(mismatch_err["stream_id"], "lane-b");
+
+    // 3. Unknown response_id must be rejected locally without reaching upstream.
+    socket
+        .send(Message::Text(
+            r#"{"type":"response.interrupt","response_id":"resp_unknown"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let unknown_err: Value = serde_json::from_str(&recv_text(&mut socket).await).unwrap();
+    assert_eq!(unknown_err["type"], "error");
+    assert_eq!(unknown_err["status"], 400);
+    assert_eq!(unknown_err["error"]["code"], "response_not_found");
+
+    // 4. Future unsupported client event must include the sanitized event type.
+    socket
+        .send(Message::Text(
+            r#"{"type":"response.future_control"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let unsupported_err: Value = serde_json::from_str(&recv_text(&mut socket).await).unwrap();
+    assert_eq!(unsupported_err["type"], "error");
+    assert_eq!(unsupported_err["status"], 400);
+    assert_eq!(unsupported_err["error"]["code"], "invalid_request_error");
+    assert!(
+        unsupported_err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("response.future_control")
+    );
+
+    // 5. Valid interrupt on lane-a reaches upstream and returns ack + incomplete with lane-a.
+    socket
+        .send(Message::Text(
+            format!(
+                r#"{{"type":"response.interrupt","response_id":"{response_id}","stream_id":"lane-a","mode":"discard_partial_items"}}"#
+            )
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let ack: Value = serde_json::from_str(&recv_text(&mut socket).await).unwrap();
+    assert_eq!(ack["type"], "response.interrupt.accepted");
+    assert_eq!(ack["response_id"], response_id);
+    assert_eq!(ack["stream_id"], "lane-a");
+
+    let incomplete: Value = serde_json::from_str(&recv_text(&mut socket).await).unwrap();
+    assert_eq!(incomplete["type"], "response.incomplete");
+    assert_eq!(incomplete["stream_id"], "lane-a");
+
+    // 6. Follow-up turn on lane-a still succeeds.
+    socket
+        .send(Message::Text(
+            r#"{"type":"response.create","stream_id":"lane-a","model":"gpt-test","store":false,"input":"followup"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let followup_created: Value = serde_json::from_str(&recv_text(&mut socket).await).unwrap();
+    assert_eq!(followup_created["type"], "response.created");
+    let followup_completed: Value = serde_json::from_str(&recv_text(&mut socket).await).unwrap();
+    assert_eq!(followup_completed["type"], "response.completed");
+
+    let recorded = upstream.state.connections.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0].len(),
+        3,
+        "only the 2 creates and 1 valid interrupt should reach upstream: {:?}",
+        recorded[0]
     );
 }

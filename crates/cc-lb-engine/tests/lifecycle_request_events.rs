@@ -1869,6 +1869,136 @@ async fn responses_websocket_incomplete_with_error_records_provider_error()
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn responses_websocket_interrupt_emits_no_phantom_row_and_records_rejections_with_type()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
+    let mut updates = test_bus.bus.subscribe();
+    let mut gateway = responses_matrix_gateway(&test_bus).await;
+
+    // 1. Accepted response.create + accepted response.interrupt + clean incomplete.
+    let turn = responses_matrix_admit(&mut gateway).await.unwrap();
+    responses_matrix_send(&mut gateway, &turn, 0, "resp_int_evt").await;
+    let auth = gateway.authenticate().await?;
+    let int_dispatch = gateway
+        .client_message(
+            auth,
+            Bytes::from_static(
+                br#"{"type":"response.interrupt","response_id":"resp_int_evt","mode":"discard_partial_items"}"#,
+            ),
+        )
+        .await?
+        .expect("interrupt dispatches");
+    assert!(int_dispatch.control);
+    let incomplete = Bytes::from_static(
+        br#"{"type":"response.incomplete","stream_id":"main","response":{"id":"resp_int_evt","error":null,"incomplete_details":{"reason":"interrupted"}}}"#,
+    );
+    assert!(gateway.provider_message(1131, &incomplete).await?.forward);
+
+    // 2. Rejected interrupt (unknown response_id) records 1 rejected row.
+    let auth = gateway.authenticate().await?;
+    let err = gateway
+        .client_message(
+            auth,
+            Bytes::from_static(br#"{"type":"response.interrupt","response_id":"resp_missing"}"#),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "response_not_found");
+
+    // 3. Rejected unsupported event type records 1 rejected row containing the event type.
+    let auth = gateway.authenticate().await?;
+    let err = gateway
+        .client_message(
+            auth,
+            Bytes::from_static(br#"{"type":"response.future_event"}"#),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "invalid_request_error");
+
+    gateway.close();
+    // 1 completed create turn + 2 local rejections = 3 lifecycle rows (no phantom row for accepted interrupt).
+    let mut terminated = Vec::with_capacity(3);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while terminated.len() < 3 {
+            if let cc_lb_lifecycle::LifecycleEvent::RequestTerminated {
+                reason,
+                client_status,
+                internal_errors,
+                ..
+            } = lifecycle_rx.recv().await.unwrap()
+            {
+                terminated.push((client_status, reason, internal_errors));
+            }
+        }
+    })
+    .await
+    .expect("all 3 terminated lifecycle events arrive");
+    test_bus.shutdown().await;
+    let mut persisted_final_count = 0usize;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while persisted_final_count < 3 {
+            if let cc_lb_request_log::RequestEventUpdate::Final(_) = updates.recv().await.unwrap() {
+                persisted_final_count += 1;
+            }
+        }
+    })
+    .await
+    .expect("all 3 request events persist");
+
+    let summary_rows = crate::common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(
+        summary_rows.len(),
+        3,
+        "accepted response.interrupt must not emit an extra request_events row"
+    );
+    assert!(summary_rows.iter().any(|row| {
+        row.status == 101
+            && row.error_code.is_none()
+            && row.upstream_stream_warning_type.as_deref() == Some("response.incomplete")
+            && row.upstream_stream_warning_message.as_deref() == Some("interrupted")
+    }));
+    assert!(
+        summary_rows
+            .iter()
+            .any(|row| row.status == 400 && row.error_code.as_deref() == Some("response_not_found"))
+    );
+    assert!(
+        summary_rows
+            .iter()
+            .any(|row| row.status == 400
+                && row.error_code.as_deref() == Some("invalid_request_error"))
+    );
+    assert!(terminated.iter().any(|(status, reason, internal_errors)| {
+        *status == 400
+            && matches!(
+                reason,
+                cc_lb_lifecycle::TerminationReason::ErrorCode(code) if code == "response_not_found"
+            )
+            && internal_errors.iter().any(|err| {
+                err.message.as_deref()
+                    == Some("The interrupt target is not available on this WebSocket connection")
+            })
+    }));
+    assert!(terminated.iter().any(|(status, reason, internal_errors)| {
+        *status == 400
+            && matches!(
+                reason,
+                cc_lb_lifecycle::TerminationReason::ErrorCode(code) if code == "invalid_request_error"
+            )
+            && internal_errors.iter().any(|err| {
+                err.message.as_deref()
+                    == Some("Unsupported Responses WebSocket client event: response.future_event")
+            })
+    }));
+    Ok(())
+}
+
 #[tokio::test]
 async fn hermes_root_identity_crosses_proxy_and_persists_without_body_rewrite()
 -> Result<(), Box<dyn std::error::Error>> {

@@ -254,9 +254,14 @@ response-id bindings. Conversation ownership remains durable independently of
 that flag. The HTTP response-id behavior described above is unchanged.
 
 The gateway parses control messages once and forwards ordinary deltas unchanged,
-without rewriting them as SSE or reserializing the client request body. Closing
-or disconnecting cancels active turns; cc-lb does not add a `response.cancel`
-wire operation. A terminal turn releases its concurrent slot immediately.
+without rewriting them as SSE or reserializing the client request body. Client
+`response.interrupt` control frames are forwarded unchanged to the provider
+WebSocket connection that owns the target `response_id` after verifying
+principal and optional lane ownership, without creating a new turn or failing
+over, and provider `response.interrupt.accepted` / `response.interrupt.failed`
+acknowledgements are relayed back to the client. Closing or disconnecting
+still cancels active turns; cc-lb does not add a `response.cancel` wire
+operation. A terminal turn releases its concurrent slot immediately.
 Measured usage, including a reported numeric zero, is reconciled once by the
 background accounting worker even on an unsuccessful turn. Without measured
 usage, the reservation is refunded once; `null` or an empty usage object alone
