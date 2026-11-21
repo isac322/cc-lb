@@ -86,6 +86,7 @@ ENV CARGO_HOME=/cargo-home
 
 # Build-time metadata / knobs.
 ARG GIT_SHA=""
+ARG BUILD_TIME_EPOCH=""
 ARG SOURCE_DATE_EPOCH=""
 # The default ships BOTH storage backends in one binary; the backend is chosen at
 # runtime via `[storage] kind` ("sqlite" or "postgres"). Override to slim, e.g.
@@ -144,8 +145,9 @@ if [ -n "${CC_LB_GIT_SHA:-}" ]; then
 else
   unset CC_LB_GIT_SHA
 fi
-if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
-  CC_LB_BUILD_TIME="$(date -u -d "@${SOURCE_DATE_EPOCH}" '+%Y-%m-%dT%H:%M:%SZ')"
+build_time_epoch="${BUILD_TIME_EPOCH:-${SOURCE_DATE_EPOCH:-}}"
+if [ -n "${build_time_epoch}" ]; then
+  CC_LB_BUILD_TIME="$(date -u -d "@${build_time_epoch}" '+%Y-%m-%dT%H:%M:%SZ')"
 else
   CC_LB_BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 fi

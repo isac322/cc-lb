@@ -71,6 +71,7 @@ jobs:
           set -euo pipefail
           sha=$(git rev-parse HEAD)
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "build_time_epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
           echo "CACHE_KEY=docker-mounts-off-${{ matrix.key }}-$sha" >> "$GITHUB_ENV"
 
       - name: Restore BuildKit cache mounts
@@ -131,6 +132,7 @@ jobs:
             SCCACHE_LOCAL_MOUNT=1
             REQUIRE_SCCACHE=1
             GIT_SHA=${{ steps.source.outputs.sha }}
+            BUILD_TIME_EPOCH=${{ steps.source.outputs.build_time_epoch }}
 
       - name: Smoke-test native binary
         if: matrix.smoke
@@ -148,6 +150,7 @@ jobs:
             SCCACHE_LOCAL_MOUNT=1
             REQUIRE_SCCACHE=1
             GIT_SHA=${{ steps.source.outputs.sha }}
+            BUILD_TIME_EPOCH=${{ steps.source.outputs.build_time_epoch }}
 
       - name: Extract populated BuildKit cache mounts
         if: github.ref == 'refs/heads/master' && steps.cache-restore.outputs.cache-hit != 'true'
