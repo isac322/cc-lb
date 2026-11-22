@@ -716,7 +716,7 @@ fn batch_b_wire_snapshots_are_stable() {
     );
 
     assert_wire(LimitKind::CostUsd, json!("cost_usd"));
-    assert_wire(PrincipalLimitKind::Requests, json!("requests"));
+    assert_wire(LimitKind::Requests, json!("requests"));
     assert_wire(
         Limit {
             kind: LimitKind::CostUsd,
