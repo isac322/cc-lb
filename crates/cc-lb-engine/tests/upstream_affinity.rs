@@ -57,34 +57,55 @@ enum ResponseSpec {
         content_encoding: &'static str,
     },
     Status(StatusCode, Value),
+    GzipStatus(StatusCode, Value),
 }
 
 #[derive(Default)]
 struct RecordingDispatch {
     responses: Mutex<VecDeque<ResponseSpec>>,
     urls: Mutex<Vec<String>>,
+    captured: Mutex<Vec<(String, Value)>>,
 }
 
 impl RecordingDispatch {
     fn with_response(response: ResponseSpec) -> Arc<Self> {
+        Self::with_responses(vec![response])
+    }
+
+    fn with_responses(responses: Vec<ResponseSpec>) -> Arc<Self> {
         Arc::new(Self {
-            responses: Mutex::new(VecDeque::from([response])),
+            responses: Mutex::new(VecDeque::from(responses)),
             urls: Mutex::new(Vec::new()),
+            captured: Mutex::new(Vec::new()),
         })
     }
 
     fn call_count(&self) -> usize {
         self.urls.lock().expect("dispatch URL lock").len()
     }
+
+    fn captured_requests(&self) -> Vec<(String, Value)> {
+        self.captured
+            .lock()
+            .expect("captured requests lock")
+            .clone()
+    }
 }
 
 #[async_trait]
 impl UpstreamDispatch for RecordingDispatch {
     async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let url = request.url().to_string();
+        let parsed: Value =
+            serde_json::from_slice(request.body()).unwrap_or_else(|_| json!({"raw": true}));
         self.urls
             .lock()
             .expect("dispatch URL lock")
-            .push(request.url().to_string());
+            .push(url.clone());
+        self.captured
+            .lock()
+            .expect("captured requests lock")
+            .push((url, parsed));
         let response = self
             .responses
             .lock()
@@ -141,6 +162,16 @@ impl UpstreamDispatch for RecordingDispatch {
                     None,
                     Body::from(Bytes::from(value.to_string())),
                 )
+            }
+            ResponseSpec::GzipStatus(response_status, value) => {
+                status = response_status;
+                let mut encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder
+                    .write_all(value.to_string().as_bytes())
+                    .expect("gzip status body writes");
+                let compressed = encoder.finish().expect("gzip status body finishes");
+                ("application/json", Some("gzip"), Body::from(compressed))
             }
         };
         let mut response = Response::new(body);
@@ -3062,13 +3093,18 @@ async fn ws_previous_response_fallback_controls_preserve_503_boundaries() {
     assert_eq!(err_b.code, "upstream_affinity_unavailable");
     live_oauth.close();
 
-    // Control C: unknown encrypted_content without previous_response_id or with empty
-    // previous_response_id must return 503 on OAuth-only pool.
+    // Control C: under FailClosed policy, unknown encrypted_content without
+    // previous_response_id or with empty previous_response_id must return 503
+    // on an OAuth-only pool.
     let store_c = Arc::new(MemoryAffinityStore::default());
-    let mut oauth_only = ws1296_gateway(lifecycle(
+    let mut oauth_only = ws1296_gateway(lifecycle_with_config(
         vec![openai_oauth_upstream_record(oauth_id, "oauth-main", true)],
         Arc::new(RecordingDispatch::default()),
         Some(store_c),
+        LifecycleConfig {
+            unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy::FailClosed,
+            ..LifecycleConfig::default()
+        },
     ))
     .await;
     for previous in [None, Some("")] {
@@ -3222,4 +3258,604 @@ async fn ws_native_codex_oauth_session_rejects_stale_and_cross_lane_previous_res
         "The previous response is not available on this connection"
     );
     gateway.close();
+}
+
+fn openai_reasoning_input(ciphertext: &str) -> Value {
+    json!({
+        "type": "reasoning",
+        "id": "rs_item",
+        "summary": [],
+        "encrypted_content": ciphertext,
+    })
+}
+
+fn openai_invalid_encrypted_error(code: &str, message: &str) -> Value {
+    json!({
+        "error": {
+            "type": "invalid_request_error",
+            "code": code,
+            "message": message,
+        }
+    })
+}
+
+async fn ws_hybrid_send(
+    gateway: &mut cc_lb_engine::responses_websocket::ResponsesWebSocketGateway,
+    dispatch: &cc_lb_engine::responses_websocket::WebSocketDispatch,
+    connection_id: u64,
+    upstream_id: Uuid,
+    upstream_name: &str,
+) -> Bytes {
+    gateway.assign_connection(dispatch.turn_id, connection_id, upstream_id, upstream_name);
+    gateway
+        .validate_send(dispatch.turn_id)
+        .await
+        .expect("owner remains eligible at send");
+    let frame = gateway
+        .frame_for_send(dispatch)
+        .expect("dispatch frame shapes cleanly");
+    assert!(gateway.sent(dispatch.turn_id).is_empty());
+    frame
+}
+
+#[tokio::test]
+async fn hybrid_http_multi_upstream_strips_unknown_reasoning_upfront_preserves_include_and_never_binds()
+ {
+    let upstream_a = Uuid::parse_str("10000000-0000-0000-0000-000000000001").unwrap();
+    let upstream_b = Uuid::parse_str("10000000-0000-0000-0000-000000000002").unwrap();
+    let store = Arc::new(MemoryAffinityStore::default());
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "id": "resp_multi",
+        "object": "response",
+        "status": "completed",
+        "output": [],
+        "usage": {"input_tokens": 5, "output_tokens": 3}
+    })));
+    let lifecycle = lifecycle(
+        vec![
+            openai_upstream_record(upstream_a, "openai-a", true),
+            openai_upstream_record(upstream_b, "openai-b", true),
+        ],
+        dispatch.clone(),
+        Some(store.clone()),
+    );
+
+    let foreign = "gAAAAABforeign_multi_http";
+    let req = responses_request(json!({
+        "model": "gpt-5-codex",
+        "stream": false,
+        "include": ["reasoning.encrypted_content"],
+        "input": [
+            openai_reasoning_input(foreign),
+            {"role": "user", "content": "hello"},
+        ]
+    }));
+    let resp = handle_authenticated(&lifecycle, req)
+        .await
+        .expect("multi-upstream hybrid strips upfront without 503");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = collect_body(resp).await;
+
+    let sent = dispatch.captured_requests();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].1["include"],
+        json!(["reasoning.encrypted_content"]),
+        "include list must remain intact when stripping reasoning items"
+    );
+    let sent_input = sent[0].1["input"].as_array().unwrap();
+    assert_eq!(sent_input.len(), 1);
+    assert_eq!(sent_input[0]["role"], "user");
+    assert_eq!(store.upstream_for(&ws1296_openai_key(foreign)), None);
+}
+
+#[tokio::test]
+async fn hybrid_http_single_upstream_verbatim_binds_and_retries_invalid_encrypted_content_once() {
+    let only_upstream = Uuid::parse_str("10000000-0000-0000-0000-000000000011").unwrap();
+    let accepted_cipher = "gAAAAABsingle_verbatim_ok";
+    let rejected_plain = "gAAAAABsingle_foreign_plain";
+    let rejected_gzip = "gAAAAABsingle_foreign_gzip";
+    let store = Arc::new(MemoryAffinityStore::default());
+    let dispatch = RecordingDispatch::with_responses(vec![
+        // 1) Verbatim match accepted on first attempt.
+        ResponseSpec::Json(json!({
+            "id": "resp_verbatim_ok",
+            "object": "response",
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 5, "output_tokens": 3}
+        })),
+        // 2) Plain 400 invalid_encrypted_content -> retry once stripped -> 200 OK.
+        ResponseSpec::Status(
+            StatusCode::BAD_REQUEST,
+            openai_invalid_encrypted_error(
+                "invalid_encrypted_content",
+                "The encrypted content for item rs_item could not be verified.",
+            ),
+        ),
+        ResponseSpec::Json(json!({
+            "id": "resp_plain_retry_ok",
+            "object": "response",
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 5, "output_tokens": 3}
+        })),
+        // 3) Gzip-encoded 400 invalid_encrypted_content -> retry once stripped -> 200 OK.
+        ResponseSpec::GzipStatus(
+            StatusCode::BAD_REQUEST,
+            openai_invalid_encrypted_error(
+                "invalid_encrypted_content",
+                "Encrypted content organization_id did not match the target organization",
+            ),
+        ),
+        ResponseSpec::Json(json!({
+            "id": "resp_gzip_retry_ok",
+            "object": "response",
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 5, "output_tokens": 3}
+        })),
+        // 4) Non-matching 400 invalid_value must NOT retry even if message mentions encrypted_content.
+        ResponseSpec::Status(
+            StatusCode::BAD_REQUEST,
+            openai_invalid_encrypted_error(
+                "invalid_value",
+                "Invalid encrypted_content must be omitted for unsupported model flag",
+            ),
+        ),
+    ]);
+    let lifecycle = lifecycle(
+        vec![openai_upstream_record(only_upstream, "openai-only", true)],
+        dispatch.clone(),
+        Some(store.clone()),
+    );
+
+    let make_req = |cipher: &str| {
+        responses_request(json!({
+            "model": "gpt-5-codex",
+            "stream": false,
+            "include": ["reasoning.encrypted_content"],
+            "input": [
+                openai_reasoning_input(cipher),
+                {"role": "user", "content": "continue"},
+            ]
+        }))
+    };
+
+    let r1 = handle_authenticated(&lifecycle, make_req(accepted_cipher))
+        .await
+        .unwrap();
+    assert_eq!(r1.status(), StatusCode::OK);
+    let _ = collect_body(r1).await;
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key(accepted_cipher)),
+        Some(only_upstream)
+    );
+
+    let r2 = handle_authenticated(&lifecycle, make_req(rejected_plain))
+        .await
+        .unwrap();
+    assert_eq!(r2.status(), StatusCode::OK);
+    let _ = collect_body(r2).await;
+    assert_eq!(store.upstream_for(&ws1296_openai_key(rejected_plain)), None);
+
+    let r3 = handle_authenticated(&lifecycle, make_req(rejected_gzip))
+        .await
+        .unwrap();
+    assert_eq!(r3.status(), StatusCode::OK);
+    let _ = collect_body(r3).await;
+    assert_eq!(store.upstream_for(&ws1296_openai_key(rejected_gzip)), None);
+
+    let r4 = handle_authenticated(&lifecycle, make_req("gAAAAABnon_matching_400"))
+        .await
+        .unwrap();
+    assert_eq!(r4.status(), StatusCode::BAD_REQUEST);
+    let _ = collect_body(r4).await;
+
+    let sent = dispatch.captured_requests();
+    assert_eq!(sent.len(), 6);
+    assert_eq!(sent[0].1["input"].as_array().unwrap().len(), 2);
+    assert_eq!(sent[1].1["input"].as_array().unwrap().len(), 2);
+    assert_eq!(sent[2].1["input"].as_array().unwrap().len(), 1);
+    assert_eq!(sent[2].1["include"], json!(["reasoning.encrypted_content"]));
+    assert_eq!(sent[3].1["input"].as_array().unwrap().len(), 2);
+    assert_eq!(sent[4].1["input"].as_array().unwrap().len(), 1);
+    assert_eq!(sent[5].1["input"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn hybrid_http_turn2_mixed_history_preserves_owned_and_prunes_foreign_on_retry() {
+    let owner = Uuid::parse_str("10000000-0000-0000-0000-000000000021").unwrap();
+    let peer = Uuid::parse_str("10000000-0000-0000-0000-000000000022").unwrap();
+    let owned_cipher = "gAAAAABowned_turn1";
+    let foreign_cipher = "gAAAAABforeign_turn2";
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(owned_cipher), owner);
+
+    let dispatch = RecordingDispatch::with_responses(vec![
+        ResponseSpec::Status(
+            StatusCode::BAD_REQUEST,
+            openai_invalid_encrypted_error(
+                "invalid_encrypted_content",
+                "The encrypted content for item rs_foreign could not be verified.",
+            ),
+        ),
+        ResponseSpec::Json(json!({
+            "id": "resp_turn2_ok",
+            "object": "response",
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 5, "output_tokens": 3}
+        })),
+    ]);
+    let lifecycle = lifecycle(
+        vec![
+            openai_upstream_record(owner, "owner", true),
+            openai_upstream_record(peer, "peer", true),
+        ],
+        dispatch.clone(),
+        Some(store.clone()),
+    );
+
+    let req = responses_request(json!({
+        "model": "gpt-5-codex",
+        "stream": false,
+        "include": ["reasoning.encrypted_content"],
+        "input": [
+            openai_reasoning_input(foreign_cipher),
+            openai_reasoning_input(owned_cipher),
+            {"role": "user", "content": "turn 2"},
+        ]
+    }));
+    let resp = handle_authenticated(&lifecycle, req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = collect_body(resp).await;
+
+    let sent = dispatch.captured_requests();
+    assert_eq!(sent.len(), 2);
+    assert!(sent[0].0.contains("owner.local"));
+    assert!(sent[1].0.contains("owner.local"));
+    assert_eq!(sent[0].1["input"].as_array().unwrap().len(), 3);
+    let retry_input = sent[1].1["input"].as_array().unwrap();
+    assert_eq!(retry_input.len(), 2);
+    assert_eq!(retry_input[0]["encrypted_content"], owned_cipher);
+    assert_eq!(retry_input[1]["role"], "user");
+    assert_eq!(store.upstream_for(&ws1296_openai_key(foreign_cipher)), None);
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key(owned_cipher)),
+        Some(owner)
+    );
+}
+
+#[tokio::test]
+async fn hybrid_ws_multi_single_and_turn2_mixed_reuse_connection_and_preserve_boundaries() {
+    let oauth_a = Uuid::parse_str("10000000-0000-0000-0000-000000000031").unwrap();
+    let oauth_b = Uuid::parse_str("10000000-0000-0000-0000-000000000032").unwrap();
+
+    // Part A: multi-upstream WS strips upfront, preserves include, and binds nothing.
+    let store_a = Arc::new(MemoryAffinityStore::default());
+    let mut gw_multi = ws1296_gateway(lifecycle(
+        vec![
+            openai_oauth_upstream_record(oauth_a, "oauth-a", true),
+            openai_oauth_upstream_record(oauth_b, "oauth-b", true),
+        ],
+        Arc::new(RecordingDispatch::default()),
+        Some(store_a.clone()),
+    ))
+    .await;
+    let foreign_multi = "gAAAAABws_multi_foreign";
+    let d_multi = ws1296_admit(&mut gw_multi, ws1296_create(None, Some(foreign_multi)))
+        .await
+        .expect("WS multi-upstream strips upfront")
+        .expect("dispatch queued");
+    let parsed_multi: Value = serde_json::from_slice(&d_multi.frame).unwrap();
+    assert_eq!(parsed_multi["input"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        parsed_multi["include"],
+        json!(["reasoning.encrypted_content"])
+    );
+    let routed_multi = d_multi.candidates.first().unwrap().clone();
+    ws_hybrid_send(
+        &mut gw_multi,
+        &d_multi,
+        10,
+        routed_multi.upstream_id,
+        &routed_multi.upstream_name,
+    )
+    .await;
+    ws1296_assert_raw_forward(
+        &gw_multi
+            .provider_message(10, &ws1296_created("resp_ws_multi"))
+            .await
+            .unwrap(),
+    );
+    ws1296_assert_raw_forward(
+        &gw_multi
+            .provider_message(10, &ws1296_completed("resp_ws_multi", vec![]))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        store_a.upstream_for(&ws1296_openai_key(foreign_multi)),
+        None
+    );
+    gw_multi.close();
+
+    // Part B: single-upstream WS sends verbatim first, retries on same connection_id on
+    // pre-creation invalid_encrypted_content, and keeps foreign reasoning unbound.
+    let store_b = Arc::new(MemoryAffinityStore::default());
+    let mut gw_single = ws1296_gateway(lifecycle(
+        vec![openai_oauth_upstream_record(oauth_a, "oauth-a", true)],
+        Arc::new(RecordingDispatch::default()),
+        Some(store_b.clone()),
+    ))
+    .await;
+    let foreign_single = "gAAAAABws_single_foreign";
+    let d_single = ws1296_admit(&mut gw_single, ws1296_create(None, Some(foreign_single)))
+        .await
+        .expect("WS single-upstream admits verbatim")
+        .expect("dispatch queued");
+    let sent_frame_1 = ws_hybrid_send(&mut gw_single, &d_single, 77, oauth_a, "oauth-a").await;
+    let sent_json_1: Value = serde_json::from_slice(&sent_frame_1).unwrap();
+    assert_eq!(sent_json_1["input"].as_array().unwrap().len(), 2);
+
+    let ws_err = Bytes::from(
+        json!({
+            "type": "error",
+            "status": 400,
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_encrypted_content",
+                "message": "The encrypted content for item rs_ws1296 could not be verified."
+            }
+        })
+        .to_string(),
+    );
+    let err_res = gw_single
+        .provider_message(77, &ws_err)
+        .await
+        .expect("WS error triggers retry instead of failing turn");
+    assert!(!err_res.forward);
+    assert!(err_res.errors.is_empty());
+    assert_eq!(err_res.dispatches.len(), 1);
+    let retry_dispatch = &err_res.dispatches[0];
+    assert_eq!(retry_dispatch.connection_id, Some(77));
+    assert!(retry_dispatch.candidates.is_empty());
+    let sent_frame_2 = ws_hybrid_send(&mut gw_single, retry_dispatch, 77, oauth_a, "oauth-a").await;
+    let sent_json_2: Value = serde_json::from_slice(&sent_frame_2).unwrap();
+    assert_eq!(sent_json_2["input"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        sent_json_2["include"],
+        json!(["reasoning.encrypted_content"])
+    );
+    ws1296_assert_raw_forward(
+        &gw_single
+            .provider_message(77, &ws1296_created("resp_ws_retry_ok"))
+            .await
+            .unwrap(),
+    );
+    ws1296_assert_raw_forward(
+        &gw_single
+            .provider_message(77, &ws1296_completed("resp_ws_retry_ok", vec![]))
+            .await
+            .unwrap(),
+    );
+    assert!(!gw_single.has_active_turns());
+    assert_eq!(
+        store_b.upstream_for(&ws1296_openai_key(foreign_single)),
+        None
+    );
+
+    // Part C: single-upstream WS verbatim match binds the accepted reasoning key.
+    let accepted_ws = "gAAAAABws_single_accepted";
+    let d_acc = ws1296_admit(&mut gw_single, ws1296_create(None, Some(accepted_ws)))
+        .await
+        .expect("WS verbatim accepted")
+        .expect("dispatch queued");
+    ws_hybrid_send(&mut gw_single, &d_acc, 77, oauth_a, "oauth-a").await;
+    ws1296_assert_raw_forward(
+        &gw_single
+            .provider_message(77, &ws1296_created("resp_ws_acc_ok"))
+            .await
+            .unwrap(),
+    );
+    ws1296_assert_raw_forward(
+        &gw_single
+            .provider_message(77, &ws1296_completed("resp_ws_acc_ok", vec![]))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        store_b.upstream_for(&ws1296_openai_key(accepted_ws)),
+        Some(oauth_a)
+    );
+    gw_single.close();
+
+    // Part D: Turn 2 WS mixed history [foreign, owned, user] pins to owner, retries once
+    // stripping only foreign while keeping owned intact on live connection_id=88.
+    let store_d = Arc::new(MemoryAffinityStore::default());
+    let owned_ws = "gAAAAABws_turn1_owned";
+    let foreign_turn2 = "gAAAAABws_turn2_foreign";
+    store_d.insert(ws1296_openai_key(owned_ws), oauth_a);
+    let mut gw_mixed = ws1296_gateway(lifecycle(
+        vec![
+            openai_oauth_upstream_record(oauth_a, "oauth-a", true),
+            openai_oauth_upstream_record(oauth_b, "oauth-b", true),
+        ],
+        Arc::new(RecordingDispatch::default()),
+        Some(store_d.clone()),
+    ))
+    .await;
+    let mixed_frame = Bytes::from(
+        json!({
+            "type": "response.create",
+            "model": "gpt-5-codex",
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+            "input": [
+                ws1296_reasoning_item(foreign_turn2),
+                ws1296_reasoning_item(owned_ws),
+                {"role": "user", "content": "turn 2"},
+            ]
+        })
+        .to_string(),
+    );
+    let d_mixed = ws1296_admit(&mut gw_mixed, mixed_frame)
+        .await
+        .expect("Turn 2 mixed WS admits")
+        .expect("dispatch queued");
+    assert_eq!(d_mixed.candidates[0].upstream_id, oauth_a);
+    let sent_mixed_1 = ws_hybrid_send(&mut gw_mixed, &d_mixed, 88, oauth_a, "oauth-a").await;
+    let json_mixed_1: Value = serde_json::from_slice(&sent_mixed_1).unwrap();
+    assert_eq!(json_mixed_1["input"].as_array().unwrap().len(), 3);
+
+    let err_res_mixed = gw_mixed.provider_message(88, &ws_err).await.unwrap();
+    assert_eq!(err_res_mixed.dispatches.len(), 1);
+    assert_eq!(err_res_mixed.dispatches[0].connection_id, Some(88));
+    let sent_mixed_2 = ws_hybrid_send(
+        &mut gw_mixed,
+        &err_res_mixed.dispatches[0],
+        88,
+        oauth_a,
+        "oauth-a",
+    )
+    .await;
+    let json_mixed_2: Value = serde_json::from_slice(&sent_mixed_2).unwrap();
+    let input_mixed_2 = json_mixed_2["input"].as_array().unwrap();
+    assert_eq!(input_mixed_2.len(), 2);
+    assert_eq!(input_mixed_2[0]["encrypted_content"], owned_ws);
+    ws1296_assert_raw_forward(
+        &gw_mixed
+            .provider_message(88, &ws1296_created("resp_ws_mixed_ok"))
+            .await
+            .unwrap(),
+    );
+    ws1296_assert_raw_forward(
+        &gw_mixed
+            .provider_message(88, &ws1296_completed("resp_ws_mixed_ok", vec![]))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        store_d.upstream_for(&ws1296_openai_key(foreign_turn2)),
+        None
+    );
+    assert_eq!(
+        store_d.upstream_for(&ws1296_openai_key(owned_ws)),
+        Some(oauth_a)
+    );
+    gw_mixed.close();
+}
+
+#[tokio::test]
+async fn hybrid_negative_controls_keep_fail_closed_boundaries() {
+    let openai_id = Uuid::parse_str("10000000-0000-0000-0000-000000000041").unwrap();
+    let disabled_owner = Uuid::parse_str("10000000-0000-0000-0000-000000000042").unwrap();
+    let anthropic_id = Uuid::parse_str("10000000-0000-0000-0000-000000000043").unwrap();
+    let gemini_id = Uuid::parse_str("10000000-0000-0000-0000-000000000044").unwrap();
+    let owned_reasoning = "gAAAAABdisabled_owner_reasoning";
+
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(owned_reasoning), disabled_owner);
+    let shared_dispatch = Arc::new(RecordingDispatch::default());
+    let lc = lifecycle(
+        vec![
+            openai_upstream_record(openai_id, "openai-main", true),
+            openai_upstream_record(disabled_owner, "openai-disabled", false),
+            upstream_record(anthropic_id, "anthropic-main", true),
+            gemini_upstream_record(gemini_id, "gemini-main", true),
+        ],
+        shared_dispatch.clone(),
+        Some(store),
+    );
+
+    let cases: Vec<Request<Bytes>> = vec![
+        // Compaction encrypted item (even alongside reasoning) stays fail-closed.
+        responses_request(json!({
+            "model": "gpt-5-codex",
+            "input": [
+                openai_reasoning_input("gAAAAABunknown_rs"),
+                {"type": "compaction", "id": "cmp_1", "encrypted_content": "gAAAAABunknown_cmp"},
+            ]
+        })),
+        // compaction_summary encrypted item stays fail-closed.
+        responses_request(json!({
+            "model": "gpt-5-codex",
+            "input": [
+                {"type": "compaction_summary", "id": "cmp_2", "encrypted_content": "gAAAAABunknown_cmps"},
+            ]
+        })),
+        // Unknown conversation stays fail-closed even with reasoning.
+        responses_request(json!({
+            "model": "gpt-5-codex",
+            "conversation": "conv_unknown_hybrid",
+            "input": [openai_reasoning_input("gAAAAABunknown_rs")]
+        })),
+        // Unknown HTTP previous_response_id stays fail-closed even with reasoning.
+        responses_request(json!({
+            "model": "gpt-5-codex",
+            "previous_response_id": "resp_unknown_hybrid",
+            "input": [openai_reasoning_input("gAAAAABunknown_rs")]
+        })),
+        // Disabled known owner stays fail-closed (no cross-upstream failover).
+        responses_request(json!({
+            "model": "gpt-5-codex",
+            "input": [openai_reasoning_input(owned_reasoning)]
+        })),
+        // Anthropic web-search encrypted_content stays fail-closed.
+        messages_request(opaque_request(&["anthropic-ws-cipher"], false)),
+        // Gemini cachedContent stays fail-closed.
+        provider_request(
+            cc_lb_domain::Provider::Gemini,
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            json!({
+                "cachedContent": "cachedContents/unknown",
+                "contents": [{"parts": [{"text": "hi"}]}]
+            }),
+        ),
+    ];
+
+    for (idx, req) in cases.into_iter().enumerate() {
+        let resp = handle_authenticated(&lc, req)
+            .await
+            .unwrap_or_else(|e| panic!("case {idx} should produce HTTP 503 response, got {e:?}"));
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "case {idx} must fail closed with 503"
+        );
+    }
+    assert!(
+        shared_dispatch.captured_requests().is_empty(),
+        "fail-closed negative controls must never dispatch upstream"
+    );
+
+    // Explicit FailClosed policy rejects unknown reasoning with 503 on both HTTP and WS.
+    let fail_closed_lc = lifecycle_with_config(
+        vec![openai_oauth_upstream_record(openai_id, "oauth-main", true)],
+        shared_dispatch.clone(),
+        Some(Arc::new(MemoryAffinityStore::default())),
+        LifecycleConfig {
+            unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy::FailClosed,
+            ..LifecycleConfig::default()
+        },
+    );
+    let http_fc = handle_authenticated(
+        &fail_closed_lc,
+        responses_request(json!({
+            "model": "gpt-5-codex",
+            "input": [openai_reasoning_input("gAAAAABfc_http")]
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(http_fc.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let mut gw_fc = ws1296_gateway(fail_closed_lc).await;
+    let ws_fc_err = ws1296_admit(&mut gw_fc, ws1296_create(None, Some("gAAAAABfc_ws")))
+        .await
+        .expect_err("FailClosed WS rejects unknown reasoning with 503");
+    assert_eq!(ws_fc_err.status, 503);
+    assert_eq!(ws_fc_err.code, "upstream_affinity_unavailable");
+    gw_fc.close();
 }

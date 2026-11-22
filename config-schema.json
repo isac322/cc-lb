@@ -251,7 +251,8 @@
     "upstream_affinity": {
       "$ref": "#/$defs/UpstreamAffinityConfig",
       "default": {
-        "ttl_days": 7
+        "ttl_days": 7,
+        "unknown_openai_reasoning": "hybrid"
       }
     },
     "warmup": {
@@ -1413,6 +1414,21 @@
         }
       }
     },
+    "UnknownOpenaiReasoningPolicy": {
+      "description": "Handling for OpenAI Responses requests whose only unestablished opaque\naffinity state is `reasoning.encrypted_content` (and for unmatched pending\n`reasoning.encrypted_content` on a resolved OpenAI owner).",
+      "oneOf": [
+        {
+          "description": "Fail closed with `503 upstream_affinity_unavailable`.",
+          "type": "string",
+          "const": "fail_closed"
+        },
+        {
+          "description": "Preserve unknown `reasoning.encrypted_content` verbatim when a single\neligible OpenAI upstream exists (or an owner is already resolved) and\nretry once with only the unmatched `reasoning` items removed if the\nupstream rejects with `invalid_encrypted_content`; when multiple\neligible OpenAI upstreams exist and no owner is established, strip\nunknown `reasoning` items before dispatch instead of guessing.",
+          "type": "string",
+          "const": "hybrid"
+        }
+      ]
+    },
     "UpstreamAffinityConfig": {
       "type": "object",
       "properties": {
@@ -1421,6 +1437,10 @@
           "format": "uint32",
           "default": 7,
           "minimum": 1
+        },
+        "unknown_openai_reasoning": {
+          "$ref": "#/$defs/UnknownOpenaiReasoningPolicy",
+          "default": "hybrid"
         }
       },
       "additionalProperties": false

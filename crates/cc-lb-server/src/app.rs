@@ -2270,6 +2270,7 @@ fn lifecycle_config_from_config(
         replica_identity,
         prompt_cache_shadow: config.prompt_cache_shadow.clone(),
         upstream_affinity_ttl: std::time::Duration::from_secs(config.upstream_affinity.ttl_secs()),
+        unknown_openai_reasoning: config.upstream_affinity.unknown_openai_reasoning,
         openai_oauth_compat: config.openai_oauth_compat,
         openai_realtime_origin: config.openai_public_api.realtime_origin.clone(),
     }
@@ -5918,6 +5919,8 @@ mod tests {
     fn lifecycle_config_uses_startup_upstream_affinity_ttl() {
         let mut config = Config::default();
         config.upstream_affinity.ttl_days = 14;
+        config.upstream_affinity.unknown_openai_reasoning =
+            cc_lb_config::UnknownOpenaiReasoningPolicy::FailClosed;
 
         let lifecycle_config = super::lifecycle_config_from_config(
             &config,
@@ -5931,6 +5934,10 @@ mod tests {
         assert_eq!(
             lifecycle_config.upstream_affinity_ttl,
             std::time::Duration::from_secs(14 * 86_400)
+        );
+        assert_eq!(
+            lifecycle_config.unknown_openai_reasoning,
+            cc_lb_config::UnknownOpenaiReasoningPolicy::FailClosed
         );
     }
 
@@ -6574,6 +6581,38 @@ mod tests {
                 .initialize()
                 .await
                 .expect("affinity test storage initializes");
+            for record in &records {
+                let created = cc_lb_storage_api::UpstreamStore::create(
+                    &*sqlite,
+                    cc_lb_storage_api::UpstreamCreate {
+                        id: record.id,
+                        name: record.name.clone(),
+                        kind: record.kind,
+                        base_url: record.base_url.clone(),
+                        api_key_ciphertext: record.api_key_ciphertext.clone(),
+                        oauth_tokens: None,
+                        warmup_enabled: record.warmup_enabled,
+                        warmup_dialect_plugin: record.warmup_dialect_plugin.clone(),
+                        workspace_id: record.workspace_id.clone(),
+                        vertex: record.vertex.clone(),
+                        vertex_credential_type: record.vertex_credential_type,
+                        vertex_quota_project_id: record.vertex_quota_project_id.clone(),
+                        api_key_access: None,
+                    },
+                )
+                .await
+                .expect("seed upstream spec in affinity sqlite");
+                if !record.enabled {
+                    cc_lb_storage_api::UpstreamStore::set_enabled(
+                        &*sqlite,
+                        created.id,
+                        created.revision,
+                        false,
+                    )
+                    .await
+                    .expect("disable seeded upstream in affinity sqlite");
+                }
+            }
         }
         let storage: Arc<dyn Storage> = Arc::clone(&sqlite) as Arc<dyn Storage>;
         let builtin_authn = Arc::new(BuiltinAuthn::new(
@@ -8725,5 +8764,744 @@ mod tests {
         );
         let _ = first_task.await;
         proxy_task.abort();
+    }
+
+    #[derive(Clone, Copy)]
+    enum FakeEncryptedBehavior {
+        RejectForeignInvalidEncrypted,
+        AcceptAll,
+    }
+
+    #[derive(Clone)]
+    struct RecordedUpstreamRequest {
+        transport: &'static str,
+        body: Value,
+    }
+
+    struct FakeCodexServer {
+        address: SocketAddr,
+        requests: Arc<std::sync::Mutex<Vec<RecordedUpstreamRequest>>>,
+        task: JoinHandle<()>,
+    }
+
+    fn fake_invalid_encrypted_error(item_id: &str) -> Value {
+        serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_encrypted_content",
+                "message": format!(
+                    "The encrypted content for item {item_id} could not be verified. Reason: Encrypted content organization_id did not match the target organization"
+                ),
+            }
+        })
+    }
+
+    fn fake_completed_response(id: &str, output_reasoning: Option<(&str, &str)>) -> Value {
+        let mut output = Vec::new();
+        if let Some((item_id, ciphertext)) = output_reasoning {
+            output.push(serde_json::json!({
+                "type": "reasoning",
+                "id": item_id,
+                "summary": [],
+                "encrypted_content": ciphertext,
+            }));
+        }
+        serde_json::json!({
+            "id": id,
+            "object": "response",
+            "model": "gpt-5-codex",
+            "status": "completed",
+            "store": false,
+            "output": output,
+            "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        })
+    }
+
+    fn first_unknown_reasoning_id(body: &Value, allowed_known: &[&str]) -> Option<String> {
+        body.get("input")?.as_array()?.iter().find_map(|item| {
+            let obj = item.as_object()?;
+            if obj.get("type").and_then(Value::as_str) != Some("reasoning") {
+                return None;
+            }
+            let enc = obj.get("encrypted_content").and_then(Value::as_str)?;
+            if allowed_known.contains(&enc) {
+                return None;
+            }
+            Some(
+                obj.get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("rs_unknown")
+                    .to_owned(),
+            )
+        })
+    }
+
+    async fn spawn_fake_codex_upstream(
+        behavior: FakeEncryptedBehavior,
+        allowed_known: Vec<&'static str>,
+        response_prefix: &'static str,
+        output_reasoning: Option<(&'static str, &'static str)>,
+        gzip_400: bool,
+    ) -> FakeCodexServer {
+        use axum::routing::get;
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write;
+
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reqs_http = requests.clone();
+        let reqs_ws = requests.clone();
+        let allowed_http = allowed_known.clone();
+        let allowed_ws = allowed_known;
+        let seq = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seq_http = seq.clone();
+        let seq_ws = seq;
+
+        let router = axum::Router::new().route(
+            "/responses",
+            get(move |upgrade: WebSocketUpgrade| {
+                let reqs_ws = reqs_ws.clone();
+                let allowed_ws = allowed_ws.clone();
+                let seq_ws = seq_ws.clone();
+                async move {
+                    upgrade.on_upgrade(move |mut socket| async move {
+                        while let Some(Ok(Message::Text(frame))) = socket.next().await {
+                            let body: Value =
+                                serde_json::from_str(&frame).expect("WS provider frame is JSON");
+                            reqs_ws
+                                .lock()
+                                .expect("requests lock")
+                                .push(RecordedUpstreamRequest {
+                                    transport: "ws",
+                                    body: body.clone(),
+                                });
+                            let stream_id = body
+                                .get("stream_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
+                            if matches!(
+                                behavior,
+                                FakeEncryptedBehavior::RejectForeignInvalidEncrypted
+                            ) && let Some(item_id) =
+                                first_unknown_reasoning_id(&body, &allowed_ws)
+                            {
+                                let mut error = serde_json::json!({
+                                    "type": "error",
+                                    "status": 400,
+                                    "error": fake_invalid_encrypted_error(&item_id)["error"],
+                                });
+                                if let Some(stream_id) = stream_id {
+                                    error["stream_id"] = Value::String(stream_id);
+                                }
+                                let _ = socket.send(Message::Text(error.to_string().into())).await;
+                                continue;
+                            }
+                            let n = seq_ws.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            let resp_id = format!("{response_prefix}_ws_{n}");
+                            let created = serde_json::json!({
+                                "type": "response.created",
+                                "sequence_number": 0,
+                                "response": {
+                                    "id": resp_id,
+                                    "object": "response",
+                                    "model": "gpt-5-codex",
+                                    "status": "in_progress",
+                                    "store": false,
+                                    "output": [],
+                                    "usage": null,
+                                }
+                            });
+                            let _ = socket.send(Message::Text(created.to_string().into())).await;
+                            if let Some((item_id, ciphertext)) = output_reasoning {
+                                let item_done = serde_json::json!({
+                                    "type": "response.output_item.done",
+                                    "sequence_number": 1,
+                                    "output_index": 0,
+                                    "item": {
+                                        "type": "reasoning",
+                                        "id": item_id,
+                                        "summary": [],
+                                        "encrypted_content": ciphertext,
+                                    }
+                                });
+                                let _ = socket
+                                    .send(Message::Text(item_done.to_string().into()))
+                                    .await;
+                            }
+                            let completed = serde_json::json!({
+                                "type": "response.completed",
+                                "sequence_number": 2,
+                                "response": fake_completed_response(&resp_id, output_reasoning),
+                            });
+                            let _ = socket
+                                .send(Message::Text(completed.to_string().into()))
+                                .await;
+                        }
+                    })
+                }
+            })
+            .post(move |bytes: Bytes| {
+                let reqs_http = reqs_http.clone();
+                let allowed_http = allowed_http.clone();
+                let seq_http = seq_http.clone();
+                async move {
+                    let body: Value =
+                        serde_json::from_slice(&bytes).expect("HTTP provider body is JSON");
+                    reqs_http
+                        .lock()
+                        .expect("requests lock")
+                        .push(RecordedUpstreamRequest {
+                            transport: "http",
+                            body: body.clone(),
+                        });
+                    if matches!(
+                        behavior,
+                        FakeEncryptedBehavior::RejectForeignInvalidEncrypted
+                    ) && let Some(item_id) = first_unknown_reasoning_id(&body, &allowed_http)
+                    {
+                        let payload = serde_json::to_vec(&fake_invalid_encrypted_error(&item_id))
+                            .expect("error json");
+                        if gzip_400 {
+                            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                            encoder.write_all(&payload).expect("gzip writes");
+                            let compressed = encoder.finish().expect("gzip finishes");
+                            return axum::response::Response::builder()
+                                .status(StatusCode::BAD_REQUEST)
+                                .header(http::header::CONTENT_TYPE, "application/json")
+                                .header(http::header::CONTENT_ENCODING, "gzip")
+                                .body(Body::from(compressed))
+                                .expect("gzip 400 builds");
+                        }
+                        return axum::response::Response::builder()
+                            .status(StatusCode::BAD_REQUEST)
+                            .header(http::header::CONTENT_TYPE, "application/json")
+                            .body(Body::from(payload))
+                            .expect("400 builds");
+                    }
+                    let n = seq_http.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    let resp_id = format!("{response_prefix}_http_{n}");
+                    axum::response::Response::builder()
+                        .status(StatusCode::OK)
+                        .header(http::header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&fake_completed_response(
+                                &resp_id,
+                                output_reasoning,
+                            ))
+                            .expect("ok json"),
+                        ))
+                        .expect("200 builds")
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fake codex binds");
+        let address = listener.local_addr().expect("fake codex addr");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("fake codex serves");
+        });
+        FakeCodexServer {
+            address,
+            requests,
+            task,
+        }
+    }
+
+    fn codex_foreign_history_payload(
+        is_ws: bool,
+        reasoning_items: &[(&str, &str)],
+        user_text: &str,
+    ) -> Value {
+        let mut input = Vec::new();
+        for (item_id, enc) in reasoning_items {
+            input.push(serde_json::json!({
+                "type": "reasoning",
+                "id": item_id,
+                "summary": [],
+                "encrypted_content": enc,
+            }));
+        }
+        input.push(serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": user_text}],
+        }));
+        let mut payload = serde_json::json!({
+            "model": "gpt-5-codex",
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+            "input": input,
+        });
+        if is_ws {
+            payload["type"] = Value::String("response.create".to_owned());
+        }
+        payload
+    }
+
+    async fn read_ws_until_completed(
+        client: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> Vec<Value> {
+        let mut events = Vec::new();
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await
+                .expect("WS response frame arrives in time")
+                .expect("WS stream stays open")
+                .expect("WS frame decodes");
+            let text = msg.to_text().expect("WS frame is text");
+            let value: Value = serde_json::from_str(text).expect("WS frame is JSON");
+            let event_type = value["type"].as_str().unwrap_or_default().to_owned();
+            events.push(value);
+            if event_type == "response.completed" || event_type == "error" {
+                break;
+            }
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn codex_unknown_reasoning_e2e_multi_and_single_upstream() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let http = reqwest::Client::new();
+        let foreign_ciphertext = "gAAAAABcliproxy_foreign";
+
+        // Scenario A: Multi-upstream pool (2 OpenAI OAuth upstreams) on empty DB
+        // must strip foreign reasoning upfront and succeed without 1/N guessing.
+        let fake_a = spawn_fake_codex_upstream(
+            FakeEncryptedBehavior::RejectForeignInvalidEncrypted,
+            vec![],
+            "resp_a",
+            Some(("rs_cclb_new_a", "gAAAAABcclb_new_a")),
+            false,
+        )
+        .await;
+        let fake_b = spawn_fake_codex_upstream(
+            FakeEncryptedBehavior::RejectForeignInvalidEncrypted,
+            vec![],
+            "resp_b",
+            Some(("rs_cclb_new_b", "gAAAAABcclb_new_b")),
+            false,
+        )
+        .await;
+        let mut up_a = websocket_upstream(
+            1,
+            "oauth-a",
+            Url::parse(&format!("http://{}/", fake_a.address)).unwrap(),
+        );
+        up_a.kind = UpstreamKind::OpenaiOauth;
+        let mut up_b = websocket_upstream(
+            2,
+            "oauth-b",
+            Url::parse(&format!("http://{}/", fake_b.address)).unwrap(),
+        );
+        up_b.kind = UpstreamKind::OpenaiOauth;
+        let (_dir_a, router_a) = websocket_test_router_with_affinity_store(
+            vec![up_a, up_b],
+            TerminalStrategy::FirstPick,
+        )
+        .await;
+        let (proxy_a, task_a) = spawn_proxy_router(router_a).await;
+
+        let http_res = http
+            .post(format!(
+                "http://{proxy_a}/openai/backend-api/codex/responses"
+            ))
+            .header("x-api-key", TEST_KEY.plaintext.as_str())
+            .json(&codex_foreign_history_payload(
+                false,
+                &[("rs_cliproxy_1", foreign_ciphertext)],
+                "continue after cliproxyapi",
+            ))
+            .send()
+            .await
+            .expect("HTTP multi-upstream sends");
+        let http_status = http_res.status();
+        let http_body: Value = http_res.json().await.expect("HTTP json");
+        assert_eq!(
+            http_status,
+            StatusCode::OK,
+            "Scenario A HTTP must succeed: {http_body}"
+        );
+
+        let mut ws_req = websocket_request(proxy_a);
+        *ws_req.uri_mut() = format!("ws://{proxy_a}/openai/backend-api/codex/responses")
+            .parse()
+            .unwrap();
+        let (mut ws_client, _) = connect_async(ws_req).await.expect("WS connects");
+        ws_client
+            .send(UpstreamMessage::Text(
+                codex_foreign_history_payload(
+                    true,
+                    &[("rs_cliproxy_1", foreign_ciphertext)],
+                    "continue ws after cliproxyapi",
+                )
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("WS create sends");
+        let ws_events = read_ws_until_completed(&mut ws_client).await;
+        assert_eq!(
+            ws_events.last().and_then(|v| v["type"].as_str()),
+            Some("response.completed"),
+            "Scenario A WS must succeed: {ws_events:?}"
+        );
+        let _ = ws_client.close(None).await;
+
+        let seen_a = fake_a.requests.lock().unwrap().clone();
+        let seen_b = fake_b.requests.lock().unwrap().clone();
+        assert_eq!(
+            seen_a.len(),
+            2,
+            "multi-upstream should strip upfront without retry (1 HTTP + 1 WS)"
+        );
+        assert_eq!(seen_a[0].transport, "http");
+        assert_eq!(seen_a[1].transport, "ws");
+        assert!(seen_b.is_empty());
+        for req in &seen_a {
+            let items = req.body["input"].as_array().expect("input array");
+            assert!(items.iter().all(|item| item["type"] != "reasoning"));
+            assert_eq!(items.len(), 1);
+            assert_eq!(
+                req.body["include"],
+                serde_json::json!(["reasoning.encrypted_content"])
+            );
+        }
+        task_a.abort();
+        fake_a.task.abort();
+        fake_b.task.abort();
+
+        // Scenario B: Single eligible upstream accepts foreign reasoning verbatim and learns it.
+        let fake_match = spawn_fake_codex_upstream(
+            FakeEncryptedBehavior::AcceptAll,
+            vec![],
+            "resp_match",
+            None,
+            false,
+        )
+        .await;
+        let mut up_match = websocket_upstream(
+            10,
+            "oauth-match",
+            Url::parse(&format!("http://{}/", fake_match.address)).unwrap(),
+        );
+        up_match.kind = UpstreamKind::OpenaiOauth;
+        let (_dir_b, router_b) =
+            websocket_test_router_with_affinity_store(vec![up_match], TerminalStrategy::FirstPick)
+                .await;
+        let (proxy_b, task_b) = spawn_proxy_router(router_b).await;
+
+        let http_res_b = http
+            .post(format!(
+                "http://{proxy_b}/openai/backend-api/codex/responses"
+            ))
+            .header("x-api-key", TEST_KEY.plaintext.as_str())
+            .json(&codex_foreign_history_payload(
+                false,
+                &[("rs_cliproxy_1", "gAAAAABmatch_http")],
+                "hello single http",
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(http_res_b.status(), StatusCode::OK);
+
+        let mut ws_req_b = websocket_request(proxy_b);
+        *ws_req_b.uri_mut() = format!("ws://{proxy_b}/openai/backend-api/codex/responses")
+            .parse()
+            .unwrap();
+        let (mut ws_client_b, _) = connect_async(ws_req_b).await.unwrap();
+        ws_client_b
+            .send(UpstreamMessage::Text(
+                codex_foreign_history_payload(
+                    true,
+                    &[("rs_cliproxy_1", "gAAAAABmatch_ws")],
+                    "hello single ws",
+                )
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let ws_events_b = read_ws_until_completed(&mut ws_client_b).await;
+        assert_eq!(
+            ws_events_b.last().and_then(|v| v["type"].as_str()),
+            Some("response.completed"),
+            "Scenario B WS must succeed: {ws_events_b:?}"
+        );
+        let _ = ws_client_b.close(None).await;
+
+        let seen_match = fake_match.requests.lock().unwrap().clone();
+        assert_eq!(seen_match.len(), 2);
+        assert_eq!(
+            seen_match[0].body["input"][0]["encrypted_content"],
+            "gAAAAABmatch_http"
+        );
+        assert_eq!(
+            seen_match[1].body["input"][0]["encrypted_content"],
+            "gAAAAABmatch_ws"
+        );
+        task_b.abort();
+        fake_match.task.abort();
+
+        // Scenario C: Single eligible upstream rejects with 400 invalid_encrypted_content
+        // (including gzip-encoded HTTP 400), retries once stripped on same upstream, and succeeds.
+        let fake_retry = spawn_fake_codex_upstream(
+            FakeEncryptedBehavior::RejectForeignInvalidEncrypted,
+            vec![],
+            "resp_retry",
+            None,
+            true,
+        )
+        .await;
+        let mut up_retry = websocket_upstream(
+            20,
+            "oauth-retry",
+            Url::parse(&format!("http://{}/", fake_retry.address)).unwrap(),
+        );
+        up_retry.kind = UpstreamKind::OpenaiOauth;
+        let (_dir_c, router_c) =
+            websocket_test_router_with_affinity_store(vec![up_retry], TerminalStrategy::FirstPick)
+                .await;
+        let (proxy_c, task_c) = spawn_proxy_router(router_c).await;
+
+        let http_res_c = http
+            .post(format!(
+                "http://{proxy_c}/openai/backend-api/codex/responses"
+            ))
+            .header("x-api-key", TEST_KEY.plaintext.as_str())
+            .json(&codex_foreign_history_payload(
+                false,
+                &[("rs_cliproxy_1", "gAAAAABmismatch_http")],
+                "hello retry http",
+            ))
+            .send()
+            .await
+            .unwrap();
+        let status_c = http_res_c.status();
+        let body_c: Value = http_res_c.json().await.unwrap();
+        assert_eq!(
+            status_c,
+            StatusCode::OK,
+            "Scenario C HTTP retry must succeed: {body_c}"
+        );
+
+        let mut ws_req_c = websocket_request(proxy_c);
+        *ws_req_c.uri_mut() = format!("ws://{proxy_c}/openai/backend-api/codex/responses")
+            .parse()
+            .unwrap();
+        let (mut ws_client_c, _) = connect_async(ws_req_c).await.unwrap();
+        ws_client_c
+            .send(UpstreamMessage::Text(
+                codex_foreign_history_payload(
+                    true,
+                    &[("rs_cliproxy_1", "gAAAAABmismatch_ws")],
+                    "hello retry ws",
+                )
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let ws_events_c = read_ws_until_completed(&mut ws_client_c).await;
+        assert_eq!(
+            ws_events_c.last().and_then(|v| v["type"].as_str()),
+            Some("response.completed"),
+            "Scenario C WS retry must succeed: {ws_events_c:?}"
+        );
+        let _ = ws_client_c.close(None).await;
+
+        let seen_retry = fake_retry.requests.lock().unwrap().clone();
+        assert_eq!(
+            seen_retry.len(),
+            4,
+            "Scenario C should record raw attempt + stripped retry for both HTTP and WS"
+        );
+        assert_eq!(
+            seen_retry[0].body["input"][0]["encrypted_content"],
+            "gAAAAABmismatch_http"
+        );
+        assert_eq!(seen_retry[1].body["input"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            seen_retry[2].body["input"][0]["encrypted_content"],
+            "gAAAAABmismatch_ws"
+        );
+        assert_eq!(seen_retry[3].body["input"].as_array().unwrap().len(), 1);
+
+        task_c.abort();
+        fake_retry.task.abort();
+    }
+
+    #[tokio::test]
+    async fn codex_unknown_reasoning_e2e_mixed_turn2_history() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let http = reqwest::Client::new();
+        let owned_http = "gAAAAABcclb_turn1_http";
+        let owned_ws = "gAAAAABcclb_turn1_ws";
+        let foreign = "gAAAAABcliproxy_legacy";
+
+        let fake_a = spawn_fake_codex_upstream(
+            FakeEncryptedBehavior::RejectForeignInvalidEncrypted,
+            vec![owned_http, owned_ws],
+            "resp_a",
+            Some(("rs_cclb_1", owned_http)),
+            false,
+        )
+        .await;
+        let fake_b = spawn_fake_codex_upstream(
+            FakeEncryptedBehavior::RejectForeignInvalidEncrypted,
+            vec![],
+            "resp_b",
+            Some(("rs_b_1", "gAAAAABunused_b")),
+            false,
+        )
+        .await;
+
+        let mut up_a = websocket_upstream(
+            1,
+            "oauth-a",
+            Url::parse(&format!("http://{}/", fake_a.address)).unwrap(),
+        );
+        up_a.kind = UpstreamKind::OpenaiOauth;
+        let mut up_b = websocket_upstream(
+            2,
+            "oauth-b",
+            Url::parse(&format!("http://{}/", fake_b.address)).unwrap(),
+        );
+        up_b.kind = UpstreamKind::OpenaiOauth;
+
+        let (_dir, router) = websocket_test_router_with_affinity_store(
+            vec![up_a, up_b],
+            TerminalStrategy::FirstPick,
+        )
+        .await;
+        let (proxy, proxy_task) = spawn_proxy_router(router).await;
+
+        // Turn 1 HTTP establishes affinity for `owned_http` on oauth-a.
+        let turn1_http = http
+            .post(format!("http://{proxy}/openai/backend-api/codex/responses"))
+            .header("x-api-key", TEST_KEY.plaintext.as_str())
+            .json(&codex_foreign_history_payload(false, &[], "turn 1 http"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(turn1_http.status(), StatusCode::OK);
+
+        // Turn 2 HTTP mixes foreign legacy reasoning + owned Turn 1 reasoning.
+        let turn2_http = http
+            .post(format!("http://{proxy}/openai/backend-api/codex/responses"))
+            .header("x-api-key", TEST_KEY.plaintext.as_str())
+            .json(&codex_foreign_history_payload(
+                false,
+                &[("rs_foreign", foreign), ("rs_cclb_1", owned_http)],
+                "turn 2 http mixed",
+            ))
+            .send()
+            .await
+            .unwrap();
+        let turn2_status = turn2_http.status();
+        let turn2_body: Value = turn2_http.json().await.unwrap();
+        assert_eq!(
+            turn2_status,
+            StatusCode::OK,
+            "Scenario D HTTP Turn 2 mixed history must succeed: {turn2_body}"
+        );
+
+        // Now verify WS Turn 2 with mixed history where WS response binds `owned_ws` on Turn 1.
+        let mut ws_req1 = websocket_request(proxy);
+        *ws_req1.uri_mut() = format!("ws://{proxy}/openai/backend-api/codex/responses")
+            .parse()
+            .unwrap();
+        let (mut ws1, _) = connect_async(ws_req1).await.unwrap();
+        ws1.send(UpstreamMessage::Text(
+            codex_foreign_history_payload(true, &[], "turn 1 ws")
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        let ws1_events = read_ws_until_completed(&mut ws1).await;
+        assert_eq!(
+            ws1_events.last().and_then(|v| v["type"].as_str()),
+            Some("response.completed")
+        );
+        let _ = ws1.close(None).await;
+
+        // Reconnect WS (fresh socket, DB affinity for `owned_http` / Turn 1 item) and send mixed Turn 2.
+        let mut ws_req2 = websocket_request(proxy);
+        *ws_req2.uri_mut() = format!("ws://{proxy}/openai/backend-api/codex/responses")
+            .parse()
+            .unwrap();
+        let (mut ws2, _) = connect_async(ws_req2).await.unwrap();
+        ws2.send(UpstreamMessage::Text(
+            codex_foreign_history_payload(
+                true,
+                &[("rs_foreign", foreign), ("rs_cclb_1", owned_http)],
+                "turn 2 ws mixed",
+            )
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        let ws2_events = read_ws_until_completed(&mut ws2).await;
+        assert_eq!(
+            ws2_events.last().and_then(|v| v["type"].as_str()),
+            Some("response.completed"),
+            "Scenario D WS Turn 2 mixed history must succeed: {ws2_events:?}"
+        );
+        let _ = ws2.close(None).await;
+
+        // Check recorded upstream requests on oauth-a:
+        // Index 0: Turn 1 HTTP (no reasoning)
+        // Index 1: Turn 2 HTTP raw (both foreign + owned_http)
+        // Index 2: Turn 2 HTTP retry (ONLY owned_http kept!)
+        // Index 3: Turn 1 WS (no reasoning)
+        // Index 4: Turn 2 WS raw (both foreign + owned_http)
+        // Index 5: Turn 2 WS retry (ONLY owned_http kept!)
+        let seen_a = fake_a.requests.lock().unwrap().clone();
+        assert_eq!(
+            seen_a.len(),
+            6,
+            "unexpected request count: {}",
+            seen_a.len()
+        );
+        assert_eq!(seen_a[1].body["input"].as_array().unwrap().len(), 3);
+        assert_eq!(seen_a[2].body["input"].as_array().unwrap().len(), 2);
+        assert_eq!(seen_a[2].body["input"][0]["encrypted_content"], owned_http);
+        assert_eq!(seen_a[4].body["input"].as_array().unwrap().len(), 3);
+        assert_eq!(seen_a[5].body["input"].as_array().unwrap().len(), 2);
+        assert_eq!(seen_a[5].body["input"][0]["encrypted_content"], owned_http);
+        assert!(fake_b.requests.lock().unwrap().is_empty());
+
+        // Sending ONLY `foreign` again across `[oauth-a, oauth-b]` must NOT be pinned
+        // to `oauth-a` (multi-upstream still strips `foreign` instead of binding it).
+        let post_check = http
+            .post(format!("http://{proxy}/openai/backend-api/codex/responses"))
+            .header("x-api-key", TEST_KEY.plaintext.as_str())
+            .json(&codex_foreign_history_payload(
+                false,
+                &[("rs_foreign", foreign)],
+                "foreign should remain unbound",
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(post_check.status(), StatusCode::OK);
+        let seen_a_after = fake_a.requests.lock().unwrap().clone();
+        assert_eq!(seen_a_after.len(), 7);
+        assert_eq!(
+            seen_a_after[6].body["input"].as_array().unwrap().len(),
+            1,
+            "foreign reasoning must never be bound during Turn 2 recovery"
+        );
+
+        proxy_task.abort();
+        fake_a.task.abort();
+        fake_b.task.abort();
     }
 }

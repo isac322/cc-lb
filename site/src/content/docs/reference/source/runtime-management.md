@@ -60,7 +60,7 @@ Provider-prefixed routes select the provider explicitly: `/anthropic/v1/...`, `/
 Provider-owned state referenced inside a supported HTTP generation request is forwarded unchanged and kept on its owning upstream through upstream affinity. cc-lb records a SHA-256 digest of each state id together with the upstream that created it, and routes later requests that reference the id only to that upstream:
 
 - Anthropic Messages: web-search `encrypted_content`, file ids in `file` / `container_upload` blocks, and container ids.
-- OpenAI HTTP Responses also records typed `compaction` and `compaction_summary` items when they carry `encrypted_content`; nested tool-schema annotations are request data, not provider-owned state.
+- OpenAI HTTP Responses also records typed `reasoning`, `compaction`, and `compaction_summary` items when they carry `encrypted_content`; nested tool-schema annotations are request data, not provider-owned state. When a request contains unknown `reasoning.encrypted_content` (and no `previous_response_id` or `conversation`, and no `compaction`/`compaction_summary` encrypted items), `[upstream_affinity] unknown_openai_reasoning` defaults to `hybrid`: multiple eligible OpenAI upstreams strip unknown `reasoning` items upfront, while a single eligible upstream (or a resolved owner with additional unmatched `reasoning` items) tries verbatim first and retries once on the same upstream with only unowned `reasoning` items stripped on pre-creation `400 invalid_encrypted_content`; `compaction`/`compaction_summary` remain fail-closed (`503`), and `fail_closed` restores `503` for unknown reasoning items.
 - Gemini generateContent / countTokens: `cachedContent` references (including nested `generateContentRequest.cachedContent`). `thoughtSignature` is forwarded but is not treated as affinity state.
 
 - Gemini cachedContents creation: the exact `POST /gemini/v1beta/cachedContents` operation is available only with Gemini API-key upstreams and explicit-caching Gemini 2.5 and Gemini 3 family models. Gemini 4+ explicit caching, other models, and non-create `cachedContents` API surfaces remain HTTP `404 operation_not_supported`. cc-lb forwards the request body unchanged and binds a successful canonical response `name` in the form `cachedContents/<id>` to the selected upstream before returning success; later `generateContent` and `countTokens` requests that reference that name remain pinned to its owner.
@@ -183,7 +183,13 @@ rows keep their storage format.
 
 A live `previous_response_id` does not override another upstream's reasoning ownership:
 conflicting owners return `400 upstream_affinity_unavailable`; unknown or unavailable
-owners return `503`. Requests do not fail over across that ownership boundary.
+owners return `503`, except that when `previous_response_id` is absent or empty and
+`[upstream_affinity] unknown_openai_reasoning = "hybrid"` (the default), unknown
+`reasoning.encrypted_content` (or unmatched pending `reasoning` items on a resolved owner)
+without `compaction`/`compaction_summary` follows hybrid recovery—stripping upfront across
+multiple eligible OpenAI upstreams, or trying verbatim first on a single eligible upstream
+or resolved owner and retrying once on the same upstream if pre-creation returns
+`invalid_encrypted_content`—without failing over across ownership boundaries.
 
 Client close frames receive a matching close reply. A valid provider error that cannot
 be assigned to a response is forwarded unchanged once, then its provider connection is

@@ -613,6 +613,16 @@ describe('config editor information architecture', () => {
       presentation: 'enum',
     });
   });
+
+  it('classifies upstream_affinity.unknown_openai_reasoning in the routing affinity section', () => {
+    expect(
+      classifyConfigLeaf('upstream_affinity.unknown_openai_reasoning', 'enum'),
+    ).toMatchObject({
+      categoryId: 'routing',
+      sectionId: 'affinity',
+      presentation: 'enum',
+    });
+  });
   it('classifies the public OpenAI realtime origin in network settings', () => {
     expect(
       classifyConfigLeaf('openai_public_api.realtime_origin', 'string'),
@@ -876,6 +886,16 @@ describe('config field guidance', () => {
     );
     expect(guidance.description).toContain('realtime');
     expect(guidance.recommendation).toContain('restart');
+  });
+
+  it('provides guidance for unknown_openai_reasoning affinity policy', () => {
+    const guidance = resolveConfigFieldGuidance(
+      'upstream_affinity.unknown_openai_reasoning',
+      undefined,
+      'enum',
+    );
+    expect(guidance.description).toContain('reasoning');
+    expect(guidance.recommendation).toContain('hybrid');
   });
 
   it('falls back to the schema description when the table omits one', () => {

@@ -2072,6 +2072,16 @@ const CONFIG_FIELD_GUIDANCE: readonly {
     },
   },
   {
+    pattern: 'upstream_affinity.unknown_openai_reasoning',
+    guidance: {
+      description:
+        'How OpenAI Responses requests handle unestablished encrypted reasoning items when no affinity owner is known.',
+      recommendation:
+        'Use hybrid (default) for multi-provider thread portability without cross-upstream failover; use fail_closed only when strict 503 rejection on foreign reasoning items is required.',
+      impactDimensions: ['availability', 'latency'],
+    },
+  },
+  {
     pattern: 'warmup.openai_model',
     guidance: {
       description: 'Model used for OpenAI OAuth warm-up requests.',

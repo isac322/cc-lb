@@ -12,6 +12,7 @@ mod plan;
 mod quota;
 mod routing;
 mod upstream;
+mod upstream_affinity;
 /// Vertex AI endpoint and credential configuration types.
 pub mod vertex;
 
@@ -44,6 +45,7 @@ pub use upstream::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, CredentialKind, Provider, Upstream, UpstreamCandidate,
     UpstreamIdentity, UpstreamKind,
 };
+pub use upstream_affinity::UnknownOpenaiReasoningPolicy;
 pub use vertex::{
     VERTEX_CREDENTIAL_INVALID_CLIENT, VERTEX_CREDENTIAL_INVALID_GRANT, VertexApiVersion,
     VertexCredentialType, VertexTarget, VertexUpstreamConfig, VertexValidationError,

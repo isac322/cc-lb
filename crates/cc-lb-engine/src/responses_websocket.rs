@@ -10,6 +10,7 @@ use bytes::Bytes;
 use cc_lb_control::api_keys::builtin_authn::BuiltinAuthError;
 use cc_lb_control::api_keys::limit_engine::{LimitEngine, Reservation};
 use cc_lb_lifecycle::{LifecycleEvent, UsageSnapshot, UsageSource};
+use cc_lb_storage_api::UpstreamAffinityKey;
 use http::{HeaderMap, StatusCode};
 use serde_json::Value;
 use sonic_rs::JsonValueTrait as _;
@@ -25,6 +26,9 @@ use crate::response_transform::ResponseTransformContext;
 use crate::terminal_observer::{
     InternalFailure, LifecycleContext, StreamTerminationCause, StreamTerminationOutcome,
     UpstreamErrorCode, record_websocket_terminal_span,
+};
+use crate::upstream_affinity::{
+    is_openai_invalid_encrypted_content_error_value, strip_openai_reasoning_encrypted_items,
 };
 use crate::usage_parser::{UsageCounts, observe_non_stream_json_value_for_shape};
 use cc_lb_upstream::{Signer, SseEvent, TransformSseEventRequest, TransformSseEventResult};
@@ -162,6 +166,32 @@ pub(crate) struct WebSocketIngress<'a> {
     pub query: Option<&'a str>,
 }
 
+pub(crate) enum WsUnknownReasoningPlan {
+    None,
+    /// Multi-upstream pool with unestablished reasoning: stripped upfront before dispatch.
+    StrippedUpfront {
+        body: Arc<Value>,
+        frame: Bytes,
+    },
+    /// Single eligible upstream with unestablished reasoning: send verbatim first;
+    /// bind `unknown_keys` on success, or retry once stripping all reasoning on
+    /// pre-created `invalid_encrypted_content` error.
+    RetryStripAll {
+        unknown_keys: Vec<UpstreamAffinityKey>,
+    },
+    /// Resolved owner with unmatched pending reasoning digests: send verbatim first;
+    /// retry once stripping only `pending_digests` on pre-created `invalid_encrypted_content`.
+    RetryStripPending {
+        pending_digests: HashSet<[u8; 32]>,
+        pending_keys: Vec<UpstreamAffinityKey>,
+    },
+}
+
+enum WsUnknownReasoningRetry {
+    All,
+    Pending(HashSet<[u8; 32]>),
+}
+
 pub(crate) struct PreparedWebSocketTurn {
     pub candidates: Vec<WebSocketCandidate>,
     pub observer: Option<LifecycleContext>,
@@ -181,6 +211,7 @@ pub(crate) struct PreparedWebSocketTurn {
     pub route_info: cc_lb_lifecycle::RouteInfo,
     pub setup_timings: cc_lb_lifecycle::RequestSetupTimings,
     pub request_id: String,
+    pub unknown_reasoning_plan: WsUnknownReasoningPlan,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -369,6 +400,17 @@ impl ResponsesStreamMetrics {
         self.send_started = Some(send_started);
     }
 
+    fn reset_for_retry(&mut self) {
+        self.relay_started = None;
+        self.send_started = None;
+        self.upstream_ttfb_ms = None;
+        self.upstream_started_emitted = false;
+        self.first_output_ms = None;
+        self.last_output_ms = None;
+        self.event_count = 0;
+        self.total_bytes = 0;
+    }
+
     fn maybe_record_heartbeat(
         &mut self,
         now: std::time::Instant,
@@ -537,6 +579,7 @@ struct Turn {
     controls: VecDeque<Bytes>,
     sent: bool,
     attempted: bool,
+    attempt_num: u32,
     charged_bytes: usize,
     usage: Option<UsageCounts>,
     usage_complete: bool,
@@ -546,6 +589,9 @@ struct Turn {
     echo_metadata: Option<Value>,
     funding_ambiguous: bool,
     response_created: bool,
+    unknown_reasoning_retry: Option<WsUnknownReasoningRetry>,
+    unknown_reasoning_retried: bool,
+    pending_affinity_keys: Vec<UpstreamAffinityKey>,
 }
 
 /// A session owns no authenticated proof until a fresh client check succeeds.
@@ -848,7 +894,7 @@ impl ResponsesWebSocketGateway {
                 .then_some(self.session_upstream)
                 .flatten()
         });
-        let prepared = self
+        let mut prepared = self
             .lifecycle
             .prepare_websocket_turn_with_surface(
                 &auth,
@@ -865,6 +911,45 @@ impl ResponsesWebSocketGateway {
             )
             .await
             .map_err(|error| error.with_stream(lane.clone()))?;
+        let (body, frame, unknown_reasoning_retry, pending_affinity_keys) = match std::mem::replace(
+            &mut prepared.unknown_reasoning_plan,
+            WsUnknownReasoningPlan::None,
+        ) {
+            WsUnknownReasoningPlan::None => (body, frame, None, Vec::new()),
+            WsUnknownReasoningPlan::StrippedUpfront {
+                body: stripped_body,
+                frame: stripped_frame,
+            } => (stripped_body, stripped_frame, None, Vec::new()),
+            WsUnknownReasoningPlan::RetryStripAll { unknown_keys } => (
+                body,
+                frame,
+                Some(WsUnknownReasoningRetry::All),
+                unknown_keys,
+            ),
+            WsUnknownReasoningPlan::RetryStripPending {
+                pending_digests,
+                pending_keys,
+            } => (
+                body,
+                frame,
+                Some(WsUnknownReasoningRetry::Pending(pending_digests)),
+                pending_keys,
+            ),
+        };
+        let actual_charge = frame
+            .len()
+            .saturating_add(json_owned_bytes(&body))
+            .saturating_add(std::mem::size_of::<Turn>())
+            .saturating_add(lane.as_ref().map_or(0, String::len))
+            .saturating_add(previous.as_ref().map_or(0, String::len))
+            .saturating_add(auth.principal_id().len())
+            .saturating_add(auth.key_id().len())
+            .saturating_add(
+                body.get("model")
+                    .and_then(Value::as_str)
+                    .map_or(0, str::len),
+            );
+        let charge = actual_charge;
         if let Some(stream_id) = lane.as_deref() {
             prepared.span.record("cc_lb.responses.stream_id", stream_id);
         }
@@ -904,6 +989,7 @@ impl ResponsesWebSocketGateway {
                 previous_response_id: previous,
                 steer_parent: None,
                 attempted: false,
+                attempt_num: 0,
                 steer_submissions: 0,
                 accepted_steers: HashSet::new(),
                 sent: false,
@@ -917,6 +1003,9 @@ impl ResponsesWebSocketGateway {
                 metrics,
                 funding_ambiguous: false,
                 response_created: false,
+                unknown_reasoning_retry,
+                unknown_reasoning_retried: false,
+                pending_affinity_keys,
             },
         );
         if !self.lanes.contains_key(&lane) {
@@ -1094,6 +1183,7 @@ impl ResponsesWebSocketGateway {
                 previous_response_id: Some(parent.clone()),
                 steer_parent: Some(parent),
                 attempted: false,
+                attempt_num: 0,
                 steer_submissions: 1,
                 accepted_steers: HashSet::new(),
                 sent: false,
@@ -1107,6 +1197,9 @@ impl ResponsesWebSocketGateway {
                 metrics,
                 funding_ambiguous: false,
                 response_created: false,
+                unknown_reasoning_retry: None,
+                unknown_reasoning_retried: false,
+                pending_affinity_keys: Vec::new(),
             },
         );
         let lane_state = self.lanes.entry(lane).or_default();
@@ -1562,10 +1655,11 @@ impl ResponsesWebSocketGateway {
         }
         if !turn.attempted {
             turn.attempted = true;
+            turn.attempt_num = turn.attempt_num.saturating_add(1);
             if let Some(observer) = turn.prepared.observer.as_ref() {
                 observer.emit_lifecycle(LifecycleEvent::UpstreamAttempt {
                     event_id: observer.event_id().to_owned(),
-                    attempt_num: 1,
+                    attempt_num: turn.attempt_num,
                     upstream_id,
                 });
             }
@@ -1855,8 +1949,10 @@ impl ResponsesWebSocketGateway {
             .await?;
         match transformed {
             Ok(Some(frames)) => {
-                result.forward = false;
-                result.frames = Some(frames);
+                if result.forward {
+                    result.forward = false;
+                    result.frames = Some(frames);
+                }
             }
             Ok(None) => {
                 if result.forward
@@ -2211,6 +2307,93 @@ impl ResponsesWebSocketGateway {
             )
             .with_stream(lane));
         }
+        if kind == "error"
+            && transform_error.is_none()
+            && turn.response_id.is_none()
+            && !turn.response_created
+            && !turn.unknown_reasoning_retried
+            && turn.unknown_reasoning_retry.is_some()
+            && is_openai_invalid_encrypted_content_error_value(&value)
+            && turn.upstream_id.is_some()
+        {
+            let only_digests = match turn.unknown_reasoning_retry.as_ref() {
+                Some(WsUnknownReasoningRetry::All) => None,
+                Some(WsUnknownReasoningRetry::Pending(digests)) => Some(digests),
+                None => None,
+            };
+            if let Some(stripped_body) =
+                strip_openai_reasoning_encrypted_items(&turn.body, only_digests)
+                && let Ok(stripped_bytes) = serde_json::to_vec(&stripped_body)
+            {
+                let stripped_frame = Bytes::from(stripped_bytes);
+                let stripped_body = Arc::new(stripped_body);
+                let old_dynamic = turn
+                    .frame
+                    .len()
+                    .saturating_add(json_owned_bytes(&turn.body))
+                    .saturating_add(
+                        turn.plugin_request
+                            .as_ref()
+                            .map_or(0, |(_, req)| req.frame.len()),
+                    );
+                let new_dynamic = stripped_frame
+                    .len()
+                    .saturating_add(json_owned_bytes(&stripped_body));
+                if new_dynamic
+                    <= self
+                        .byte_cap
+                        .saturating_sub(self.used_bytes)
+                        .saturating_add(old_dynamic)
+                {
+                    let turn = self.turns.get_mut(&turn_id).expect("turn exists");
+                    self.used_bytes = self
+                        .used_bytes
+                        .saturating_sub(old_dynamic)
+                        .saturating_add(new_dynamic);
+                    turn.charged_bytes = turn
+                        .charged_bytes
+                        .saturating_sub(old_dynamic)
+                        .saturating_add(new_dynamic);
+                    turn.body = stripped_body;
+                    turn.frame = stripped_frame.clone();
+                    turn.plugin_request = None;
+                    turn.echo_metadata = None;
+                    turn.sent = false;
+                    turn.attempted = false;
+                    turn.metrics.reset_for_retry();
+                    turn.unknown_reasoning_retried = true;
+                    match turn.unknown_reasoning_retry.take() {
+                        Some(WsUnknownReasoningRetry::All) => {
+                            turn.pending_affinity_keys.clear();
+                        }
+                        Some(WsUnknownReasoningRetry::Pending(digests)) => {
+                            turn.pending_affinity_keys.retain(|key| {
+                                !(key.provider == "openai"
+                                    && key.kind
+                                        == cc_lb_storage_api::UpstreamAffinityKind::OpenaiResponseId
+                                    && digests.contains(&key.value_sha256))
+                            });
+                        }
+                        None => {}
+                    }
+                    let retry_connection_id = Some(connection_id);
+                    let retry_dispatch = WebSocketDispatch {
+                        turn_id,
+                        frame: stripped_frame,
+                        connection_id: retry_connection_id,
+                        candidates: Vec::new(),
+                        stream_id: lane,
+                        control: false,
+                    };
+                    return Ok(WebSocketEventResult {
+                        forward: false,
+                        frames: None,
+                        dispatches: vec![retry_dispatch],
+                        errors: Vec::new(),
+                    });
+                }
+            }
+        }
         if let Some(id) = response_id {
             if turn.response_id.as_deref().is_some_and(|bound| bound != id) {
                 return Err(WebSocketError::new(
@@ -2293,28 +2476,37 @@ impl ResponsesWebSocketGateway {
         // Later snapshots and item.done can introduce reusable reasoning even
         // when the response id itself belongs only to this live connection.
         if response.is_some() || kind == "response.output_item.done" {
-            let turn = self.turns.get(&turn_id).expect("admitted turn exists");
-            let upstream_id = turn.upstream_id.ok_or_else(|| {
-                WebSocketError::new(
-                    502,
-                    "upstream_unavailable",
-                    "Response upstream is unavailable",
-                )
-            })?;
-            let stored = turn.prepared.store
-                && response
-                    .and_then(|value| value.get("store"))
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true);
+            let (auth, upstream_id, stored, pending_keys) = {
+                let turn = self.turns.get_mut(&turn_id).expect("admitted turn exists");
+                let upstream_id = turn.upstream_id.ok_or_else(|| {
+                    WebSocketError::new(
+                        502,
+                        "upstream_unavailable",
+                        "Response upstream is unavailable",
+                    )
+                })?;
+                let stored = turn.prepared.store
+                    && response
+                        .and_then(|value| value.get("store"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
+                let pending_keys = if kind != "response.failed" && kind != "response.incomplete" {
+                    std::mem::take(&mut turn.pending_affinity_keys)
+                } else {
+                    Vec::new()
+                };
+                (turn.auth.clone(), upstream_id, stored, pending_keys)
+            };
             self.lifecycle
-                .bind_websocket_response(
-                    &turn.auth,
+                .bind_websocket_response_with_pending(
+                    &auth,
                     upstream_id,
                     response.unwrap_or(&Value::Null),
                     (kind == "response.output_item.done")
                         .then(|| value.get("item"))
                         .flatten(),
                     stored,
+                    &pending_keys,
                 )
                 .await
                 .map_err(|error| error.with_stream(lane.clone()))?;
@@ -3395,6 +3587,7 @@ pub(crate) mod tests {
                     }))
                     .unwrap(),
                     request_id: "terminal-fixture".to_owned(),
+                    unknown_reasoning_plan: WsUnknownReasoningPlan::None,
                 },
                 body: Arc::new(serde_json::json!({})),
                 frame: Bytes::new(),
@@ -3410,6 +3603,7 @@ pub(crate) mod tests {
                 controls: VecDeque::new(),
                 sent: true,
                 attempted: true,
+                attempt_num: 1,
                 charged_bytes: 0,
                 usage: None,
                 usage_complete: false,
@@ -3419,6 +3613,9 @@ pub(crate) mod tests {
                 metrics: ResponsesStreamMetrics::new(),
                 funding_ambiguous: false,
                 response_created: false,
+                unknown_reasoning_retry: None,
+                unknown_reasoning_retried: false,
+                pending_affinity_keys: Vec::new(),
             },
         );
         gateway.lanes.insert(
@@ -4020,6 +4217,7 @@ pub(crate) mod tests {
                         }))
                         .expect("fixture route info"),
                         request_id: "embedded-turn".to_owned(),
+                        unknown_reasoning_plan: WsUnknownReasoningPlan::None,
                     },
                     body: Arc::new(serde_json::json!({})),
                     frame: Bytes::new(),
@@ -4035,6 +4233,7 @@ pub(crate) mod tests {
                     controls: VecDeque::new(),
                     sent: true,
                     attempted: true,
+                    attempt_num: 1,
                     charged_bytes: 0,
                     usage: Some(usage),
                     usage_complete,
@@ -4044,6 +4243,9 @@ pub(crate) mod tests {
                     metrics: ResponsesStreamMetrics::new(),
                     funding_ambiguous: false,
                     response_created: false,
+                    unknown_reasoning_retry: None,
+                    unknown_reasoning_retried: false,
+                    pending_affinity_keys: Vec::new(),
                 },
             );
             gateway.finish_turn(1, None);

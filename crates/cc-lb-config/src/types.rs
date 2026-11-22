@@ -115,12 +115,16 @@ impl Default for OpenaiPublicApiConfig {
     }
 }
 
+pub use cc_lb_domain::UnknownOpenaiReasoningPolicy;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct UpstreamAffinityConfig {
     #[serde(default = "default_upstream_affinity_ttl_days")]
     #[schemars(range(min = 1))]
     pub ttl_days: u32,
+    #[serde(default)]
+    pub unknown_openai_reasoning: UnknownOpenaiReasoningPolicy,
 }
 
 impl UpstreamAffinityConfig {
@@ -133,6 +137,7 @@ impl Default for UpstreamAffinityConfig {
     fn default() -> Self {
         Self {
             ttl_days: DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS,
+            unknown_openai_reasoning: UnknownOpenaiReasoningPolicy::default(),
         }
     }
 }

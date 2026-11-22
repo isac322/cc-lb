@@ -1,6 +1,7 @@
 use cc_lb_config::{
     Config, DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV,
     DEFAULT_SQLITE_PATH, DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS, StorageConfig,
+    UnknownOpenaiReasoningPolicy,
 };
 
 #[test]
@@ -29,6 +30,10 @@ fn load_minimal_toml_applies_plan_defaults() {
         config.upstream_affinity.ttl_secs(),
         u64::from(DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS) * 86_400
     );
+    assert_eq!(
+        config.upstream_affinity.unknown_openai_reasoning,
+        UnknownOpenaiReasoningPolicy::Hybrid
+    );
     assert_eq!(config.circuit_breaker.failures_to_open, 5);
     assert_eq!(config.circuit_breaker.window_secs, 10);
     assert_eq!(config.circuit_breaker.half_open_after_secs, 30);
@@ -49,6 +54,7 @@ fn upstream_affinity_ttl_loads_from_toml() {
 
 [upstream_affinity]
 ttl_days = 14
+unknown_openai_reasoning = "fail_closed"
 "#,
     );
 
@@ -56,4 +62,8 @@ ttl_days = 14
 
     assert_eq!(config.upstream_affinity.ttl_days, 14);
     assert_eq!(config.upstream_affinity.ttl_secs(), 14 * 86_400);
+    assert_eq!(
+        config.upstream_affinity.unknown_openai_reasoning,
+        UnknownOpenaiReasoningPolicy::FailClosed
+    );
 }
