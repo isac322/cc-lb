@@ -121,9 +121,12 @@ After upgrading, a strict URL mode takes effect wherever the pool setting is omi
 
 Learned upstream affinity bindings are retained for 7 days from their last successful binding by default. Ordinary replay reads do not refresh the timestamp, so bindings older than `ttl_days` fail closed with `503` and are purged.
 
+When an OpenAI Responses request contains unowned `reasoning.encrypted_content` items (with `previous_response_id` absent or empty and no `compaction`/`compaction_summary` items), `unknown_openai_reasoning` selects `"hybrid"` (default) or `"fail_closed"`. Under `"hybrid"`, multiple eligible OpenAI upstreams strip unknown `reasoning` items upfront, while a single eligible upstream (or a resolved owner carrying unmatched pending `reasoning` items) tries verbatim first and retries once on the same upstream with only unowned `reasoning` items stripped when `400 invalid_encrypted_content` occurs before any response frame is emitted. `"fail_closed"` rejects unknown `reasoning.encrypted_content` with `503 upstream_affinity_unavailable`.
+
 ```toml
 [upstream_affinity]
 ttl_days = 7
+unknown_openai_reasoning = "hybrid"
 ```
 
 ## Request diagnostics

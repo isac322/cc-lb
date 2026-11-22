@@ -90,6 +90,11 @@ fn environment_provenance_is_schema_filtered_and_excludes_secret_payload_envs() 
                 && !entry.sensitive
         }));
         assert!(overrides.iter().any(|entry| {
+            entry.path == "upstream_affinity.unknown_openai_reasoning"
+                && entry.name == "CC_LB_UPSTREAM_AFFINITY__UNKNOWN_OPENAI_REASONING"
+                && !entry.sensitive
+        }));
+        assert!(overrides.iter().any(|entry| {
             entry.path == "storage.url" && entry.name == "CC_LB_STORAGE__URL" && entry.sensitive
         }));
         for secret in [
@@ -112,6 +117,10 @@ fn environment_provenance_is_schema_filtered_and_excludes_secret_payload_envs() 
         .arg("editor_contract::environment_provenance_is_schema_filtered_and_excludes_secret_payload_envs")
         .env(PROVENANCE_CHILD, "1")
         .env("CC_LB_UPSTREAM_AFFINITY__TTL_DAYS", "30")
+        .env(
+            "CC_LB_UPSTREAM_AFFINITY__UNKNOWN_OPENAI_REASONING",
+            "fail_closed",
+        )
         .env("CC_LB_STORAGE__URL", "postgres://secret@localhost/db")
         .env("CC_LB_ADMIN_TOKEN", "secret-admin-token")
         .env("CC_LB_MASTER_KEY", "secret-master-key")

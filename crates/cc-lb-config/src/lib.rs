@@ -23,8 +23,8 @@ pub use types::{
     ListenerOverrides, ObservabilityConfig, OpenAiOAuthConfig, PluginWireBounds,
     PostgresPoolConfig, PriceCatalogConfig, PromptCacheShadowConfig, RecurringJobConfig,
     RuntimeConfig, SchedulerConfig, SchedulerPoolConfig, ShapeOriginPolicy, StorageConfig,
-    SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig, UpstreamAffinityConfig, WarmupConfig,
-    WasmtimeAllocationStrategy, WasmtimeConfig,
+    SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig, UnknownOpenaiReasoningPolicy,
+    UpstreamAffinityConfig, WarmupConfig, WasmtimeAllocationStrategy, WasmtimeConfig,
 };
 pub use validation::{ValidationError, validate_postgres_url};
 

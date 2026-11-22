@@ -46,7 +46,8 @@ use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RouteDecision};
 use cc_lb_storage_api::{
     PrincipalKind as DbPrincipalKind, PrincipalKindLite, PromptCacheObservationRecord,
     ProviderPromptCacheObservationRecord, StoredApiKeyRecord, UpstreamAffinityBinding,
-    UpstreamAffinityKey, UpstreamAffinityStore, UpstreamRateLimitObservationRecord, UpstreamRecord,
+    UpstreamAffinityKey, UpstreamAffinityKind, UpstreamAffinityStore,
+    UpstreamRateLimitObservationRecord, UpstreamRecord,
     upstream::UpstreamKind as StorageUpstreamKind,
 };
 #[cfg(test)]
@@ -115,7 +116,7 @@ use crate::request_context::{CodexBackendSurface, ProviderScope, RequestContext}
 use crate::request_timing::{REQUEST_STAGE_TIMINGS, RequestStageTimings};
 use crate::responses_websocket::{
     PreparedWebSocketTurn, WebSocketCandidate, WebSocketError, WebSocketIngress,
-    WebSocketPluginRequest,
+    WebSocketPluginRequest, WsUnknownReasoningPlan,
 };
 use crate::sse_error_frame::{
     ResponsesSseErrorContext, make_provider_error_frame, make_responses_failed_frame,
@@ -127,11 +128,13 @@ use crate::terminal_observer::{
     numeric_attribute,
 };
 use crate::upstream_affinity::{
-    OpenaiResponseReferenceScope, UpstreamAffinityExtractionError, extract_request_affinity_keys,
+    OpenaiResponseReferenceScope, UpstreamAffinityExtractionError,
+    collect_openai_pending_reasoning_digests, extract_request_affinity_keys,
     extract_request_affinity_keys_with_scope, extract_response_affinity_keys,
     extract_response_affinity_keys_from_sse_event, extract_websocket_response_affinity_keys,
-    gemini_cached_content_expiry, path_affinity_key, realtime_call_affinity_key,
-    request_observes_response_affinity,
+    gemini_cached_content_expiry, is_openai_invalid_encrypted_content_http_error,
+    is_openai_unknown_reasoning_only, path_affinity_key, realtime_call_affinity_key,
+    request_observes_response_affinity, strip_openai_reasoning_encrypted_items,
 };
 use crate::usage_decoder::{UsageDecoder, decode_full_body};
 #[cfg(test)]
@@ -3230,6 +3233,7 @@ pub struct LifecycleConfig {
     pub replica_identity: Option<ReplicaIdentity>,
     pub prompt_cache_shadow: PromptCacheShadowConfig,
     pub upstream_affinity_ttl: Duration,
+    pub unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy,
     pub openai_oauth_compat: cc_lb_domain::OpenaiOauthCompatPolicy,
     pub openai_realtime_origin: url::Url,
 }
@@ -3244,6 +3248,7 @@ impl Default for LifecycleConfig {
             upstream_affinity_ttl: Duration::from_secs(
                 UpstreamAffinityConfig::default().ttl_secs(),
             ),
+            unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy::default(),
             openai_oauth_compat: cc_lb_domain::OpenaiOauthCompatPolicy::default(),
             openai_realtime_origin: url::Url::parse("https://api.openai.com/").expect("valid URL"),
         }
@@ -4978,7 +4983,7 @@ impl Lifecycle {
                 });
             }
             let route_started = Instant::now();
-            let (ctx, mut pipeline_result) = self
+            let (ctx, mut pipeline_result, unknown_reasoning_plan) = self
                 .websocket_routing(
                     &view,
                     auth,
@@ -5004,6 +5009,12 @@ impl Lifecycle {
                         });
                     }
                 })?;
+            let effective_body: Arc<Value> = match &unknown_reasoning_plan {
+                WsUnknownReasoningPlan::StrippedUpfront { body: stripped, .. } => {
+                    Arc::clone(stripped)
+                }
+                _ => Arc::clone(&body),
+            };
             if let Some(observer) = observer.as_ref() {
                 for error in pipeline_result.internal_errors.drain(..) {
                     observer.record_internal_error(error);
@@ -5043,7 +5054,7 @@ impl Lifecycle {
                 None,
                 duration_to_ms(route_started.elapsed()),
             );
-            let model = body
+            let model = effective_body
                 .get("model")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
@@ -5057,7 +5068,7 @@ impl Lifecycle {
                 None,
                 provider_cache::analyze(
                     ProviderCapability::OpenaiResponses,
-                    body.as_ref(),
+                    effective_body.as_ref(),
                     &ctx.canonical_model_id,
                     ingress.headers,
                 ),
@@ -5073,7 +5084,7 @@ impl Lifecycle {
                 });
             }
             let body_view = RequestBodyView {
-                parsed: Ok(body.clone()),
+                parsed: Ok(effective_body.clone()),
                 json_parse_ms: 0.0,
             };
             let reserve_started = Instant::now();
@@ -5177,6 +5188,7 @@ impl Lifecycle {
                 span: stream_span.clone(),
                 setup_timings,
                 request_id: request_id.to_owned(),
+                unknown_reasoning_plan,
             })
         }
         .instrument(span.clone())
@@ -5240,8 +5252,17 @@ impl Lifecycle {
         owner: Option<Uuid>,
         request_id: String,
         codex_backend: bool,
-    ) -> Result<(RequestContext, FilterPipelineResult), WebSocketError> {
+    ) -> Result<(RequestContext, FilterPipelineResult, WsUnknownReasoningPlan), WebSocketError>
+    {
         use cc_lb_control::api_keys::principal_view::PrincipalStatus;
+        enum WsUnknownReasoningRecovery {
+            None,
+            Unestablished,
+            Pending {
+                pending_digests: HashSet<[u8; 32]>,
+                pending_keys: Vec<UpstreamAffinityKey>,
+            },
+        }
         if view.principal_view.principal_status(auth.principal_id()) != PrincipalStatus::Active {
             return Err(WebSocketError::new(
                 403,
@@ -5287,13 +5308,33 @@ impl Lifecycle {
                 UPSTREAM_AFFINITY_KEY_LIMIT_MESSAGE,
             )
         })?;
+        let has_previous = body
+            .get("previous_response_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty());
+        let mut recovery = WsUnknownReasoningRecovery::None;
         let affinity = match self.resolve_request_affinities(&keys).await {
-            Ok(affinity) => affinity,
+            Ok(affinity) => {
+                if let Some(ref resolved) = affinity
+                    && self.config.unknown_openai_reasoning
+                        == cc_lb_domain::UnknownOpenaiReasoningPolicy::Hybrid
+                    && !has_previous
+                {
+                    let pending_digests = collect_openai_pending_reasoning_digests(
+                        ProviderCapability::OpenaiResponses,
+                        body,
+                        &resolved.pending_keys,
+                    );
+                    if !pending_digests.is_empty() {
+                        recovery = WsUnknownReasoningRecovery::Pending {
+                            pending_digests,
+                            pending_keys: resolved.pending_keys.clone(),
+                        };
+                    }
+                }
+                affinity
+            }
             Err(failure) => {
-                let has_previous = body
-                    .get("previous_response_id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| !id.is_empty());
                 let allowed_upstreams = view.principal_view.allowed_upstreams(auth.principal_id());
                 let mut has_openai_oauth = false;
                 let mut has_openai_api_key = false;
@@ -5318,11 +5359,20 @@ impl Lifecycle {
                         "The previous response is not available on this connection",
                     ));
                 }
-                return Err(WebSocketError::new(
-                    failure.status.as_u16(),
-                    error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
-                    failure.message,
-                ));
+                if not_established
+                    && self.config.unknown_openai_reasoning
+                        == cc_lb_domain::UnknownOpenaiReasoningPolicy::Hybrid
+                    && is_openai_unknown_reasoning_only(ProviderCapability::OpenaiResponses, body)
+                {
+                    recovery = WsUnknownReasoningRecovery::Unestablished;
+                    None
+                } else {
+                    return Err(WebSocketError::new(
+                        failure.status.as_u16(),
+                        error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                        failure.message,
+                    ));
+                }
             }
         };
         let target = match (
@@ -5367,7 +5417,7 @@ impl Lifecycle {
             Some(body),
             Some(ProviderCapability::OpenaiResponses),
         );
-        let ctx = RequestContext::builder()
+        let mut ctx = RequestContext::builder()
             .request_id(request_id)
             .thread_id(identity.thread_id)
             .downstream_headers(downstream_headers)
@@ -5447,7 +5497,35 @@ impl Lifecycle {
                 },
             ));
         }
-        Ok((ctx, result))
+        let plan = match recovery {
+            WsUnknownReasoningRecovery::None => WsUnknownReasoningPlan::None,
+            WsUnknownReasoningRecovery::Unestablished => {
+                if result.candidates.len() > 1 {
+                    if let Some(stripped) = strip_openai_reasoning_encrypted_items(body, None)
+                        && let Ok(bytes) = serde_json::to_vec(&stripped)
+                    {
+                        let frame = Bytes::from(bytes);
+                        ctx.body_bytes = frame.clone();
+                        WsUnknownReasoningPlan::StrippedUpfront {
+                            body: Arc::new(stripped),
+                            frame,
+                        }
+                    } else {
+                        WsUnknownReasoningPlan::None
+                    }
+                } else {
+                    WsUnknownReasoningPlan::RetryStripAll { unknown_keys: keys }
+                }
+            }
+            WsUnknownReasoningRecovery::Pending {
+                pending_digests,
+                pending_keys,
+            } => WsUnknownReasoningPlan::RetryStripPending {
+                pending_digests,
+                pending_keys,
+            },
+        };
+        Ok((ctx, result, plan))
     }
 
     /// Shape one WebSocket frame for its selected upstream.
@@ -5704,6 +5782,7 @@ impl Lifecycle {
     }
 
     /// Persist recognized state before the gateway exposes it to another connection.
+    #[cfg(test)]
     pub(crate) async fn bind_websocket_response(
         &self,
         auth: &crate::Authenticated,
@@ -5712,7 +5791,29 @@ impl Lifecycle {
         output_item: Option<&Value>,
         store: bool,
     ) -> Result<(), WebSocketError> {
-        let keys = extract_websocket_response_affinity_keys(
+        self.bind_websocket_response_with_pending(
+            auth,
+            upstream_id,
+            response,
+            output_item,
+            store,
+            &[],
+        )
+        .await
+    }
+
+    /// Persist recognized state (plus any verbatim-accepted pending request keys)
+    /// before the gateway exposes the response to another connection.
+    pub(crate) async fn bind_websocket_response_with_pending(
+        &self,
+        auth: &crate::Authenticated,
+        upstream_id: Uuid,
+        response: &Value,
+        output_item: Option<&Value>,
+        store: bool,
+        pending_request_keys: &[UpstreamAffinityKey],
+    ) -> Result<(), WebSocketError> {
+        let mut keys = extract_websocket_response_affinity_keys(
             response,
             output_item,
             auth.principal_id(),
@@ -5729,6 +5830,7 @@ impl Lifecycle {
                 "upstream response carries invalid provider state",
             )
         })?;
+        keys.extend(pending_request_keys.iter().cloned());
         let context = ResponseAffinityContext {
             capability: ProviderCapability::OpenaiResponses,
             usage_shape: None,
@@ -5844,7 +5946,7 @@ impl Lifecycle {
             });
         let non_json_body = multipart || realtime_call_envelope;
         let empty_body = Bytes::new();
-        let body_view = RequestBodyView::new(if non_json_body {
+        let mut body_view = RequestBodyView::new(if non_json_body {
             &empty_body
         } else {
             &ctx.body_bytes
@@ -6198,17 +6300,58 @@ impl Lifecycle {
                 ));
             }
         };
+        enum HttpUnknownReasoningRecovery {
+            None,
+            Unestablished {
+                unknown_keys: Vec<UpstreamAffinityKey>,
+            },
+            PendingOnOwner {
+                pending_reasoning_digests: HashSet<[u8; 32]>,
+            },
+        }
+        let mut unknown_reasoning_recovery = HttpUnknownReasoningRecovery::None;
         let request_affinity = match self
             .resolve_request_affinities(&request_affinity_keys)
             .await
         {
-            Ok(resolution) => resolution,
+            Ok(resolution) => {
+                if let Some(ref resolved) = resolution
+                    && self.config.unknown_openai_reasoning
+                        == cc_lb_domain::UnknownOpenaiReasoningPolicy::Hybrid
+                    && let Some(body_val) = body_view.value()
+                {
+                    let pending_reasoning_digests = collect_openai_pending_reasoning_digests(
+                        request_capability,
+                        body_val,
+                        &resolved.pending_keys,
+                    );
+                    if !pending_reasoning_digests.is_empty() {
+                        unknown_reasoning_recovery = HttpUnknownReasoningRecovery::PendingOnOwner {
+                            pending_reasoning_digests,
+                        };
+                    }
+                }
+                resolution
+            }
             // A response cc-lb never saw (or one past the affinity TTL) has no
             // recorded owner; the single-owner rule below still places it safely.
             Err(failure)
                 if request_capability == ProviderCapability::OpenaiStoredResponse
                     && failure.message == UPSTREAM_AFFINITY_NOT_ESTABLISHED_MESSAGE =>
             {
+                None
+            }
+            Err(failure)
+                if failure.message == UPSTREAM_AFFINITY_NOT_ESTABLISHED_MESSAGE
+                    && self.config.unknown_openai_reasoning
+                        == cc_lb_domain::UnknownOpenaiReasoningPolicy::Hybrid
+                    && body_view.value().is_some_and(|value| {
+                        is_openai_unknown_reasoning_only(request_capability, value)
+                    }) =>
+            {
+                unknown_reasoning_recovery = HttpUnknownReasoningRecovery::Unestablished {
+                    unknown_keys: request_affinity_keys,
+                };
                 None
             }
             Err(failure) => {
@@ -6404,6 +6547,35 @@ impl Lifecycle {
             pipeline_result
                 .candidates
                 .retain(|candidate| candidate.upstream_id == affinity.target_upstream_id);
+        }
+        let mut pending_request_keys = request_affinity
+            .as_ref()
+            .map(|affinity| affinity.pending_keys.clone())
+            .unwrap_or_default();
+        let mut single_unestablished_probe = false;
+        if !pipeline_result.candidates.is_empty()
+            && let HttpUnknownReasoningRecovery::Unestablished { unknown_keys } =
+                &unknown_reasoning_recovery
+        {
+            if pipeline_result.candidates.len() > 1 {
+                if let Some(stripped) = body_view
+                    .value()
+                    .and_then(|value| strip_openai_reasoning_encrypted_items(value, None))
+                    && let Ok(bytes) = serde_json::to_vec(&stripped)
+                {
+                    ctx.body_bytes = Bytes::from(bytes);
+                    rewrite_json_request_body_headers(
+                        &mut ctx.downstream_headers,
+                        ctx.body_bytes.len(),
+                    );
+                    body_view.parsed = Ok(Arc::new(stripped));
+                }
+                unknown_reasoning_recovery = HttpUnknownReasoningRecovery::None;
+                pending_request_keys.clear();
+            } else {
+                pending_request_keys = unknown_keys.clone();
+                single_unestablished_probe = true;
+            }
         }
         if let Some(o) = observer.as_ref() {
             for error in pipeline_result.internal_errors.drain(..) {
@@ -6601,7 +6773,7 @@ impl Lifecycle {
                 }),
             observer: observer.as_ref(),
             handle_span: &handle_span,
-            enabled: request_affinity.is_none() && !single_owner,
+            enabled: request_affinity.is_none() && !single_owner && !single_unestablished_probe,
             excluded: Vec::new(),
             vertex_rate_limited_scopes: HashSet::new(),
             upstream_attempts: 1,
@@ -7154,6 +7326,105 @@ impl Lifecycle {
             break (response, dispatch_started, dispatch_unix_secs, signer);
         };
         drop(failover);
+        if response.status() == StatusCode::BAD_REQUEST
+            && !matches!(
+                unknown_reasoning_recovery,
+                HttpUnknownReasoningRecovery::None
+            )
+        {
+            let collected = collect_error_response(response)
+                .instrument(tracing::info_span!("proxy.collect_upstream_error_body"))
+                .await;
+            let retry_stripped = if collected.body.as_deref().is_some_and(|body| {
+                is_openai_invalid_encrypted_content_http_error(
+                    collected.status,
+                    &collected.headers,
+                    body,
+                )
+            }) {
+                let only_digests = match &unknown_reasoning_recovery {
+                    HttpUnknownReasoningRecovery::PendingOnOwner {
+                        pending_reasoning_digests,
+                    } => Some(pending_reasoning_digests),
+                    HttpUnknownReasoningRecovery::Unestablished { .. }
+                    | HttpUnknownReasoningRecovery::None => None,
+                };
+                body_view
+                    .value()
+                    .and_then(|value| strip_openai_reasoning_encrypted_items(value, only_digests))
+                    .and_then(|stripped| {
+                        serde_json::to_vec(&stripped)
+                            .ok()
+                            .map(|bytes| (stripped, Bytes::from(bytes)))
+                    })
+            } else {
+                None
+            };
+            if let Some((stripped, bytes)) = retry_stripped {
+                ctx.body_bytes = bytes;
+                rewrite_json_request_body_headers(
+                    &mut ctx.downstream_headers,
+                    ctx.body_bytes.len(),
+                );
+                body_view.parsed = Ok(Arc::new(stripped));
+                match &unknown_reasoning_recovery {
+                    HttpUnknownReasoningRecovery::Unestablished { .. } => {
+                        pending_request_keys.clear();
+                    }
+                    HttpUnknownReasoningRecovery::PendingOnOwner {
+                        pending_reasoning_digests,
+                    } => {
+                        pending_request_keys.retain(|key| {
+                            !(key.provider == "openai"
+                                && key.kind == UpstreamAffinityKind::OpenaiResponseId
+                                && pending_reasoning_digests.contains(&key.value_sha256))
+                        });
+                    }
+                    HttpUnknownReasoningRecovery::None => {}
+                }
+                keepalive_shaped_body = None;
+                announce_attempt(
+                    observer.as_ref(),
+                    &mut attempt_num,
+                    routed.route.upstream_id,
+                    &mut attempt_timings,
+                    Some(dispatch_started),
+                );
+                response = match self
+                    .run_upstream_attempt(
+                        auth,
+                        reserved.as_ref(),
+                        &ctx,
+                        &principal,
+                        &routed,
+                        signer.clone(),
+                        observer.as_ref(),
+                        &mut attempt_timings,
+                        &mut keepalive_shaped_body,
+                        &cache_metadata,
+                        &keepalive_request_started,
+                    )
+                    .await
+                {
+                    Ok(attempt) => {
+                        compat_response_plan = attempt.compat_response_plan;
+                        attempt.response
+                    }
+                    Err(failure) => {
+                        return Ok(self.relay_attempt_failure(
+                            failure,
+                            request_capability,
+                            active_limit.as_ref(),
+                            observer.as_ref(),
+                            &attempt_timings,
+                            request_capability.provider(),
+                        ));
+                    }
+                };
+            } else {
+                response = response_from_collected(collected, request_capability);
+            }
+        }
         let mut precomputed_usage: Option<UsageCounts> = None;
         let chat_fanout_plan = compat_response_plan.as_ref().and_then(|plan| {
             let CompatResponseKind::Chat { plan } = &plan.kind else {
@@ -7513,9 +7784,7 @@ impl Lifecycle {
             store: self.upstream_affinity_store.clone(),
             principal_id: principal.id.clone(),
             upstream_id: resolved_upstream_id,
-            pending_request_keys: request_affinity
-                .map(|affinity| affinity.pending_keys)
-                .unwrap_or_default(),
+            pending_request_keys,
             observe_response_keys: body_view
                 .value()
                 .is_some_and(|value| request_observes_response_affinity(request_capability, value)),
@@ -12575,6 +12844,15 @@ fn response_from_collected(
     response
 }
 
+fn rewrite_json_request_body_headers(headers: &mut HeaderMap, body_len: usize) {
+    headers.remove(CONTENT_LENGTH);
+    headers.remove(http::header::CONTENT_ENCODING);
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if let Ok(value) = HeaderValue::from_str(&body_len.to_string()) {
+        headers.insert(CONTENT_LENGTH, value);
+    }
+}
+
 fn record_shape_internal_error(observer: Option<&LifecycleContext>, message: &str) {
     if let Some(observer) = observer {
         observer.record_internal_error(InternalError {
@@ -15504,8 +15782,8 @@ fn vertex_scope(record: &UpstreamRecord) -> Option<(String, String)> {
 /// principal's filter pipeline over fresh candidates minus every upstream
 /// already tried, so one routing convention covers the first pick and each
 /// fallback.
-struct FailoverRouter<'a> {
-    view: &'a DynamicView,
+struct FailoverRouter<'v, 'a> {
+    view: &'v DynamicView,
     cached: &'a PrincipalSpecCached,
     router_pipeline: &'a RouterPipelineCache,
     ctx: &'a RequestContext,
@@ -15527,7 +15805,7 @@ struct FailoverRouter<'a> {
     upstream_attempts: u8,
 }
 
-impl<'a> FailoverRouter<'a> {
+impl<'v, 'a> FailoverRouter<'v, 'a> {
     /// Routes to the next upstream, or returns `None` when the caller must
     /// relay the current failure. The caller announces the new route.
     fn next(
@@ -15535,7 +15813,7 @@ impl<'a> FailoverRouter<'a> {
         lifecycle: &Lifecycle,
         failed: &RoutedUpstream<'_>,
         reason: FailoverReason,
-    ) -> Option<RoutedUpstream<'a>> {
+    ) -> Option<RoutedUpstream<'v>> {
         if !self.enabled || self.upstream_attempts >= MAX_UPSTREAM_ATTEMPTS {
             return None;
         }

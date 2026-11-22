@@ -1,8 +1,11 @@
 use std::collections::HashSet;
+use std::ops::ControlFlow;
 
 use crate::provider_capability::{ProviderCapability, safe_openai_resource_path};
+use crate::usage_decoder::decode_full_body;
 use crate::usage_parser::ParsedSseEvent;
 use cc_lb_storage_api::{UpstreamAffinityKey, UpstreamAffinityKind};
+use http::{HeaderMap, StatusCode};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -345,12 +348,7 @@ impl<'a> KeyCollector<'a> {
         kind: UpstreamAffinityKind,
         value: Option<&Value>,
     ) -> Result<(), UpstreamAffinityExtractionError> {
-        let id = value.and_then(|value| {
-            value
-                .as_str()
-                .or_else(|| value.get("id").and_then(Value::as_str))
-        });
-        match id {
+        match reference_id(value) {
             Some(id) => self.push(kind, id),
             None => Ok(()),
         }
@@ -480,6 +478,229 @@ fn anthropic_block_file_id<'v>(
         return None;
     }
     object.get("file_id").and_then(Value::as_str)
+}
+
+fn reference_id(value: Option<&Value>) -> Option<&str> {
+    value
+        .and_then(|value| {
+            value
+                .as_str()
+                .or_else(|| value.get("id").and_then(Value::as_str))
+        })
+        .filter(|id| !id.is_empty())
+}
+
+const fn is_openai_responses_affinity_capability(capability: ProviderCapability) -> bool {
+    matches!(
+        capability,
+        ProviderCapability::OpenaiResponses
+            | ProviderCapability::OpenaiResponsesInputTokens
+            | ProviderCapability::OpenaiResponsesCompact
+    )
+}
+
+fn walk_openai_reasoning_items<'a, B>(
+    value: &'a Value,
+    visitor: &mut impl FnMut(&'a str, &'a str) -> ControlFlow<B>,
+) -> ControlFlow<B> {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                walk_openai_reasoning_items(item, visitor)?;
+            }
+        }
+        Value::Object(object) => {
+            if let Some(item_type) = object.get("type").and_then(Value::as_str)
+                && matches!(item_type, "reasoning" | "compaction" | "compaction_summary")
+                && let Some(encrypted_content) = reference_id(object.get("encrypted_content"))
+            {
+                visitor(item_type, encrypted_content)?;
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+    ControlFlow::Continue(())
+}
+
+/// Returns whether the OpenAI Responses request's ONLY opaque affinity state
+/// comes from `reasoning.encrypted_content` items in an `input` array (with no
+/// `previous_response_id`, `conversation`, `compaction`, or `compaction_summary`).
+pub(crate) fn is_openai_unknown_reasoning_only(
+    capability: ProviderCapability,
+    value: &Value,
+) -> bool {
+    if !is_openai_responses_affinity_capability(capability) {
+        return false;
+    }
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if reference_id(object.get("previous_response_id")).is_some()
+        || reference_id(object.get("conversation")).is_some()
+    {
+        return false;
+    }
+    let Some(input @ Value::Array(_)) = object.get("input") else {
+        return false;
+    };
+    let mut found_reasoning = false;
+    let flow = walk_openai_reasoning_items(input, &mut |item_type, _| {
+        if matches!(item_type, "compaction" | "compaction_summary") {
+            return ControlFlow::Break(());
+        }
+        if item_type == "reasoning" {
+            found_reasoning = true;
+        }
+        ControlFlow::Continue(())
+    });
+    flow.is_continue() && found_reasoning
+}
+
+/// Returns SHA-256 digests for `reasoning.encrypted_content` items present in
+/// `value` whose OpenAI affinity key remained unresolved (`pending_keys`).
+pub(crate) fn collect_openai_pending_reasoning_digests(
+    capability: ProviderCapability,
+    value: &Value,
+    pending_keys: &[UpstreamAffinityKey],
+) -> HashSet<[u8; 32]> {
+    let mut matched = HashSet::new();
+    if !is_openai_responses_affinity_capability(capability) || pending_keys.is_empty() {
+        return matched;
+    }
+    if reference_id(value.get("previous_response_id")).is_some()
+        || reference_id(value.get("conversation")).is_some()
+    {
+        return matched;
+    }
+    let Some(input) = value.get("input").filter(|v| v.is_array()) else {
+        return matched;
+    };
+    let pending_digests: HashSet<[u8; 32]> = pending_keys
+        .iter()
+        .filter(|key| {
+            key.provider == OPENAI_PROVIDER && key.kind == UpstreamAffinityKind::OpenaiResponseId
+        })
+        .map(|key| key.value_sha256)
+        .collect();
+    if pending_digests.is_empty() {
+        return matched;
+    }
+    let _ = walk_openai_reasoning_items(input, &mut |item_type, encrypted_content| {
+        if item_type == "reasoning" {
+            let digest: [u8; 32] = Sha256::digest(encrypted_content.as_bytes()).into();
+            if pending_digests.contains(&digest) {
+                matched.insert(digest);
+            }
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    matched
+}
+
+fn strip_reasoning_array_tree(
+    value: &mut Value,
+    only_digests: Option<&HashSet<[u8; 32]>>,
+    stripped: &mut bool,
+) {
+    let Value::Array(items) = value else {
+        return;
+    };
+    items.retain_mut(|item| match item {
+        Value::Object(object) => {
+            let is_target_reasoning = object.get("type").and_then(Value::as_str)
+                == Some("reasoning")
+                && reference_id(object.get("encrypted_content")).is_some_and(|enc| {
+                    only_digests.is_none_or(|digests| {
+                        let digest: [u8; 32] = Sha256::digest(enc.as_bytes()).into();
+                        digests.contains(&digest)
+                    })
+                });
+            if is_target_reasoning {
+                *stripped = true;
+                false
+            } else {
+                true
+            }
+        }
+        Value::Array(_) => {
+            strip_reasoning_array_tree(item, only_digests, stripped);
+            true
+        }
+        _ => true,
+    });
+}
+
+/// Removes `reasoning` items carrying `encrypted_content` from `input` arrays.
+/// When `only_digests` is `Some`, only items whose ciphertext SHA-256 digest is
+/// in `only_digests` are removed, keeping already-owned reasoning intact.
+pub(crate) fn strip_openai_reasoning_encrypted_items(
+    value: &Value,
+    only_digests: Option<&HashSet<[u8; 32]>>,
+) -> Option<Value> {
+    let input = value.get("input")?;
+    if !input.is_array() {
+        return None;
+    }
+    let mut cloned = value.clone();
+    let mut stripped = false;
+    if let Some(input_mut) = cloned.as_object_mut().and_then(|obj| obj.get_mut("input")) {
+        strip_reasoning_array_tree(input_mut, only_digests, &mut stripped);
+    }
+    stripped.then_some(cloned)
+}
+
+/// Returns whether an OpenAI JSON error payload reports unverifiable `encrypted_content`.
+pub(crate) fn is_openai_invalid_encrypted_content_error_value(value: &Value) -> bool {
+    let err = value
+        .get("error")
+        .or_else(|| value.pointer("/response/error"))
+        .unwrap_or(value);
+    match err.get("code").and_then(Value::as_str) {
+        Some("invalid_encrypted_content") => return true,
+        Some(code) if !code.is_empty() => return false,
+        _ => {}
+    }
+    let Some(message) = err
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("detail").and_then(Value::as_str))
+    else {
+        return false;
+    };
+    let lower = message.to_ascii_lowercase();
+    (lower.contains("encrypted content") || lower.contains("encrypted_content"))
+        && [
+            "could not be verified",
+            "cannot be verified",
+            "failed to verify",
+            "could not be decrypted",
+            "cannot be decrypted",
+            "failed to decrypt",
+            "unable to decrypt",
+            "encrypted content organization_id did not match",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+/// Returns whether an HTTP 400 error body (plain or content-encoded) reports
+/// unverifiable `encrypted_content`. Hot-path parsing uses `sonic_rs::from_slice`.
+pub(crate) fn is_openai_invalid_encrypted_content_http_error(
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> bool {
+    if status != StatusCode::BAD_REQUEST || body.is_empty() {
+        return false;
+    }
+    let output_budget = body.len().saturating_mul(8).clamp(64 * 1024, 512 * 1024);
+    let Ok(Some(plaintext)) = decode_full_body(headers, body, output_budget) else {
+        return false;
+    };
+    let Ok(value) = sonic_rs::from_slice::<Value>(plaintext.as_ref()) else {
+        return false;
+    };
+    is_openai_invalid_encrypted_content_error_value(&value)
 }
 
 #[cfg(test)]
@@ -1195,5 +1416,204 @@ mod tests {
             digest("019eb97d-8e9a-7ff3-94b0-ea019babd5d7")
         );
         assert_eq!(realtime_call_affinity_key("principal-openai", "/"), None);
+    }
+
+    #[test]
+    fn unknown_reasoning_only_classification_and_pending_digests_respect_boundaries() {
+        let base_reasoning = serde_json::json!({
+            "model": "gpt-5-codex",
+            "include": ["reasoning.encrypted_content"],
+            "input": [
+                {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "gAAAAABforeign_1"},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            ]
+        });
+        assert!(is_openai_unknown_reasoning_only(
+            ProviderCapability::OpenaiResponses,
+            &base_reasoning
+        ));
+        assert!(is_openai_unknown_reasoning_only(
+            ProviderCapability::OpenaiResponsesCompact,
+            &base_reasoning
+        ));
+        assert!(!is_openai_unknown_reasoning_only(
+            ProviderCapability::AnthropicMessages,
+            &base_reasoning
+        ));
+
+        for excluded in [
+            serde_json::json!({
+                "previous_response_id": "resp_1",
+                "input": [{"type": "reasoning", "encrypted_content": "gAAAAABforeign_1"}]
+            }),
+            serde_json::json!({
+                "conversation": "conv_1",
+                "input": [{"type": "reasoning", "encrypted_content": "gAAAAABforeign_1"}]
+            }),
+            serde_json::json!({
+                "input": [
+                    {"type": "reasoning", "encrypted_content": "gAAAAABforeign_1"},
+                    {"type": "compaction", "id": "cmp_1", "encrypted_content": "gAAAAABcmp_1"},
+                ]
+            }),
+            serde_json::json!({
+                "input": [
+                    {"type": "reasoning", "encrypted_content": "gAAAAABforeign_1"},
+                    {"type": "compaction_summary", "id": "cmp_2", "encrypted_content": "gAAAAABcmp_2"},
+                ]
+            }),
+            serde_json::json!({
+                "input": "just a string"
+            }),
+            serde_json::json!({
+                "input": [{"type": "message", "role": "user", "content": "hi"}]
+            }),
+        ] {
+            assert!(
+                !is_openai_unknown_reasoning_only(ProviderCapability::OpenaiResponses, &excluded),
+                "unexpected classification for {excluded}"
+            );
+        }
+
+        let keys = vec![
+            UpstreamAffinityKey {
+                principal_id: "p".to_owned(),
+                provider: OPENAI_PROVIDER.to_owned(),
+                kind: UpstreamAffinityKind::OpenaiResponseId,
+                value_sha256: digest("gAAAAABforeign_1"),
+            },
+            UpstreamAffinityKey {
+                principal_id: "p".to_owned(),
+                provider: OPENAI_PROVIDER.to_owned(),
+                kind: UpstreamAffinityKind::OpenaiConversationId,
+                value_sha256: digest("conv_ignored"),
+            },
+        ];
+        let matched = collect_openai_pending_reasoning_digests(
+            ProviderCapability::OpenaiResponses,
+            &base_reasoning,
+            &keys,
+        );
+        assert_eq!(matched, HashSet::from([digest("gAAAAABforeign_1")]));
+    }
+
+    #[test]
+    fn strip_openai_reasoning_preserves_messages_compaction_schemas_and_owned_items() {
+        let mixed = serde_json::json!({
+            "model": "gpt-5-codex",
+            "include": ["reasoning.encrypted_content"],
+            "input": [
+                {"type": "reasoning", "id": "rs_foreign", "summary": [], "encrypted_content": "gAAAAABforeign"},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "q1"}]},
+                {"type": "reasoning", "id": "rs_owned", "summary": [], "encrypted_content": "gAAAAABowned"},
+                {"type": "reasoning", "id": "rs_plain", "summary": [{"type": "summary_text", "text": "thought"}]},
+                {"type": "additional_tools", "tools": [{"parameters": {"default": {"type": "reasoning", "encrypted_content": "schema-literal"}}}]},
+                {"type": "compaction", "id": "cmp_1", "encrypted_content": "gAAAAABcmp"},
+            ]
+        });
+
+        let selective_digests = HashSet::from([digest("gAAAAABforeign")]);
+        let selective =
+            strip_openai_reasoning_encrypted_items(&mixed, Some(&selective_digests)).unwrap();
+        let selective_items = selective["input"].as_array().unwrap();
+        assert_eq!(selective_items.len(), 5);
+        assert_eq!(selective_items[0]["role"], "user");
+        assert_eq!(selective_items[1]["id"], "rs_owned");
+        assert_eq!(selective_items[2]["id"], "rs_plain");
+        assert_eq!(selective_items[3]["type"], "additional_tools");
+        assert_eq!(selective_items[4]["type"], "compaction");
+        assert_eq!(
+            selective["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
+
+        let all = strip_openai_reasoning_encrypted_items(&mixed, None).unwrap();
+        assert_eq!(all["input"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            strip_openai_reasoning_encrypted_items(
+                &mixed,
+                Some(&HashSet::from([digest("missing")]))
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn invalid_encrypted_content_error_matchers_handle_plain_and_gzip_responses() {
+        use std::io::Write;
+
+        let by_code = serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_encrypted_content",
+                "message": "opaque error"
+            }
+        });
+        assert!(is_openai_invalid_encrypted_content_error_value(&by_code));
+
+        let by_ws_message = serde_json::json!({
+            "type": "error",
+            "status": 400,
+            "error": {
+                "message": "The encrypted content for item rs_1 could not be verified."
+            }
+        });
+        assert!(is_openai_invalid_encrypted_content_error_value(
+            &by_ws_message
+        ));
+
+        let unrelated = serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_value",
+                "message": "Invalid encrypted_content must be omitted? No, bad model id"
+            }
+        });
+        assert!(!is_openai_invalid_encrypted_content_error_value(&unrelated));
+        let unrelated_no_code = serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "message": "Invalid encrypted_content must be omitted for an unsupported model flag"
+            }
+        });
+        assert!(!is_openai_invalid_encrypted_content_error_value(
+            &unrelated_no_code
+        ));
+        let unrelated_model = serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "code": "model_not_found",
+                "message": "model does not exist"
+            }
+        });
+        assert!(!is_openai_invalid_encrypted_content_error_value(
+            &unrelated_model
+        ));
+
+        let payload = serde_json::to_vec(&by_code).unwrap();
+        assert!(is_openai_invalid_encrypted_content_http_error(
+            StatusCode::BAD_REQUEST,
+            &HeaderMap::new(),
+            &payload
+        ));
+        assert!(!is_openai_invalid_encrypted_content_http_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &HeaderMap::new(),
+            &payload
+        ));
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&payload).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut gzip_headers = HeaderMap::new();
+        gzip_headers.insert(
+            http::header::CONTENT_ENCODING,
+            http::HeaderValue::from_static("gzip"),
+        );
+        assert!(is_openai_invalid_encrypted_content_http_error(
+            StatusCode::BAD_REQUEST,
+            &gzip_headers,
+            &compressed
+        ));
     }
 }
