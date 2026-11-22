@@ -149,9 +149,11 @@ try {
   for (const stream of [child.stdout, child.stderr]) stream.on('data', data => { diagnostics = (diagnostics + data).slice(-16000); });
   await record('process', `cc-lb pid=${child.pid}; config=${config}`, `kill -TERM ${child.pid}`);
   let ready = false;
-  for (let i = 0; i < 120; i++) {
+  const readyDeadline = Date.now() + 30_000;
+  while (Date.now() < readyDeadline) {
     if (childError) throw childError;
     assert.equal(child.exitCode, null, 'cc-lb exited before readiness');
+    assert.equal(child.signalCode, null, 'cc-lb exited before readiness');
     try { ready = (await fetch(`http://127.0.0.1:${adminPort}/admin/health`, { signal: AbortSignal.timeout(500) })).status === 200; } catch {}
     if (ready) break;
     await new Promise(resolve => setTimeout(resolve, 50));
