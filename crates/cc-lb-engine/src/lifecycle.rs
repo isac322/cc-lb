@@ -5293,14 +5293,25 @@ impl Lifecycle {
                 let has_previous = body
                     .get("previous_response_id")
                     .and_then(Value::as_str)
-                    .is_some();
-                let oauth_only = view
-                    .upstreams_snapshot()
-                    .iter()
-                    .filter(|record| record.enabled)
-                    .all(|record| record.kind == StorageUpstreamKind::OpenaiOauth);
+                    .is_some_and(|id| !id.is_empty());
+                let allowed_upstreams = view.principal_view.allowed_upstreams(auth.principal_id());
+                let mut has_openai_oauth = false;
+                let mut has_openai_api_key = false;
+                for record in view.upstreams_snapshot().iter().filter(|record| {
+                    record.enabled
+                        && allowed_upstreams.is_none_or(|allowed| {
+                            allowed.is_empty() || allowed.contains(&record.id)
+                        })
+                }) {
+                    match record.kind {
+                        StorageUpstreamKind::OpenaiOauth => has_openai_oauth = true,
+                        StorageUpstreamKind::OpenaiApiKey => has_openai_api_key = true,
+                        _ => {}
+                    }
+                }
+                let oauth_only = has_openai_oauth && (codex_backend || !has_openai_api_key);
                 let not_established = failure.message == UPSTREAM_AFFINITY_NOT_ESTABLISHED_MESSAGE;
-                if has_previous && oauth_only && not_established {
+                if owner.is_none() && has_previous && oauth_only && not_established {
                     return Err(WebSocketError::new(
                         400,
                         "previous_response_not_found",

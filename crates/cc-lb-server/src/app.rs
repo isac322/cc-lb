@@ -6434,6 +6434,25 @@ mod tests {
         websocket_test_router_with_allowed_models(records, terminal, vec!["*".to_owned()]).await
     }
 
+    async fn websocket_test_router_with_affinity_store(
+        records: Vec<UpstreamRecord>,
+        terminal: TerminalStrategy,
+    ) -> (tempfile::TempDir, Router) {
+        let dir = tempfile::TempDir::new().expect("tempdir creates");
+        let db_url = format!("sqlite://{}", dir.path().join("affinity.sqlite").display());
+        let state = websocket_test_state_with_affinity_store(
+            records,
+            terminal,
+            DrainController::new(),
+            Arc::new(WebSocketTestSignerFactory),
+            Arc::new(FixtureKeyStore),
+            vec!["*".to_owned()],
+            Some(db_url),
+        )
+        .await;
+        (dir, proxy_router(state, 30))
+    }
+
     async fn websocket_test_router_with_allowed_models(
         records: Vec<UpstreamRecord>,
         terminal: TerminalStrategy,
@@ -6521,12 +6540,42 @@ mod tests {
         managed_key_store: Arc<dyn ManagedKeyStore>,
         allowed_models: Vec<String>,
     ) -> ProxyState {
+        websocket_test_state_with_affinity_store(
+            records,
+            terminal,
+            drain_controller,
+            signer_factory,
+            managed_key_store,
+            allowed_models,
+            None,
+        )
+        .await
+    }
+
+    async fn websocket_test_state_with_affinity_store(
+        records: Vec<UpstreamRecord>,
+        terminal: TerminalStrategy,
+        drain_controller: DrainController,
+        signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
+        managed_key_store: Arc<dyn ManagedKeyStore>,
+        allowed_models: Vec<String>,
+        affinity_db_url: Option<String>,
+    ) -> ProxyState {
         let clock: ClockHandle = Arc::new(cc_lb_clock::SystemClock);
-        let storage: Arc<dyn Storage> = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite("sqlite::memory:", clock.clone())
+        let with_affinity_store = affinity_db_url.is_some();
+        let db_url = affinity_db_url.unwrap_or_else(|| "sqlite::memory:".to_owned());
+        let sqlite = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite(&db_url, clock.clone())
                 .await
                 .expect("in-memory storage opens"),
         );
+        if with_affinity_store {
+            sqlite
+                .initialize()
+                .await
+                .expect("affinity test storage initializes");
+        }
+        let storage: Arc<dyn Storage> = Arc::clone(&sqlite) as Arc<dyn Storage>;
         let builtin_authn = Arc::new(BuiltinAuthn::new(
             Arc::new(KeyStore::new(managed_key_store)),
             clock.clone(),
@@ -6556,13 +6605,19 @@ mod tests {
                 .upstream_records(records)
                 .build(),
         ));
-        let lifecycle = Arc::new(Lifecycle::new_with_dynamic_view(
+        let mut lifecycle = Lifecycle::new_with_dynamic_view(
             builtin_authn.clone(),
             dynamic_view.clone(),
             make_default_dispatcher(50),
             LifecycleConfig::default(),
             clock.clone(),
-        ));
+        );
+        if with_affinity_store {
+            lifecycle = lifecycle.with_upstream_affinity_store(
+                sqlite as Arc<dyn cc_lb_storage_api::UpstreamAffinityStore>,
+            );
+        }
+        let lifecycle = Arc::new(lifecycle);
         ProxyState {
             lifecycle,
             body_caps: RequestBodyCaps {
@@ -7364,6 +7419,106 @@ mod tests {
         provider.await.unwrap();
         let _ = client.close(None).await;
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_oauth_reconnect_previous_response_returns_400_with_anthropic_upstream_and_codex_backend()
+     {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("address available");
+
+        // 1. Public /openai/v1/responses with OpenaiOauth + AnthropicApiKey
+        let mut oauth = websocket_upstream(
+            1,
+            "oauth",
+            Url::parse(&format!("http://{address}/")).expect("provider URL"),
+        );
+        oauth.kind = UpstreamKind::OpenaiOauth;
+        let mut anthropic = websocket_upstream(
+            2,
+            "anthropic",
+            Url::parse(&format!("http://{address}/")).expect("provider URL"),
+        );
+        anthropic.kind = UpstreamKind::AnthropicApiKey;
+        let (_public_dir, public_router) = websocket_test_router_with_affinity_store(
+            vec![oauth.clone(), anthropic.clone()],
+            TerminalStrategy::FirstPick,
+        )
+        .await;
+        let (public_proxy, public_task) = spawn_proxy_router(public_router).await;
+        let mut public_request = websocket_request(public_proxy);
+        *public_request.uri_mut() = format!("ws://{public_proxy}/openai/v1/responses")
+            .parse()
+            .expect("public WS URI parses");
+        let (mut public_client, _) = connect_async(public_request)
+            .await
+            .expect("public handshake succeeds");
+        public_client
+            .send(UpstreamMessage::Text(
+                r#"{"type":"response.create","model":"gpt-4.1","store":false,"previous_response_id":"resp_closed","input":[]}"#.into(),
+            ))
+            .await
+            .expect("public create sends");
+        let public_error = tokio::time::timeout(Duration::from_secs(5), public_client.next())
+            .await
+            .expect("public error arrives")
+            .expect("public frame exists")
+            .expect("public frame decodes");
+        let public_error: Value =
+            serde_json::from_str(public_error.to_text().expect("error is text"))
+                .expect("error is JSON");
+        assert_eq!(public_error["status"], 400);
+        assert_eq!(public_error["error"]["code"], "previous_response_not_found");
+        let _ = public_client.close(None).await;
+        public_task.abort();
+
+        // 2. Native /openai/backend-api/codex/responses with OpenaiOauth + OpenaiApiKey + AnthropicApiKey
+        let mut openai_api_key = websocket_upstream(
+            3,
+            "openai-api-key",
+            Url::parse(&format!("http://{address}/")).expect("provider URL"),
+        );
+        openai_api_key.kind = UpstreamKind::OpenaiApiKey;
+        let (_codex_dir, codex_router) = websocket_test_router_with_affinity_store(
+            vec![oauth, openai_api_key, anthropic],
+            TerminalStrategy::FirstPick,
+        )
+        .await;
+        let (codex_proxy, codex_task) = spawn_proxy_router(codex_router).await;
+        let mut codex_request = websocket_request(codex_proxy);
+        *codex_request.uri_mut() = format!("ws://{codex_proxy}/openai/backend-api/codex/responses")
+            .parse()
+            .expect("codex WS URI parses");
+        let (mut codex_client, _) = connect_async(codex_request)
+            .await
+            .expect("codex handshake succeeds");
+        codex_client
+            .send(UpstreamMessage::Text(
+                r#"{"type":"response.create","model":"gpt-4.1","store":false,"previous_response_id":"resp_closed","input":[]}"#.into(),
+            ))
+            .await
+            .expect("codex create sends");
+        let codex_error = tokio::time::timeout(Duration::from_secs(5), codex_client.next())
+            .await
+            .expect("codex error arrives")
+            .expect("codex frame exists")
+            .expect("codex frame decodes");
+        let codex_error: Value =
+            serde_json::from_str(codex_error.to_text().expect("error is text"))
+                .expect("error is JSON");
+        assert_eq!(codex_error["status"], 400);
+        assert_eq!(codex_error["error"]["code"], "previous_response_not_found");
+        let _ = codex_client.close(None).await;
+        codex_task.abort();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "rejected previous_response_not_found turns must not contact any upstream",
+        );
     }
 
     #[tokio::test]

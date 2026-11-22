@@ -793,7 +793,10 @@ impl ResponsesWebSocketGateway {
             )
             .with_stream(lane.clone()));
         }
-        if owner.is_none() && self.session_oauth && previous.is_some() {
+        if owner.is_none()
+            && self.session_oauth
+            && previous.as_deref().is_some_and(|id| !id.is_empty())
+        {
             return Err(WebSocketError::new(
                 400,
                 "previous_response_not_found",
@@ -1402,16 +1405,22 @@ impl ResponsesWebSocketGateway {
         self.connection_lanes
             .entry(connection_id)
             .or_insert_with(|| self.turns.get(&turn_id).and_then(|turn| turn.lane.clone()));
-        self.session_upstream.get_or_insert(upstream_id);
-        if self
-            .turns
-            .get(&turn_id)
-            .is_some_and(|turn| turn.prepared.oauth_compat)
-        {
+        let is_oauth = self.turns.get(&turn_id).is_some_and(|turn| {
+            turn.prepared
+                .candidates
+                .iter()
+                .find(|candidate| candidate.upstream_id == upstream_id)
+                .map_or(turn.prepared.oauth_transport, |candidate| {
+                    candidate.socket_per_lane
+                })
+        });
+        if is_oauth {
+            self.session_upstream.get_or_insert(upstream_id);
             self.session_oauth = true;
         }
         self.connections.entry(connection_id).or_insert(upstream_id);
         if let Some(turn) = self.turns.get_mut(&turn_id) {
+            turn.prepared.oauth_transport = is_oauth;
             if let Some(signer) = turn.prepared_signers.remove(&upstream_id) {
                 self.connection_signers
                     .entry(connection_id)

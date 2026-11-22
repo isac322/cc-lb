@@ -2934,3 +2934,292 @@ async fn ws1296_live_previous_response_accepts_same_reasoning_owner_on_original_
     assert_eq!(dispatch.call_count(), 0);
     gateway.close();
 }
+
+fn openai_oauth_upstream_record(
+    id: Uuid,
+    name: &str,
+    enabled: bool,
+) -> cc_lb_storage_api::UpstreamRecord {
+    let mut record = upstream_record(id, name, enabled);
+    record.kind = UpstreamKind::OpenaiOauth;
+    record
+}
+
+#[tokio::test]
+async fn ws_oauth_reconnect_previous_response_returns_400_with_non_openai_upstreams() {
+    let oauth_id = Uuid::from_u128(0x138201);
+    let anthropic_id = Uuid::from_u128(0x138202);
+    let gemini_id = Uuid::from_u128(0x138203);
+    let store = Arc::new(MemoryAffinityStore::default());
+    let dispatch = Arc::new(RecordingDispatch::default());
+    let mut gateway = ws1296_gateway(lifecycle(
+        vec![
+            openai_oauth_upstream_record(oauth_id, "oauth-main", true),
+            upstream_record(anthropic_id, "anthropic-main", true),
+            gemini_upstream_record(gemini_id, "gemini-main", true),
+        ],
+        dispatch.clone(),
+        Some(store),
+    ))
+    .await;
+
+    let error = ws1296_admit(&mut gateway, ws1296_create(Some("resp_closed_ws"), None))
+        .await
+        .expect_err("OAuth-only OpenAI pool must convert missing previous_response_id to 400");
+    assert_eq!(error.status, 400);
+    assert_eq!(error.code, "previous_response_not_found");
+    assert_eq!(dispatch.call_count(), 0);
+    gateway.close();
+}
+
+#[tokio::test]
+async fn ws_codex_backend_reconnect_previous_response_returns_400_with_mixed_openai_pool() {
+    let oauth_id = Uuid::from_u128(0x138211);
+    let api_key_id = Uuid::from_u128(0x138212);
+    let anthropic_id = Uuid::from_u128(0x138213);
+    let store = Arc::new(MemoryAffinityStore::default());
+    let dispatch = Arc::new(RecordingDispatch::default());
+    let mut gateway = ws1296_gateway(lifecycle(
+        vec![
+            openai_oauth_upstream_record(oauth_id, "oauth-main", true),
+            openai_upstream_record(api_key_id, "openai-api-key", true),
+            upstream_record(anthropic_id, "anthropic-main", true),
+        ],
+        dispatch.clone(),
+        Some(store),
+    ))
+    .await
+    .with_codex_backend(true);
+
+    let error = ws1296_admit(&mut gateway, ws1296_create(Some("resp_closed_ws"), None))
+        .await
+        .expect_err("codex_backend surface is OAuth-only even with OpenaiApiKey present");
+    assert_eq!(error.status, 400);
+    assert_eq!(error.code, "previous_response_not_found");
+    assert_eq!(dispatch.call_count(), 0);
+    gateway.close();
+}
+
+#[tokio::test]
+async fn ws_previous_response_fallback_controls_preserve_503_boundaries() {
+    let oauth_id = Uuid::from_u128(0x138221);
+    let api_key_id = Uuid::from_u128(0x138222);
+    let anthropic_id = Uuid::from_u128(0x138223);
+
+    // Control A: mixed OpenAI pool on public /v1/responses must keep 503.
+    let store_a = Arc::new(MemoryAffinityStore::default());
+    let mut mixed_public = ws1296_gateway(lifecycle(
+        vec![
+            openai_oauth_upstream_record(oauth_id, "oauth-main", true),
+            openai_upstream_record(api_key_id, "openai-api-key", true),
+        ],
+        Arc::new(RecordingDispatch::default()),
+        Some(store_a),
+    ))
+    .await;
+    let err_a = ws1296_admit(
+        &mut mixed_public,
+        ws1296_create(Some("resp_closed_ws"), None),
+    )
+    .await
+    .expect_err("mixed OpenAI public WS must not rewrite unknown previous_response_id");
+    assert_eq!(err_a.status, 503);
+    assert_eq!(err_a.code, "upstream_affinity_unavailable");
+    mixed_public.close();
+
+    // Control B: live previous_response_id owner + unknown encrypted_content must return 503.
+    let store_b = Arc::new(MemoryAffinityStore::default());
+    let mut live_oauth = ws1296_gateway(lifecycle(
+        vec![openai_oauth_upstream_record(oauth_id, "oauth-main", true)],
+        Arc::new(RecordingDispatch::default()),
+        Some(store_b),
+    ))
+    .await;
+    let turn = ws1296_admit(&mut live_oauth, ws1296_create(None, None))
+        .await
+        .expect("initial turn admits")
+        .expect("initial turn dispatches");
+    ws1296_send(&mut live_oauth, &turn, 1).await;
+    ws1296_assert_raw_forward(
+        &live_oauth
+            .provider_message(1, &ws1296_created("resp_live"))
+            .await
+            .expect("created handled"),
+    );
+    ws1296_assert_raw_forward(
+        &live_oauth
+            .provider_message(1, &ws1296_completed("resp_live", vec![]))
+            .await
+            .expect("completed handled"),
+    );
+    let err_b = ws1296_admit(
+        &mut live_oauth,
+        ws1296_create(Some("resp_live"), Some("unknown-foreign-reasoning")),
+    )
+    .await
+    .expect_err("live previous_response_id must not mask unknown encrypted_content");
+    assert_eq!(err_b.status, 503);
+    assert_eq!(err_b.code, "upstream_affinity_unavailable");
+    live_oauth.close();
+
+    // Control C: unknown encrypted_content without previous_response_id or with empty
+    // previous_response_id must return 503 on OAuth-only pool.
+    let store_c = Arc::new(MemoryAffinityStore::default());
+    let mut oauth_only = ws1296_gateway(lifecycle(
+        vec![openai_oauth_upstream_record(oauth_id, "oauth-main", true)],
+        Arc::new(RecordingDispatch::default()),
+        Some(store_c),
+    ))
+    .await;
+    for previous in [None, Some("")] {
+        let err_c = ws1296_admit(
+            &mut oauth_only,
+            ws1296_create(previous, Some("unknown-foreign-reasoning")),
+        )
+        .await
+        .expect_err("unknown reasoning must fail closed with 503");
+        assert_eq!(err_c.status, 503);
+        assert_eq!(err_c.code, "upstream_affinity_unavailable");
+    }
+    oauth_only.close();
+
+    // Control D: zero enabled OpenAI upstreams must not vacuously count as OAuth-only.
+    let store_d = Arc::new(MemoryAffinityStore::default());
+    let mut no_openai = ws1296_gateway(lifecycle(
+        vec![upstream_record(anthropic_id, "anthropic-only", true)],
+        Arc::new(RecordingDispatch::default()),
+        Some(store_d),
+    ))
+    .await;
+    let err_d = ws1296_admit(&mut no_openai, ws1296_create(Some("resp_closed_ws"), None))
+        .await
+        .expect_err("empty OpenAI pool must not return previous_response_not_found");
+    assert_eq!(err_d.status, 503);
+    assert_eq!(err_d.code, "upstream_affinity_unavailable");
+    no_openai.close();
+}
+
+#[tokio::test]
+async fn ws_native_codex_oauth_session_rejects_stale_and_cross_lane_previous_response() {
+    let oauth_id = Uuid::from_u128(0x138231);
+    let api_key_id = Uuid::from_u128(0x138232);
+    let store = Arc::new(MemoryAffinityStore::default());
+    let mut gateway = ws1296_gateway(lifecycle(
+        vec![
+            openai_oauth_upstream_record(oauth_id, "oauth-main", true),
+            openai_upstream_record(api_key_id, "openai-api-key", true),
+        ],
+        Arc::new(RecordingDispatch::default()),
+        Some(store),
+    ))
+    .await
+    .with_codex_backend(true);
+
+    let lane_a_create = Bytes::from(
+        json!({
+            "type": "response.create",
+            "stream_id": "a",
+            "model": "gpt-5-codex",
+            "store": false,
+            "input": [{"role": "user", "content": "hello"}],
+        })
+        .to_string(),
+    );
+    let turn = ws1296_admit(&mut gateway, lane_a_create)
+        .await
+        .expect("lane a turn admits")
+        .expect("lane a turn dispatches");
+    assert_eq!(turn.candidates.len(), 1);
+    assert_eq!(turn.candidates[0].upstream_id, oauth_id);
+    ws1296_send(&mut gateway, &turn, 1).await;
+
+    let created = Bytes::from(
+        json!({
+            "type": "response.created",
+            "stream_id": "a",
+            "sequence_number": 0,
+            "response": {
+                "id": "resp_lane_a",
+                "object": "response",
+                "model": "gpt-5-codex",
+                "status": "in_progress",
+                "store": false,
+                "output": [],
+                "usage": null,
+            },
+        })
+        .to_string(),
+    );
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(1, &created)
+            .await
+            .expect("lane a created forwards"),
+    );
+    let completed = Bytes::from(
+        json!({
+            "type": "response.completed",
+            "stream_id": "a",
+            "sequence_number": 1,
+            "response": {
+                "id": "resp_lane_a",
+                "object": "response",
+                "model": "gpt-5-codex",
+                "status": "completed",
+                "store": false,
+                "output": [],
+                "usage": null,
+            },
+        })
+        .to_string(),
+    );
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(1, &completed)
+            .await
+            .expect("lane a completed forwards"),
+    );
+
+    let cross_lane = Bytes::from(
+        json!({
+            "type": "response.create",
+            "stream_id": "b",
+            "previous_response_id": "resp_lane_a",
+            "model": "gpt-5-codex",
+            "store": false,
+            "input": [{"role": "user", "content": "cross lane"}],
+        })
+        .to_string(),
+    );
+    let cross_err = ws1296_admit(&mut gateway, cross_lane)
+        .await
+        .expect_err("cross-lane previous_response_id must be rejected");
+    assert_eq!(cross_err.status, 400);
+    assert_eq!(cross_err.code, "previous_response_not_found");
+    assert_eq!(
+        cross_err.message,
+        "The previous response belongs to another WebSocket lane"
+    );
+
+    let stale = Bytes::from(
+        json!({
+            "type": "response.create",
+            "stream_id": "a",
+            "previous_response_id": "resp_evicted",
+            "model": "gpt-5-codex",
+            "store": false,
+            "input": [{"role": "user", "content": "stale"}],
+        })
+        .to_string(),
+    );
+    let stale_err = ws1296_admit(&mut gateway, stale)
+        .await
+        .expect_err("missing previous_response_id on active OAuth WS must return 400");
+    assert_eq!(stale_err.status, 400);
+    assert_eq!(stale_err.code, "previous_response_not_found");
+    assert_eq!(
+        stale_err.message,
+        "The previous response is not available on this connection"
+    );
+    gateway.close();
+}
