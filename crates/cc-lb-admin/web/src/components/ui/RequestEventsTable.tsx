@@ -1,4 +1,4 @@
-import { CircleAlert, Unplug } from 'lucide-react';
+import { CircleAlert, CircleCheck, Unplug } from 'lucide-react';
 import type React from 'react';
 import { memo, useState } from 'react';
 import { eventTime } from '../../lib/api';
@@ -6,6 +6,7 @@ import {
   getRequestOutcome,
   type RequestOutcome,
   requestOutcomeTone,
+  resolveRequestProtocol,
   STATUS_TONE_TEXT_CLASS,
 } from '../../lib/format';
 import {
@@ -275,6 +276,32 @@ function RequestStatusCell({ outcome }: { outcome: RequestOutcome }) {
       </TableCell>
     );
   }
+  if (outcome.type === 'ws_completed') {
+    return (
+      <TableCell numeric className={base}>
+        <Hint
+          openOnFocus={false}
+          label={
+            <span className="flex flex-col">
+              <span>Completed</span>
+              <span className="text-text-muted">WebSocket</span>
+            </span>
+          }
+        >
+          <IconButton
+            label="WebSocket request completed"
+            className="-my-1.5 -mr-2 align-middle max-md:-my-3 max-md:-mr-3.5"
+          >
+            <CircleCheck
+              strokeWidth={1.75}
+              aria-hidden="true"
+              className="text-traffic-success-text"
+            />
+          </IconButton>
+        </Hint>
+      </TableCell>
+    );
+  }
   if (outcome.type === 'completed') {
     return (
       <TableCell
@@ -293,10 +320,12 @@ function RequestStatusCell({ outcome }: { outcome: RequestOutcome }) {
     outcome.type === 'client_disconnected'
       ? 'Client disconnected'
       : outcome.label;
+  const transportLabel =
+    outcome.protocol === 'websocket' ? 'WebSocket' : `HTTP ${outcome.status}`;
   const detail =
     outcome.error_code != null && outcome.error_code !== title
-      ? `HTTP ${outcome.status} · ${outcome.error_code}`
-      : `HTTP ${outcome.status}`;
+      ? `${transportLabel} · ${outcome.error_code}`
+      : transportLabel;
   const Icon = disconnected ? Unplug : CircleAlert;
   return (
     <TableCell numeric className={base}>
@@ -312,7 +341,7 @@ function RequestStatusCell({ outcome }: { outcome: RequestOutcome }) {
         {/* Tone sits on the glyph: `cx` does not merge, so a `text-*` on the
         button would race `IconButton`'s own `text-text-muted`. */}
         <IconButton
-          label={`${title} (HTTP ${outcome.status})`}
+          label={`${title} (${transportLabel})`}
           className="-my-1.5 -mr-2 align-middle max-md:-my-3 max-md:-mr-3.5"
         >
           <Icon
@@ -370,11 +399,13 @@ const RequestEventRow = memo(function RequestEventRow({
   onAnchorRange,
 }: RequestEventRowProps) {
   const isPartial = event._phase === 'partial';
+  const protocol = resolveRequestProtocol(event);
   const outcome = getRequestOutcome(
     isPartial,
     event._phase === 'final' ? event.status : 0,
     event._phase === 'final' ? event.error_code : undefined,
     event._phase === 'final' ? event.upstream_error_type : undefined,
+    protocol,
   );
   const tone = requestOutcomeTone(outcome);
   const tierBadge = serviceTierBadgeText(event.service_tier);

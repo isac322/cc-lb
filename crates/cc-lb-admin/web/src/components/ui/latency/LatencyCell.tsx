@@ -1,5 +1,11 @@
 import { type ReactNode, useId } from 'react';
-import { fmtBytes, fmtMs, fmtMsCompact, fmtSetupMs } from '../../../lib/format';
+import {
+  fmtBytes,
+  fmtMs,
+  fmtMsCompact,
+  fmtSetupMs,
+  resolveRequestProtocol,
+} from '../../../lib/format';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { MetricCell } from '../MetricCell';
 import { cx } from '../primitives';
@@ -185,6 +191,8 @@ export function LatencyCell({
         { label: 'Sign', value: e.sign_ms },
       ];
 
+  const protocol = resolveRequestProtocol(e);
+  const isWebsocket = protocol === 'websocket';
   const responseBodyRemainderLabel = isCancelledPartial
     ? hasResponseBodyBreakdown
       ? 'Other response body (client cancelled)'
@@ -192,7 +200,9 @@ export function LatencyCell({
     : hasResponseBodyBreakdown
       ? 'Other response body'
       : e.stream_total_ms != null
-        ? 'Stream relay'
+        ? isWebsocket
+          ? 'WebSocket relay'
+          : 'Stream relay'
         : 'Body collect';
   const unattributedDescription = latencyResponsibilityDescription(
     'unattributed',
@@ -303,7 +313,7 @@ export function LatencyCell({
         pill={
           e.connection_reused ? (
             <span className="px-1 py-0.5 rounded-sm bg-ok/12 text-success-text text-caption leading-none">
-              Warm pool
+              {isWebsocket ? 'Reused socket' : 'Warm pool'}
             </span>
           ) : null
         }
@@ -322,11 +332,12 @@ export function LatencyCell({
         duration={duration}
         items={[
           {
-            label: 'Header wait',
+            label: isWebsocket ? 'First frame wait' : 'Header wait',
             value: e.upstream_ttfb_ms != null ? upstream_wait_ms : undefined,
             showZero: e.upstream_ttfb_ms != null,
-            description:
-              'Combined provider generation, upstream transit, and runtime scheduling until response headers arrive.',
+            description: isWebsocket
+              ? 'Provider generation and transit wait until the first WebSocket response frame arrives.'
+              : 'Combined provider generation, upstream transit, and runtime scheduling until response headers arrive.',
           },
           {
             label: 'Response body wait',

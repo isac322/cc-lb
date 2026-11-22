@@ -148,6 +148,7 @@ async fn connect_realtime_provider(
         RealtimeProvider,
         HeaderMap,
         cc_lb_engine::OwnedBulkheadGuard,
+        cc_lb_engine::realtime_websocket::RealtimeConnectionTimings,
     ),
     WebSocketError,
 > {
@@ -161,6 +162,7 @@ async fn connect_realtime_provider(
     let mut config = state.websocket_bulkhead_config;
     config.semaphore_permits = config.max_conns_per_upstream;
     let operation = async {
+        let bulkhead_started = std::time::Instant::now();
         let guard = state
             .websocket_bulkheads
             .bulkhead(session.candidate.upstream_name.clone(), config)
@@ -173,6 +175,10 @@ async fn connect_realtime_provider(
                     "WebSocket upstream connection budget is full",
                 )
             })?;
+        let bulkhead_wait_ms = bulkhead_started
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
         let mut request = responses_websocket_request(session.url.clone(), session.headers.clone())
             .map_err(|_| {
                 WebSocketError::new(
@@ -182,7 +188,16 @@ async fn connect_realtime_provider(
                 )
             })?;
         session.inject_trace_context(request.headers_mut());
-        connect_provider_websocket(state, session.candidate.upstream_id, request, guard).await
+        let (upstream, headers, guard, connect_timings) =
+            connect_provider_websocket(state, session.candidate.upstream_id, request, guard)
+                .await?;
+        let timings = cc_lb_engine::realtime_websocket::RealtimeConnectionTimings {
+            bulkhead_wait_ms: Some(bulkhead_wait_ms),
+            dns_ms: connect_timings.dns_ms,
+            connect_ms: connect_timings.connect_ms,
+            connection_reused: Some(false),
+        };
+        Ok((upstream, headers, guard, timings))
     };
     tokio::select! {
         result = operation => result,
@@ -383,7 +398,7 @@ async fn openai_realtime_websocket_for_target(
         Ok(session) => session,
         Err(error) => return websocket_http_error(&error),
     };
-    let (upstream, response_headers, bulkhead) =
+    let (upstream, response_headers, bulkhead, connect_timings) =
         match connect_realtime_provider(&state, &session).await {
             Ok(connection) => connection,
             Err(error) => {
@@ -392,7 +407,7 @@ async fn openai_realtime_websocket_for_target(
                 return websocket_http_error(&error);
             }
         };
-    session.connected(&response_headers);
+    session.connected_with_timings(&response_headers, connect_timings);
     let request_dispatch = tracing::dispatcher::get_default(Clone::clone);
     websocket
         .max_message_size(state.body_caps.messages)
@@ -543,7 +558,7 @@ pub(super) async fn gemini_live_websocket_handler(
                         return;
                     }
                 };
-                let (mut upstream, response_headers, _bulkhead) =
+                let (mut upstream, response_headers, _bulkhead, connect_timings) =
                     match connect_realtime_provider(&state, &session).await {
                         Ok(connection) => connection,
                         Err(error) => {
@@ -555,7 +570,7 @@ pub(super) async fn gemini_live_websocket_handler(
                             return;
                         }
                     };
-                session.connected(&response_headers);
+                session.connected_with_timings(&response_headers, connect_timings);
                 let first = match transform_realtime_message(
                     &session,
                     cc_lb_upstream::RealtimeFrameDirection::Setup,
@@ -638,7 +653,7 @@ async fn relay_realtime_websocket(
     mut downstream: WebSocket,
     mut upstream: RealtimeProvider,
     state: &ProxyState,
-    session: RealtimeWebSocketSession,
+    mut session: RealtimeWebSocketSession,
     kind: RealtimeWebSocketKind,
 ) {
     // Usage frames are already marker-filtered, so an unbounded handoff keeps
@@ -720,7 +735,9 @@ async fn relay_realtime_websocket(
                     let message = match message {
                         Some(Ok(message @ UpstreamMessage::Text(_))) => {
                             if let UpstreamMessage::Text(frame) = &message {
-                                if metrics.observe_frame(frame.as_bytes()) {
+                                let now = std::time::Instant::now();
+                                session.record_first_provider_frame_at(now);
+                                if metrics.observe_frame_at(frame.as_bytes(), now) {
                                     session.emit_request_activity();
                                 }
                                 metrics.observe_turn_boundary(kind, frame.as_bytes());
@@ -733,7 +750,9 @@ async fn relay_realtime_websocket(
                         }
                         Some(Ok(message @ UpstreamMessage::Binary(_))) => {
                             if let UpstreamMessage::Binary(frame) = &message {
-                                if metrics.observe_frame(frame) {
+                                let now = std::time::Instant::now();
+                                session.record_first_provider_frame_at(now);
+                                if metrics.observe_frame_at(frame, now) {
                                     session.emit_request_activity();
                                 }
                                 metrics.observe_turn_boundary(kind, frame);

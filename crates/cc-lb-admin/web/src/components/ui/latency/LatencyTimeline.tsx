@@ -8,7 +8,14 @@ import {
   useState,
 } from 'react';
 import type { ApiKeyProvider } from '../../../lib/api';
-import { fmtBytes, fmtMs, fmtN, fmtSetupMs } from '../../../lib/format';
+import {
+  fmtBytes,
+  fmtMs,
+  fmtN,
+  fmtSetupMs,
+  type RequestProtocol,
+  resolveRequestProtocol,
+} from '../../../lib/format';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { cx, Skeleton } from '../primitives';
 import {
@@ -133,6 +140,7 @@ const MARKER_DESCRIPTIONS: Record<string, string> = {
 function stageDescription(
   key: string,
   provider?: LatencyProvider | null,
+  protocol?: RequestProtocol | null,
 ): string | undefined {
   if (key === 'shape') {
     if (provider === 'anthropic') {
@@ -143,6 +151,14 @@ function stageDescription(
     }
     if (provider === 'gemini') {
       return 'Run the shape plugin: adapt the request dialect and shape the outbound body for Gemini.';
+    }
+  }
+  if (protocol === 'websocket') {
+    if (key === 'upstream_wait') {
+      return 'Provider generation and upstream transit wait until the first WebSocket response frame arrives.';
+    }
+    if (key === 'stream_relay') {
+      return 'Complete WebSocket response frame relay from the first provider frame to completion.';
     }
   }
   if (key === 'stream_relay' && provider === 'anthropic') {
@@ -165,10 +181,31 @@ const ANTHROPIC_MARKER_DESCRIPTIONS: Record<string, string> = {
     'Last byte received from Anthropic on this stream. End of upstream response.',
 };
 
+const WEBSOCKET_MARKER_DESCRIPTIONS: Record<string, string> = {
+  message_start:
+    'First WebSocket response lifecycle frame (`response.created` / `response.in_progress`) — the provider began the turn.',
+  content_block_start:
+    'First output item or content part frame (`response.output_item.added` / `content_part.added`).',
+  first_delta:
+    'Time-to-first-token (TTFT). First streamed WebSocket content or reasoning delta frame delivered.',
+  first_output:
+    'Legacy first non-empty WebSocket output frame observed before semantic lifecycle markers were separated.',
+  last_delta:
+    'Last streamed WebSocket content or reasoning delta frame delivered before turn completion.',
+  message_stop:
+    'Terminal WebSocket response frame (`response.completed` / `incomplete` / `failed`).',
+  last_chunk:
+    'Last WebSocket response frame received from upstream for this turn.',
+};
+
 function markerDescription(
   key: string,
   provider?: LatencyProvider | null,
+  protocol?: RequestProtocol | null,
 ): string | undefined {
+  if (protocol === 'websocket') {
+    return WEBSOCKET_MARKER_DESCRIPTIONS[key] ?? MARKER_DESCRIPTIONS[key];
+  }
   return provider === 'anthropic'
     ? ANTHROPIC_MARKER_DESCRIPTIONS[key]
     : MARKER_DESCRIPTIONS[key];
@@ -335,17 +372,29 @@ export function buildStageDetails(e: RequestEventWithPhase): StageDetail[] {
           (e.dns_ms ?? 0) -
           (e.connect_ms ?? 0),
       );
-      push('upstream_wait', 'Upstream wait', 'upstream', upstreamWait);
+      push(
+        'upstream_wait',
+        resolveRequestProtocol(e) === 'websocket'
+          ? 'First frame wait'
+          : 'Upstream wait',
+        'upstream',
+        upstreamWait,
+      );
     }
 
     if (e._phase === 'final') {
+      const protocol = resolveRequestProtocol(e);
+      const isWebsocket = protocol === 'websocket';
       const bodyMs = responseBodyDuration(e);
       const hasIncompleteStream =
         e.status === 499 ||
         (e.stream_total_ms == null &&
           ((e.sse_event_count ?? 0) > 0 ||
             e.stream_message_start_ms != null ||
-            e.stream_last_chunk_ms != null));
+            e.stream_last_chunk_ms != null ||
+            (isWebsocket &&
+              ((e.body_chunk_count ?? 0) > 0 ||
+                e.stream_first_output_ms != null))));
       if (hasIncompleteStream) {
         pushRecorded(
           'partial_stream',
@@ -356,7 +405,12 @@ export function buildStageDetails(e: RequestEventWithPhase): StageDetail[] {
           e.upstream_body_ms,
         );
       } else if (e.stream_total_ms != null) {
-        pushRecorded('stream_relay', 'Stream relay', 'body', bodyMs);
+        pushRecorded(
+          'stream_relay',
+          isWebsocket ? 'WebSocket relay' : 'Stream relay',
+          'body',
+          bodyMs,
+        );
       } else {
         pushRecorded(
           'body_collect',
@@ -382,6 +436,18 @@ export function buildStageDetails(e: RequestEventWithPhase): StageDetail[] {
   });
 }
 
+function markerHeading(protocol: RequestProtocol | null): string {
+  if (protocol === 'websocket') return 'WebSocket markers';
+  if (protocol === 'http_stream') return 'Stream markers';
+  return 'SSE markers';
+}
+
+function markerDetailsHeading(protocol: RequestProtocol | null): string {
+  if (protocol === 'websocket') return 'WebSocket marker details';
+  if (protocol === 'http_stream') return 'Stream marker details';
+  return 'SSE marker details';
+}
+
 interface SseMarker {
   key: string;
   label: string;
@@ -392,17 +458,28 @@ interface SseMarker {
 }
 
 export function buildSseMarkers(e: RequestEventWithPhase): SseMarker[] {
-  if (e.source_kind === 'renewal') return [];
+  if (e.source_kind === 'renewal' || e.protocol === 'http') return [];
 
-  const relayStart =
-    (e.request_body_read_ms ?? 0) +
-    (e.auth_ms ?? 0) +
-    (e.route_ms ?? 0) +
-    (e.limit_reserve_ms ?? 0) +
-    deriveSetupOverhead(e) +
-    (e.shape_ms ?? 0) +
-    (e.sign_ms ?? 0) +
-    (e.upstream_ttfb_ms ?? 0);
+  const protocol = resolveRequestProtocol(e);
+  const isWebsocket = protocol === 'websocket';
+  const isLegacyWebsocketStream =
+    isWebsocket &&
+    e._phase === 'final' &&
+    e.upstream_ttfb_ms == null &&
+    e.stream_total_ms != null &&
+    e.duration_ms != null &&
+    e.stream_total_ms >= e.duration_ms * 0.95;
+
+  const relayStart = isLegacyWebsocketStream
+    ? 0
+    : (e.request_body_read_ms ?? 0) +
+      (e.auth_ms ?? 0) +
+      (e.route_ms ?? 0) +
+      (e.limit_reserve_ms ?? 0) +
+      deriveSetupOverhead(e) +
+      (e.shape_ms ?? 0) +
+      (e.sign_ms ?? 0) +
+      (e.upstream_ttfb_ms ?? 0);
 
   const defs: Array<{
     key: string;
@@ -413,13 +490,13 @@ export function buildSseMarkers(e: RequestEventWithPhase): SseMarker[] {
   }> = [
     {
       key: 'message_start',
-      label: 'Message start',
+      label: isWebsocket ? 'Response created' : 'Message start',
       ms: e._phase === 'final' ? e.stream_message_start_ms : undefined,
       color: 'text-text-muted',
     },
     {
       key: 'content_block_start',
-      label: 'Content block start',
+      label: isWebsocket ? 'Output started' : 'Content block start',
       ms: e._phase === 'final' ? e.stream_content_block_start_ms : undefined,
       color: 'text-text-muted',
     },
@@ -430,6 +507,20 @@ export function buildSseMarkers(e: RequestEventWithPhase): SseMarker[] {
       color: 'text-text',
       starred: true,
     },
+    ...(isWebsocket &&
+    e._phase === 'final' &&
+    e.stream_first_content_delta_ms == null &&
+    e.stream_first_output_ms != null
+      ? [
+          {
+            key: 'first_output',
+            label: 'First output frame',
+            ms: e.stream_first_output_ms,
+            color: 'text-text',
+            starred: true,
+          },
+        ]
+      : []),
     {
       key: 'last_delta',
       label: 'Last content delta',
@@ -438,13 +529,13 @@ export function buildSseMarkers(e: RequestEventWithPhase): SseMarker[] {
     },
     {
       key: 'message_stop',
-      label: 'Message stop',
+      label: isWebsocket ? 'Response completed' : 'Message stop',
       ms: e._phase === 'final' ? e.stream_message_stop_ms : undefined,
       color: 'text-text-muted',
     },
     {
       key: 'last_chunk',
-      label: 'Last chunk',
+      label: isWebsocket ? 'Last frame' : 'Last chunk',
       ms: e._phase === 'final' ? e.stream_last_chunk_ms : undefined,
       color: 'text-text-faint',
     },
@@ -640,7 +731,9 @@ function ResponsibilityOverview({
             <button
               aria-label={`${group.label}${
                 group.key === 'upstream-net' && event.connection_reused === true
-                  ? ', warm pool'
+                  ? resolveRequestProtocol(event) === 'websocket'
+                    ? ', reused socket'
+                    : ', warm pool'
                   : ''
               }, ${group.observed ? fmtMs(group.valueMs) : 'not recorded'}, ${
                 group.observed
@@ -661,7 +754,9 @@ function ResponsibilityOverview({
                 {group.key === 'upstream-net' &&
                 event.connection_reused === true ? (
                   <span className="ml-1 rounded-sm bg-ok/12 px-1 py-0.5 text-caption leading-none text-success-text">
-                    Warm pool
+                    {resolveRequestProtocol(event) === 'websocket'
+                      ? 'Reused socket'
+                      : 'Warm pool'}
                   </span>
                 ) : null}
               </span>
@@ -691,15 +786,17 @@ function StageInfo({
   total,
   groupLabel,
   provider,
+  protocol,
 }: {
   stage: StageDetail;
   overview: StageDetail[];
   total: number;
   groupLabel: string;
   provider?: LatencyProvider | null;
+  protocol?: RequestProtocol | null;
 }) {
   const overviewTotal = overview.reduce((a, s) => a + s.ms, 0);
-  const description = stageDescription(stage.key, provider);
+  const description = stageDescription(stage.key, provider, protocol);
   const multi = overview.length > 1 && overviewTotal > 0;
 
   return (
@@ -830,11 +927,13 @@ function MarkerIcon({ starred }: { starred?: boolean }) {
 function MarkerInfo({
   marker,
   provider,
+  protocol,
 }: {
   marker: SseMarker;
   provider?: LatencyProvider | null;
+  protocol?: RequestProtocol | null;
 }) {
-  const description = markerDescription(marker.key, provider);
+  const description = markerDescription(marker.key, provider, protocol);
   return (
     <div className="flex flex-col gap-1 min-w-[220px]">
       <div className="flex items-center gap-1.5">
@@ -854,7 +953,9 @@ function MarkerInfo({
       </div>
       <div className="flex items-center gap-2 tabular-nums text-text-faint">
         <span>+{fmtMs(marker.relayMs)}</span>
-        <span>from relay start</span>
+        <span>
+          {protocol === 'websocket' ? 'from first frame' : 'from relay start'}
+        </span>
       </div>
       {description ? (
         <div className="text-text-faint leading-snug border-t border-subtle/40 pt-1.5">
@@ -877,6 +978,7 @@ function SegmentButton({
   overview,
   groupLabel,
   provider,
+  protocol,
 }: {
   stage: StageDetail;
   startMs: number;
@@ -885,6 +987,7 @@ function SegmentButton({
   overview: StageDetail[];
   groupLabel: string;
   provider?: LatencyProvider | null;
+  protocol?: RequestProtocol | null;
 }) {
   const isActive = active.isActive(stage.key);
   const isSticky = active.isSticky(stage.key);
@@ -905,6 +1008,7 @@ function SegmentButton({
           total={total}
           groupLabel={groupLabel}
           provider={provider}
+          protocol={protocol}
         />
       }
     >
@@ -982,6 +1086,7 @@ function MarkerDot({
   axisTop,
   dotTop,
   provider,
+  protocol,
 }: {
   marker: StaggeredMarker;
   total: number;
@@ -989,6 +1094,7 @@ function MarkerDot({
   axisTop: number;
   dotTop: number;
   provider?: LatencyProvider | null;
+  protocol?: RequestProtocol | null;
 }) {
   const leftPct = clampPct((marker.absMs / total) * 100);
   const isActive = active.isActive(marker.key);
@@ -1007,7 +1113,11 @@ function MarkerDot({
           }}
         />
       )}
-      <InfoPopover content={<MarkerInfo marker={marker} provider={provider} />}>
+      <InfoPopover
+        content={
+          <MarkerInfo marker={marker} provider={provider} protocol={protocol} />
+        }
+      >
         <button
           type="button"
           {...active.bind(marker.key)}
@@ -1152,10 +1262,13 @@ function SseLane({
   const dotY = (track: number) => axisTop + 8 + track * trackStep;
   const laneHeight = dotY(maxTrack) + 8;
 
+  const protocol = resolveRequestProtocol(event);
   return (
     <div>
       <div className="flex items-center justify-between mb-1">
-        <span className="text-label text-text-muted">SSE markers</span>
+        <span className="text-label text-text-muted">
+          {markerHeading(protocol)}
+        </span>
         <span className="text-caption text-text-faint">Request axis</span>
       </div>
       {/* Inset by half a marker so one at 0% or 100% is never clipped by the
@@ -1174,6 +1287,7 @@ function SseLane({
             axisTop={axisTop}
             dotTop={dotY(m.track)}
             provider={provider}
+            protocol={protocol}
           />
         ))}
       </div>
@@ -1191,39 +1305,51 @@ function StreamCounters({
   provider?: LatencyProvider | null;
 }) {
   const isAnthropic = provider === 'anthropic';
+  const protocol = resolveRequestProtocol(event);
+  const isWebsocket = protocol === 'websocket';
   return (
     <div className="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-caption text-text-muted">
-      <CounterPill
-        label="SSE"
-        value={event._phase === 'final' ? event.sse_event_count : undefined}
-        description={
-          isAnthropic
-            ? 'Total parsed SSE frames — every `event:` line the proxy relayed (message_start, content_block_start, content_block_delta, ping, message_stop, etc. combined).'
-            : 'Total parsed SSE frames recorded while relaying the upstream response.'
-        }
-      />
+      {!isWebsocket && protocol !== 'http_stream' && protocol !== 'http' && (
+        <CounterPill
+          label="SSE"
+          value={event._phase === 'final' ? event.sse_event_count : undefined}
+          description={
+            isAnthropic
+              ? 'Total parsed SSE frames — every `event:` line the proxy relayed (message_start, content_block_start, content_block_delta, ping, message_stop, etc. combined).'
+              : 'Total parsed SSE frames recorded while relaying the upstream response.'
+          }
+        />
+      )}
       <CounterPill
         label="deltas"
         value={event._phase === 'final' ? event.content_delta_count : undefined}
         description={
-          isAnthropic
-            ? 'Number of `event: content_block_delta` frames — approximates the streamed token chunk count.'
-            : 'Number of streamed content deltas recorded by the proxy — approximates the token chunk count.'
+          isWebsocket
+            ? 'Number of streamed WebSocket content or reasoning delta frames — approximates the token chunk count.'
+            : isAnthropic
+              ? 'Number of `event: content_block_delta` frames — approximates the streamed token chunk count.'
+              : 'Number of streamed content deltas recorded by the proxy — approximates the token chunk count.'
         }
       />
       <CounterPill
         label="pings"
         value={event._phase === 'final' ? event.ping_count : undefined}
         description={
-          isAnthropic
-            ? 'Number of `event: ping` keepalive frames Anthropic sent to keep the SSE connection alive during long turns.'
-            : 'Number of stream keepalive events recorded by the proxy.'
+          isWebsocket
+            ? 'Number of WebSocket Ping/Pong control frames observed while relaying this turn.'
+            : isAnthropic
+              ? 'Number of `event: ping` keepalive frames Anthropic sent to keep the SSE connection alive during long turns.'
+              : 'Number of stream keepalive events recorded by the proxy.'
         }
       />
       <CounterPill
-        label="chunks"
+        label={isWebsocket ? 'frames' : 'chunks'}
         value={event._phase === 'final' ? event.body_chunk_count : undefined}
-        description="Count of raw HTTP body chunks relayed downstream. Non-stream: response body chunk count. Stream: low-level stream frame count from upstream."
+        description={
+          isWebsocket
+            ? 'Total WebSocket provider frames received while relaying this turn.'
+            : 'Count of raw HTTP body chunks relayed downstream. Non-stream: response body chunk count. Stream: low-level stream frame count from upstream.'
+        }
       />
       <CounterPill
         label="avg gap"
@@ -1307,12 +1433,14 @@ function StageDetailsList({
   unaccounted,
   active,
   provider,
+  protocol,
 }: {
   stages: StageDetail[];
   total: number;
   unaccounted: number;
   active: ActiveKeyApi;
   provider?: LatencyProvider | null;
+  protocol?: RequestProtocol | null;
 }) {
   const [open, setOpen] = useState(false);
   const count = stages.length + (unaccounted > 0 ? 1 : 0);
@@ -1352,7 +1480,7 @@ function StageDetailsList({
             setupTiming={s.setupTiming}
             total={total}
             hint={GROUP_META[s.group].label}
-            description={stageDescription(s.key, provider)}
+            description={stageDescription(s.key, provider, protocol)}
             detail={s.detail}
           />
         ))}
@@ -1384,10 +1512,12 @@ function SseDetailsList({
   markers,
   active,
   provider,
+  protocol,
 }: {
   markers: SseMarker[];
   active: ActiveKeyApi;
   provider?: LatencyProvider | null;
+  protocol?: RequestProtocol | null;
 }) {
   const [open, setOpen] = useState(false);
   const activeKey = active.activeKey;
@@ -1405,13 +1535,13 @@ function SseDetailsList({
       )}
     >
       <CollapsibleSummary suggested={suggested}>
-        SSE marker details ({markers.length})
+        {markerDetailsHeading(protocol ?? null)} ({markers.length})
       </CollapsibleSummary>
       <div className="mt-2 space-y-0.5">
         {markers.map((m) => {
           const isActive = active.isActive(m.key);
           const isSticky = active.isSticky(m.key);
-          const description = markerDescription(m.key, provider);
+          const description = markerDescription(m.key, provider, protocol);
           const button = (
             <button
               type="button"
@@ -1447,7 +1577,13 @@ function SseDetailsList({
             <InfoPopover
               key={m.key}
               side="left"
-              content={<MarkerInfo marker={m} provider={provider} />}
+              content={
+                <MarkerInfo
+                  marker={m}
+                  provider={provider}
+                  protocol={protocol}
+                />
+              }
             >
               {button}
             </InfoPopover>
@@ -1648,7 +1784,9 @@ export function LatencyTimeline({
   }
 
   const unaccounted = groups.unaccounted;
-  const showStreamLane = markers.length > 0 && !isPartial;
+  const protocol = resolveRequestProtocol(event);
+  const showStreamLane =
+    markers.length > 0 && !isPartial && protocol !== 'http';
   // Under a few milliseconds the proportional bars are noise: every stage
   // rounds to a sliver, so only the itemized stage list stays.
   const tooFastToChart =
@@ -1738,6 +1876,7 @@ export function LatencyTimeline({
                           overview={groupItems}
                           groupLabel={groupLabel}
                           provider={provider}
+                          protocol={protocol}
                         />
                       ))}
                     </div>
@@ -1773,9 +1912,15 @@ export function LatencyTimeline({
         unaccounted={unaccounted}
         active={active}
         provider={provider}
+        protocol={protocol}
       />
       {showStreamLane && (
-        <SseDetailsList markers={markers} active={active} provider={provider} />
+        <SseDetailsList
+          markers={markers}
+          active={active}
+          provider={provider}
+          protocol={protocol}
+        />
       )}
     </div>
   );

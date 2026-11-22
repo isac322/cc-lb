@@ -13,8 +13,8 @@ use cc_lb_storage_api::{
     JudgeResponseFormat, KeyStatus, LlmJudgeConfig, OAuthCredentials, PrincipalCreate,
     PrincipalKind, PrincipalKindLite, PrincipalLimitIdentityKind, PrincipalLimitKind,
     PrincipalLimitState, RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState,
-    RequestEvent, RequestEventKind, StorageError, UsageRollup, UsageRollupResolution,
-    UsageRollupRun,
+    RequestEvent, RequestEventKind, RequestProtocol, StorageError, UsageRollup,
+    UsageRollupResolution, UsageRollupRun,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -390,6 +390,7 @@ fn batch_b_wire_snapshots_are_stable() {
         source_ref_id: Some("session-hash:4".to_owned()),
         event_kind: Some(RequestEventKind::Renewal),
         ts_ms: Some(1_700_000_000_123),
+        protocol: Some(RequestProtocol::HttpSse),
         principal_id: Some("principal_batch_b".to_owned()),
         key_id: Some("key_batch_b".to_owned()),
         principal_kind: Some("machine".to_owned()),
@@ -542,6 +543,7 @@ fn batch_b_wire_snapshots_are_stable() {
         "source_ref_id": "session-hash:4",
         "event_kind": "renewal",
         "ts_ms": 1_700_000_000_123u64,
+        "protocol": "http_sse",
         "principal_id": "principal_batch_b",
         "key_id": "key_batch_b",
         "principal_kind": "machine",

@@ -5,6 +5,7 @@
 
 pub(crate) mod aside;
 pub(crate) mod claude_code;
+pub(crate) mod codex;
 pub(crate) mod hermes;
 pub(crate) mod omp;
 pub(crate) mod opencode;
@@ -30,6 +31,10 @@ pub(crate) enum ClientRequestKind {
     Main,
     Advisor,
     Subagent,
+    Prewarm,
+    Review,
+    Memory,
+    Guardian,
     Recap,
     Compaction,
     SessionTitle,
@@ -46,6 +51,10 @@ impl ClientRequestKind {
             Self::Main => "main",
             Self::Advisor => "advisor",
             Self::Subagent => "subagent",
+            Self::Prewarm => "prewarm",
+            Self::Review => "review",
+            Self::Memory => "memory",
+            Self::Guardian => "guardian",
             Self::Recap => "recap",
             Self::Compaction => "compaction",
             Self::SessionTitle => "session_title",
@@ -246,6 +255,10 @@ impl<'a> RequestView<'a> {
     pub(crate) fn pointer(&self, path: &str) -> Option<&'a Value> {
         self.value.pointer(path)
     }
+
+    pub(crate) fn value(&self) -> &'a Value {
+        self.value
+    }
 }
 
 fn classify_shared(view: &RequestView<'_>) -> Option<ClientRequestKind> {
@@ -301,6 +314,10 @@ fn classify_explicit_request_class(raw: &str) -> Option<Option<ClientRequestKind
         ("main", Some(ClientRequestKind::Main)),
         ("subagent", Some(ClientRequestKind::Subagent)),
         ("workflow", Some(ClientRequestKind::Subagent)),
+        ("prewarm", Some(ClientRequestKind::Prewarm)),
+        ("review", Some(ClientRequestKind::Review)),
+        ("memory", Some(ClientRequestKind::Memory)),
+        ("guardian", Some(ClientRequestKind::Guardian)),
         ("compaction", Some(ClientRequestKind::Compaction)),
         ("side_reply", Some(ClientRequestKind::Side)),
         ("side", Some(ClientRequestKind::Side)),
@@ -317,6 +334,7 @@ fn classify_explicit_request_class(raw: &str) -> Option<Option<ClientRequestKind
     .find_map(|(class, kind)| raw.eq_ignore_ascii_case(class).then_some(kind))
 }
 
+#[cfg(test)]
 pub(crate) fn classify_client_request_kind_with_class(
     value: Option<&Value>,
     observed_session_id: Option<&str>,
@@ -324,11 +342,32 @@ pub(crate) fn classify_client_request_kind_with_class(
     has_claude_agent: bool,
     claude_request_class: Option<&str>,
 ) -> Option<&'static str> {
+    classify_client_request_kind_with_signals(
+        value,
+        observed_session_id,
+        parent_session_id,
+        has_claude_agent,
+        claude_request_class,
+        None,
+    )
+}
+
+pub(crate) fn classify_client_request_kind_with_signals(
+    value: Option<&Value>,
+    observed_session_id: Option<&str>,
+    parent_session_id: Option<&str>,
+    has_claude_agent: bool,
+    claude_request_class: Option<&str>,
+    codex_signals: Option<&codex::CodexRequestSignals<'_>>,
+) -> Option<&'static str> {
     let explicit_class = claude_request_class.and_then(classify_explicit_request_class);
     if let Some(Some(kind)) = explicit_class {
         return Some(kind.as_str());
     }
     let Some(value) = value else {
+        if codex_signals.is_some_and(|signals| signals.is_compact_endpoint) {
+            return Some(ClientRequestKind::Compaction.as_str());
+        }
         if has_claude_agent {
             return Some(ClientRequestKind::Subagent.as_str());
         }
@@ -337,6 +376,9 @@ pub(crate) fn classify_client_request_kind_with_class(
             .then(|| ClientRequestKind::Unknown.as_str());
     };
     let view = RequestView::new(value, observed_session_id, parent_session_id);
+    if let Some(kind) = codex::classify(&view, codex_signals) {
+        return Some(kind.as_str());
+    }
     let auxiliary_classifiers: [FamilyClassifier; 8] = [
         omp::classify_advisor,
         aside::classify_auxiliary,

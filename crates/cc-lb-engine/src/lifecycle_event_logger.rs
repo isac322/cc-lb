@@ -772,6 +772,7 @@ mod tests {
             source_kind: source_kind.map(str::to_owned),
             source_ref_id: None,
             event_kind: None,
+            protocol: None,
         }
     }
 
@@ -793,6 +794,7 @@ mod tests {
             sign_ms,
             upstream_ttfb_ms,
             observed_at_unix_millis: None,
+            protocol: None,
         }
     }
     fn upstream_started_with_attempt_stages(
@@ -814,6 +816,7 @@ mod tests {
             sign_ms: None,
             upstream_ttfb_ms,
             observed_at_unix_millis: None,
+            protocol: None,
         }
     }
 
@@ -876,6 +879,8 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         }
     }
 
@@ -1454,6 +1459,8 @@ mod tests {
                 internal_errors: Vec::new(),
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
+                protocol: None,
             },
         ]);
 

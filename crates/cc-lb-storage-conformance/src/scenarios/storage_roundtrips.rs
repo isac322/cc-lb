@@ -299,6 +299,7 @@ fn request_events() -> Vec<RequestEvent> {
             source_kind: Some("proxy".to_owned()),
             source_ref_id: Some("roundtrip-source-ref-a".to_owned()),
             event_kind: Some(RequestEventKind::Messages),
+            protocol: Some(cc_lb_storage_api::RequestProtocol::HttpSse),
             ts_ms: Some(1_800_300_100_123),
             principal_id: Some("roundtrip-principal-a".to_owned()),
             key_id: Some("key-a".to_owned()),

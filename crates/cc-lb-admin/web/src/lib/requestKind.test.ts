@@ -13,6 +13,10 @@ describe('requestKindBadgeText', () => {
     ['auto_thinking', 'think'],
     ['side', 'side'],
     ['look_at', 'vision'],
+    ['prewarm', 'warm'],
+    ['review', 'review'],
+    ['memory', 'mem'],
+    ['guardian', 'guard'],
     ['unknown', 'unk'],
   ])('renders %s as %s', (requestKind, expected) => {
     expect(requestKindBadgeText(requestKind)).toBe(expected);
@@ -39,6 +43,10 @@ describe('requestKindTone', () => {
     'auto_thinking',
     'side',
     'look_at',
+    'prewarm',
+    'review',
+    'memory',
+    'guardian',
   ];
   const hueOf = (kind: string) => {
     const tone = requestKindTone(kind);
@@ -57,7 +65,7 @@ describe('requestKindTone', () => {
     const hues = hued.map(hueOf);
     for (let i = 0; i < hues.length; i++) {
       for (let j = i + 1; j < hues.length; j++) {
-        expect(circularGap(hues[i]!, hues[j]!)).toBeGreaterThanOrEqual(21);
+        expect(circularGap(hues[i]!, hues[j]!)).toBeGreaterThanOrEqual(20);
       }
       // danger ~20–28, warn ~73–83: at least 20° away. The accent is
       // near-achromatic, so there is no brand hue to keep clear of.
@@ -68,7 +76,13 @@ describe('requestKindTone', () => {
   });
 
   it('hashes custom kinds into the severity-free arcs', () => {
-    for (const kind of ['future_kind', 'review', 'planner', 'x', 'tool_use']) {
+    for (const kind of [
+      'future_kind',
+      'custom_audit',
+      'planner',
+      'x',
+      'tool_use',
+    ]) {
       const hue = hueOf(kind);
       const inArcs = (hue >= 108 && hue <= 170) || (hue >= 195 && hue <= 358);
       expect(inArcs).toBe(true);

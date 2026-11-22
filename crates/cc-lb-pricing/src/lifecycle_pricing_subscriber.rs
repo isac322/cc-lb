@@ -619,6 +619,8 @@ mod tests {
                 upstream_body_ms: None,
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
+                protocol: None,
             })
             .await
             .unwrap();
@@ -667,6 +669,8 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -755,6 +759,8 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -873,6 +879,8 @@ mod tests {
                             upstream_body_ms: None,
                             event_kind: None,
                             funding_ambiguous: false,
+                            upstream_ttfb_ms: None,
+                            protocol: None,
                         },
                     );
                     let LifecycleEvent::Priced {

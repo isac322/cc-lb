@@ -2,7 +2,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::storage_types_common::RequestEventStreamFilters;
-use cc_lb_request_log::RequestEventKind;
+use cc_lb_request_log::{RequestEventKind, RequestProtocol};
 
 /// Slim projection of a [`cc_lb_request_log::RequestEvent`] limited to the
 /// fields the admin request-event LIST view displays. Backends may populate
@@ -19,6 +19,9 @@ pub struct RequestEventListItem {
     /// Endpoint classification; `None` on rows persisted before the
     /// `event_kind` column existed (historical `unclassified`).
     pub event_kind: Option<RequestEventKind>,
+    /// Transport/framing protocol (`http`, `http_sse`, `http_stream`, or `websocket`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<RequestProtocol>,
     pub principal_id: Option<String>,
     pub upstream_id: Option<Uuid>,
     pub upstream_name: Option<String>,
@@ -194,6 +197,7 @@ mod tests {
             event_id: None,
             source_kind: None,
             event_kind: None,
+            protocol: None,
             principal_id: None,
             upstream_id: None,
             upstream_name: None,

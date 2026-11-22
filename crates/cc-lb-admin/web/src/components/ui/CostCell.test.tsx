@@ -41,7 +41,7 @@ function renderCost(event: RequestEventWithPhase) {
 }
 
 describe('CostCell breakdown', () => {
-  it('keeps reported zero categories and omits unavailable categories', () => {
+  it('hides zero categories and unavailable categories', () => {
     renderCost({
       ...baseEvent,
       cost_usd_micros: 6_000,
@@ -54,8 +54,41 @@ describe('CostCell breakdown', () => {
     expect(screen.getByText('Input')).toBeDefined();
     expect(screen.getByText('Output')).toBeDefined();
     expect(screen.getByText('Cache read')).toBeDefined();
-    expect(screen.getByText('Cache create 5m')).toBeDefined();
+    expect(screen.queryByText('Cache create 5m')).toBeNull();
     expect(screen.queryByText('Cache create 1h')).toBeNull();
+  });
+
+  it('hides zero-cost cache write rows for OpenAI when only input/output/read are nonzero', () => {
+    renderCost({
+      ...baseEvent,
+      cost_usd_micros: 3_500,
+      cost_input_micros: 1_000,
+      cost_output_micros: 2_000,
+      cost_cache_read_micros: 500,
+      cost_cache_write_micros: 0,
+      cost_cache_write_30m_micros: 0,
+      cost_cache_write_12h_micros: 0,
+    });
+
+    expect(screen.getByText('Cache read')).toBeDefined();
+    expect(screen.getByText('Input')).toBeDefined();
+    expect(screen.getByText('Output')).toBeDefined();
+    expect(screen.queryByText('Cache write')).toBeNull();
+    expect(screen.queryByText('Cache write 30m')).toBeNull();
+    expect(screen.queryByText('Cache write 12h')).toBeNull();
+  });
+
+  it('shows no billable cost note when total is zero', () => {
+    renderCost({
+      ...baseEvent,
+      cost_usd_micros: 0,
+      cost_input_micros: 0,
+      cost_output_micros: 0,
+    });
+
+    expect(screen.getByText('No billable cost')).toBeDefined();
+    expect(screen.queryByText('Input')).toBeNull();
+    expect(screen.getByText('Total')).toBeDefined();
   });
 
   it('labels OpenAI cache writes by their reported lifetime', () => {
@@ -73,7 +106,7 @@ describe('CostCell breakdown', () => {
     expect(screen.getByText('$0.0060')).toBeDefined();
   });
 
-  it('keeps an unknown-lifetime write in the authoritative total', () => {
+  it('shows residual Cache write and keeps it in the authoritative total', () => {
     renderCost({
       ...baseEvent,
       cost_usd_micros: 4_000,
@@ -85,10 +118,11 @@ describe('CostCell breakdown', () => {
         name: 'Cost $0.0040, show breakdown',
       }),
     ).toBeDefined();
+    expect(screen.getByText('Cache write')).toBeDefined();
     expect(screen.queryByText('Cache write 30m')).toBeNull();
     expect(screen.queryByText('Cache write 12h')).toBeNull();
     expect(screen.getByText('Total')).toBeDefined();
-    expect(screen.getByText('$0.0040')).toBeDefined();
+    expect(screen.getAllByText('$0.0040').length).toBeGreaterThanOrEqual(2);
   });
 
   it('labels Gemini cached-content usage as a cache read', () => {

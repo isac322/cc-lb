@@ -105,6 +105,7 @@ async fn renewal_survives_full_channels() {
         source_kind: None,
         source_ref_id: None,
         event_kind: None,
+        protocol: None,
     });
     let session = scenario.schedule(Some("renewal-key")).await;
     assert!(scenario.claim(&session).await);
@@ -231,6 +232,7 @@ async fn renewal_row_yields_one_diagnostics_line_with_the_finalizer_seq() {
         source_kind: Some("renewal".to_owned()),
         source_ref_id: Some(completion.source_ref_id.clone()),
         event_kind: Some(RequestEventKind::Renewal),
+        protocol: None,
     })
     .await
     .expect("assembler is running");
@@ -254,6 +256,8 @@ async fn renewal_row_yields_one_diagnostics_line_with_the_finalizer_seq() {
         upstream_body_ms: None,
         event_kind: Some(RequestEventKind::Renewal),
         funding_ambiguous: false,
+        upstream_ttfb_ms: None,
+        protocol: None,
     })
     .await
     .expect("assembler is running");

@@ -670,7 +670,8 @@ Checks, in order:
    `request_kind = "subagent"`) are scoped under their own agent key so
    they do not overwrite or cancel the parent session's schedule, and
    one-shot auxiliary requests (`recap`, `compaction`, `session_title`,
-   `auto_thinking`, `notification`, `side`, `look_at`) do not mutate
+   `auto_thinking`, `notification`, `side`, `look_at`, `prewarm`, `review`,
+   `memory`, `guardian`) do not mutate
    keep-alive state.
 
    Claude Code can label side requests with

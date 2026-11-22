@@ -144,6 +144,8 @@ pub enum LifecycleEvent {
         /// producer did not classify the request.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         event_kind: Option<cc_lb_request_log::RequestEventKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol: Option<cc_lb_request_log::RequestProtocol>,
     },
     /// Body parsing and shape validation completed.
     ParseCompleted {
@@ -204,6 +206,8 @@ pub enum LifecycleEvent {
         /// Capture time of the HTTP response headers, before off-path processing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         observed_at_unix_millis: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol: Option<cc_lb_request_log::RequestProtocol>,
     },
     /// Provider quota frame handed to off-path consumers without parsing or
     /// copying its bytes. A missing matched response remains account-only.
@@ -267,6 +271,8 @@ pub enum LifecycleEvent {
         #[serde(default)]
         io_timings: RequestIoTimings,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        upstream_ttfb_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         upstream_body_ms: Option<u64>,
         /// Connection timings measured for the last dispatch attempt.
         /// Carried on the terminal snapshot so dispatch failures (which never
@@ -295,6 +301,8 @@ pub enum LifecycleEvent {
         /// Whether late or ambiguous quota evidence invalidated funding.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         funding_ambiguous: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol: Option<cc_lb_request_log::RequestProtocol>,
     },
     /// Emitted by the pricing subscriber after cost is computed from usage
     /// counts, model, and upstream kind. The assembler merges these micros

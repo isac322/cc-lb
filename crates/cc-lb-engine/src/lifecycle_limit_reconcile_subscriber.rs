@@ -786,6 +786,8 @@ mod tests {
                 finalize_ms: None,
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
+                protocol: None,
             },
         );
         assert_eq!(concurrency.current(&record.key_hash_b64), 1);
@@ -856,6 +858,8 @@ mod tests {
             finalize_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -899,6 +903,8 @@ mod tests {
             finalize_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -932,6 +938,8 @@ mod tests {
             finalize_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -987,6 +995,8 @@ mod tests {
             finalize_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         }
     }
 

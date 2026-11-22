@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{RequestEvent, RequestEventKind};
+use crate::{RequestEvent, RequestEventKind, RequestProtocol};
 
 /// In-flight snapshot of an active request, emitted by the lifecycle event
 /// assembler while the request is still executing (before finalization).
@@ -31,6 +31,10 @@ pub struct RequestEventPartial {
     /// Mirrors [`RequestEvent::event_kind`]; absent means unclassified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_kind: Option<RequestEventKind>,
+    /// Transport/framing protocol known so far (`http`, `http_sse`,
+    /// `http_stream`, or `websocket`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<RequestProtocol>,
     pub ts: u64,
     pub ts_ms: u64,
     /// Millisecond timestamp of the most recent lifecycle event merged into

@@ -417,6 +417,9 @@ const HISTOGRAM_SQL_HEAD: &str = "SELECT MIN(MAX((list_ts_ms - ?1) / ?2, 0), ?3)
         COUNT(CASE WHEN list_status >= 500 \
             OR (list_status BETWEEN 200 AND 299 \
                 AND error_code = 'upstream_stream_error') \
+            OR (list_status = 101 \
+                AND error_code IS NOT NULL \
+                AND error_code <> 'client_closed_request') \
             THEN 1 END) AS error_count \
  FROM request_events_v1 \
  WHERE ts >= ?4 AND ts <= ?5 \
@@ -643,7 +646,7 @@ async fn insert_request_event_in_tx(
         "ping_count, stream_inter_output_avg_ms, provider_session_id, provider_connection_id, upstream_http_version, upstream_request_id, upstream_content_encoding, ",
         "upstream_content_length, upstream_body_bytes, upstream_body_end, ",
         "upstream_body_error_cause, upstream_body_error_io_kind, upstream_body_error_h2_reason, ",
-        "upstream_stream_warning_type, upstream_stream_warning_message, thinking_level, funding",
+        "upstream_stream_warning_type, upstream_stream_warning_message, thinking_level, funding, protocol",
         ") VALUES (",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
@@ -653,7 +656,7 @@ async fn insert_request_event_in_tx(
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",
         ") ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING ",
         "RETURNING id",
     ))
@@ -907,6 +910,7 @@ async fn insert_request_event_in_tx(
     .bind(event.upstream_stream_warning_message.as_deref())
     .bind(event.thinking_level.as_deref())
     .bind(event.funding.map(|value| value.as_str()))
+    .bind(event.protocol.map(|value| value.as_str()))
     .fetch_optional(&mut **tx)
     .await
     .map_err(map_sqlx_error)

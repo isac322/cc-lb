@@ -12,7 +12,7 @@ use cc_lb_observability::EngineMetricsHook;
 use cc_lb_request_log::{
     CostBreakdown as LifecycleCostBreakdown, RequestCacheBreakpoint, RequestCacheState,
     RequestDiagnostics, RequestDiagnosticsRecord, RequestDiagnosticsSource, RequestEventKind,
-    RequestEventPartial, RequestEventUpdate,
+    RequestEventPartial, RequestEventUpdate, RequestProtocol,
 };
 use cc_lb_storage_api::{CacheKeepaliveEvidenceRow, RequestEvent, RequestEventStore};
 use sha2::{Digest, Sha256};
@@ -193,6 +193,7 @@ struct Partial {
     request_id: Option<String>,
     source_kind: Option<String>,
     event_kind: Option<RequestEventKind>,
+    protocol: Option<RequestProtocol>,
     source_ref_id: Option<String>,
     ts_ms: u64,
     last_partial_emit_ts: Option<Instant>,
@@ -339,6 +340,7 @@ impl Partial {
             source_kind: self.source_kind.clone(),
             source_ref_id: self.source_ref_id.clone(),
             event_kind: self.event_kind,
+            protocol: self.protocol,
             ts: ts_ms / 1_000,
             ts_ms,
             last_update_ms: now_ms,
@@ -1188,6 +1190,7 @@ async fn handle_event(
         finalize_ms,
         proxy_setup_ms,
         setup_timings,
+        upstream_ttfb_ms,
         upstream_body_ms,
         dns_ms,
         connect_ms,
@@ -1196,6 +1199,7 @@ async fn handle_event(
         internal_errors,
         event_kind,
         funding_ambiguous,
+        protocol,
         ..
     } = &event
     {
@@ -1213,6 +1217,7 @@ async fn handle_event(
             partial.finalize_ms = *finalize_ms;
             partial.proxy_setup_ms = *proxy_setup_ms;
             apply_setup_timings(&mut partial, setup_timings);
+            partial.upstream_ttfb_ms = *upstream_ttfb_ms;
             partial.upstream_body_ms = *upstream_body_ms;
             // Orphan rows have no prior `UpstreamResponseStarted`, so the
             // terminal snapshot is the only carrier of connection timings.
@@ -1225,6 +1230,7 @@ async fn handle_event(
             // Terminal-carried classification is the only metadata left when
             // `RequestStarted` was dropped on the writer channel.
             partial.event_kind = *event_kind;
+            partial.protocol = *protocol;
             publish_partial(bus, &partial, PartialTrigger::RequestTerminated, now_ms);
             write_finalized_rows(
                 storage,
@@ -1247,6 +1253,7 @@ async fn handle_event(
         partial.finalize_ms = partial.finalize_ms.or(*finalize_ms);
         partial.proxy_setup_ms = partial.proxy_setup_ms.or(*proxy_setup_ms);
         apply_setup_timings(&mut partial, setup_timings);
+        partial.upstream_ttfb_ms = partial.upstream_ttfb_ms.or(*upstream_ttfb_ms);
         partial.upstream_body_ms = partial.upstream_body_ms.or(*upstream_body_ms);
         // Terminal-carried connection timings fill gaps only: a successful
         // `UpstreamResponseStarted` already recorded the authoritative values.
@@ -1259,6 +1266,7 @@ async fn handle_event(
         // from `RequestStarted` (including renewal precedence) stays
         // authoritative.
         partial.event_kind = partial.event_kind.or(*event_kind);
+        partial.protocol = partial.protocol.or(*protocol);
         partial.funding_ambiguous |= *funding_ambiguous;
         let expects_priced =
             partial.usage_seen && partial.model().is_some() && partial.cost.is_none();
@@ -1373,6 +1381,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             source_kind,
             source_ref_id,
             event_kind,
+            protocol,
             ..
         } => {
             partial.request_id = Some(request_id);
@@ -1386,6 +1395,9 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 partial.source_kind.as_deref(),
                 event_kind,
             ));
+            if protocol.is_some() {
+                partial.protocol = protocol;
+            }
         }
         LifecycleEvent::ParseCompleted {
             result: Ok(info), ..
@@ -1489,6 +1501,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             shape_ms,
             sign_ms,
             upstream_ttfb_ms,
+            protocol,
             ..
         } => {
             partial.upstream_response_status = Some(status);
@@ -1499,6 +1512,9 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.shape_ms = shape_ms;
             partial.sign_ms = sign_ms;
             partial.upstream_ttfb_ms = upstream_ttfb_ms;
+            if protocol.is_some() {
+                partial.protocol = protocol;
+            }
             if (200..300).contains(&status)
                 && headers
                     .provider_headers
@@ -1720,12 +1736,26 @@ fn finalize_base(
 
     let cost = partial.cost_options();
     let diagnostics = partial.upstream_stream_diagnostics.as_ref();
+    let protocol = if partial.source_kind.as_deref() == Some("renewal") {
+        None
+    } else {
+        partial.protocol.or_else(|| {
+            if client_status == 101 {
+                Some(RequestProtocol::Websocket)
+            } else if partial.stream_success.is_some_and(|c| c > 0) {
+                Some(RequestProtocol::HttpSse)
+            } else {
+                Some(RequestProtocol::Http)
+            }
+        })
+    };
     RequestEvent {
         ts: ts_ms / 1_000,
         ts_ms: Some(ts_ms),
         request_id,
         source_kind: partial.source_kind.clone(),
         event_kind: partial.event_kind,
+        protocol,
         source_ref_id: partial.source_ref_id.clone(),
         principal_id,
         key_id,
@@ -1799,7 +1829,11 @@ fn finalize_base(
         thinking_tokens: (partial.usage.thinking_tokens > 0)
             .then_some(partial.usage.thinking_tokens),
         service_tier: partial.usage.service_tier.clone(),
-        sse_event_count: partial.stream_success,
+        sse_event_count: if protocol == Some(RequestProtocol::Websocket) {
+            None
+        } else {
+            partial.stream_success
+        },
         thread_id: identity.thread_id,
         observed_session_id: identity.observed_session_id,
         request_kind: identity.request_kind,
@@ -2354,6 +2388,8 @@ mod tests {
                 upstream_body_ms: None,
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
+                protocol: None,
             },
         )
         .await;
@@ -2423,6 +2459,8 @@ mod tests {
                 internal_errors: Vec::new(),
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
+                protocol: None,
             },
         )
         .await;
@@ -2454,6 +2492,8 @@ mod tests {
                 internal_errors: Vec::new(),
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
+                protocol: None,
             },
         )
         .await;
@@ -2508,6 +2548,7 @@ mod tests {
             source_kind: None,
             source_ref_id: None,
             event_kind: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -2542,6 +2583,8 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -2579,6 +2622,7 @@ mod tests {
                 source_kind: Some("proxy".to_owned()),
                 source_ref_id: None,
                 event_kind: None,
+                protocol: None,
             })
             .await
             .expect("send request started");
@@ -2611,6 +2655,8 @@ mod tests {
                 internal_errors: Vec::new(),
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
+                protocol: None,
             })
             .await
             .expect("send termination");
@@ -2647,6 +2693,7 @@ mod tests {
             source_kind: Some("proxy".to_owned()),
             source_ref_id: Some("ingress-123".to_owned()),
             event_kind: None,
+            protocol: None,
         })
         .await
         .expect("send request started");
@@ -2670,6 +2717,8 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .expect("send request terminated");
@@ -2697,6 +2746,7 @@ mod tests {
             source_kind: Some("proxy".to_owned()),
             source_ref_id: None,
             event_kind: Some(RequestEventKind::CountTokens),
+            protocol: None,
         })
         .await
         .expect("send request started");
@@ -2720,6 +2770,8 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .expect("send request terminated");
@@ -2747,6 +2799,7 @@ mod tests {
             source_ref_id: Some("session:9".to_owned()),
             // A renewal replaying /v1/messages must not land as messages.
             event_kind: Some(RequestEventKind::Messages),
+            protocol: None,
         })
         .await
         .expect("send request started");
@@ -2770,6 +2823,8 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .expect("send request terminated");
@@ -2810,6 +2865,8 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: Some(RequestEventKind::Messages),
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -2853,6 +2910,8 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -2900,6 +2959,8 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: Some(RequestEventKind::Messages),
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -2928,6 +2989,7 @@ mod tests {
             source_kind: Some("renewal".to_owned()),
             source_ref_id: Some("session:7".to_owned()),
             event_kind: Some(RequestEventKind::Renewal),
+            protocol: None,
         })
         .await
         .expect("send request started");
@@ -2951,6 +3013,8 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: Some(RequestEventKind::Messages),
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .expect("send request terminated");
@@ -2976,6 +3040,7 @@ mod tests {
             source_kind: None,
             source_ref_id: None,
             event_kind: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -3009,6 +3074,8 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -3039,6 +3106,7 @@ mod tests {
             source_kind: None,
             source_ref_id: None,
             event_kind: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -3071,6 +3139,8 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -3119,6 +3189,8 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         }
     }
 
@@ -3131,6 +3203,7 @@ mod tests {
             source_kind: None,
             source_ref_id: None,
             event_kind: None,
+            protocol: None,
         }
     }
 
@@ -3392,6 +3465,7 @@ mod tests {
             source_kind: None,
             source_ref_id: None,
             event_kind: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -3421,6 +3495,8 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -3459,6 +3535,8 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -3510,6 +3588,8 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -3542,6 +3622,7 @@ mod tests {
             source_kind: None,
             source_ref_id: None,
             event_kind: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -3557,6 +3638,7 @@ mod tests {
             sign_ms: None,
             upstream_ttfb_ms: Some(20),
             observed_at_unix_millis: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -3582,6 +3664,8 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -3627,6 +3711,8 @@ mod tests {
             upstream_body_ms: Some(4),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -3638,6 +3724,7 @@ mod tests {
             source_kind: None,
             source_ref_id: None,
             event_kind: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -3687,6 +3774,7 @@ mod tests {
                 source_kind: Some("renewal".to_owned()),
                 source_ref_id: Some("orphan-session:1".to_owned()),
                 event_kind: None,
+                protocol: None,
             },
         )
         .await;
@@ -3793,6 +3881,7 @@ mod tests {
                 source_kind: Some("proxy".to_owned()),
                 source_ref_id: None,
                 event_kind: None,
+                protocol: None,
             },
         )
         .await;
@@ -3868,6 +3957,8 @@ mod tests {
                 finalize_ms: None,
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
+                protocol: None,
             },
         )
         .await;
@@ -3951,6 +4042,7 @@ mod tests {
                 source_kind: Some("proxy".to_owned()),
                 source_ref_id: None,
                 event_kind: None,
+                protocol: None,
             },
         )
         .await;
@@ -4066,6 +4158,7 @@ mod tests {
                 source_kind: None,
                 source_ref_id: None,
                 event_kind: None,
+                protocol: None,
             },
         )
         .await;
@@ -4106,6 +4199,7 @@ mod tests {
                 source_kind: None,
                 source_ref_id: None,
                 event_kind: None,
+                protocol: None,
             },
         )
         .await;
@@ -4136,6 +4230,7 @@ mod tests {
                 source_kind: None,
                 source_ref_id: None,
                 event_kind: None,
+                protocol: None,
             },
         )
         .await;
@@ -4174,6 +4269,8 @@ mod tests {
                 upstream_body_ms: None,
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
+                protocol: None,
             },
         )
         .await;
@@ -4221,6 +4318,7 @@ mod tests {
             source_kind: None,
             source_ref_id: None,
             event_kind: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -4244,6 +4342,8 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -4293,6 +4393,7 @@ mod tests {
             source_kind: None,
             source_ref_id: None,
             event_kind: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -4422,6 +4523,7 @@ mod tests {
                 event_kind: None,
                 ts_ms: 1_730_000_000_000,
                 stream: false,
+                protocol: None,
             })
             .await
             .unwrap();
@@ -4464,6 +4566,8 @@ mod tests {
                 upstream_body_ms: None,
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
+                protocol: None,
             })
             .await
             .unwrap();
@@ -4532,6 +4636,7 @@ mod tests {
             event_kind: None,
             ts_ms: 1_730_000_000_000,
             stream: false,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -4572,6 +4677,8 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -4668,6 +4775,7 @@ mod tests {
             source_kind: None,
             source_ref_id: None,
             event_kind: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -4739,6 +4847,7 @@ mod tests {
             sign_ms: Some(5),
             upstream_ttfb_ms: Some(6),
             observed_at_unix_millis: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -4818,6 +4927,8 @@ mod tests {
             upstream_body_ms: Some(12),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -4972,6 +5083,7 @@ mod tests {
             source_kind: None,
             source_ref_id: None,
             event_kind: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -5010,6 +5122,8 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         })
         .await
         .unwrap();
@@ -5075,6 +5189,7 @@ mod tests {
             source_kind: None,
             source_ref_id: None,
             event_kind: None,
+            protocol: None,
         });
         bus.publish_lifecycle(LifecycleEvent::RouteCompleted {
             event_id: event_id.clone(),
@@ -5136,6 +5251,8 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         });
 
         handle.shutdown().await;
@@ -5512,6 +5629,8 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         }
     }
 
@@ -5873,6 +5992,7 @@ mod tests {
             source_kind: None,
             source_ref_id: None,
             event_kind: None,
+            protocol: None,
         };
 
         // Normal: started, then a terminal that is immediately ready.
@@ -6462,6 +6582,203 @@ mod tests {
             Some("session-key")
         );
         Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn finalize_persists_protocol_and_clears_ws_sse_event_count() {
+        let store = CapturingStore::default();
+        let metrics = noop_metrics();
+
+        for (event_id, source_kind, protocol, client_status, expected_protocol, expected_sse) in [
+            (
+                "proto-ws",
+                Some("proxy"),
+                Some(RequestProtocol::Websocket),
+                101,
+                Some(RequestProtocol::Websocket),
+                None,
+            ),
+            (
+                "proto-sse",
+                Some("proxy"),
+                Some(RequestProtocol::HttpSse),
+                200,
+                Some(RequestProtocol::HttpSse),
+                Some(4),
+            ),
+            (
+                "proto-stream",
+                Some("proxy"),
+                Some(RequestProtocol::HttpStream),
+                200,
+                Some(RequestProtocol::HttpStream),
+                Some(4),
+            ),
+            (
+                "proto-http",
+                Some("proxy"),
+                Some(RequestProtocol::Http),
+                200,
+                Some(RequestProtocol::Http),
+                Some(4),
+            ),
+            ("proto-renewal", Some("renewal"), None, 200, None, Some(4)),
+        ] {
+            let mut partials = HashMap::new();
+            let mut writer = RowWriter::default();
+            handle_event(
+                &store,
+                None,
+                metrics.as_ref(),
+                &mut writer,
+                &mut partials,
+                DEFAULT_ASSEMBLER_MAP_CAP,
+                LifecycleEvent::RequestStarted {
+                    event_id: eid(event_id),
+                    request_id: format!("req-{event_id}"),
+                    ts_ms: 1_730_000_000_000,
+                    stream: protocol != Some(RequestProtocol::Http),
+                    source_kind: source_kind.map(str::to_owned),
+                    source_ref_id: None,
+                    event_kind: None,
+                    protocol,
+                },
+            )
+            .await;
+            handle_event(
+                &store,
+                None,
+                metrics.as_ref(),
+                &mut writer,
+                &mut partials,
+                DEFAULT_ASSEMBLER_MAP_CAP,
+                LifecycleEvent::UpstreamResponseStarted {
+                    event_id: eid(event_id),
+                    status: client_status,
+                    headers: Default::default(),
+                    bulkhead_wait_ms: None,
+                    dns_ms: None,
+                    connect_ms: None,
+                    connection_reused: None,
+                    shape_ms: None,
+                    sign_ms: None,
+                    upstream_ttfb_ms: None,
+                    observed_at_unix_millis: None,
+                    protocol,
+                },
+            )
+            .await;
+            handle_event(
+                &store,
+                None,
+                metrics.as_ref(),
+                &mut writer,
+                &mut partials,
+                DEFAULT_ASSEMBLER_MAP_CAP,
+                LifecycleEvent::StreamCompleted {
+                    event_id: eid(event_id),
+                    result: Ok(StreamSuccess {
+                        sse_event_count: 4,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .await;
+            handle_event(
+                &store,
+                None,
+                metrics.as_ref(),
+                &mut writer,
+                &mut partials,
+                DEFAULT_ASSEMBLER_MAP_CAP,
+                LifecycleEvent::RequestTerminated {
+                    event_id: eid(event_id),
+                    reason: TerminationReason::Success,
+                    client_status,
+                    duration_ms: 10,
+                    request_body_read_ms: None,
+                    request_body_bytes: None,
+                    finalize_ms: None,
+                    first_body_chunk_ms: None,
+                    first_content_delta_ms: None,
+                    dns_ms: None,
+                    connect_ms: None,
+                    connection_reused: None,
+                    internal_errors: Vec::new(),
+                    proxy_setup_ms: None,
+                    setup_timings: Default::default(),
+                    io_timings: Default::default(),
+                    upstream_body_ms: None,
+                    event_kind: None,
+                    funding_ambiguous: false,
+                    upstream_ttfb_ms: None,
+                    protocol,
+                },
+            )
+            .await;
+            force_flush_terminations(&store, None, metrics.as_ref(), &mut writer, &mut partials)
+                .await;
+
+            let rows = store.rows.lock().expect("rows lock");
+            let row = rows
+                .iter()
+                .find(|row| row.event_id.as_deref() == Some(event_id))
+                .expect("persisted row");
+            assert_eq!(row.protocol, expected_protocol, "{event_id}");
+            assert_eq!(row.sse_event_count, expected_sse, "{event_id}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminal_upstream_ttfb_fills_gap_without_overwriting_started_value() {
+        for (started_ttfb, terminal_ttfb, expected_ttfb) in
+            [(None, Some(116), Some(116)), (Some(42), Some(99), Some(42))]
+        {
+            let store = CapturingStore::default();
+            let metrics = noop_metrics();
+            let event_id = eid(&format!("ttfb-{started_ttfb:?}-{terminal_ttfb:?}"));
+            let mut partial = Partial::new(Instant::now(), event_id.clone());
+            partial.request_id = Some("req-ttfb-merge".to_owned());
+            partial.upstream_ttfb_ms = started_ttfb;
+            let mut partials = HashMap::from([(event_id.clone(), partial)]);
+
+            handle_event(
+                &store,
+                None,
+                metrics.as_ref(),
+                &mut RowWriter::default(),
+                &mut partials,
+                DEFAULT_ASSEMBLER_MAP_CAP,
+                LifecycleEvent::RequestTerminated {
+                    event_id,
+                    reason: TerminationReason::Success,
+                    client_status: 101,
+                    duration_ms: 200,
+                    request_body_read_ms: None,
+                    request_body_bytes: None,
+                    finalize_ms: Some(1),
+                    first_body_chunk_ms: Some(0),
+                    first_content_delta_ms: None,
+                    dns_ms: Some(7),
+                    connect_ms: Some(19),
+                    connection_reused: Some(false),
+                    internal_errors: Vec::new(),
+                    proxy_setup_ms: Some(2),
+                    setup_timings: Default::default(),
+                    io_timings: Default::default(),
+                    upstream_ttfb_ms: terminal_ttfb,
+                    upstream_body_ms: Some(50),
+                    event_kind: None,
+                    funding_ambiguous: false,
+                    protocol: Some(cc_lb_request_log::RequestProtocol::Websocket),
+                },
+            )
+            .await;
+
+            let rows = store.rows.lock().expect("capturing store lock");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].upstream_ttfb_ms, expected_ttfb);
+        }
     }
 }
 

@@ -18,12 +18,12 @@ pub(crate) enum BodyIoPhase {
     DownstreamPollGap,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct BodyIoTiming {
     inner: Arc<Mutex<BodyIoTimingState>>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct BodyIoTimingState {
     wait: PhaseTotal,
     process: PhaseTotal,
@@ -32,7 +32,7 @@ struct BodyIoTimingState {
     stopped: bool,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 struct PhaseTotal {
     elapsed: Duration,
     started: bool,
@@ -51,7 +51,7 @@ impl BodyIoTiming {
         self.snapshot_at(Instant::now())
     }
 
-    fn transition_at(&self, phase: Option<BodyIoPhase>, now: Instant) {
+    pub(crate) fn transition_at(&self, phase: Option<BodyIoPhase>, now: Instant) {
         let mut state = self.lock_state();
         if state.stopped {
             return;

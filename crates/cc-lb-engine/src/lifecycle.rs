@@ -108,7 +108,8 @@ use crate::provider_capability::{
 };
 use crate::provider_input_estimate::estimate_provider_input;
 use crate::request_classification::{
-    classify_client_request_kind_with_class, is_thread_sticky_subagent_seed,
+    classify_client_request_kind_with_signals, codex::CodexRequestSignals,
+    is_thread_sticky_subagent_seed,
 };
 use crate::request_context::{CodexBackendSurface, ProviderScope, RequestContext};
 use crate::request_timing::{REQUEST_STAGE_TIMINGS, RequestStageTimings};
@@ -3714,7 +3715,18 @@ fn is_semantic_content_frame(
             .and_then(Value::as_array)
             .is_some_and(|choices| {
                 choices.iter().any(|choice| {
-                    non_empty_string(choice.get("delta").and_then(|delta| delta.get("content")))
+                    let Some(delta) = choice.get("delta") else {
+                        return false;
+                    };
+                    non_empty_string(delta.get("content"))
+                        || delta
+                            .get("tool_calls")
+                            .and_then(Value::as_array)
+                            .is_some_and(|calls| {
+                                calls.iter().any(|call| {
+                                    non_empty_string(call.pointer("/function/arguments"))
+                                })
+                            })
                 })
             }),
         crate::provider_capability::UsageShape::OpenaiCompletions => value
@@ -3726,8 +3738,15 @@ fn is_semantic_content_frame(
                     .any(|choice| non_empty_string(choice.get("text")))
             }),
         crate::provider_capability::UsageShape::OpenaiResponses => {
-            event.event_type() == Some("response.output_text.delta")
-                && non_empty_string(value.and_then(|value| value.get("delta")))
+            matches!(
+                event.event_type(),
+                Some(
+                    "response.output_text.delta"
+                        | "response.function_call_arguments.delta"
+                        | "response.reasoning_summary_text.delta"
+                        | "response.refusal.delta"
+                )
+            ) && non_empty_string(value.and_then(|value| value.get("delta")))
         }
         crate::provider_capability::UsageShape::GeminiGenerateContent => {
             let candidates = value
@@ -3747,7 +3766,8 @@ fn is_semantic_content_frame(
                                         .get("thought")
                                         .and_then(Value::as_bool)
                                         .unwrap_or(false)
-                                        && non_empty_string(part.get("text"))
+                                        && (non_empty_string(part.get("text"))
+                                            || part.get("functionCall").is_some())
                                 })
                             })
                     })
@@ -3899,16 +3919,14 @@ fn observe_sse_terminal_event(
     // name even when the JSON payload omits its redundant `type` field.
     // Anthropic keeps the stricter JSON-type-only rule so a named
     // `message_stop` event cannot turn malformed payloads into completion.
+    let parsed_value = event.value().ok().flatten();
     let event_name_terminal = matches!(
         capability.usage_shape(),
         crate::provider_capability::UsageShape::OpenaiResponses
     ) && (event.event_name() == Some(b"response.completed")
         || event.event_name() == Some(b"response.incomplete"))
-        && event.value().ok().flatten().is_some();
-    let semantic_event_type = event
-        .value()
-        .ok()
-        .flatten()
+        && parsed_value.is_some();
+    let semantic_event_type = parsed_value
         .and_then(|value| value.get("type"))
         .and_then(serde_json::Value::as_str);
     let response_terminal_type = matches!(
@@ -3921,10 +3939,152 @@ fn observe_sse_terminal_event(
         || response_terminal_type
         || semantic_terminal_event_type(capability)
             .is_some_and(|terminal| semantic_event_type == Some(terminal));
+    let response_failed_stop = matches!(
+        capability.usage_shape(),
+        crate::provider_capability::UsageShape::OpenaiResponses
+    ) && parsed_value.is_some()
+        && (event.event_name() == Some(b"response.failed")
+            || semantic_event_type == Some("response.failed"));
+    let openai_chat_stop = matches!(
+        capability.usage_shape(),
+        crate::provider_capability::UsageShape::OpenaiChatCompletions
+            | crate::provider_capability::UsageShape::OpenaiCompletions
+    ) && (event.is_done()
+        || parsed_value
+            .and_then(|value| value.get("choices"))
+            .and_then(Value::as_array)
+            .is_some_and(|choices| {
+                choices.iter().any(|choice| {
+                    choice
+                        .get("finish_reason")
+                        .is_some_and(|reason| !reason.is_null())
+                })
+            }));
+    let gemini_stop = matches!(
+        capability.usage_shape(),
+        crate::provider_capability::UsageShape::GeminiGenerateContent
+    ) && parsed_value
+        .and_then(|value| {
+            value
+                .get("candidates")
+                .or_else(|| value.get("response")?.get("candidates"))
+        })
+        .and_then(Value::as_array)
+        .is_some_and(|candidates| {
+            candidates.iter().any(|candidate| {
+                candidate
+                    .get("finishReason")
+                    .is_some_and(|reason| !reason.is_null())
+            })
+        });
     if event.event_name() == Some(b"message_stop")
-        || (usage_message_stop && message_stop_at.is_none())
+        || ((usage_message_stop
+            || event_name_terminal
+            || response_terminal_type
+            || response_failed_stop
+            || openai_chat_stop
+            || gemini_stop)
+            && message_stop_at.is_none())
     {
         *message_stop_at = Some(now());
+    }
+}
+
+fn observe_sse_lifecycle_markers(
+    capability: ProviderCapability,
+    event: &usage_parser::ParsedSseEvent<'_>,
+    message_start_at: &mut Option<Instant>,
+    content_block_start_at: &mut Option<Instant>,
+    ping_count: &mut u64,
+    downstream_drop_guard: Option<&mut DownstreamStreamDropGuard>,
+    now: Instant,
+) {
+    match event.event_name() {
+        Some(b"message_start") if message_start_at.is_none() => {
+            *message_start_at = Some(now);
+            if let Some(guard) = downstream_drop_guard {
+                guard.set_keepalive_anchor_at(now);
+            }
+            return;
+        }
+        Some(b"content_block_start") if content_block_start_at.is_none() => {
+            *content_block_start_at = Some(now);
+            return;
+        }
+        Some(b"ping") => {
+            *ping_count = ping_count.saturating_add(1);
+            return;
+        }
+        _ => {}
+    }
+
+    let Some(value) = event.value().ok().flatten() else {
+        return;
+    };
+    match capability.usage_shape() {
+        crate::provider_capability::UsageShape::OpenaiResponses => match event.event_type() {
+            Some("response.created" | "response.in_progress") if message_start_at.is_none() => {
+                *message_start_at = Some(now);
+                if let Some(guard) = downstream_drop_guard {
+                    guard.set_keepalive_anchor_at(now);
+                }
+            }
+            Some("response.output_item.added" | "response.content_part.added")
+                if content_block_start_at.is_none() =>
+            {
+                *content_block_start_at = Some(now);
+            }
+            _ => {}
+        },
+        crate::provider_capability::UsageShape::OpenaiChatCompletions
+        | crate::provider_capability::UsageShape::OpenaiCompletions => {
+            if let Some(choices) = value.get("choices").and_then(Value::as_array) {
+                if message_start_at.is_none() {
+                    *message_start_at = Some(now);
+                    if let Some(guard) = downstream_drop_guard {
+                        guard.set_keepalive_anchor_at(now);
+                    }
+                }
+                if content_block_start_at.is_none()
+                    && choices.iter().any(|choice| {
+                        choice.get("delta").is_some_and(|delta| {
+                            delta.get("role").is_some()
+                                || delta.get("content").is_some_and(|v| !v.is_null())
+                                || delta.get("tool_calls").is_some()
+                        }) || choice.get("text").is_some_and(|v| !v.is_null())
+                    })
+                {
+                    *content_block_start_at = Some(now);
+                }
+            }
+        }
+        crate::provider_capability::UsageShape::GeminiGenerateContent => {
+            let candidates = value.get("candidates").or_else(|| {
+                value
+                    .get("response")
+                    .and_then(|resp| resp.get("candidates"))
+            });
+            if let Some(candidates) = candidates.and_then(Value::as_array) {
+                if message_start_at.is_none() {
+                    *message_start_at = Some(now);
+                    if let Some(guard) = downstream_drop_guard {
+                        guard.set_keepalive_anchor_at(now);
+                    }
+                }
+                if content_block_start_at.is_none()
+                    && candidates.iter().any(|candidate| {
+                        candidate
+                            .get("content")
+                            .and_then(|content| content.get("parts"))
+                            .and_then(Value::as_array)
+                            .is_some_and(|parts| !parts.is_empty())
+                    })
+                {
+                    *content_block_start_at = Some(now);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -4696,10 +4856,12 @@ impl Lifecycle {
         );
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
+            observer.set_protocol(cc_lb_request_log::RequestProtocol::Websocket);
             observer.set_request_span(span.clone());
             observer.set_response_stream_span(stream_span.clone());
             observer.emit_request_started(true);
         }
+        let mut setup_timings = cc_lb_lifecycle::RequestSetupTimings::default();
         let result = async {
             let view = self.dynamic_view.load();
             let cached = view
@@ -4717,6 +4879,7 @@ impl Lifecycle {
                 kind: PrincipalKind::InternalKey,
             };
             if let Some(observer) = observer.as_ref() {
+                let cache_structure_started = Instant::now();
                 let cache_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
                     ingress.headers,
                     Some(body.as_ref()),
@@ -4724,6 +4887,8 @@ impl Lifecycle {
                     Some(ProviderCapability::OpenaiResponses),
                     None,
                 );
+                setup_timings.cache_structure_ms =
+                    Some(cache_structure_started.elapsed().as_secs_f64() * 1_000.0);
                 observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                     event_id: observer.event_id().to_owned(),
                     result: Ok(cc_lb_lifecycle::ParseInfo {
@@ -4960,6 +5125,7 @@ impl Lifecycle {
                     .and_then(Value::as_bool)
                     .unwrap_or(record.kind != StorageUpstreamKind::OpenaiOauth),
                 span: stream_span.clone(),
+                setup_timings,
                 request_id: request_id.to_owned(),
             })
         }
@@ -5135,7 +5301,11 @@ impl Lifecycle {
         strip_hop_by_hop(&mut downstream_headers);
         let canonical_model = canonical_model_id(Provider::Openai, model).to_owned();
         let service_tier = body.get("service_tier").and_then(Value::as_str);
-        let identity = request_identity_metadata(ingress.headers, Some(body));
+        let identity = request_identity_metadata(
+            ingress.headers,
+            Some(body),
+            Some(ProviderCapability::OpenaiResponses),
+        );
         let ctx = RequestContext::builder()
             .request_id(request_id)
             .thread_id(identity.thread_id)
@@ -5378,7 +5548,7 @@ impl Lifecycle {
     ) -> Result<(Url, HeaderMap), WebSocketError> {
         self.sign_websocket_connection_with_signer(auth, headers, candidate, query)
             .await
-            .map(|(url, headers, _)| (url, headers))
+            .map(|(url, headers, _, _, _)| (url, headers))
     }
 
     pub(crate) async fn sign_websocket_connection_with_signer(
@@ -5387,7 +5557,7 @@ impl Lifecycle {
         headers: &HeaderMap,
         candidate: &WebSocketCandidate,
         query: Option<&str>,
-    ) -> Result<(Url, HeaderMap, Arc<dyn Signer>), WebSocketError> {
+    ) -> Result<(Url, HeaderMap, Arc<dyn Signer>, f64, u64), WebSocketError> {
         let view = self.dynamic_view.load();
         let record = view
             .upstreams_snapshot()
@@ -5434,14 +5604,18 @@ impl Lifecycle {
             WebSocketError::new(502, error_codes::ROUTE_NOT_CONFIGURED, error.to_string())
         })?;
         let factory = view.signer_factory.with_router_choice(record.name.clone());
+        let signer_started = Instant::now();
         let signer: Arc<dyn Signer> = factory.build(&upstream).await.map_err(|error| {
             WebSocketError::new(502, "upstream_signing_failed", error.to_string())
         })?;
+        let prepare_signer_ms = signer_started.elapsed().as_secs_f64() * 1_000.0;
+        let sign_started = Instant::now();
         let signed = sign_request(signer.as_ref(), shaped)
             .await
             .map_err(|error| {
                 WebSocketError::new(502, "upstream_signing_failed", error.to_string())
             })?;
+        let sign_ms = duration_to_ms(sign_started.elapsed());
         let mut url = signed.url().clone();
         let scheme = match url.scheme() {
             "https" => "wss",
@@ -5465,7 +5639,7 @@ impl Lifecycle {
         })?;
         let mut headers = signed.headers().clone();
         strip_hop_by_hop(&mut headers);
-        Ok((url, headers, signer))
+        Ok((url, headers, signer, prepare_signer_ms, sign_ms))
     }
 
     /// Persist recognized state before the gateway exposes it to another connection.
@@ -8704,6 +8878,35 @@ impl Lifecycle {
             .await?;
         let response = &attempt_result.response;
         if let Some(o) = observer {
+            let stream_requested = o.stream_requested();
+            let capability =
+                classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope)
+                    .unwrap_or(ProviderCapability::AnthropicMessages);
+            let response_is_sse = is_sse_response(response.headers(), stream_requested, capability);
+            let compat_forces_buffered =
+                attempt_result
+                    .compat_response_plan
+                    .as_ref()
+                    .is_some_and(|plan| {
+                        compat_response::requires_buffered_response(plan)
+                            || (matches!(&plan.kind, CompatResponseKind::Chat { .. })
+                                && !response.status().is_success())
+                    });
+            let audio_stream = matches!(
+                capability,
+                ProviderCapability::OpenaiAudio | ProviderCapability::OpenaiAudioTranscriptions
+            ) && !has_json_content_type(response.headers());
+            let protocol = if response_is_sse && !compat_forces_buffered {
+                cc_lb_request_log::RequestProtocol::HttpSse
+            } else if !compat_forces_buffered
+                && response.status().is_success()
+                && !has_json_content_type(response.headers())
+                && (stream_requested || audio_stream)
+            {
+                cc_lb_request_log::RequestProtocol::HttpStream
+            } else {
+                cc_lb_request_log::RequestProtocol::Http
+            };
             o.set_attempt_timings(
                 attempt_timings.shape_ms,
                 attempt_timings.sign_ms,
@@ -8721,6 +8924,7 @@ impl Lifecycle {
                 shape_ms: attempt_timings.shape_ms,
                 sign_ms: attempt_timings.sign_ms,
                 upstream_ttfb_ms: attempt_timings.upstream_ttfb_ms,
+                protocol: Some(protocol),
             });
         }
         Ok(attempt_result)
@@ -9969,7 +10173,6 @@ impl Lifecycle {
                                         .mark_abnormal_stop(stop.stop_reason, error_message);
                                 }
                                 sse_event_count = sse_event_count.saturating_add(1);
-                                let event_name = parsed_event.event_name();
                                 let mut affinity_persist_failed = false;
                                 let affinity_binding = if success_sse_affinity_gate {
                                     let response_keys = match
@@ -10147,21 +10350,15 @@ impl Lifecycle {
                                     content_delta_count =
                                         content_delta_count.saturating_add(1);
                                 }
-                                match event_name {
-                                    Some(b"message_start") if message_start_at.is_none() => {
-                                        message_start_at = Some(now);
-                                        downstream_drop_guard.set_keepalive_anchor_at(now);
-                                    }
-                                    Some(b"content_block_start")
-                                        if content_block_start_at.is_none() =>
-                                    {
-                                        content_block_start_at = Some(now);
-                                    }
-                                    Some(b"ping") => {
-                                        ping_count = ping_count.saturating_add(1);
-                                    }
-                                    _ => {}
-                                }
+                                observe_sse_lifecycle_markers(
+                                    response_affinity_context.capability,
+                                    &parsed_event,
+                                    &mut message_start_at,
+                                    &mut content_block_start_at,
+                                    &mut ping_count,
+                                    Some(&mut downstream_drop_guard),
+                                    now,
+                                );
                                 if usage_update.message_start_usage {
                                     if message_start_at.is_none() {
                                         message_start_at = Some(now);
@@ -14174,7 +14371,7 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
     capability: Option<ProviderCapability>,
     path_model: Option<&str>,
 ) -> RequestCacheMetadata {
-    let identity = request_identity_metadata(headers, value);
+    let identity = request_identity_metadata(headers, value, capability);
     let thread_id = identity.thread_id.clone();
     let observed_session_id = identity.observed_session_id.clone();
     let request_kind = identity.request_kind.clone();
@@ -14529,6 +14726,7 @@ fn derived_parent_session_id(session_id: &str) -> Option<String> {
 fn request_identity_metadata(
     headers: &HeaderMap,
     value: Option<&Value>,
+    capability: Option<ProviderCapability>,
 ) -> RequestIdentityMetadata {
     let metadata = value.map(metadata_identity).unwrap_or_default();
     let (observed_session_id, session_id_source) =
@@ -14538,9 +14736,18 @@ fn request_identity_metadata(
         };
     let claude_agent_id = header_identity(headers, "x-claude-code-agent-id");
     let claude_parent_agent_id = header_identity(headers, "x-claude-code-parent-agent-id");
-    let client_app = header_identity(headers, "x-app");
+    let originator = header_identity(headers, "originator");
+    let client_app = header_identity(headers, "x-app").or_else(|| {
+        originator.as_ref().and_then(|value| {
+            let trimmed = value.trim();
+            (trimmed.len() >= 5 && trimmed.as_bytes()[..5].eq_ignore_ascii_case(b"codex"))
+                .then(|| trimmed.to_owned())
+        })
+    });
+    let codex_parent_thread_id = header_identity(headers, "x-codex-parent-thread-id");
     let parent_session_id = header_identity(headers, "x-parent-session-id")
         .or_else(|| header_identity(headers, "x-opencode-parent-session-id"))
+        .or_else(|| codex_parent_thread_id.clone())
         .or_else(|| metadata.parent_session_id.clone())
         .or_else(|| {
             observed_session_id
@@ -14559,12 +14766,24 @@ fn request_identity_metadata(
     let explicit_auxiliary = claude_request_class
         .as_deref()
         .is_some_and(|class| class.trim().eq_ignore_ascii_case("auxiliary"));
-    let request_kind = classify_client_request_kind_with_class(
+    let subagent_header = header_identity(headers, "x-openai-subagent");
+    let user_agent = header_identity(headers, "user-agent");
+    let codex_signals = CodexRequestSignals {
+        subagent_header: subagent_header.as_deref(),
+        guardian_header: header_identity(headers, "x-codex-guardian").is_some(),
+        has_parent_thread: codex_parent_thread_id.is_some(),
+        originator: originator.as_deref(),
+        user_agent: user_agent.as_deref(),
+        has_codex_turn_metadata: header_identity(headers, "x-codex-turn-metadata").is_some(),
+        is_compact_endpoint: capability == Some(ProviderCapability::OpenaiResponsesCompact),
+    };
+    let request_kind = classify_client_request_kind_with_signals(
         value,
         observed_session_id.as_deref(),
         parent_session_id.as_deref(),
         claude_agent_id.is_some(),
         claude_request_class.as_deref(),
+        Some(&codex_signals),
     )
     .map(str::to_owned);
 
@@ -19918,6 +20137,62 @@ mod tests {
     }
 
     #[test]
+    fn request_cache_metadata_classifies_codex_kinds_parent_thread_and_client_app() {
+        let mut main_headers = HeaderMap::new();
+        main_headers.insert(
+            HeaderName::from_static("session_id"),
+            HeaderValue::from_static("codex-thread-main"),
+        );
+        main_headers.insert(
+            HeaderName::from_static("originator"),
+            HeaderValue::from_static("codex_cli_rs"),
+        );
+        let main = request_cache_metadata(
+            &main_headers,
+            &Bytes::from_static(br#"{"model":"gpt-5.4","input":[{"role":"user","content":"hi"}]}"#),
+        );
+        assert_eq!(main.request_kind.as_deref(), Some("main"));
+        assert_eq!(main.client_app.as_deref(), Some("codex_cli_rs"));
+        assert_eq!(main.parent_session_id, None);
+
+        let prewarm = request_cache_metadata(
+            &main_headers,
+            &Bytes::from_static(br#"{"model":"gpt-5.4","generate":false,"input":[]}"#),
+        );
+        assert_eq!(prewarm.request_kind.as_deref(), Some("prewarm"));
+
+        let mut review_headers = main_headers.clone();
+        review_headers.insert(
+            HeaderName::from_static("x-openai-subagent"),
+            HeaderValue::from_static("review"),
+        );
+        review_headers.insert(
+            HeaderName::from_static("x-codex-parent-thread-id"),
+            HeaderValue::from_static("codex-thread-parent"),
+        );
+        review_headers.insert(
+            HeaderName::from_static("session_id"),
+            HeaderValue::from_static("codex-thread-child"),
+        );
+        let review =
+            request_cache_metadata(&review_headers, &Bytes::from_static(br#"{"input":[]}"#));
+        assert_eq!(review.request_kind.as_deref(), Some("review"));
+        assert_eq!(
+            review.parent_session_id.as_deref(),
+            Some("codex-thread-parent")
+        );
+
+        let compact = request_cache_metadata_from_value_with_analysis_for_capability(
+            &main_headers,
+            Some(&json!({"model":"gpt-5.4","input":[]})),
+            None,
+            Some(ProviderCapability::OpenaiResponsesCompact),
+            None,
+        );
+        assert_eq!(compact.request_kind.as_deref(), Some("compaction"));
+    }
+
+    #[test]
     fn request_cache_metadata_classifies_main_with_large_project_context_block() {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -22480,10 +22755,151 @@ mod tests {
             ProviderCapability::GeminiGenerateContent,
             &gemini_thought
         ));
+        let chat_tool_args = parse_sse_event(
+            b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"x\\\":1}\"}}]}}]}\n\n",
+        );
+        assert!(is_semantic_content_frame(
+            ProviderCapability::OpenaiChatCompletions,
+            &chat_tool_args
+        ));
+        let response_func_args = parse_sse_event(
+            b"event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"a\\\":1}\"}\n\n",
+        );
+        assert!(is_semantic_content_frame(
+            ProviderCapability::OpenaiResponses,
+            &response_func_args
+        ));
+        let gemini_fn_call = parse_sse_event(
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"bash\",\"args\":{}}}]}}]}\n\n",
+        );
+        let gemini_thought_fn_call = parse_sse_event(
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"thought\":true,\"functionCall\":{\"name\":\"bash\",\"args\":{}}}]}}]}\n\n",
+        );
+        assert!(is_semantic_content_frame(
+            ProviderCapability::GeminiGenerateContent,
+            &gemini_fn_call
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::GeminiGenerateContent,
+            &gemini_thought_fn_call
+        ));
         assert!(!is_semantic_content_frame(
             ProviderCapability::GeminiOpenaiChatCompletions,
             &gemini_text
         ));
+    }
+
+    #[test]
+    fn observe_sse_lifecycle_markers_capture_openai_and_gemini_streams() {
+        let base = Instant::now();
+
+        // OpenAI Responses SSE
+        let mut msg_start = None;
+        let mut block_start = None;
+        let mut msg_stop = None;
+        let mut stop_seen = false;
+        let mut pings = 0;
+        let created = parse_sse_event(
+            b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n",
+        );
+        let item_added = parse_sse_event(
+            b"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n\n",
+        );
+        let completed = parse_sse_event(
+            b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n",
+        );
+        observe_sse_lifecycle_markers(
+            ProviderCapability::OpenaiResponses,
+            &created,
+            &mut msg_start,
+            &mut block_start,
+            &mut pings,
+            None,
+            base + Duration::from_millis(5),
+        );
+        observe_sse_lifecycle_markers(
+            ProviderCapability::OpenaiResponses,
+            &item_added,
+            &mut msg_start,
+            &mut block_start,
+            &mut pings,
+            None,
+            base + Duration::from_millis(8),
+        );
+        observe_sse_terminal_event(
+            ProviderCapability::OpenaiResponses,
+            &completed,
+            false,
+            &mut stop_seen,
+            &mut msg_stop,
+            || base + Duration::from_millis(20),
+        );
+        assert_eq!(msg_start, Some(base + Duration::from_millis(5)));
+        assert_eq!(block_start, Some(base + Duration::from_millis(8)));
+        assert_eq!(msg_stop, Some(base + Duration::from_millis(20)));
+        assert!(stop_seen);
+
+        // OpenAI Chat Completions SSE
+        let mut msg_start = None;
+        let mut block_start = None;
+        let mut msg_stop = None;
+        let mut stop_seen = false;
+        let chunk_role = parse_sse_event(
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n",
+        );
+        let chunk_stop = parse_sse_event(
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        );
+        observe_sse_lifecycle_markers(
+            ProviderCapability::OpenaiChatCompletions,
+            &chunk_role,
+            &mut msg_start,
+            &mut block_start,
+            &mut pings,
+            None,
+            base + Duration::from_millis(3),
+        );
+        observe_sse_terminal_event(
+            ProviderCapability::OpenaiChatCompletions,
+            &chunk_stop,
+            false,
+            &mut stop_seen,
+            &mut msg_stop,
+            || base + Duration::from_millis(12),
+        );
+        assert_eq!(msg_start, Some(base + Duration::from_millis(3)));
+        assert_eq!(block_start, Some(base + Duration::from_millis(3)));
+        assert_eq!(msg_stop, Some(base + Duration::from_millis(12)));
+
+        // Gemini SSE
+        let mut msg_start = None;
+        let mut block_start = None;
+        let mut msg_stop = None;
+        let mut stop_seen = false;
+        let gem_chunk = parse_sse_event(
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]},\"finishReason\":\"STOP\"}]}\n\n",
+        );
+        observe_sse_lifecycle_markers(
+            ProviderCapability::GeminiGenerateContent,
+            &gem_chunk,
+            &mut msg_start,
+            &mut block_start,
+            &mut pings,
+            None,
+            base + Duration::from_millis(7),
+        );
+        observe_sse_terminal_event(
+            ProviderCapability::GeminiGenerateContent,
+            &gem_chunk,
+            false,
+            &mut stop_seen,
+            &mut msg_stop,
+            || base + Duration::from_millis(9),
+        );
+        assert_eq!(msg_start, Some(base + Duration::from_millis(7)));
+        assert_eq!(block_start, Some(base + Duration::from_millis(7)));
+        assert_eq!(msg_stop, Some(base + Duration::from_millis(9)));
+        assert!(!stop_seen);
     }
 
     /// QA-STOR-01: the affinity store fails while resolving request keys.

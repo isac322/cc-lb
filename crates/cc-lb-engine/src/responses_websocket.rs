@@ -179,7 +179,27 @@ pub(crate) struct PreparedWebSocketTurn {
     pub store: bool,
     pub span: Span,
     pub route_info: cc_lb_lifecycle::RouteInfo,
+    pub setup_timings: cc_lb_lifecycle::RequestSetupTimings,
     pub request_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ResponsesDispatchTimings {
+    pub connection_reused: Option<bool>,
+    pub bulkhead_wait_ms: Option<u64>,
+    pub dns_ms: Option<u64>,
+    pub connect_ms: Option<u64>,
+}
+
+impl ResponsesDispatchTimings {
+    pub const fn reused() -> Self {
+        Self {
+            connection_reused: Some(true),
+            bulkhead_wait_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+        }
+    }
 }
 
 pub(crate) struct WebSocketPluginRequest {
@@ -228,35 +248,137 @@ struct Lane {
     queued: VecDeque<u64>,
 }
 
+fn duration_to_ms(duration: std::time::Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn ws_semantic_content_delta(frame: &[u8], event_type: &str) -> bool {
+    if !matches!(
+        event_type,
+        "response.output_text.delta"
+            | "response.function_call_arguments.delta"
+            | "response.reasoning_summary_text.delta"
+            | "response.refusal.delta"
+    ) {
+        return false;
+    }
+    sonic_rs::get_from_slice(frame, &["delta"])
+        .ok()
+        .is_some_and(|value| value.as_str().is_some_and(|text| !text.is_empty()))
+}
+
 #[derive(Debug)]
 struct ResponsesStreamMetrics {
-    started: std::time::Instant,
+    turn_started: std::time::Instant,
+    relay_started: Option<std::time::Instant>,
+    send_started: Option<std::time::Instant>,
+    proxy_setup_ms: Option<u64>,
+    setup_timings: cc_lb_lifecycle::RequestSetupTimings,
+    io_timing: crate::body_io_timing::BodyIoTiming,
+    bulkhead_wait_ms: Option<u64>,
+    dns_ms: Option<u64>,
+    connect_ms: Option<u64>,
+    connection_reused: Option<bool>,
+    shape_ms: Option<u64>,
+    sign_ms: Option<u64>,
+    upstream_ttfb_ms: Option<u64>,
+    upstream_started_emitted: bool,
     first_output_ms: Option<u64>,
     last_output_ms: Option<u64>,
-    last_activity_heartbeat_ms: u64,
+    stream_message_start_ms: Option<u64>,
+    stream_content_block_start_ms: Option<u64>,
+    stream_first_content_delta_ms: Option<u64>,
+    stream_last_content_delta_ms: Option<u64>,
+    stream_message_stop_ms: Option<u64>,
+    last_activity_heartbeat_at: std::time::Instant,
     event_count: u64,
+    content_delta_count: u64,
+    ping_count: u64,
     total_bytes: u64,
     provider_session_id: Option<String>,
 }
 
+struct ObservedFrameOutcome {
+    heartbeat_due: bool,
+    first_content_delta_ms: Option<u64>,
+}
+
 impl ResponsesStreamMetrics {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::new_with_setup(
+            std::time::Instant::now(),
+            None,
+            cc_lb_lifecycle::RequestSetupTimings::default(),
+        )
+    }
+
+    fn new_with_setup(
+        turn_started: std::time::Instant,
+        proxy_setup_ms: Option<u64>,
+        setup_timings: cc_lb_lifecycle::RequestSetupTimings,
+    ) -> Self {
         Self {
-            started: std::time::Instant::now(),
+            turn_started,
+            relay_started: None,
+            send_started: None,
+            proxy_setup_ms,
+            setup_timings,
+            io_timing: crate::body_io_timing::BodyIoTiming::default(),
+            bulkhead_wait_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
+            shape_ms: None,
+            sign_ms: None,
+            upstream_ttfb_ms: None,
+            upstream_started_emitted: false,
             first_output_ms: None,
             last_output_ms: None,
-            last_activity_heartbeat_ms: 0,
+            stream_message_start_ms: None,
+            stream_content_block_start_ms: None,
+            stream_first_content_delta_ms: None,
+            stream_last_content_delta_ms: None,
+            stream_message_stop_ms: None,
+            last_activity_heartbeat_at: turn_started,
             event_count: 0,
+            content_delta_count: 0,
+            ping_count: 0,
             total_bytes: 0,
             provider_session_id: None,
         }
     }
 
-    fn maybe_record_heartbeat(&mut self, elapsed_ms: u64, heartbeat_interval_ms: u64) -> bool {
+    fn record_dispatch_timings(&mut self, timings: ResponsesDispatchTimings) {
+        if let Some(reused) = timings.connection_reused {
+            self.connection_reused = Some(reused);
+        }
+        if let Some(wait) = timings.bulkhead_wait_ms {
+            self.bulkhead_wait_ms = Some(wait);
+        }
+        if let Some(dns) = timings.dns_ms {
+            self.dns_ms = Some(dns);
+        }
+        if let Some(connect) = timings.connect_ms {
+            self.connect_ms = Some(connect);
+        }
+    }
+
+    fn mark_sent(&mut self, timings: ResponsesDispatchTimings, send_started: std::time::Instant) {
+        self.record_dispatch_timings(timings);
+        self.send_started = Some(send_started);
+    }
+
+    fn maybe_record_heartbeat(
+        &mut self,
+        now: std::time::Instant,
+        heartbeat_interval_ms: u64,
+    ) -> bool {
         if heartbeat_interval_ms > 0
-            && elapsed_ms.saturating_sub(self.last_activity_heartbeat_ms) >= heartbeat_interval_ms
+            && duration_to_ms(now.saturating_duration_since(self.last_activity_heartbeat_at))
+                >= heartbeat_interval_ms
         {
-            self.last_activity_heartbeat_ms = elapsed_ms;
+            self.last_activity_heartbeat_at = now;
             true
         } else {
             false
@@ -267,16 +389,77 @@ impl ResponsesStreamMetrics {
         if heartbeat_interval_ms == 0 {
             return false;
         }
-        let elapsed = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        self.maybe_record_heartbeat(elapsed, heartbeat_interval_ms)
+        self.maybe_record_heartbeat(std::time::Instant::now(), heartbeat_interval_ms)
     }
 
+    #[cfg(test)]
     fn observe(&mut self, frame: &[u8], heartbeat_interval_ms: u64) -> bool {
-        let elapsed = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        self.observe_at(frame, std::time::Instant::now(), heartbeat_interval_ms)
+            .heartbeat_due
+    }
+
+    fn observe_at(
+        &mut self,
+        frame: &[u8],
+        now: std::time::Instant,
+        heartbeat_interval_ms: u64,
+    ) -> ObservedFrameOutcome {
+        let relay_start = match self.relay_started {
+            Some(start) => start,
+            None => {
+                self.relay_started = Some(now);
+                let first_frame_wait = self
+                    .send_started
+                    .map(|sent| duration_to_ms(now.saturating_duration_since(sent)))
+                    .unwrap_or_else(|| {
+                        duration_to_ms(now.saturating_duration_since(self.turn_started))
+                    });
+                self.upstream_ttfb_ms = Some(
+                    self.bulkhead_wait_ms
+                        .unwrap_or(0)
+                        .saturating_add(self.dns_ms.unwrap_or(0))
+                        .saturating_add(self.connect_ms.unwrap_or(0))
+                        .saturating_add(first_frame_wait),
+                );
+                now
+            }
+        };
+        self.io_timing
+            .transition_at(Some(crate::body_io_timing::BodyIoPhase::Process), now);
+        let elapsed = duration_to_ms(now.saturating_duration_since(relay_start));
         self.first_output_ms.get_or_insert(elapsed);
         self.last_output_ms = Some(elapsed);
         self.event_count = self.event_count.saturating_add(1);
         self.total_bytes = self.total_bytes.saturating_add(frame.len() as u64);
+
+        let mut captured_first_delta = None;
+        if let Ok(event_type_val) = sonic_rs::get_from_slice(frame, &["type"])
+            && let Some(event_type) = event_type_val.as_str()
+        {
+            match event_type {
+                "response.created" | "response.in_progress" => {
+                    self.stream_message_start_ms.get_or_insert(elapsed);
+                }
+                "response.output_item.added" | "response.content_part.added" => {
+                    self.stream_content_block_start_ms.get_or_insert(elapsed);
+                }
+                "response.completed" | "response.incomplete" | "response.failed" => {
+                    if self.stream_message_stop_ms.is_none() {
+                        self.stream_message_stop_ms = Some(elapsed);
+                    }
+                }
+                other if ws_semantic_content_delta(frame, other) => {
+                    if self.stream_first_content_delta_ms.is_none() {
+                        self.stream_first_content_delta_ms = Some(elapsed);
+                        captured_first_delta = Some(elapsed);
+                    }
+                    self.stream_last_content_delta_ms = Some(elapsed);
+                    self.content_delta_count = self.content_delta_count.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+
         if self.provider_session_id.is_none() {
             let bounded = |value: Option<sonic_rs::LazyValue<'_>>| {
                 let value = value.and_then(|value| value.as_str().map(str::to_owned))?;
@@ -286,25 +469,39 @@ impl ResponsesStreamMetrics {
             let fallback_id = sonic_rs::get_from_slice(frame, &["response_id"]).ok();
             self.provider_session_id = bounded(response_id).or_else(|| bounded(fallback_id));
         }
-        self.maybe_record_heartbeat(elapsed, heartbeat_interval_ms)
+        ObservedFrameOutcome {
+            heartbeat_due: self.maybe_record_heartbeat(now, heartbeat_interval_ms),
+            first_content_delta_ms: captured_first_delta,
+        }
     }
 
     fn latency(&self, status: u16) -> StreamLatency {
-        let stream_total_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let stream_total_ms = self
+            .relay_started
+            .map_or(0, |start| duration_to_ms(start.elapsed()));
         let inter_output_avg_ms = match (self.first_output_ms, self.last_output_ms) {
             (Some(first), Some(last)) if self.event_count > 1 => {
                 Some(last.saturating_sub(first) / (self.event_count - 1))
             }
             _ => None,
         };
+        let inter_token_avg_ms = match (
+            self.stream_first_content_delta_ms,
+            self.stream_last_content_delta_ms,
+        ) {
+            (Some(first), Some(last)) if self.content_delta_count > 1 => {
+                Some(last.saturating_sub(first) / (self.content_delta_count - 1))
+            }
+            _ => None,
+        };
         StreamLatency {
             status,
             stream_first_chunk_ms: self.first_output_ms,
-            stream_message_start_ms: None,
-            stream_content_block_start_ms: None,
-            stream_first_content_delta_ms: None,
-            stream_last_content_delta_ms: None,
-            stream_message_stop_ms: None,
+            stream_message_start_ms: self.stream_message_start_ms,
+            stream_content_block_start_ms: self.stream_content_block_start_ms,
+            stream_first_content_delta_ms: self.stream_first_content_delta_ms,
+            stream_last_content_delta_ms: self.stream_last_content_delta_ms,
+            stream_message_stop_ms: self.stream_message_stop_ms,
             stream_last_chunk_ms: self.last_output_ms,
             stream_first_output_ms: self.first_output_ms,
             stream_last_output_ms: self.last_output_ms,
@@ -314,9 +511,9 @@ impl ResponsesStreamMetrics {
             provider_connection_id: None,
             stream_total_ms,
             sse_event_count: 0,
-            content_delta_count: 0,
-            ping_count: 0,
-            inter_token_avg_ms: None,
+            content_delta_count: self.content_delta_count,
+            ping_count: self.ping_count,
+            inter_token_avg_ms,
             total_bytes: self.total_bytes,
         }
     }
@@ -466,6 +663,7 @@ impl ResponsesWebSocketGateway {
         let (observer, _) = self.lifecycle.websocket_observer("/v1/responses");
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
+            observer.set_protocol(cc_lb_request_log::RequestProtocol::Websocket);
             terminate_error(observer, error);
         }
     }
@@ -475,7 +673,10 @@ impl ResponsesWebSocketGateway {
         auth: Authenticated,
         frame: Bytes,
     ) -> Result<Option<WebSocketDispatch>, WebSocketError> {
+        let turn_started = std::time::Instant::now();
+        let parse_started = std::time::Instant::now();
         let body = parse_client_frame(&auth, &frame, self.byte_cap);
+        let json_parse_ms = Some(parse_started.elapsed().as_secs_f64() * 1_000.0);
         let kind_str = body
             .as_ref()
             .ok()
@@ -511,6 +712,8 @@ impl ResponsesWebSocketGateway {
                         observer.clone()
                     },
                     &request_id,
+                    turn_started,
+                    json_parse_ms,
                 )
                 .await
             }
@@ -527,6 +730,7 @@ impl ResponsesWebSocketGateway {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn admit_client(
         &mut self,
         auth: Authenticated,
@@ -534,6 +738,8 @@ impl ResponsesWebSocketGateway {
         body: Value,
         observer: Option<LifecycleContext>,
         request_id: &str,
+        turn_started: std::time::Instant,
+        json_parse_ms: Option<f64>,
     ) -> Result<Option<WebSocketDispatch>, WebSocketError> {
         let kind = body.get("type").and_then(Value::as_str).ok_or_else(|| {
             WebSocketError::new(
@@ -544,7 +750,15 @@ impl ResponsesWebSocketGateway {
         })?;
         if kind == "response.steer" {
             return self
-                .admit_steer(auth, frame, body, observer, request_id)
+                .admit_steer(
+                    auth,
+                    frame,
+                    body,
+                    observer,
+                    request_id,
+                    turn_started,
+                    json_parse_ms,
+                )
                 .await;
         }
         if kind == "response.interrupt" {
@@ -651,6 +865,15 @@ impl ResponsesWebSocketGateway {
         if let Some(stream_id) = lane.as_deref() {
             prepared.span.record("cc_lb.responses.stream_id", stream_id);
         }
+        let mut setup_timings = prepared.setup_timings;
+        if json_parse_ms.is_some() {
+            setup_timings.json_parse_ms = json_parse_ms;
+        }
+        let metrics = ResponsesStreamMetrics::new_with_setup(
+            turn_started,
+            Some(duration_to_ms(turn_started.elapsed())),
+            setup_timings,
+        );
         self.next_turn_id = self.next_turn_id.checked_add(1).ok_or_else(|| {
             WebSocketError::new(
                 503,
@@ -688,7 +911,7 @@ impl ResponsesWebSocketGateway {
                 incomplete_reason: None,
                 plugin_request: None,
                 echo_metadata: None,
-                metrics: ResponsesStreamMetrics::new(),
+                metrics,
                 funding_ambiguous: false,
                 response_created: false,
             },
@@ -731,6 +954,7 @@ impl ResponsesWebSocketGateway {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn admit_steer(
         &mut self,
         auth: Authenticated,
@@ -738,6 +962,8 @@ impl ResponsesWebSocketGateway {
         control: Value,
         observer: Option<LifecycleContext>,
         request_id: &str,
+        turn_started: std::time::Instant,
+        json_parse_ms: Option<f64>,
     ) -> Result<Option<WebSocketDispatch>, WebSocketError> {
         let parent = control
             .get("previous_response_id")
@@ -830,6 +1056,15 @@ impl ResponsesWebSocketGateway {
         if let Some(stream_id) = lane.as_deref() {
             prepared.span.record("cc_lb.responses.stream_id", stream_id);
         }
+        let mut setup_timings = prepared.setup_timings;
+        if json_parse_ms.is_some() {
+            setup_timings.json_parse_ms = json_parse_ms;
+        }
+        let metrics = ResponsesStreamMetrics::new_with_setup(
+            turn_started,
+            Some(duration_to_ms(turn_started.elapsed())),
+            setup_timings,
+        );
         self.next_turn_id = self.next_turn_id.checked_add(1).ok_or_else(|| {
             WebSocketError::new(
                 503,
@@ -866,7 +1101,7 @@ impl ResponsesWebSocketGateway {
                 incomplete_reason: None,
                 plugin_request: None,
                 echo_metadata: None,
-                metrics: ResponsesStreamMetrics::new(),
+                metrics,
                 funding_ambiguous: false,
                 response_created: false,
             },
@@ -1022,11 +1257,13 @@ impl ResponsesWebSocketGateway {
             .get(&dispatch.turn_id)
             .and_then(|turn| turn.plugin_request.as_ref())
             .map_or(&self.headers, |(_, request)| &request.headers);
-        let (url, headers, signer) = self
+        let (url, headers, signer, prepare_signer_ms, sign_ms) = self
             .lifecycle
             .sign_websocket_connection_with_signer(&auth, headers, candidate, self.query.as_deref())
             .await?;
         if let Some(turn) = self.turns.get_mut(&dispatch.turn_id) {
+            turn.metrics.setup_timings.prepare_signer_ms = Some(prepare_signer_ms);
+            turn.metrics.sign_ms = Some(sign_ms);
             turn.prepared_signers.insert(candidate.upstream_id, signer);
         }
         Ok((url, headers))
@@ -1062,6 +1299,7 @@ impl ResponsesWebSocketGateway {
                     .map_or(0, |(_, request)| request.frame.len()),
             )
         };
+        let shape_started = std::time::Instant::now();
         let request = self.lifecycle.shape_websocket_frame_with_surface(
             &auth,
             WebSocketIngress {
@@ -1074,6 +1312,7 @@ impl ResponsesWebSocketGateway {
             observer.as_ref(),
             self.codex_backend,
         )?;
+        let shape_ms = duration_to_ms(shape_started.elapsed());
         let new_charge = request.as_ref().map_or(0, |request| request.frame.len());
         if new_charge
             > self
@@ -1092,6 +1331,7 @@ impl ResponsesWebSocketGateway {
             .saturating_sub(old_charge)
             .saturating_add(new_charge);
         let turn = self.turns.get_mut(&turn_id).expect("turn remains admitted");
+        turn.metrics.shape_ms = Some(shape_ms);
         turn.charged_bytes = turn
             .charged_bytes
             .saturating_sub(old_charge)
@@ -1324,6 +1564,12 @@ impl ResponsesWebSocketGateway {
         Ok(())
     }
 
+    pub fn record_dispatch_timings(&mut self, turn_id: u64, timings: ResponsesDispatchTimings) {
+        if let Some(turn) = self.turns.get_mut(&turn_id) {
+            turn.metrics.record_dispatch_timings(timings);
+        }
+    }
+
     pub fn sent(&mut self, turn_id: u64) -> Vec<WebSocketDispatch> {
         let connection = self.turns.get(&turn_id).and_then(|turn| turn.connection_id);
         if let Some(connection) = connection
@@ -1366,6 +1612,47 @@ impl ResponsesWebSocketGateway {
             });
         }
         ready
+    }
+
+    pub fn sent_with_timings(
+        &mut self,
+        turn_id: u64,
+        timings: ResponsesDispatchTimings,
+        send_started: std::time::Instant,
+    ) -> Vec<WebSocketDispatch> {
+        if let Some(turn) = self.turns.get_mut(&turn_id) {
+            turn.metrics.mark_sent(timings, send_started);
+        }
+        self.sent(turn_id)
+    }
+
+    pub fn begin_downstream_send(&mut self, connection_id: u64) {
+        let now = std::time::Instant::now();
+        for turn in self.turns.values_mut() {
+            if turn.connection_id == Some(connection_id)
+                && turn.sent
+                && turn.metrics.relay_started.is_some()
+            {
+                turn.metrics.io_timing.transition_at(
+                    Some(crate::body_io_timing::BodyIoPhase::DownstreamPollGap),
+                    now,
+                );
+            }
+        }
+    }
+
+    pub fn finish_downstream_send(&mut self, connection_id: u64) {
+        let now = std::time::Instant::now();
+        for turn in self.turns.values_mut() {
+            if turn.connection_id == Some(connection_id)
+                && turn.sent
+                && turn.metrics.relay_started.is_some()
+            {
+                turn.metrics
+                    .io_timing
+                    .transition_at(Some(crate::body_io_timing::BodyIoPhase::Wait), now);
+            }
+        }
     }
 
     fn resolve_provider_turn_id(
@@ -1450,12 +1737,45 @@ impl ResponsesWebSocketGateway {
             && turn.connection_id == Some(connection_id)
             && turn.sent
         {
-            if turn
+            let now = std::time::Instant::now();
+            let outcome = turn
                 .metrics
-                .observe(frame, self.activity_heartbeat_interval_ms)
-                && let Some(observer) = turn.prepared.observer.as_ref()
-            {
-                observer.emit_request_activity();
+                .observe_at(frame, now, self.activity_heartbeat_interval_ms);
+            if let Some(observer) = turn.prepared.observer.as_ref() {
+                if !turn.metrics.upstream_started_emitted {
+                    turn.metrics.upstream_started_emitted = true;
+                    observer.set_attempt_bulkhead_wait_ms(turn.metrics.bulkhead_wait_ms);
+                    observer.set_attempt_connection_timings(
+                        turn.metrics.dns_ms,
+                        turn.metrics.connect_ms,
+                        turn.metrics.connection_reused,
+                    );
+                    observer.set_attempt_timings(
+                        turn.metrics.shape_ms,
+                        turn.metrics.sign_ms,
+                        turn.metrics.upstream_ttfb_ms,
+                    );
+                    observer.emit_lifecycle(LifecycleEvent::UpstreamResponseStarted {
+                        event_id: observer.event_id().to_owned(),
+                        status: StatusCode::SWITCHING_PROTOCOLS.as_u16(),
+                        headers: Default::default(),
+                        bulkhead_wait_ms: turn.metrics.bulkhead_wait_ms,
+                        dns_ms: turn.metrics.dns_ms,
+                        connect_ms: turn.metrics.connect_ms,
+                        connection_reused: turn.metrics.connection_reused,
+                        shape_ms: turn.metrics.shape_ms,
+                        sign_ms: turn.metrics.sign_ms,
+                        upstream_ttfb_ms: turn.metrics.upstream_ttfb_ms,
+                        observed_at_unix_millis: None,
+                        protocol: Some(cc_lb_request_log::RequestProtocol::Websocket),
+                    });
+                }
+                if let Some(first_delta_ms) = outcome.first_content_delta_ms {
+                    observer.set_first_content_delta_ms(first_delta_ms);
+                }
+                if outcome.heartbeat_due {
+                    observer.emit_request_activity();
+                }
             }
             if response_id.is_some() && response_id == turn.response_id && lane == turn.lane {
                 return Some(turn_id);
@@ -1470,12 +1790,13 @@ impl ResponsesWebSocketGateway {
     pub fn observe_provider_ping(&mut self, connection_id: u64) {
         let heartbeat_interval_ms = self.activity_heartbeat_interval_ms;
         for turn in self.turns.values_mut() {
-            if turn.connection_id == Some(connection_id)
-                && turn.sent
-                && turn.metrics.observe_heartbeat_only(heartbeat_interval_ms)
-                && let Some(observer) = turn.prepared.observer.as_ref()
-            {
-                observer.emit_request_activity();
+            if turn.connection_id == Some(connection_id) && turn.sent {
+                turn.metrics.ping_count = turn.metrics.ping_count.saturating_add(1);
+                if turn.metrics.observe_heartbeat_only(heartbeat_interval_ms)
+                    && let Some(observer) = turn.prepared.observer.as_ref()
+                {
+                    observer.emit_request_activity();
+                }
             }
         }
     }
@@ -2236,6 +2557,8 @@ impl ResponsesWebSocketGateway {
             error.map(|error| error.code),
             error.map(|error| error.message.as_str()),
         );
+        turn.metrics.io_timing.stop();
+        let finalize_started = std::time::Instant::now();
         let latency = turn
             .metrics
             .latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
@@ -2268,6 +2591,27 @@ impl ResponsesWebSocketGateway {
                     },
                 });
             }
+            observer.set_attempt_bulkhead_wait_ms(turn.metrics.bulkhead_wait_ms);
+            observer.set_attempt_connection_timings(
+                turn.metrics.dns_ms,
+                turn.metrics.connect_ms,
+                turn.metrics.connection_reused,
+            );
+            observer.set_attempt_timings(
+                turn.metrics.shape_ms,
+                turn.metrics.sign_ms,
+                turn.metrics.upstream_ttfb_ms,
+            );
+            observer.set_setup_timings(turn.metrics.setup_timings);
+            observer.set_io_timings(turn.metrics.io_timing.snapshot());
+            observer.set_termination_timings(
+                turn.metrics.proxy_setup_ms,
+                Some(latency.stream_total_ms),
+                latency.stream_first_output_ms,
+            );
+            if let Some(delta_ms) = latency.stream_first_content_delta_ms {
+                observer.set_first_content_delta_ms(delta_ms);
+            }
             observer.emit_lifecycle(LifecycleEvent::StreamCompleted {
                 event_id: observer.event_id().to_owned(),
                 result: if complete {
@@ -2281,12 +2625,19 @@ impl ResponsesWebSocketGateway {
                         body_bytes: Some(latency.total_bytes),
                         body_chunk_count: Some(latency.stream_event_count),
                         first_body_chunk_ms: latency.stream_first_output_ms,
+                        stream_message_start_ms: latency.stream_message_start_ms,
+                        stream_content_block_start_ms: latency.stream_content_block_start_ms,
+                        stream_first_content_delta_ms: latency.stream_first_content_delta_ms,
+                        stream_last_content_delta_ms: latency.stream_last_content_delta_ms,
+                        stream_message_stop_ms: latency.stream_message_stop_ms,
                         stream_last_chunk_ms: latency.stream_last_output_ms,
                         stream_total_ms: Some(latency.stream_total_ms),
+                        content_delta_count: Some(latency.content_delta_count),
+                        ping_count: Some(latency.ping_count),
                         stream_inter_output_avg_ms: latency.stream_inter_output_avg_ms,
+                        inter_token_avg_ms: latency.inter_token_avg_ms,
                         provider_session_id: latency.provider_session_id.clone(),
                         provider_connection_id: latency.provider_connection_id.clone(),
-                        ..Default::default()
                     })
                 } else {
                     Err(cc_lb_lifecycle::StreamError {
@@ -2307,6 +2658,7 @@ impl ResponsesWebSocketGateway {
                         first_body_chunk_ms: latency.stream_first_output_ms,
                         stream_last_chunk_ms: latency.stream_last_chunk_ms,
                         stream_total_ms: Some(latency.stream_total_ms),
+                        ping_count: Some(latency.ping_count),
                         stream_inter_output_avg_ms: latency.stream_inter_output_avg_ms,
                         provider_session_id: latency.provider_session_id.clone(),
                         provider_connection_id: latency.provider_connection_id.clone(),
@@ -2347,6 +2699,7 @@ impl ResponsesWebSocketGateway {
                     UpstreamErrorCode::StreamError,
                 ),
             }
+            observer.set_finalize_ms(duration_to_ms(finalize_started.elapsed()));
             observer.finish();
             if let Some(dispatch) = tracing::enabled!(
                 target: "cc_lb_engine::lifecycle",
@@ -2832,6 +3185,7 @@ fn parse_client_frame(
 
 fn observe_authenticated_frame(observer: &LifecycleContext, info: cc_lb_lifecycle::AuthInfo) {
     observer.mark_authn_reached();
+    observer.set_protocol(cc_lb_request_log::RequestProtocol::Websocket);
     observer.emit_request_started(true);
     observer.emit_lifecycle(LifecycleEvent::AuthCompleted {
         event_id: observer.event_id().to_owned(),
@@ -3026,6 +3380,7 @@ pub(crate) mod tests {
                     model: "gpt-test".to_owned(),
                     store: false,
                     span: Span::none(),
+                    setup_timings: Default::default(),
                     route_info: serde_json::from_value(serde_json::json!({
                         "upstream_id": Uuid::nil(), "upstream_name": "assigned", "model": "gpt-test"
                     }))
@@ -3650,6 +4005,7 @@ pub(crate) mod tests {
                         model: model.to_owned(),
                         store: false,
                         span: Span::none(),
+                        setup_timings: Default::default(),
                         route_info: serde_json::from_value(serde_json::json!({
                             "upstream_id": Uuid::nil(), "upstream_name": "embedded", "model": model
                         }))
@@ -4051,7 +4407,7 @@ pub(crate) mod tests {
         assert!(latency.stream_last_output_ms.is_some());
         assert_eq!(latency.provider_session_id.as_deref(), Some("resp_123"));
         assert_eq!(latency.sse_event_count, 0);
-        assert_eq!(latency.content_delta_count, 0);
+        assert_eq!(latency.content_delta_count, 1);
     }
 
     #[test]
@@ -4082,25 +4438,74 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn responses_timing_tracks_output_events_without_anthropic_counters() {
-        let mut metrics = ResponsesStreamMetrics::new();
-        metrics.observe(
+    fn responses_timing_tracks_output_events_and_separated_ttfb_clock() {
+        let now = std::time::Instant::now();
+        let base = now
+            .checked_sub(std::time::Duration::from_millis(500))
+            .expect("500ms sub must not underflow");
+        let mut metrics = ResponsesStreamMetrics::new_with_setup(
+            base,
+            Some(2),
+            cc_lb_lifecycle::RequestSetupTimings::default(),
+        );
+        metrics.mark_sent(
+            ResponsesDispatchTimings {
+                connection_reused: Some(false),
+                bulkhead_wait_ms: Some(5),
+                dns_ms: Some(10),
+                connect_ms: Some(25),
+            },
+            base + std::time::Duration::from_millis(45),
+        );
+        let t_first = base + std::time::Duration::from_millis(95);
+        metrics.observe_at(
             br#"{"type":"response.created","response":{"id":"resp-native"}}"#,
+            t_first,
             0,
         );
-        metrics.observe(br#"{"type":"response.output_text.delta","delta":"a"}"#, 0);
-        metrics.observe(
+        metrics.observe_at(
+            br#"{"type":"response.output_item.added"}"#,
+            t_first + std::time::Duration::from_millis(4),
+            0,
+        );
+        metrics.observe_at(
+            br#"{"type":"response.output_text.delta","delta":"a"}"#,
+            t_first + std::time::Duration::from_millis(10),
+            0,
+        );
+        metrics.observe_at(
+            br#"{"type":"response.function_call_arguments.delta","delta":"{\"x\":1}"}"#,
+            t_first + std::time::Duration::from_millis(20),
+            0,
+        );
+        metrics.observe_at(
             br#"{"type":"response.completed","response":{"id":"resp-native"}}"#,
+            t_first + std::time::Duration::from_millis(30),
             0,
         );
+        metrics.ping_count = 2;
         let latency = metrics.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
         assert_eq!(latency.provider_session_id.as_deref(), Some("resp-native"));
-        assert_eq!(latency.stream_event_count, 3);
-        assert!(latency.stream_first_output_ms.is_some());
-        assert!(latency.stream_last_output_ms.is_some());
+        assert_eq!(latency.stream_event_count, 5);
+        assert_eq!(latency.stream_first_output_ms, Some(0));
+        assert_eq!(latency.stream_last_output_ms, Some(30));
+        assert_eq!(latency.stream_message_start_ms, Some(0));
+        assert_eq!(latency.stream_content_block_start_ms, Some(4));
+        assert_eq!(latency.stream_first_content_delta_ms, Some(10));
+        assert_eq!(latency.stream_last_content_delta_ms, Some(20));
+        assert_eq!(latency.stream_message_stop_ms, Some(30));
         assert_eq!(latency.sse_event_count, 0);
-        assert_eq!(latency.content_delta_count, 0);
-        assert_eq!(latency.ping_count, 0);
+        assert_eq!(latency.content_delta_count, 2);
+        assert_eq!(latency.ping_count, 2);
+        assert_eq!(latency.inter_token_avg_ms, Some(10));
+        // bulkhead(5) + dns(10) + connect(25) + wait(95-45=50) == 90ms
+        assert_eq!(metrics.upstream_ttfb_ms, Some(90));
+        assert!(
+            latency.stream_total_ms < duration_to_ms(metrics.turn_started.elapsed()),
+            "relay clock ({}) must start on first provider frame, not turn admission ({})",
+            latency.stream_total_ms,
+            duration_to_ms(metrics.turn_started.elapsed()),
+        );
     }
 
     #[test]
@@ -4147,18 +4552,27 @@ pub(crate) mod tests {
         let expected_event_id = observer.event_id().to_owned();
         let mut gateway = terminal_fixture_gateway(&fixture, Some(observer));
 
-        gateway.turns.get_mut(&1).unwrap().metrics.started = std::time::Instant::now()
+        let aged_65s = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(65))
             .expect("65s sub must not underflow");
+        {
+            let metrics = &mut gateway.turns.get_mut(&1).unwrap().metrics;
+            metrics.turn_started = aged_65s;
+            metrics.last_activity_heartbeat_at = aged_65s;
+        }
         let created =
             Bytes::from_static(br#"{"type":"response.created","response":{"id":"resp_fixture"}}"#);
         gateway.provider_message(1, &created).await.unwrap();
         // Immediate ping inside the same 60s window must be throttled.
         gateway.observe_provider_ping(1);
 
-        gateway.turns.get_mut(&1).unwrap().metrics.started = std::time::Instant::now()
+        let aged_130s = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(130))
             .expect("130s sub must not underflow");
+        {
+            let metrics = &mut gateway.turns.get_mut(&1).unwrap().metrics;
+            metrics.last_activity_heartbeat_at = aged_130s;
+        }
         gateway.observe_provider_ping(1);
 
         let mut activity_count = 0usize;
@@ -4212,9 +4626,14 @@ pub(crate) mod tests {
         let mut gateway = terminal_fixture_gateway(&fixture, Some(observer));
         assert!(gateway.has_active_turns());
 
-        gateway.turns.get_mut(&1).unwrap().metrics.started = std::time::Instant::now()
+        let aged_65s = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(65))
             .expect("65s sub must not underflow");
+        {
+            let metrics = &mut gateway.turns.get_mut(&1).unwrap().metrics;
+            metrics.turn_started = aged_65s;
+            metrics.last_activity_heartbeat_at = aged_65s;
+        }
         gateway.observe_active_turns_heartbeat();
         // Second immediate tick inside same 60s window must be throttled.
         gateway.observe_active_turns_heartbeat();

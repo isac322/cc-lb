@@ -111,6 +111,9 @@ function RequestDetail({
     (merged.input_tokens ?? 0) > 0 ||
     (merged.output_tokens ?? 0) > 0 ||
     (merged.cache_creation_input_tokens ?? 0) > 0 ||
+    (merged.cache_write_input_tokens ?? 0) > 0 ||
+    (merged.cache_write_input_tokens_30m ?? 0) > 0 ||
+    (merged.cache_write_input_tokens_12h ?? 0) > 0 ||
     (merged.cache_read_input_tokens ?? 0) > 0;
 
   const principalLabel = principalName ?? merged.principal_id ?? DASH;

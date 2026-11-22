@@ -385,6 +385,12 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
     .await
     .expect("install funding column for current writer");
     sqlx::raw_sql(include_str!(
+        "../migrations/0131_request_events_protocol.sql"
+    ))
+    .execute(storage.pool())
+    .await
+    .expect("install protocol column for current writer");
+    sqlx::raw_sql(include_str!(
         "../migrations/0124_usage_rollups_pricing_completeness.sql"
     ))
     .execute(storage.pool())

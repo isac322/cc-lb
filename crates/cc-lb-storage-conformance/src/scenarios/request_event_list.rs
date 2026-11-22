@@ -1151,6 +1151,7 @@ fn list_projection(event: &RequestEvent) -> RequestEventListItem {
         event_id: event.event_id.clone(),
         source_kind: event.source_kind.clone(),
         event_kind: event.event_kind,
+        protocol: event.protocol,
         principal_id: event.principal_id.clone(),
         upstream_id: event.upstream_id,
         upstream_name: event.upstream_name.clone(),

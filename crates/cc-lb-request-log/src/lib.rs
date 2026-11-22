@@ -6,6 +6,7 @@ mod cache;
 mod event_kind;
 mod funding;
 mod header_snapshot;
+mod protocol;
 mod request_diagnostics;
 mod request_event;
 mod request_event_update;
@@ -18,6 +19,7 @@ pub use cache::{
 pub use event_kind::{ParseRequestEventKindError, RequestEventKind};
 pub use funding::{ParseRequestFundingError, RequestFunding};
 pub use header_snapshot::{CostBreakdown, HeaderSnapshot};
+pub use protocol::{ParseRequestProtocolError, RequestProtocol};
 pub use request_diagnostics::{
     REQUEST_DIAGNOSTICS_SCHEMA, RequestDiagnostics, RequestDiagnosticsRecord,
     RequestDiagnosticsSource, render_request_diagnostics_line,

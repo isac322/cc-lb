@@ -11,6 +11,10 @@ const REQUEST_KIND_BADGE_TEXT: Readonly<Record<string, string>> = {
   auto_thinking: 'think',
   side: 'side',
   look_at: 'vision',
+  prewarm: 'warm',
+  review: 'review',
+  memory: 'mem',
+  guardian: 'guard',
   unknown: 'unk',
 };
 
@@ -23,7 +27,7 @@ export function requestKindBadgeText(
 }
 
 /**
- * Fixed OKLCH hue per known request kind, ≥ 21° apart. The accent is
+ * Fixed OKLCH hue per known request kind, ≥ 20° apart. The accent is
  * near-achromatic, so badges can use most of the wheel; every badge color
  * (`categoricalColor`, both themes) instead stays at least OKLab ΔE 0.08
  * from warn, danger and the cache-write series — the free arcs are 108–170
@@ -32,15 +36,19 @@ export function requestKindBadgeText(
  * badge and an outlined neutral badge.
  */
 const REQUEST_KIND_HUE: Readonly<Record<string, number>> = {
-  side: 112,
-  session_title: 135,
-  notification: 200,
-  subagent: 235,
-  look_at: 258,
-  compaction: 281,
-  auto_thinking: 304,
-  advisor: 327,
-  recap: 350,
+  side: 108,
+  session_title: 128,
+  prewarm: 148,
+  memory: 168,
+  notification: 196,
+  subagent: 216,
+  look_at: 236,
+  compaction: 256,
+  review: 276,
+  auto_thinking: 296,
+  guardian: 316,
+  advisor: 336,
+  recap: 356,
 };
 
 /**

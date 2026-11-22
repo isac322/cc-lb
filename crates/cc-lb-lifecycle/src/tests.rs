@@ -18,6 +18,7 @@ fn request_started_roundtrip() {
         source_kind: Some("proxy".to_owned()),
         source_ref_id: Some("ingress-123".to_owned()),
         event_kind: None,
+        protocol: Some(cc_lb_request_log::RequestProtocol::Websocket),
     };
     let json = serde_json::to_string(&event).expect("serialize");
     let restored: LifecycleEvent = serde_json::from_str(&json).expect("deserialize");
@@ -51,6 +52,7 @@ fn request_terminated_preserves_nested_io_timings() {
             response_body_downstream_poll_gap_ms: Some(2.0),
             retry_overhead_ms: None,
         },
+        upstream_ttfb_ms: Some(12),
         upstream_body_ms: None,
         dns_ms: Some(3),
         connect_ms: Some(41),
@@ -61,6 +63,7 @@ fn request_terminated_preserves_nested_io_timings() {
         internal_errors: Vec::new(),
         event_kind: None,
         funding_ambiguous: false,
+        protocol: None,
     };
 
     let json = serde_json::to_value(&event).expect("serialize terminal setup timings");
@@ -94,6 +97,7 @@ fn kind_labels_cover_every_variant() {
             source_kind: None,
             source_ref_id: None,
             event_kind: None,
+            protocol: None,
         }
         .kind(),
         LifecycleEvent::ParseCompleted {
@@ -159,6 +163,7 @@ fn kind_labels_cover_every_variant() {
             sign_ms: None,
             upstream_ttfb_ms: None,
             observed_at_unix_millis: None,
+            protocol: None,
         }
         .kind(),
         LifecycleEvent::RequestLogUpstreamErrorObserved {
@@ -205,6 +210,8 @@ fn kind_labels_cover_every_variant() {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
+            protocol: None,
         }
         .kind(),
         LifecycleEvent::RequestActivity {

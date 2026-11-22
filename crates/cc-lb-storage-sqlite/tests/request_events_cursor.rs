@@ -6,7 +6,8 @@ use std::{
 
 use cc_lb_storage_api::{
     MetaStore, RequestEvent, RequestEventHistogramQuery, RequestEventKeyLastUsedQuery,
-    RequestEventListQuery, RequestEventStore, RequestEventStreamFilters, StatusClass,
+    RequestEventListQuery, RequestEventStore, RequestEventStreamFilters, RequestProtocol,
+    StatusClass,
 };
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
 use uuid::Uuid;
@@ -963,4 +964,123 @@ async fn open_sqlite_existing_never_creates_a_database() {
         .verify_schema_current()
         .await
         .expect("a database migrated by this binary is current");
+}
+
+#[tokio::test]
+async fn request_protocol_roundtrips_and_ws_101_errors_count_in_histogram() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let database_url = format!(
+        "sqlite://{}",
+        temp_dir.path().join("request-protocol.sqlite").display()
+    );
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+            .await
+            .expect("open sqlite");
+    storage.initialize().await.expect("initialize sqlite");
+
+    let base = 1_800_000_000_u64;
+    let upstream_id = Uuid::new_v4();
+    let cases = [
+        (
+            "evt-ws-ok",
+            base,
+            Some(RequestProtocol::Websocket),
+            101_u16,
+            None,
+        ),
+        (
+            "evt-ws-disconnect",
+            base + 1,
+            Some(RequestProtocol::Websocket),
+            101_u16,
+            Some("client_closed_request"),
+        ),
+        (
+            "evt-ws-err",
+            base + 2,
+            Some(RequestProtocol::Websocket),
+            101_u16,
+            Some("upstream_error"),
+        ),
+        (
+            "evt-sse-ok",
+            base + 3,
+            Some(RequestProtocol::HttpSse),
+            200_u16,
+            None,
+        ),
+        (
+            "evt-http-ok",
+            base + 4,
+            Some(RequestProtocol::Http),
+            200_u16,
+            None,
+        ),
+    ];
+    for (event_id, ts, protocol, status, error_code) in cases {
+        storage
+            .append_request_event(&RequestEvent {
+                ts,
+                ts_ms: Some(ts * 1_000),
+                event_id: Some(event_id.to_owned()),
+                request_id: format!("req-{event_id}"),
+                principal_id: Some("p-1".to_owned()),
+                upstream_id: Some(upstream_id),
+                model: Some("gpt-5.4".to_owned()),
+                status,
+                error_code: error_code.map(str::to_owned),
+                protocol,
+                duration_ms: 25,
+                ..RequestEvent::default()
+            })
+            .await
+            .expect("append event");
+    }
+
+    let listed = storage
+        .list_request_events(&RequestEventListQuery {
+            limit: 10,
+            since_unix_secs: base,
+            until_unix_secs: base + 10,
+            ..Default::default()
+        })
+        .await
+        .expect("list request events");
+    assert_eq!(listed.len(), 5);
+    let by_id = listed
+        .into_iter()
+        .map(|item| (item.event_id.clone().unwrap(), item))
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(
+        by_id["evt-ws-ok"].protocol,
+        Some(RequestProtocol::Websocket)
+    );
+    assert_eq!(by_id["evt-sse-ok"].protocol, Some(RequestProtocol::HttpSse));
+    assert_eq!(by_id["evt-http-ok"].protocol, Some(RequestProtocol::Http));
+
+    let full = storage
+        .get_request_event("evt-ws-err")
+        .await
+        .expect("get detail")
+        .expect("detail exists");
+    assert_eq!(full.protocol, Some(RequestProtocol::Websocket));
+
+    let histogram = storage
+        .request_event_histogram(&RequestEventHistogramQuery {
+            bucket_ms: 60_000,
+            bucket_count: 1,
+            since_unix_secs: base,
+            until_unix_secs: base + 10,
+            ..Default::default()
+        })
+        .await
+        .expect("histogram");
+    let total_count: u64 = histogram.iter().map(|bucket| bucket.total_count).sum();
+    let error_count: u64 = histogram.iter().map(|bucket| bucket.error_count).sum();
+    assert_eq!(total_count, 5);
+    assert_eq!(
+        error_count, 1,
+        "only status=101 with non-disconnect error_code counts as error"
+    );
 }

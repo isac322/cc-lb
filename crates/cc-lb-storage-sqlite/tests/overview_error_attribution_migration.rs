@@ -235,7 +235,7 @@ async fn retained_and_api_pruned_history_keep_exact_upstream_identity_and_checkp
         .await
         .unwrap();
         sqlx::migrate!("./migrations")
-            .run_direct(Some(130), &mut connection, false)
+            .run_direct(None, &mut connection, false)
             .await
             .unwrap();
         connection.close().await.unwrap();
@@ -559,7 +559,7 @@ async fn missing_legacy_uuid_stays_global_only_despite_surviving_identity_candid
         .await
         .unwrap();
         sqlx::migrate!("./migrations")
-            .run_direct(Some(130), &mut connection, false)
+            .run_direct(None, &mut connection, false)
             .await
             .unwrap();
         connection.close().await.unwrap();
@@ -896,21 +896,23 @@ async fn partial_retention_batch_cannot_certify_a_name_only_event_owner() {
             ("stable-server-error", 40, Some(stable), "stable", 500),
             ("stable-original-id", 90, Some(original), "original", 403),
         ] {
-            storage
-                .append_request_event(&RequestEvent {
-                    ts: AT + offset,
-                    ts_ms: Some((AT + offset) * 1000),
-                    request_id: id.to_owned(),
-                    event_id: Some(id.to_owned()),
-                    principal_id: Some("boundary-principal".to_owned()),
-                    upstream_id,
-                    upstream_name: Some(name.to_owned()),
-                    model: Some("model".to_owned()),
-                    status,
-                    ..RequestEvent::default()
-                })
-                .await
-                .unwrap();
+            sqlx::query(
+                "INSERT INTO request_events_v1
+                 (request_id,event_id,ts,list_ts_ms,principal_id,upstream_id,upstream_name,model,list_status,list_duration_ms)
+                 VALUES (?,?,?,?,?,?,?,?,?,0)",
+            )
+            .bind(id)
+            .bind(id)
+            .bind((AT + offset) as i64)
+            .bind(((AT + offset) * 1000) as i64)
+            .bind("boundary-principal")
+            .bind(upstream_id.map(|value| value.to_string()))
+            .bind(name)
+            .bind("model")
+            .bind(status as i64)
+            .execute(storage.pool())
+            .await
+            .unwrap();
         }
         sqlx::raw_sql(
             "INSERT INTO usage_rollup_checkpoints_v1 (id,value)

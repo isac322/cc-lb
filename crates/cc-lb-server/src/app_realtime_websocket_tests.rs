@@ -1882,6 +1882,22 @@ async fn realtime_and_live_publish_active_cumulative_usage_then_preserve_provide
         assert_eq!((rows[0].1.input_tokens, rows[0].1.output_tokens), (Some(20), Some(7)));
         let stored = &rows[0].1;
         assert_eq!(stored.status, 101);
+        assert_eq!(
+            stored.protocol,
+            Some(cc_lb_request_log::RequestProtocol::Websocket)
+        );
+        let min_ttfb_ms = stored
+            .bulkhead_wait_ms
+            .unwrap_or(0)
+            .saturating_add(stored.dns_ms.unwrap_or(0))
+            .saturating_add(stored.connect_ms.unwrap_or(0));
+        let upstream_ttfb_ms = stored
+            .upstream_ttfb_ms
+            .expect("realtime WebSocket records first-frame TTFB");
+        assert!(
+            upstream_ttfb_ms >= min_ttfb_ms,
+            "expected upstream_ttfb_ms ({upstream_ttfb_ms}) >= connect+bulkhead ({min_ttfb_ms})"
+        );
         if gemini {
             assert_eq!(stored.tool_use_prompt_tokens, Some(9));
             assert_eq!(stored.thinking_tokens, Some(2));
