@@ -1,9 +1,11 @@
 #![allow(dead_code)]
 
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::Read;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle as ThreadJoinHandle;
 
@@ -341,6 +343,7 @@ pub struct TestServer {
     pub _fake: JoinHandle<Result<(), std::io::Error>>,
     pub _config_dir: TempDir,
     pub _process: TestProcess,
+    pub _port_leases: [PortLease; 3],
 }
 
 impl Drop for TestServer {
@@ -751,6 +754,7 @@ struct SpawnedTestServer {
     managed_key: ManagedTestKey,
     config_dir: TempDir,
     process: TestProcess,
+    port_leases: [PortLease; 3],
 }
 
 struct StartupFailure {
@@ -798,6 +802,7 @@ async fn spawn_test_server_with_options(
                     _fake: fake,
                     _config_dir: spawned.config_dir,
                     _process: spawned.process,
+                    _port_leases: spawned.port_leases,
                 };
             }
             Err(error) if error.address_in_use && attempt < SERVER_START_ATTEMPTS => {
@@ -821,9 +826,10 @@ async fn spawn_test_server_attempt(
     envs: &[(String, String)],
     messages_cap_bytes: u64,
 ) -> Result<SpawnedTestServer, StartupFailure> {
-    let proxy_listener = reserve_addr();
-    let admin_listener = reserve_addr();
-    let metrics_listener = reserve_addr();
+    let (proxy_listener, proxy_lease) = reserve_test_port();
+    let (admin_listener, admin_lease) = reserve_test_port();
+    let (metrics_listener, metrics_lease) = reserve_test_port();
+    let port_leases = [proxy_lease, admin_lease, metrics_lease];
     let proxy_addr = proxy_listener.local_addr().expect("proxy local addr");
     let admin_addr = admin_listener.local_addr().expect("admin local addr");
     let metrics_addr = metrics_listener.local_addr().expect("metrics local addr");
@@ -855,11 +861,73 @@ async fn spawn_test_server_attempt(
         managed_key,
         config_dir,
         process,
+        port_leases,
     })
 }
 
-fn reserve_addr() -> StdTcpListener {
-    StdTcpListener::bind("127.0.0.1:0").expect("reserve free port")
+const RESERVED_PORT_RANGE_START: u16 = 15_000;
+const RESERVED_PORT_RANGE_LEN: u16 = 15_000;
+static NEXT_PORT_OFFSET: AtomicUsize = AtomicUsize::new(0);
+
+/// Cross-process advisory lock keeping a test server port out of sibling test handoffs
+/// until after the child process holding it has been killed and reaped.
+pub struct PortLease {
+    _lock_file: File,
+}
+
+fn port_lock_path(port: u16) -> PathBuf {
+    std::env::temp_dir()
+        .join("cc-lb-test-ports")
+        .join(format!("port-{port}.lock"))
+}
+
+fn open_port_lock_file(lock_path: &Path) -> File {
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .expect("open test port lock file")
+}
+
+/// Reserves a loopback port from the non-ephemeral `15_000..=29_999` range (disjoint
+/// from Linux `32768..=60999` and macOS/BSD `49152..=65535` `bind(0)` pools) backed by an
+/// advisory OS file lock so sibling test processes cannot contend on the `drop -> bind`
+/// handoff window or collide with `bind("127.0.0.1:0")` sockets.
+pub fn reserve_test_port() -> (StdTcpListener, PortLease) {
+    let lock_dir = std::env::temp_dir().join("cc-lb-test-ports");
+    std::fs::create_dir_all(&lock_dir).expect("create test port lock dir");
+    let seq = NEXT_PORT_OFFSET.fetch_add(1, Ordering::Relaxed);
+    let pid_mix = (std::process::id() as usize).wrapping_mul(2_654_435_761);
+    let range_len = usize::from(RESERVED_PORT_RANGE_LEN);
+    let start = pid_mix.wrapping_add(seq) % range_len;
+
+    for step in 0..range_len {
+        let offset = u16::try_from((start + step) % range_len).expect("port offset fits u16");
+        let port = RESERVED_PORT_RANGE_START + offset;
+        let lock_path = port_lock_path(port);
+        let lock_file = open_port_lock_file(&lock_path);
+        match lock_file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => continue,
+            Err(error) => panic!("acquire test port lock {}: {error}", lock_path.display()),
+        }
+        if let Ok(listener) = StdTcpListener::bind(("127.0.0.1", port)) {
+            return (
+                listener,
+                PortLease {
+                    _lock_file: lock_file,
+                },
+            );
+        }
+    }
+
+    panic!(
+        "exhausted non-ephemeral test port range {}..={}",
+        RESERVED_PORT_RANGE_START,
+        RESERVED_PORT_RANGE_START + RESERVED_PORT_RANGE_LEN - 1
+    );
 }
 
 fn write_config_with_extra(
@@ -1353,4 +1421,30 @@ fn split_response(text: &str) -> (String, String) {
         Some((headers, body)) => (headers.to_owned(), body.to_owned()),
         _ => (text.to_owned(), String::new()),
     }
+}
+
+#[test]
+fn reserve_test_port_uses_non_ephemeral_range_and_exclusive_leases() {
+    let (listener, lease) = reserve_test_port();
+    let port = listener.local_addr().expect("reserved local addr").port();
+    assert!(
+        (RESERVED_PORT_RANGE_START..RESERVED_PORT_RANGE_START + RESERVED_PORT_RANGE_LEN)
+            .contains(&port),
+        "reserved port {port} fell outside non-ephemeral range"
+    );
+
+    let lock_path = port_lock_path(port);
+    let contender = open_port_lock_file(&lock_path);
+    assert!(
+        matches!(contender.try_lock(), Err(TryLockError::WouldBlock)),
+        "active PortLease must block concurrent lock acquisition for port {port}"
+    );
+    drop(contender);
+    drop(listener);
+    drop(lease);
+
+    let reacquired = open_port_lock_file(&lock_path);
+    reacquired
+        .try_lock()
+        .expect("dropping PortLease must release the advisory port lock");
 }
