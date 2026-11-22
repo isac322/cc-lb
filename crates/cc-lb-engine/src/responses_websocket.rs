@@ -2503,7 +2503,11 @@ impl ResponsesWebSocketGateway {
                         .and_then(|value| value.get("store"))
                         .and_then(Value::as_bool)
                         .unwrap_or(true);
-                let pending_keys = if kind != "response.failed" && kind != "response.incomplete" {
+                // Only bind unverified input `pending_affinity_keys` once the upstream
+                // completes cleanly (`response.completed`); `response.queued`,
+                // `response.in_progress`, and other non-terminal frames must never persist
+                // unverified input reasoning before a subsequent `400` or stream failure.
+                let pending_keys = if kind == "response.completed" {
                     std::mem::take(&mut turn.pending_affinity_keys)
                 } else {
                     Vec::new()

@@ -3936,6 +3936,11 @@ async fn hybrid_ws_rejects_non_400_and_post_queued_errors_without_retry() {
             .await
             .expect("response.queued forwards"),
     );
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key(foreign_queued)),
+        None,
+        "response.queued must not bind pending unverified input reasoning"
+    );
 
     let err_400 = Bytes::from(
         json!({
@@ -3962,5 +3967,63 @@ async fn hybrid_ws_rejects_non_400_and_post_queued_errors_without_retry() {
         "post-queued 400 must not retry"
     );
     assert!(!gateway.has_active_turns());
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key(foreign_queued)),
+        None,
+        "rejected post-queued turn must leave foreign reasoning unbound"
+    );
+
+    // 3) Same for response.in_progress followed by 400 invalid_encrypted_content.
+    let foreign_in_progress = "gAAAAABws_post_in_progress";
+    let dispatch_ip = ws1296_admit(&mut gateway, ws1296_create(None, Some(foreign_in_progress)))
+        .await
+        .expect("WS turn admits")
+        .expect("dispatch queued");
+    ws_hybrid_send(&mut gateway, &dispatch_ip, 100, oauth_a, "oauth-a").await;
+    let in_progress_frame = Bytes::from(
+        json!({
+            "type": "response.in_progress",
+            "sequence_number": 1,
+            "response": {
+                "id": "resp_in_progress_live",
+                "object": "response",
+                "model": "gpt-5-codex",
+                "status": "in_progress",
+                "store": false,
+                "output": [],
+                "usage": null
+            }
+        })
+        .to_string(),
+    );
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(100, &in_progress_frame)
+            .await
+            .expect("response.in_progress forwards"),
+    );
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key(foreign_in_progress)),
+        None,
+        "response.in_progress must not bind pending unverified input reasoning"
+    );
+    let post_ip_res = gateway
+        .provider_message(100, &err_400)
+        .await
+        .expect("post-in_progress error forwards without panic");
+    assert!(
+        post_ip_res.forward,
+        "post-in_progress 400 must forward without retrying"
+    );
+    assert!(
+        post_ip_res.dispatches.is_empty(),
+        "post-in_progress 400 must not retry"
+    );
+    assert!(!gateway.has_active_turns());
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key(foreign_in_progress)),
+        None,
+        "rejected post-in_progress turn must leave foreign reasoning unbound"
+    );
     gateway.close();
 }
