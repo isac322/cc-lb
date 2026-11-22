@@ -16,7 +16,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use cc_lb_pdk_wasmtime::types::{
+use cc_lb_pdk_wasmtime::types::v2::{
     ArchivedShapeRequest, ArchivedTransformResponseRequest, ArchivedTransformSseEventRequest,
     ArchivedUpstream, Header as WireHeader, ShapeResponse, TransformResponseResult,
     TransformSseEventResult,
@@ -33,7 +33,8 @@ mod passthrough {
 
     #[cc_lb_pdk_wasmtime::handler(
         shape,
-        wire = 1,
+        provider = "anthropic",
+        wire = 2,
         description = "Passes the incoming request through to the selected upstream",
         usage = "Testing only, no config. Requires the host to populate Upstream::AnthropicDirect.base_url before dispatch.",
         view
@@ -72,7 +73,8 @@ mod passthrough {
 
     #[cc_lb_pdk_wasmtime::handler(
         transform_response,
-        wire = 1,
+        provider = "anthropic",
+        wire = 2,
         description = "Explicit no-op buffered response transform for shape-owned fixture",
         usage = "Testing only. Declares that the shape plugin intentionally leaves buffered responses unchanged.",
         mode = "noop",
@@ -84,7 +86,8 @@ mod passthrough {
 
     #[cc_lb_pdk_wasmtime::handler(
         transform_sse_event,
-        wire = 1,
+        provider = "anthropic",
+        wire = 2,
         description = "Explicit no-op SSE event transform for shape-owned fixture",
         usage = "Testing only. Declares that the shape plugin intentionally leaves SSE events unchanged.",
         mode = "noop",

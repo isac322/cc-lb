@@ -1,6 +1,5 @@
-//! Plugin metadata JSON schema, shared by `cc_lb.plugin.v1` (legacy) and
-//! `cc_lb.plugin.v2` (provider-qualified) custom sections.
-//! The guest-side emitter is in `cc-lb-pdk-wasmtime-macros`.
+//! Plugin metadata JSON schema for the `cc_lb.plugin.v2` (provider-qualified)
+//! custom section. The guest-side emitter is in `cc-lb-pdk-wasmtime-macros`.
 
 use std::collections::BTreeMap;
 use std::string::String;
@@ -8,8 +7,9 @@ use std::string::String;
 use serde::{Deserialize, Serialize};
 
 /// Top-level plugin metadata. Written by the `#[cc_lb_plugin(...)]`
-/// proc-macro into one metadata custom section. V1 hook keys are bare
-/// (e.g. `shape`); V2 also accepts qualified keys (e.g. `shape_openai`).
+/// proc-macro into the `cc_lb.plugin.v2` metadata custom section.
+/// Hook keys are provider-qualified (e.g. `filter_anthropic`, `shape_openai`),
+/// or `shape_envelope_gemini`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginMetadata {
     pub name: String,
@@ -84,7 +84,7 @@ impl From<serde_json::Error> for MetadataError {
 }
 
 impl PluginMetadata {
-    /// Parse V1 or V2 metadata custom section bytes as JSON and validate
+    /// Parse `cc_lb.plugin.v2` metadata custom section bytes as JSON and validate
     /// required fields. The host validates the section's version separately.
     pub fn parse(bytes: &[u8]) -> Result<Self, MetadataError> {
         let raw: Self = serde_json::from_slice(bytes)?;
@@ -132,10 +132,13 @@ mod tests {
     #[test]
     fn hook_mode_parses_explicit_noop() {
         let metadata = PluginMetadata::parse(
-            br#"{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{"transform_response":{"wire_version":1,"description":"response hook","usage":"call transform_response","mode":"noop"}}}"#,
+            br#"{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{"transform_response_anthropic":{"wire_version":2,"description":"response hook","usage":"call transform_response_anthropic","mode":"noop"}}}"#,
         )
         .expect("metadata parses");
 
-        assert_eq!(metadata.hooks["transform_response"].mode, HookMode::Noop);
+        assert_eq!(
+            metadata.hooks["transform_response_anthropic"].mode,
+            HookMode::Noop
+        );
     }
 }

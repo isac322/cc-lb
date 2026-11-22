@@ -63,8 +63,8 @@ export const CONFIG_EDITOR_CATEGORIES = [
   {
     id: 'identity',
     label: 'Identity & access',
-    description: 'Admin authentication, OAuth, and cluster identity.',
-    roots: ['admin', 'oauth', 'cluster', 'openai_oauth_compat'],
+    description: 'Admin authentication and OAuth.',
+    roots: ['admin', 'oauth', 'openai_oauth_compat'],
   },
   {
     id: 'quota',
@@ -225,12 +225,8 @@ export const CONFIG_EDITOR_SECTIONS = [
     categoryId: 'data',
     label: 'Retention',
     description:
-      'How long request events and partial records are kept, and which request event fields are stored.',
-    paths: [
-      'request_event_retention_days',
-      'event_bus.partial_retention_ttl_secs',
-      'event_bus.partial_retention_max_entries',
-    ],
+      'How long request events are kept, and which request event fields are stored.',
+    paths: ['request_event_retention_days'],
     advancedPaths: [],
     danger: [],
   },
@@ -358,21 +354,6 @@ export const CONFIG_EDITOR_SECTIONS = [
     paths: ['oauth.**'],
     advancedPaths: [],
     danger: [],
-  },
-  {
-    id: 'cluster-identity',
-    categoryId: 'identity',
-    label: 'Cluster identity',
-    description: 'Instance URL and shared token for cluster membership.',
-    paths: ['cluster.*'],
-    advancedPaths: [],
-    danger: [
-      {
-        path: 'cluster.token_env',
-        impact:
-          'A wrong token variable breaks authentication between cluster instances.',
-      },
-    ],
   },
   {
     id: 'price-catalog',
@@ -1134,25 +1115,6 @@ const CONFIG_FIELD_GUIDANCE: readonly {
     },
   },
   {
-    pattern: 'cluster.instance_url',
-    guidance: {
-      description: 'Base URL other cluster members use to reach this instance.',
-      recommendation:
-        'Must be routable from peers; a wrong value breaks cluster coordination for this node.',
-      impactDimensions: ['availability', 'network'],
-    },
-  },
-  {
-    pattern: 'cluster.token_env',
-    guidance: {
-      description:
-        'Environment variable holding the shared token for cluster-internal requests.',
-      recommendation:
-        'Must match on every member; a mismatch rejects inter-node calls.',
-      impactDimensions: ['security', 'availability'],
-    },
-  },
-  {
     pattern: 'event_bus.broadcast_capacity',
     guidance: {
       description:
@@ -1161,30 +1123,6 @@ const CONFIG_FIELD_GUIDANCE: readonly {
       higher:
         'Tolerates slower consumers at the cost of more buffered events in memory.',
       impactDimensions: ['memory', 'availability'],
-    },
-  },
-  {
-    pattern: 'event_bus.partial_retention_max_entries',
-    guidance: {
-      description:
-        'Maximum partial events retained for subscribers that reconnect.',
-      lower:
-        'Bounds retention memory but evicts events before slow subscribers catch up.',
-      higher:
-        'Keeps more history for reconnecting subscribers at higher memory cost.',
-      impactDimensions: ['memory', 'durability'],
-    },
-  },
-  {
-    pattern: 'event_bus.partial_retention_ttl_secs',
-    guidance: {
-      description:
-        'How long a retained partial event stays available for replay.',
-      lower:
-        'Expires events sooner, bounding memory but shrinking the replay window.',
-      higher:
-        'Extends the replay window for reconnecting subscribers at higher memory cost.',
-      impactDimensions: ['memory', 'durability'],
     },
   },
   {

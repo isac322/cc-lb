@@ -19,7 +19,6 @@ import {
 import { Route as SettingsRoute } from './settings';
 
 const queryMocks = vi.hoisted(() => ({
-  useConfigDraft: vi.fn(),
   useConfigEditor: vi.fn(),
   useConfigHistory: vi.fn(),
   useSaveConfigFile: vi.fn(),
@@ -224,13 +223,6 @@ const configSchema = {
         },
       },
     },
-    cluster: {
-      type: 'object',
-      properties: {
-        instance_url: { type: ['string', 'null'] },
-        token_env: { type: 'string' },
-      },
-    },
     price_catalog: {
       type: 'object',
       properties: { url: { type: 'string' }, cache_path: { type: 'string' } },
@@ -342,7 +334,6 @@ const fileConfig = {
     },
   },
   oauth: { anthropic: null, github: { client_id: 'gh-client', scopes: [] } },
-  cluster: { instance_url: null, token_env: 'CC_LB_CLUSTER_TOKEN' },
   price_catalog: {
     url: 'https://example.com/prices.json',
     cache_path: '/tmp/prices.json',
@@ -415,17 +406,6 @@ function editorResponse(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function draftResponse(overrides: Record<string, unknown> = {}) {
-  return {
-    draft: structuredClone(fileConfig),
-    revision: 7,
-    last_validated_revision: 7,
-    last_validation: structuredClone(validReport),
-    saved_at_unix_secs: 1_789_473_600,
-    ...overrides,
-  };
-}
-
 function loadingResult() {
   return {
     data: undefined,
@@ -469,10 +449,9 @@ function mutationResult(mutate = vi.fn()) {
   };
 }
 
-function setSettingsLoaded(editor = editorResponse(), draft = draftResponse()) {
+function setSettingsLoaded(editor = editorResponse()) {
   queryMocks.useStatus.mockReturnValue(loadedResult(loadedStatus));
   queryMocks.useConfigEditor.mockReturnValue(loadedResult(editor));
-  queryMocks.useConfigDraft.mockReturnValue(loadedResult(draft));
   queryMocks.useConfigHistory.mockReturnValue(loadedResult({ entries: [] }));
 }
 
@@ -632,7 +611,6 @@ beforeEach(() => {
   apiMocks.downloadJson.mockResolvedValue(undefined);
   queryMocks.useStatus.mockReturnValue(loadingResult());
   queryMocks.useConfigEditor.mockReturnValue(loadingResult());
-  queryMocks.useConfigDraft.mockReturnValue(loadingResult());
   queryMocks.useConfigHistory.mockReturnValue(loadingResult());
   queryMocks.useSaveConfigFile.mockReturnValue(mutationResult());
   queryMocks.useSaveDraft.mockReturnValue(mutationResult());
@@ -1084,7 +1062,6 @@ test('single-root compound sections let the section heading own the label', () =
       name: 'Add provider',
     }),
   ).toBeDefined();
-  expectSingleRootSection('cluster-identity', 'cluster');
 
   // Pricing & quotas.
   showCategory(view, 'Pricing & quotas');
@@ -1508,10 +1485,7 @@ test('unknown file keys land in the Other settings fallback area', () => {
 });
 test('history load failures stay distinct from empty history and offer retry', () => {
   const beforeProcessStart = 1_789_473_000;
-  setSettingsLoaded(
-    editorResponse({ saved_at_unix_secs: beforeProcessStart }),
-    draftResponse({ saved_at_unix_secs: beforeProcessStart }),
-  );
+  setSettingsLoaded(editorResponse({ saved_at_unix_secs: beforeProcessStart }));
   const history = errorResult(new Error('history offline'));
   queryMocks.useConfigHistory.mockReturnValue(history);
 
@@ -1814,10 +1788,7 @@ test('filesystem validation errors block file save but not download', async () =
       },
     ],
   };
-  setSettingsLoaded(
-    editorResponse({ last_validation: filesystemReport }),
-    draftResponse({ last_validation: filesystemReport }),
-  );
+  setSettingsLoaded(editorResponse({ last_validation: filesystemReport }));
   render(<SettingsComponent />);
 
   expect(screen.queryByText('Configuration validated')).toBeNull();
@@ -2121,10 +2092,6 @@ test('structured validation issues open their category and focus the field', asy
       last_validated_revision: null,
       last_validation: invalidReport,
     }),
-    draftResponse({
-      last_validated_revision: null,
-      last_validation: invalidReport,
-    }),
   );
   render(<SettingsComponent />);
   expect(
@@ -2207,10 +2174,6 @@ test('array-level validation issues focus the matching admin provider', async ()
       last_validated_revision: null,
       last_validation: invalidReport,
     }),
-    draftResponse({
-      last_validated_revision: null,
-      last_validation: invalidReport,
-    }),
   );
   render(<SettingsComponent />);
 
@@ -2238,7 +2201,6 @@ test('clean validated read-only config can download on initial load', () => {
         fingerprint: 'sha256:current',
       },
     }),
-    draftResponse(),
   );
   render(<SettingsComponent />);
 
@@ -2280,7 +2242,6 @@ test('writable missing config can be created directly on initial load', () => {
         fingerprint: null,
       },
     }),
-    draftResponse(),
   );
   render(<SettingsComponent />);
 
@@ -2319,7 +2280,6 @@ test('read-only missing config can download but cannot be created', () => {
         fingerprint: null,
       },
     }),
-    draftResponse(),
   );
   render(<SettingsComponent />);
 
@@ -2364,10 +2324,9 @@ test('existing-file overwrite and admin-provider changes require explicit confir
     draft: changedDraft,
     effective_config: changedDraft,
   });
-  const changedDraftResponse = draftResponse({ draft: changedDraft });
   const saveFileMutate = vi.fn();
   queryMocks.useSaveConfigFile.mockReturnValue(mutationResult(saveFileMutate));
-  setSettingsLoaded(changedEditor, changedDraftResponse);
+  setSettingsLoaded(changedEditor);
   render(<SettingsComponent />);
 
   fireEvent.click(screen.getByRole('button', { name: 'Save to config file' }));
@@ -2467,10 +2426,7 @@ test('restart drift survives config save draft clearing through latest history m
   const saveFileMutate = vi.fn();
   queryMocks.useSaveConfigFile.mockReturnValue(mutationResult(saveFileMutate));
   const beforeProcessStart = 1_789_473_000;
-  setSettingsLoaded(
-    editorResponse({ saved_at_unix_secs: beforeProcessStart }),
-    draftResponse({ saved_at_unix_secs: beforeProcessStart }),
-  );
+  setSettingsLoaded(editorResponse({ saved_at_unix_secs: beforeProcessStart }));
   queryMocks.useConfigHistory.mockReturnValue(
     loadedResult({
       entries: [{ revision: 6, saved_at_unix_secs: beforeProcessStart }],
@@ -2500,12 +2456,6 @@ test('restart drift survives config save draft clearing through latest history m
 
   setSettingsLoaded(
     editorResponse({
-      draft: null,
-      saved_at_unix_secs: null,
-      last_validated_revision: null,
-      last_validation: null,
-    }),
-    draftResponse({
       draft: null,
       saved_at_unix_secs: null,
       last_validated_revision: null,
@@ -2644,7 +2594,6 @@ test('unassigned leaves land in their own category Other settings and stay searc
       effective_config: file,
       draft,
     }),
-    draftResponse({ draft }),
   );
   const view = render(<SettingsComponent />);
 
@@ -2809,7 +2758,6 @@ test('storage variant switch review lists removed leaves without a container row
   };
   setSettingsLoaded(
     editorResponse({ draft: sqliteDraft, effective_config: sqliteDraft }),
-    draftResponse({ draft: sqliteDraft }),
   );
   render(<SettingsComponent />);
   // Counts track displayable active fields: only storage.kind and
@@ -3130,15 +3078,6 @@ test('scalar fields show purpose and trade-off guidance across every category', 
     ['lower', 'higher'],
   );
 
-  // Identity & access — env-var string field with a recommendation.
-  showCategory(view, 'Identity & access');
-  expectGuidance(
-    'cluster.token_env',
-    'string',
-    ['Recommendation'],
-    ['recommendation'],
-  );
-
   // Pricing & quotas — numeric batch field.
   showCategory(view, 'Pricing & quotas');
   expectGuidance(
@@ -3231,21 +3170,12 @@ test('section grids use the 1/2/3-column contract with full-span composite edito
   expect(jobs?.className).toContain('col-span-full');
   expect(jobs?.parentElement?.className).toContain('grid');
 
-  // Identity & access: admin providers and the nested cluster object span
-  // the grid; the nested object's inner grid follows the same contract.
+  // Identity & access: admin providers span the grid.
   showCategory(view, 'Identity & access');
   const providers = document.querySelector<HTMLElement>(
     '[data-config-path="admin.auth.providers"]',
   );
   expect(providers?.className).toContain('col-span-full');
-  const cluster = document.querySelector<HTMLElement>(
-    '[data-config-path="cluster"]',
-  );
-  expect(cluster?.className).toContain('col-span-full');
-  const clusterChild = document.querySelector<HTMLElement>(
-    '[data-config-path="cluster.token_env"]',
-  );
-  expectGridContract(clusterChild?.parentElement, 'cluster');
 });
 
 test('nullable objects keep one compact switch in both enabled and disabled states', () => {
@@ -3375,10 +3305,7 @@ test('field errors mark only the failing control and risk is flagged by a badge'
       ],
     },
   };
-  setSettingsLoaded(
-    editorResponse({ last_validation: issueReport }),
-    draftResponse({ last_validation: issueReport }),
-  );
+  setSettingsLoaded(editorResponse({ last_validation: issueReport }));
   render(<SettingsComponent />);
 
   // Only the field with a validation error marks its control invalid and

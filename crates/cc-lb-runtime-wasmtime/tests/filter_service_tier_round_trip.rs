@@ -1,10 +1,13 @@
 use std::path::PathBuf;
 
-use cc_lb_plugin_wire::v1::{
-    ArchivedFilterResponse, CachePricingSummary, FilterRequest, FilterResponse, Principal,
+use cc_lb_plugin_wire::v2::{
+    ArchivedFilterResponse, CachePricingSummary, FilterResponse, Principal,
 };
+use cc_lb_plugin_wire::v3::{FilterRequest, NativeCachePricing, NativeCachePricingProvider};
 use cc_lb_plugin_wire::{HookKind, WireVersion};
-use cc_lb_runtime_wasmtime::{RuntimeSlotKey, RuntimeSlotRole, WasmtimeRuntime, admit_wasm};
+use cc_lb_runtime_wasmtime::{
+    RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch, WasmtimeRuntime, admit_wasm,
+};
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
 
@@ -32,13 +35,14 @@ fn filter_plugin_admits_and_receives_service_tier() {
     .expect("filter admission and probe");
     assert_eq!(
         inspection.hook_versions.get(&HookKind::Filter),
-        Some(&WireVersion::V1)
+        Some(&WireVersion::V3)
     );
 
-    let slot = RuntimeSlotKey::global("filter-service-tier", RuntimeSlotRole::Filter);
-    runtime
-        .register_filter(slot.clone(), "wasmtime-filter-service-tier", &wasm)
+    let slot_key = RuntimeSlotKey::global("filter-service-tier", RuntimeSlotRole::Filter);
+    let slot = runtime
+        .register_filter(slot_key, "wasmtime-filter-service-tier", &wasm)
         .expect("register filter service-tier");
+    let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
     let request = FilterRequest {
         request_id: Box::from("req-service-tier"),
         thread_id: None,
@@ -50,6 +54,11 @@ fn filter_plugin_admits_and_receives_service_tier() {
             cache_creation_5m_micros_per_million: None,
             cache_creation_1h_micros_per_million: None,
             cache_read_micros_per_million: None,
+        },
+        native_pricing: NativeCachePricing {
+            version: 1,
+            provider: NativeCachePricingProvider::Anthropic,
+            rates: Box::new([]),
         },
         method: Box::from("POST"),
         path: Box::from("/v1/messages"),
@@ -64,8 +73,8 @@ fn filter_plugin_admits_and_receives_service_tier() {
         candidates: Box::new([]),
     };
     let input = rkyv::to_bytes::<RkyvError>(&request).expect("encode filter request");
-    let output = runtime
-        .call_filter(&slot, input.as_slice())
+    let output = dispatch
+        .call_filter_scoped(input.as_slice(), <[u8]>::to_vec)
         .expect("dispatch filter");
     let mut aligned = AlignedVec::<16>::with_capacity(output.len());
     aligned.extend_from_slice(&output);

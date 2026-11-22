@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use cc_lb_domain::{Principal, UpstreamCandidate};
-use cc_lb_plugin_wire::ArchivedFilterResponse;
+use cc_lb_plugin_wire::schema::WireVersion;
+use cc_lb_plugin_wire::v2::ArchivedFilterResponse;
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, PerCandidateReason, RoutingContext};
 use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntimeError};
 use uuid::Uuid;
@@ -53,9 +54,16 @@ impl FilterPlugin for WasmtimeFilterPlugin {
                 .ok_or_else(|| FilterError::Runtime {
                     reason: "plugin metadata missing filter hook".to_owned(),
                 })?;
+        if wire_version != WireVersion::V3 {
+            return Err(FilterError::Runtime {
+                reason: format!(
+                    "filter wire version {} is unsupported (requires V3)",
+                    wire_version.as_u8()
+                ),
+            });
+        }
 
         let guest_result = FilterWireRequest {
-            wire_version,
             ctx,
             principal,
             candidates,
@@ -182,8 +190,8 @@ fn per_candidate_reason_from_label(decision: &str, reason: &str) -> PerCandidate
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_plugin_wire::FilterResponse as WireFilterResponse;
-    use cc_lb_plugin_wire::PerCandidateReason as WirePerCandidateReason;
+    use cc_lb_plugin_wire::v2::FilterResponse as WireFilterResponse;
+    use cc_lb_plugin_wire::v2::PerCandidateReason as WirePerCandidateReason;
     use rkyv::rancor::Error as RkyvError;
 
     #[test]

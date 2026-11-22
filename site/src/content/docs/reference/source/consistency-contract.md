@@ -56,7 +56,7 @@ A few other failures after the commit also attempt a serving-view rebuild before
 - `PUT`/`PATCH /admin/v1/upstreams/{id}`, when seeding a warmup bootstrap job fails.
 - `POST /admin/v1/upstreams/{id}/oauth/complete`, when seeding the refresh or warmup jobs fails.
 - `POST /admin/v1/upstreams/from-oauth-draft`, when deleting the PKCE flow row fails after the upstream and its metadata are stored.
-- `DELETE /admin/v1/plugins/registry/{id}`, `PUT`/`DELETE /admin/v1/plugin-chain-entries/{id}`, and `POST /admin/v1/principals/{principal_id}/plugin-chain/reorder` and `/rebalance`, when a storage read that follows the commit fails.
+- `DELETE /admin/v1/plugins/registry/{id}`, `DELETE /admin/v1/plugin-chain-entries/{id}`, and `POST /admin/v1/principals/{principal_id}/plugin-chain/reorder`, when a storage read that follows the commit fails.
 
 Most handlers audit only the success path. Validation and storage errors return early without an audit row. Three routes audit both the success and the failure of their main operation:
 
@@ -73,7 +73,7 @@ The plugin registry label update and WASM garbage collection write audit rows li
 - `PATCH /admin/v1/plugins/registry/{id}` updates the registry label, records `plugin_registry_label_update(id=<registry id>)`, and rebuilds the view.
 - `POST /admin/v1/plugins/wasm/gc` deletes unreferenced WASM blobs from storage one at a time and attempts to delete their cache files from disk. Candidates are processed on the request future until one blob is actually deleted. After that first successful deletion, the remaining deletions, cache-file cleanup and summary audit run in the post-commit continuation. If no blob is deleted, all candidates are checked on the request and the final audit runs in the continuation. After the loop it writes one summary row, `plugin_wasm_gc(removed=<count>)`, also when nothing was removed. If a deletion fails partway, the route returns the storage error and writes no audit row for the blobs already removed. It does not rebuild the view.
 
-Rejected authentication is audited synchronously. `require_admin_auth` awaits `record_auth_rejected` before it returns 401. If that write fails, it logs a warning and still returns 401, after a fixed 100 ms delay (`crates/cc-lb-admin/src/auth/mod.rs`). Some read routes also write synchronous audit rows (`audit_query`, `config_editor_read`, `config_draft_read`, `config_history_read`). A row written by `GET /admin/v1/audit` does not appear in that same response.
+Rejected authentication is audited synchronously. `require_admin_auth` awaits `record_auth_rejected` before it returns 401. If that write fails, it logs a warning and still returns 401, after a fixed 100 ms delay (`crates/cc-lb-admin/src/auth/mod.rs`). Some read routes also write synchronous audit rows (`audit_query`, `config_editor_read`, `config_history_read`). A row written by `GET /admin/v1/audit` does not appear in that same response.
 
 Optimistic concurrency: principal, upstream, plugin registry, and plugin chain resources return `ETag: W/"<revision>"`. Most of their update and delete routes require `If-Match`, and return `428 if_match_required` when it is missing. A stale revision returns `409 stale_revision` with `current_revision` for principals, upstreams, and OAuth completion, and `412 stale_revision` with `current` for plugin registry and chain entries. For principals, a revision mismatch on a live principal returns the same `stale_revision` body with `current_revision` on SQLite and Postgres. Conflicts on a soft-deleted principal still depend on the operation and backend: repeating a soft delete returns `409 storage_conflict` without a revision on both, while enabling or disabling a deleted principal with an older revision returns `storage_conflict` on SQLite and `stale_revision` on Postgres. Some routes take the revision another way:
 
@@ -81,17 +81,16 @@ Optimistic concurrency: principal, upstream, plugin registry, and plugin chain r
 - `POST /admin/v1/principals/{principal_id}/plugin-chain/reorder` takes an `expected_revision` for each entry in the body.
 - `POST /admin/v1/plugins/wasm` never reads `If-Match`. An upload that replaces an existing registry entry of the same name with different bytes is handled in one of two ways. An explicitly confirmed replacement sends the multipart part `confirm_replacement=true` and must also send `replace_registry_id` and `expected_revision`. An automatic replacement, allowed without confirmation when the incoming version is a higher semver than the current one, may omit both parts. When `expected_revision` is omitted, the server uses the revision it just read from storage, so no client-supplied revision is checked and a concurrent change between the client's read and the upload is not detected.
 - `POST /admin/v1/upstreams/{id}/oauth/complete` checks the upstream revision captured when the flow was started with `/oauth/start`, stored in the PKCE flow row.
-- `POST /admin/v1/principals/{principal_id}/plugin-chain/rebalance` takes no revision at all.
 - Configuration draft routes carry `expected_revision` in the request body.
 
 | Routes | State | Audit | Dynamic view on serving replica |
 |---|---|---|---|
-| `POST /admin/v1/principals`; `PUT`, `PATCH`, `DELETE /admin/v1/principals/{id}`; `POST /admin/v1/principals/{id}/enable`, `/disable`; `PUT /admin/v1/principals/{id}/allowed_models`, `/router-terminal` | Committed | After state | Rebuilt |
+| `POST /admin/v1/principals`; `PATCH`, `DELETE /admin/v1/principals/{id}`; `POST /admin/v1/principals/{id}/enable`, `/disable`; `PUT /admin/v1/principals/{id}/allowed_models`, `/router-terminal` | Committed | After state | Rebuilt |
 | `POST /admin/v1/principals/{id}/keys` | Committed | After state; on failure, revocation of the key is attempted but can fail | Rebuilt |
 | `POST /admin/v1/principals/{id}/keys/{key_id}/revoke` | Committed | After state | Rebuilt |
-| `POST /admin/v1/upstreams`; `PUT`, `PATCH`, `DELETE /admin/v1/upstreams/{id}`; `POST /admin/v1/upstreams/{id}/enable`, `/disable`; `DELETE /admin/v1/upstreams/{id}/warmup-dialect-plugin` | Committed (an update that turns warmup on for an OAuth upstream also enqueues one warmup job per lane the credential supports) | After state | Rebuilt |
+| `POST /admin/v1/upstreams`; `PUT`, `PATCH`, `DELETE /admin/v1/upstreams/{id}`; `DELETE /admin/v1/upstreams/{id}/warmup-dialect-plugin` | Committed (an update that turns warmup on for an OAuth upstream also enqueues one warmup job per lane the credential supports) | After state | Rebuilt |
 | `POST /admin/v1/upstreams/from-oauth-draft`; `POST /admin/v1/upstreams/{id}/oauth/complete` | Committed, and refresh/warmup jobs enqueued as applicable; for `from-oauth-draft`, a failed onboarding step triggers a hard delete that can itself fail | After state | Rebuilt |
-| `POST /admin/v1/principals/{principal_id}/plugin-chain`, `/reorder`, `/rebalance`; `PUT`, `DELETE /admin/v1/plugin-chain-entries/{id}` | Committed | After state | Rebuilt |
+| `POST /admin/v1/principals/{principal_id}/plugin-chain`, `/reorder`; `DELETE /admin/v1/plugin-chain-entries/{id}` | Committed | After state | Rebuilt |
 | `DELETE /admin/v1/plugins/registry/{id}`; `POST /admin/v1/plugins/wasm` | Committed | After state (upload audits failures of the upload itself, not its prechecks) | Rebuilt |
 | `PATCH /admin/v1/plugins/registry/{id}` | Committed | After state | Rebuilt |
 | `POST /admin/v1/plugins/wasm/gc` | Reported blobs deleted from storage; cache-file deletion is best-effort | One summary row after the deletion loop, also when nothing was removed; a deletion error returns before that audit write | Not rebuilt |
@@ -169,7 +168,7 @@ A valid provider observation without a supported main routing quota is still a s
 
 **Inline, not queued.** Fire-now warmup, subscription metadata refresh, and limit-reset claims call the provider during the request. Metadata refresh and limit-reset results are committed before the response. Fire-now is a hybrid: the provider call and the audit row are inline, but the warmup attempt row is written best-effort. `execute_warmup_attempt` logs a failed `insert_warmup_attempt` and returns the computed outcome anyway (`crates/cc-lb-engine/src/warmup_attempts.rs`), so a 2xx fire-now response does not prove the attempt row exists. Fire-now warms one lane per request (`?lane=`, default `primary`).
 
-`GET /admin/scheduler/status`, `GET /admin/scheduler/failures`, and `GET /admin/v1/upstreams/{id}/warmup` read committed job rows directly. Scheduler status includes rescheduled `Pending` retries in `next_run_at`. The failures endpoint lists `Failed` and `Killed` rows without filtering by attempt count; it excludes `Pending` retries. Apalis may reclaim a `Failed` row from an ordinary handler error while `attempts < max_attempts`.
+`GET /admin/v1/upstreams/{id}/warmup` reads committed job rows directly. Apalis stores `Pending` retries (with a future `run_at`), `Failed` rows (which Apalis may reclaim while `attempts < max_attempts`), and terminal `Killed` rows in the scheduler jobs table.
 
 ## OAuth token refresh
 

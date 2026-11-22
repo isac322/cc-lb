@@ -1,6 +1,5 @@
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use metrics::Unit;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
@@ -19,11 +18,10 @@ use crate::cclb_metrics::{
     touch_prometheus14_metric_handles,
 };
 use crate::panic_hook::install_panic_hook;
-use crate::redaction::{RedactingMakeWriter, RedactionLayer, RedactionPolicy};
+use crate::redaction::{RedactingMakeWriter, RedactionPolicy};
 
 type BoxedRegistryLayer = Box<dyn Layer<Registry> + Send + Sync>;
 
-static PANIC_TOTAL: AtomicU64 = AtomicU64::new(0);
 const REQUEST_DURATION_BUCKETS: [f64; 12] = [
     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
@@ -409,7 +407,7 @@ pub fn init(cfg: &ObservabilityConfig) -> Result<TracingGuard, InitError> {
             .json()
             .with_ansi(false)
             .with_writer(RedactingMakeWriter::new(std::io::stdout, policy));
-        vec![RedactionLayer::new(policy).boxed(), fmt_layer.boxed()]
+        vec![fmt_layer.boxed()]
     } else {
         vec![
             tracing_subscriber::fmt::layer()
@@ -719,12 +717,7 @@ pub fn register_metrics() {
 }
 
 pub(crate) fn increment_panic_total() {
-    PANIC_TOTAL.fetch_add(1, Ordering::Relaxed);
     metrics::counter!("cc_lb_panic_total").increment(1);
-}
-
-pub fn panic_total() -> u64 {
-    PANIC_TOTAL.load(Ordering::Relaxed)
 }
 
 fn install_prometheus(cfg: &ObservabilityConfig) -> Result<(), InitError> {

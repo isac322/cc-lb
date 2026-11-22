@@ -11,20 +11,9 @@ publish = false
 name = "integration"
 path = "tests/all.rs"
 
-[[bin]]
-name = "show"
-path = "src/bin/show.rs"
-test = false
-
-[[bin]]
-name = "validate"
-path = "src/bin/validate.rs"
-test = false
-
 [dependencies]
 cc-lb-domain = { path = "../cc-lb-domain" }
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
-clap = { workspace = true, features = ["derive"] }
 figment = { workspace = true, features = ["env", "toml"] }
 http.workspace = true
 schemars.workspace = true

@@ -41,8 +41,12 @@ The host and generated guest code use a small C ABI surface:
 
 - `cc_lb_alloc(size, align) -> ptr`
 - `cc_lb_free(ptr, size, align)`
-- `cc_lb_filter(in_ptr, in_len) -> packed_u64`
-- `cc_lb_shape(in_ptr, in_len) -> packed_u64`
+- `cc_lb_filter_<provider>(in_ptr, in_len) -> packed_u64`
+- `cc_lb_shape_<provider>(in_ptr, in_len) -> packed_u64`
+- `cc_lb_transform_response_<provider>(in_ptr, in_len) -> packed_u64`
+- `cc_lb_transform_sse_event_<provider>(in_ptr, in_len) -> packed_u64`
+- `cc_lb_transform_realtime_frame_<provider>(in_ptr, in_len) -> packed_u64`
+- `cc_lb_shape_envelope_gemini(in_ptr, in_len) -> packed_u64`
 
 Hooks return `(out_ptr, out_len)` packed into a `u64` as
 `(ptr << 32) | len`.
@@ -60,7 +64,8 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler};
-use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse, PerCandidateReason};
+use cc_lb_plugin_wire::v2::{FilterResponse, PerCandidateReason};
+use cc_lb_plugin_wire::v3::FilterRequest;
 
 #[cc_lb_plugin(
     name = "accept-all",
@@ -73,7 +78,8 @@ mod accept_all {
 
     #[handler(
         filter,
-        wire = 1,
+        provider = "anthropic",
+        wire = 3,
         description = "Accepts all candidates.",
         usage = "No configuration required.",
     )]
@@ -97,7 +103,7 @@ mod accept_all {
 The host keeps a candidate only when `decision` is `"accept"`. Every candidate
 absent from `results` is rejected, so an empty `results` rejects the whole set.
 
-Filter handlers also receive the requested service tier on the V1 request as
+Filter handlers also receive the requested service tier on the V3 request as
 `FilterRequest.service_tier`, an `Option<Box<str>>`. `service_tier` is the
 optional tier requested in the inbound request body; a pre-request filter
 cannot observe the tier ultimately reported by an upstream response. For a

@@ -7,7 +7,6 @@ members = [
     "plugins/router/cache-aware-wasmtime",
     "plugins/test-fixtures/wasmtime-shape-passthrough",
     "plugins/test-fixtures/wasmtime-filter-service-tier",
-    "plugins/test-fixtures/wasmtime-filter-openai",
     "plugins/test-fixtures/wasmtime-dual-slot",
     "tests/fixtures/fake-anthropic",
     "tests/fixtures/mock-anthropic-oauth-server",
@@ -47,7 +46,6 @@ cc-lb-runtime-wasmtime    = { path = "crates/cc-lb-runtime-wasmtime", version = 
 cc-lb-plugin-wire = { version = "0.9", path = "crates/cc-lb-plugin-wire" }
 cc-lb-pdk-wasmtime = { version = "0.2", path = "crates/cc-lb-pdk-wasmtime" }
 cc-lb-pdk-wasmtime-macros = { version = "0.2", path = "crates/cc-lb-pdk-wasmtime-macros" }
-cc-lb-plugin-conformance = { version = "0.4", path = "crates/cc-lb-plugin-conformance" }
 cc-lb-workspace-hack = { path = "tools/workspace-hack" }
 
 wasmtime = { version = "50.0.2", default-features = false, features = [

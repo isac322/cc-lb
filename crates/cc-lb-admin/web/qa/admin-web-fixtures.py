@@ -37,7 +37,6 @@ DEFAULT_MANIFEST = DEFAULT_ROOT / "fixture-manifest.json"
 FIXTURE_VERSION = 2
 TOKEN_ENV = "CC_LB_ADMIN_TOKEN"
 MASTER_KEY_ENV = "CC_LB_MASTER_KEY"
-CLUSTER_TOKEN_ENV = "CC_LB_CLUSTER_TOKEN"
 AUTH_PROVIDERS_ENV = "CC_LB_ADMIN_AUTH_PROVIDERS_JSON"
 POSTGRES_URL_ENV = "ADMIN_WEB_QA_POSTGRES_URL"
 QA_NAME = "admin-web-full"
@@ -94,7 +93,6 @@ ENGINE_MATRIX = {
         "role": "PostgreSQL storage parity fixture",
         "required_server_major": 16,
         "database": "fresh isolated loopback database whose name identifies admin-web/QA/test/fixture/scratch",
-        "cluster_env": CLUSTER_TOKEN_ENV,
         "client_fallback": "host psql/pg_dump/pg_restore when present; otherwise only an explicitly recorded owned QA container",
     },
 }
@@ -102,7 +100,6 @@ ENGINE_MATRIX = {
 GET_SIDE_EFFECTS = [
     {"id": "GET-AUDIT-EXPORT", "method": "GET", "path": "/admin/v1/export", "effect": "appends config_export Audit entry after reading the database catalog"},
     {"id": "GET-AUDIT-CONFIG-EDITOR", "method": "GET", "path": "/admin/v1/config/editor", "effect": "appends config_editor_read Audit entry"},
-    {"id": "GET-AUDIT-CONFIG-DRAFT-V1", "method": "GET", "path": "/admin/v1/config/draft", "effect": "appends config_draft_read Audit entry"},
     {"id": "GET-AUDIT-CONFIG-HISTORY-V1", "method": "GET", "path": "/admin/v1/config/history", "effect": "appends config_history_read Audit entry"},
     {"id": "GET-AUDIT-AUDIT", "method": "GET", "path": "/admin/v1/audit", "effect": "queries first, then appends audit_query; response does not contain its own new row"},
     {"id": "GET-AUDIT-EVENT-DETAIL", "method": "GET", "path": "/admin/v1/events/detail", "query": {"id": "{event_id}"}, "effect": "appends request_event_detail_read Audit entry"},
@@ -149,11 +146,9 @@ COVERAGE_GROUPS: dict[str, list[dict[str, Any]]] = {
         {"id": "UI-PLUG-09", "method": "GET", "path": "/admin/v1/plugins/registry/{id}/references", "fixture": "plugin.primary referenced twice", "reset": "none"},
         {"id": "UI-PLUG-08", "method": "DELETE", "path": "/admin/v1/plugins/registry/{id}?cascade=references", "fixture": "plugin.primary referenced twice", "reset": "snapshot"},
         {"id": "UI-PLUG-04", "method": "POST", "path": "/admin/v1/plugins/wasm/gc", "fixture": "unreferenced replaced blob", "reset": "snapshot"},
-        {"id": "API-PLUGIN-CHAIN-DIRECT", "method": "PUT/POST", "path": "/admin/v1/plugin-chain-entries/{id} and /rebalance", "fixture": "plugin.primary", "reset": "snapshot", "ui": "backend-only"},
     ],
     "settings_audit": [
         {"id": "UI-SET-17", "method": "GET", "path": "/admin/v1/config/editor", "fixture": "isolated config file", "reset": "snapshot for Audit entry"},
-        {"id": "UI-SET-03B", "method": "GET", "path": "/admin/v1/config/draft", "fixture": "settings.no_draft or settings.valid_draft", "reset": "snapshot for Audit entry"},
         {"id": "UI-SET-08", "method": "GET", "path": "/admin/v1/config/history?limit=20", "fixture": "settings.saved_history", "reset": "snapshot for Audit entry"},
         {"id": "UI-SET-04", "method": "PUT", "path": "/admin/v1/config/draft", "fixture": "settings.no_draft or settings.valid_draft", "reset": "snapshot"},
         {"id": "UI-SET-05", "method": "POST", "path": "/admin/v1/config/draft/validate", "fixture": "settings.valid_draft", "reset": "snapshot"},
@@ -297,7 +292,6 @@ def require_fixture_paths(manifest: Mapping[str, Any], root: Path) -> None:
     for key, filename in (
         (TOKEN_ENV, "admin-token"),
         (MASTER_KEY_ENV, "master-key"),
-        (CLUSTER_TOKEN_ENV, "cluster-token"),
     ):
         value = manifest.get("secret_refs", {}).get(key)
         if value is not None:
@@ -420,7 +414,6 @@ def load_manifest(raw: str) -> tuple[Path, dict[str, Any]]:
         [AUTH_PROVIDERS_ENV, TOKEN_ENV, MASTER_KEY_ENV]
         + (
             [
-                CLUSTER_TOKEN_ENV,
                 manifest.get("database", {}).get(
                     "postgres_url_env",
                     POSTGRES_URL_ENV,
@@ -598,16 +591,6 @@ def config_text(
             "half_open_after_secs = 30",
         ]
     )
-    if engine == "postgres":
-        admin_host, admin_port = loopback_address(admin_addr, "admin address")
-        lines.extend(
-            [
-                "",
-                "[cluster]",
-                f"instance_url = {toml_string(f'http://{admin_host}:{admin_port}')}",
-                f"token_env = {toml_string(CLUSTER_TOKEN_ENV)}",
-            ]
-        )
     if oauth_origin:
         origin = loopback_origin(oauth_origin, "OAuth origin")
         lines.extend(
@@ -711,11 +694,8 @@ def init_fixture(args: argparse.Namespace) -> None:
     config_path = root / "cc-lb.toml"
     token_path = root / "admin-token"
     master_key_path = root / "master-key"
-    cluster_token_path = root / "cluster-token"
     write_secret(token_path, secrets.token_urlsafe(32))
     write_secret(master_key_path, secrets.token_hex(32))
-    if args.engine == "postgres":
-        write_secret(cluster_token_path, secrets.token_urlsafe(32))
     config_path.write_text(
         config_text(
             engine=args.engine,
@@ -760,12 +740,11 @@ def init_fixture(args: argparse.Namespace) -> None:
         "secret_refs": {
             TOKEN_ENV: str(token_path),
             MASTER_KEY_ENV: str(master_key_path),
-            CLUSTER_TOKEN_ENV: str(cluster_token_path) if args.engine == "postgres" else None,
             AUTH_PROVIDERS_ENV: f'[{json.dumps({"kind": "static_token", "id": QA_NAME, "token_env": TOKEN_ENV}, separators=(",", ":"))}]',
         },
         "required_environment_keys": (
             [AUTH_PROVIDERS_ENV, TOKEN_ENV, MASTER_KEY_ENV]
-            + ([CLUSTER_TOKEN_ENV, args.postgres_url_env] if args.engine == "postgres" else [])
+            + ([args.postgres_url_env] if args.engine == "postgres" else [])
         ),
         "engine_matrix": ENGINE_MATRIX,
         "secret_material_policy": {
@@ -874,9 +853,9 @@ def prepare_fixture(args: argparse.Namespace) -> None:
         },
     )
     _, _, api_disabled = client.request(
-        "POST",
-        f"/admin/v1/upstreams/{api_disabled['id']}/disable",
-        body={},
+        "PATCH",
+        f"/admin/v1/upstreams/{api_disabled['id']}",
+        body={"enabled": False},
         headers={"If-Match": etag(int(api_disabled["spec_revision"]))},
         expected=(200,),
     )
@@ -1803,8 +1782,7 @@ def proof_fixture(args: argparse.Namespace) -> None:
     principals = check("principals", "GET", "/admin/v1/principals")
     upstreams = check("upstreams", "GET", "/admin/v1/upstreams")
     plugins = check("plugins", "GET", "/admin/v1/plugins/registry")
-    check("config-editor", "GET", "/admin/v1/config/editor")
-    draft_state = check("config-draft", "GET", "/admin/v1/config/draft")
+    editor_state = check("config-editor", "GET", "/admin/v1/config/editor")
     check("config-history", "GET", "/admin/v1/config/history")
     audit = check("audit-all", "GET", "/admin/v1/audit?limit=1000")
     primary_id = fixtures.get("principal", {}).get("primary", {}).get("id")
@@ -1839,7 +1817,7 @@ def proof_fixture(args: argparse.Namespace) -> None:
         principals,
         upstreams,
         plugins,
-        draft_state,
+        editor_state,
         audit,
         key_list,
         plugin_references,
@@ -1901,7 +1879,7 @@ def assert_fixture_invariants(
     principals: Mapping[str, Any],
     upstreams: Mapping[str, Any],
     plugins: Mapping[str, Any],
-    draft_state: Mapping[str, Any],
+    editor_state: Mapping[str, Any],
     audit: Mapping[str, Any],
     key_list: Mapping[str, Any] | None,
     plugin_references: Mapping[str, Any] | None,
@@ -1936,11 +1914,11 @@ def assert_fixture_invariants(
     expected_draft_revision = fixtures.get("settings", {}).get(
         "draft_revision"
     )
-    if draft_state.get("revision") != expected_draft_revision:
+    if editor_state.get("revision") != expected_draft_revision:
         raise FixtureError(
             "config draft revision does not match fixture manifest"
         )
-    if draft_state.get("last_validated_revision") != expected_draft_revision:
+    if editor_state.get("last_validated_revision") != expected_draft_revision:
         raise FixtureError(
             "config draft is not validated at its current revision"
         )
@@ -2024,7 +2002,6 @@ def parser() -> argparse.ArgumentParser:
   export {AUTH_PROVIDERS_ENV}='[{{"kind":"static_token","id":"{QA_NAME}","token_env":"{TOKEN_ENV}"}}]'
   export {TOKEN_ENV}="$(cat <manifest secret_refs.{TOKEN_ENV}>)"
   export {MASTER_KEY_ENV}="$(cat <manifest secret_refs.{MASTER_KEY_ENV}>)"
-  # PostgreSQL only: export {CLUSTER_TOKEN_ENV}="$(cat <manifest secret_refs.{CLUSTER_TOKEN_ENV}>)"
 
 Capture `empty` after first migration boot, then prepare and capture `populated`.
 Always stop cc-lb before reset. Proof GETs intentionally add Audit rows.

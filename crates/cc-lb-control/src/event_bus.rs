@@ -55,8 +55,8 @@ pub trait RequestEventBus: Send + Sync + 'static {
 /// Default capacity for the broadcast channel powering admin SSE subscribers.
 pub const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
 
-/// Default capacity for the durable lifecycle-writer mpsc channel used by
-/// [`LifecycleEventLogger`](crate::lifecycle_event_logger::LifecycleEventLogger).
+/// Default capacity for the durable lifecycle-writer mpsc channel wired by
+/// `cc_lb_engine::spawn_lifecycle_event_logger`.
 pub const DEFAULT_LIFECYCLE_WRITER_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY: usize = 4096;
 
@@ -67,7 +67,6 @@ pub const DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY: usize = 4096;
 const MAX_ASSEMBLER_OVERFLOW_TASKS: usize = 1024;
 pub const DEFAULT_LIFECYCLE_PRICING_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_LIMIT_RECONCILE_CAPACITY: usize = 4096;
-pub const DEFAULT_LIFECYCLE_CACHE_OBS_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_SUBSCRIPTION_QUOTA_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_LIMIT_REJECTION_AUDIT_CAPACITY: usize = 4096;
@@ -92,7 +91,6 @@ struct InMemoryBusInner {
     lifecycle_assembler_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_pricing_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_limit_reconcile_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
-    lifecycle_cache_obs_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_rate_limit_header_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_subscription_quota_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_limit_rejection_audit_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
@@ -123,7 +121,6 @@ impl InMemoryBus {
                 lifecycle_assembler_tx: Mutex::new(None),
                 lifecycle_pricing_tx: Mutex::new(None),
                 lifecycle_limit_reconcile_tx: Mutex::new(None),
-                lifecycle_cache_obs_tx: Mutex::new(None),
                 lifecycle_rate_limit_header_tx: Mutex::new(None),
                 lifecycle_subscription_quota_tx: Mutex::new(None),
                 lifecycle_limit_rejection_audit_tx: Mutex::new(None),
@@ -135,9 +132,9 @@ impl InMemoryBus {
         }
     }
 
-    /// Attach the durable lifecycle-writer consumer
-    /// (`LifecycleEventLogger`). Only one may be attached; subsequent calls
-    /// replace the previous sender.
+    /// Attach the durable lifecycle-writer consumer (see
+    /// `cc_lb_engine::spawn_lifecycle_event_logger`). Only one may be attached;
+    /// subsequent calls replace the previous sender.
     pub fn attach_lifecycle_writer(&self, capacity: usize) -> mpsc::Receiver<LifecycleEvent> {
         let (tx, rx) = mpsc::channel(capacity.max(1));
         let mut guard = self
@@ -181,20 +178,6 @@ impl InMemoryBus {
             .lifecycle_limit_reconcile_tx
             .lock()
             .expect("event bus lifecycle limit reconcile mutex poisoned");
-        *guard = Some(tx);
-        rx
-    }
-
-    pub fn attach_lifecycle_cache_observation(
-        &self,
-        capacity: usize,
-    ) -> mpsc::Receiver<LifecycleEvent> {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
-        let mut guard = self
-            .inner
-            .lifecycle_cache_obs_tx
-            .lock()
-            .expect("event bus lifecycle cache observation mutex poisoned");
         *guard = Some(tx);
         rx
     }
@@ -446,7 +429,9 @@ impl RequestEventBus for InMemoryBus {
             // Advisory heartbeat: keep broadcast listeners and stateful
             // subscribers warm without spawning assembler overflow tasks or
             // waking the stateless limit-rejection audit subscriber.
-            let _ = self.inner.lifecycle_broadcast_tx.send(event.clone());
+            if self.inner.lifecycle_broadcast_tx.receiver_count() > 0 {
+                let _ = self.inner.lifecycle_broadcast_tx.send(event.clone());
+            }
             let targets = [
                 (
                     &self.inner.lifecycle_writer_tx,
@@ -463,10 +448,6 @@ impl RequestEventBus for InMemoryBus {
                 (
                     &self.inner.lifecycle_limit_reconcile_tx,
                     "lifecycle_limit_reconcile_activity_dropped",
-                ),
-                (
-                    &self.inner.lifecycle_cache_obs_tx,
-                    "lifecycle_cache_obs_activity_dropped",
                 ),
                 (
                     &self.inner.lifecycle_rate_limit_header_tx,
@@ -545,7 +526,9 @@ impl RequestEventBus for InMemoryBus {
                     upstream_error_code: None,
                     retry_after: Some(retry_after),
                 };
-                let _ = self.inner.lifecycle_broadcast_tx.send(sanitized.clone());
+                if self.inner.lifecycle_broadcast_tx.receiver_count() > 0 {
+                    let _ = self.inner.lifecycle_broadcast_tx.send(sanitized.clone());
+                }
                 let rate_limit_header_tx = {
                     let guard = self
                         .inner
@@ -562,7 +545,9 @@ impl RequestEventBus for InMemoryBus {
         }
         // Advisory broadcast copy for live dashboards; the durable request
         // row does not depend on it, so a dropped send is acceptable.
-        let _ = self.inner.lifecycle_broadcast_tx.send(event.clone());
+        if self.inner.lifecycle_broadcast_tx.receiver_count() > 0 {
+            let _ = self.inner.lifecycle_broadcast_tx.send(event.clone());
+        }
 
         let writer_tx = {
             let guard = self
@@ -586,14 +571,6 @@ impl RequestEventBus for InMemoryBus {
                 .lifecycle_limit_reconcile_tx
                 .lock()
                 .expect("event bus lifecycle limit reconcile mutex poisoned");
-            guard.clone()
-        };
-        let cache_obs_tx = {
-            let guard = self
-                .inner
-                .lifecycle_cache_obs_tx
-                .lock()
-                .expect("event bus lifecycle cache obs mutex poisoned");
             guard.clone()
         };
         let rate_limit_header_tx = {
@@ -691,22 +668,6 @@ impl RequestEventBus for InMemoryBus {
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     tracing::debug!("lifecycle limit reconcile subscriber mpsc closed");
-                }
-            }
-        }
-        if let Some(tx) = cache_obs_tx {
-            match tx.try_send(event.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    record_dropped_events_by("lifecycle_cache_obs_full", 1);
-                    tracing::warn!(
-                        kind = dropped.kind(),
-                        event_id = %dropped.event_id(),
-                        "lifecycle cache observation subscriber mpsc full; dropping event (prompt cache observations may be missing)",
-                    );
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::debug!("lifecycle cache observation subscriber mpsc closed");
                 }
             }
         }
@@ -1025,7 +986,6 @@ mod tests {
         let mut assembler_rx = bus.attach_lifecycle_assembler(1);
         let mut pricing_rx = bus.attach_lifecycle_pricing(1);
         let mut reconcile_rx = bus.attach_lifecycle_limit_reconcile(1);
-        let mut cache_obs_rx = bus.attach_lifecycle_cache_observation(1);
         let mut rate_limit_rx = bus.attach_lifecycle_rate_limit_header(1);
         let mut quota_rx = bus.attach_lifecycle_subscription_quota(1);
         let mut api_metrics_rx = bus.attach_lifecycle_api_key_metrics(1);
@@ -1043,7 +1003,6 @@ mod tests {
         assert_eq!(assembler_rx.try_recv().expect("assembler"), first);
         assert_eq!(pricing_rx.try_recv().expect("pricing"), first);
         assert_eq!(reconcile_rx.try_recv().expect("reconcile"), first);
-        assert_eq!(cache_obs_rx.try_recv().expect("cache_obs"), first);
         assert_eq!(rate_limit_rx.try_recv().expect("rate_limit"), first);
         assert_eq!(quota_rx.try_recv().expect("quota"), first);
         assert_eq!(api_metrics_rx.try_recv().expect("api_metrics"), first);

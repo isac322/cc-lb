@@ -251,7 +251,7 @@ pub async fn build_dynamic_view(
     // build_principal_chains succeeds so we don't tear down slots the
     // still-active view is dispatching against; already-cloned
     // `Arc<PluginSlotKind>` handles keep the evicted cells alive for the
-    // duration of any in-flight call (see `WasmtimeRuntime::evict_slot`
+    // duration of any in-flight call (see `WasmtimeRuntime::retain_slots`
     // docs).
     let evicted = runtime.retain_slots(&registered_slot_keys);
     if !evicted.is_empty() {
@@ -2181,30 +2181,31 @@ mod tests {
         bytes.extend_from_slice(&payload);
     }
 
-    fn legacy_filter_provider_fixture() -> Vec<u8> {
+    fn anthropic_filter_provider_fixture() -> Vec<u8> {
         use cc_lb_plugin_wire::schema::WireSchema;
-        let output = rkyv::to_bytes::<rkyv::rancor::Error>(&cc_lb_plugin_wire::FilterResponse {
-            results: Box::new([cc_lb_plugin_wire::PerCandidateReason {
-                upstream_id: Box::from("00000000-0000-0000-0000-000000000001"),
-                decision: Box::from("reject"),
-                reason: Box::from("legacy-ran"),
-            }]),
-        })
-        .expect("filter response");
+        let output =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&cc_lb_plugin_wire::v2::FilterResponse {
+                results: Box::new([cc_lb_plugin_wire::v2::PerCandidateReason {
+                    upstream_id: Box::from("00000000-0000-0000-0000-000000000001"),
+                    decision: Box::from("reject"),
+                    reason: Box::from("anthropic-filter-ran"),
+                }]),
+            })
+            .expect("filter response");
         let data: String = output.iter().map(|byte| format!("\\{byte:02x}")).collect();
         let packed = cc_lb_plugin_wire::schema::pack_ret(16, output.len() as u32);
         let mut wasm = wat::parse_str(format!(
-            "(module (memory (export \"memory\") 1) (data (i32.const 16) \"{data}\") (func (export \"cc_lb_alloc\") (param i32 i32) (result i32) i32.const 8192) (func (export \"cc_lb_free\") (param i32 i32 i32)) (func (export \"cc_lb_filter\") (param i32 i32) (result i64) i64.const {}))",
+            "(module (memory (export \"memory\") 1) (data (i32.const 16) \"{data}\") (func (export \"cc_lb_alloc\") (param i32 i32) (result i32) i32.const 8192) (func (export \"cc_lb_free\") (param i32 i32 i32)) (func (export \"cc_lb_filter_anthropic\") (param i32 i32) (result i64) i64.const {}))",
             packed as i64,
         )).expect("filter module");
         provider_test_section(
             &mut wasm,
-            "cc_lb.schema.filter.v1",
-            &<cc_lb_plugin_wire::FilterRequest as WireSchema>::FINGERPRINT,
+            "cc_lb.schema.filter.v3",
+            &<cc_lb_plugin_wire::v3::FilterRequest as WireSchema>::FINGERPRINT,
         );
-        provider_test_section(&mut wasm, "cc_lb.plugin.v1", br#"{
-            "name":"legacy-provider-filter","version":"1.0.0","description":"legacy filter","usage":"test",
-            "hooks":{"filter":{"wire_version":1,"description":"legacy","usage":"test","mode":"active"}}
+        provider_test_section(&mut wasm, "cc_lb.plugin.v2", br#"{
+            "name":"anthropic-provider-filter","version":"1.0.0","description":"anthropic filter","usage":"test",
+            "hooks":{"filter_anthropic":{"wire_version":3,"description":"anthropic filter","usage":"test","mode":"active"}}
         }"#);
         wasm
     }
@@ -2212,7 +2213,7 @@ mod tests {
     fn openai_response_only_provider_fixture() -> Vec<u8> {
         use cc_lb_plugin_wire::schema::WireSchema;
         let output = rkyv::to_bytes::<rkyv::rancor::Error>(
-            &cc_lb_plugin_wire::TransformResponseResult::Unchanged,
+            &cc_lb_plugin_wire::v2::TransformResponseResult::Unchanged,
         )
         .expect("response transform");
         let data: String = output.iter().map(|byte| format!("\\{byte:02x}")).collect();
@@ -2223,12 +2224,12 @@ mod tests {
         )).expect("response module");
         provider_test_section(
             &mut wasm,
-            "cc_lb.schema.transform_response.v1",
-            &<cc_lb_plugin_wire::TransformResponseRequest as WireSchema>::FINGERPRINT,
+            "cc_lb.schema.transform_response.v2",
+            &<cc_lb_plugin_wire::v2::TransformResponseRequest as WireSchema>::FINGERPRINT,
         );
         provider_test_section(&mut wasm, "cc_lb.plugin.v2", br#"{
             "name":"openai-response-only","version":"1.0.0","description":"OpenAI response","usage":"test",
-            "hooks":{"transform_response_openai":{"wire_version":1,"description":"response","usage":"test","mode":"active"}}
+            "hooks":{"transform_response_openai":{"wire_version":2,"description":"response","usage":"test","mode":"active"}}
         }"#);
         wasm
     }
@@ -2346,11 +2347,12 @@ mod tests {
     fn dual_role_provider_fixture() -> Vec<u8> {
         use cc_lb_plugin_wire::schema::WireSchema;
 
-        let filter = rkyv::to_bytes::<rkyv::rancor::Error>(&cc_lb_plugin_wire::FilterResponse {
-            results: Box::new([]),
-        })
-        .expect("filter response");
-        let shape = rkyv::to_bytes::<rkyv::rancor::Error>(&cc_lb_plugin_wire::ShapeResponse {
+        let filter =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&cc_lb_plugin_wire::v2::FilterResponse {
+                results: Box::new([]),
+            })
+            .expect("filter response");
+        let shape = rkyv::to_bytes::<rkyv::rancor::Error>(&cc_lb_plugin_wire::v2::ShapeResponse {
             url: Box::from("https://dual-role.example.test/v1/messages"),
             method: Box::from("POST"),
             headers: Box::new([]),
@@ -2375,13 +2377,13 @@ mod tests {
         .expect("dual-role module");
         provider_test_section(
             &mut wasm,
-            "cc_lb.schema.filter.v1",
-            &<cc_lb_plugin_wire::FilterRequest as WireSchema>::FINGERPRINT,
+            "cc_lb.schema.filter.v3",
+            &<cc_lb_plugin_wire::v3::FilterRequest as WireSchema>::FINGERPRINT,
         );
         provider_test_section(
             &mut wasm,
-            "cc_lb.schema.shape.v1",
-            &<cc_lb_plugin_wire::ShapeRequest as WireSchema>::FINGERPRINT,
+            "cc_lb.schema.shape.v2",
+            &<cc_lb_plugin_wire::v2::ShapeRequest as WireSchema>::FINGERPRINT,
         );
         provider_test_section(
             &mut wasm,
@@ -2389,8 +2391,8 @@ mod tests {
             br#"{
             "name":"dual-role-provider","version":"1.0.0","description":"dual role","usage":"test",
             "hooks":{
-                "filter_anthropic":{"wire_version":1,"description":"filter","usage":"test","mode":"active"},
-                "shape_anthropic":{"wire_version":1,"description":"shape","usage":"test","mode":"active"}
+                "filter_anthropic":{"wire_version":3,"description":"filter","usage":"test","mode":"active"},
+                "shape_anthropic":{"wire_version":2,"description":"shape","usage":"test","mode":"active"}
             }
         }"#,
         );
@@ -2571,7 +2573,9 @@ mod tests {
             .expect("dual-role build");
             assert_dual_role_artifacts(&chains, &principal, &upstream, Some(router.id), true);
             assert_eq!(keys.len(), 2);
-            assert_eq!(runtime.slot_count(), 2);
+            for key in &keys {
+                assert!(runtime.get_slot(key).is_some());
+            }
             assert!(runtime.retain_slots(&keys).is_empty());
             if let Some(previous) = &previous_keys {
                 assert_eq!(
@@ -2612,7 +2616,10 @@ mod tests {
         .await
         .expect("filter-only build");
         assert_dual_role_artifacts(&chains, &principal, &upstream, Some(router.id), false);
-        assert_eq!(runtime.slot_count(), 1);
+        assert_eq!(filter_keys.len(), 1);
+        for key in &filter_keys {
+            assert!(runtime.get_slot(key).is_some());
+        }
         assert!(runtime.retain_slots(&filter_keys).is_empty());
         attach_dual_role_provider(&storage, principal.id, registry, PluginSlotKind::Shape).await;
         for _ in 0..2 {
@@ -2629,7 +2636,9 @@ mod tests {
             assert_dual_role_artifacts(&chains, &principal, &upstream, Some(router.id), true);
             assert_eq!(keys.len(), 2);
             assert!(filter_keys.is_subset(&keys));
-            assert_eq!(runtime.slot_count(), 2);
+            for key in &keys {
+                assert!(runtime.get_slot(key).is_some());
+            }
             assert!(runtime.retain_slots(&keys).is_empty());
         }
     }
@@ -2680,7 +2689,10 @@ mod tests {
                 Some(sibling_router.id),
                 false,
             );
-            assert_eq!(runtime.slot_count(), 3);
+            assert_eq!(original_keys.len(), 3);
+            for key in &original_keys {
+                assert!(runtime.get_slot(key).is_some());
+            }
             assert!(runtime.retain_slots(&original_keys).is_empty());
             let removed = if removed_role == PluginSlotKind::Router {
                 &router
@@ -2718,16 +2730,20 @@ mod tests {
             );
             assert_eq!(retained_keys.len(), 2);
             assert!(retained_keys.is_subset(&original_keys));
-            assert_eq!(
-                runtime.slot_count(),
-                3,
-                "building alone must not evict active-view slots"
-            );
+            for key in &original_keys {
+                assert!(
+                    runtime.get_slot(key).is_some(),
+                    "building alone must not evict active-view slots"
+                );
+            }
             let evicted = runtime.retain_slots(&retained_keys);
             assert_eq!(evicted.len(), 1);
             assert!(original_keys.contains(&evicted[0]));
             assert!(!retained_keys.contains(&evicted[0]));
-            assert_eq!(runtime.slot_count(), 2);
+            assert!(runtime.get_slot(&evicted[0]).is_none());
+            for key in &retained_keys {
+                assert!(runtime.get_slot(key).is_some());
+            }
             assert!(runtime.retain_slots(&retained_keys).is_empty());
             assert_dual_role_artifacts(
                 &chains,
@@ -2799,7 +2815,7 @@ mod tests {
             UpstreamStore::set_enabled(storage.as_ref(), anthropic.id, anthropic.revision, true)
                 .await
                 .expect("Anthropic enabled");
-        let wasm = legacy_filter_provider_fixture();
+        let wasm = anthropic_filter_provider_fixture();
         let metadata = cc_lb_runtime_wasmtime::inspect_wasm_agnostic(&wasm)
             .expect("inspection")
             .metadata;
@@ -2813,7 +2829,7 @@ mod tests {
                 WasmRegistryEntryInput {
                     name: metadata.name,
                     version: Some(metadata.version),
-                    original_filename: "legacy-provider-filter.wasm".to_owned(),
+                    original_filename: "anthropic-provider-filter.wasm".to_owned(),
                     label: None,
                     uploaded_at_unix_secs: 1,
                     uploaded_by_admin_id: Uuid::nil(),
@@ -2943,7 +2959,7 @@ mod tests {
                 candidates
                     .retain(|candidate| output.kept_upstream_ids.contains(&candidate.upstream_id));
                 if filter.plugin_id() == entry.id {
-                    assert!(output.reason.contains("legacy-ran"));
+                    assert!(output.reason.contains("anthropic-filter-ran"));
                     ran = true;
                 }
             }
@@ -2951,7 +2967,7 @@ mod tests {
             assert_eq!(
                 candidates.is_empty(),
                 expected,
-                "only the Anthropic chain applies the legacy rejection"
+                "only the Anthropic chain applies the Anthropic filter rejection"
             );
         }
         let openai = upstreams

@@ -242,7 +242,6 @@
             "mock-anthropic-oauth-server",
             "tests-loom",
             "wasmtime-dual-slot",
-            "wasmtime-filter-openai",
             "wasmtime-filter-service-tier",
             "wasmtime-shape-passthrough"
           ],

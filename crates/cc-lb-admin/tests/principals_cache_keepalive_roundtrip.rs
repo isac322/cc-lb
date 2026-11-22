@@ -9,14 +9,14 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-async fn authed_put_json(
+async fn authed_patch_json(
     app: axum::Router,
     uri: &str,
     if_match: &str,
     body: Value,
 ) -> (StatusCode, Value) {
     let request = Request::builder()
-        .method("PUT")
+        .method("PATCH")
         .uri(uri)
         .header("Authorization", format!("Bearer {TOKEN}"))
         .header("If-Match", if_match)
@@ -90,7 +90,7 @@ async fn cache_keepalive_survives_create_get_and_put_clear() {
         Value::from(10_000)
     );
 
-    let (put_status, put_body) = authed_put_json(
+    let (put_status, put_body) = authed_patch_json(
         app(state.clone()),
         &format!("/admin/v1/principals/{id}"),
         &etag,
@@ -134,7 +134,7 @@ async fn cache_keepalive_omitted_on_update_remains_unchanged() {
     .await;
     let id = created["id"].as_str().expect("principal id").to_owned();
 
-    let (put_status, put_body) = authed_put_json(
+    let (put_status, put_body) = authed_patch_json(
         app(state.clone()),
         &format!("/admin/v1/principals/{id}"),
         &etag,
@@ -196,7 +196,7 @@ async fn cache_keepalive_rejects_unimplemented_llm_judge_on_update() {
     .await;
     let id = created["id"].as_str().expect("principal id").to_owned();
 
-    let (status, body) = authed_put_json(
+    let (status, body) = authed_patch_json(
         app(state),
         &format!("/admin/v1/principals/{id}"),
         &etag,

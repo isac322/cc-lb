@@ -86,41 +86,6 @@ pub(crate) fn retain_api_key_candidates(
     has_api_key
 }
 
-pub(crate) fn response_plan_for_request(
-    capability: ProviderCapability,
-    policy: &OpenaiOauthCompatPolicy,
-    body: Option<&Value>,
-) -> Result<Option<CompatResponsePlan>, CompatReject> {
-    let Some(body) = body else { return Ok(None) };
-    let plan = match capability {
-        ProviderCapability::OpenaiResponses => {
-            let normalized = openai_compat::request::normalize_responses_request(NormalizeInput {
-                body,
-                policy,
-                transport: Transport::Http,
-            })?;
-            if normalized.body.is_none() && !normalized.aggregate_to_json {
-                None
-            } else {
-                Some(CompatResponsePlan {
-                    kind: if normalized.aggregate_to_json {
-                        CompatResponseKind::ResponsesAggregate {
-                            echo_metadata: normalized.echo_metadata,
-                        }
-                    } else {
-                        CompatResponseKind::ResponsesStream {
-                            echo_metadata: normalized.echo_metadata,
-                        }
-                    },
-                    truncation_emulate: normalized.truncation_emulate,
-                })
-            }
-        }
-        _ => None,
-    };
-    Ok(plan)
-}
-
 pub(crate) async fn prepare_request(
     _auth: &Authenticated,
     ctx: &RequestContext,
@@ -152,13 +117,26 @@ pub(crate) async fn prepare_request(
                 } else {
                     value
                 };
-                plan = response_plan_for_request(capability, policy, Some(&value))?;
                 let normalized =
                     openai_compat::request::normalize_responses_request(NormalizeInput {
                         body: &value,
                         policy,
                         transport: Transport::Http,
                     })?;
+                if normalized.body.is_some() || normalized.aggregate_to_json {
+                    plan = Some(CompatResponsePlan {
+                        kind: if normalized.aggregate_to_json {
+                            CompatResponseKind::ResponsesAggregate {
+                                echo_metadata: normalized.echo_metadata,
+                            }
+                        } else {
+                            CompatResponseKind::ResponsesStream {
+                                echo_metadata: normalized.echo_metadata,
+                            }
+                        },
+                        truncation_emulate: normalized.truncation_emulate,
+                    });
+                }
                 if let Some(next) = normalized.body {
                     body = serde_json::to_vec(&next)
                         .map(Bytes::from)
@@ -167,9 +145,6 @@ pub(crate) async fn prepare_request(
                     body = serde_json::to_vec(&value)
                         .map(Bytes::from)
                         .map_err(|_| CompatReject::unsupported_parameter("body"))?;
-                }
-                if let Some(p) = &mut plan {
-                    p.truncation_emulate = normalized.truncation_emulate;
                 }
             }
         }

@@ -385,7 +385,7 @@ async fn registry_label_patch_audit_failure_returns_500_and_rebuilds_view() {
 }
 
 #[tokio::test]
-async fn chain_update_audit_failure_returns_500_and_rebuilds_view_with_committed_chain() {
+async fn chain_delete_audit_failure_returns_500_and_rebuilds_view_with_committed_chain() {
     let harness = harness().await;
     let route = format!("/admin/v1/plugin-chain-entries/{}", harness.chain_id);
     let generation_before = harness.holder.generation();
@@ -393,12 +393,7 @@ async fn chain_update_audit_failure_returns_500_and_rebuilds_view_with_committed
 
     let (status, headers, bytes) = send(
         &harness.app,
-        request(
-            "PUT",
-            &route,
-            Some(json!({ "config": { "enabled": true } })),
-            Some("W/\"0\""),
-        ),
+        request("DELETE", &route, None, Some("W/\"0\"")),
     )
     .await;
 
@@ -420,21 +415,21 @@ async fn chain_update_audit_failure_returns_500_and_rebuilds_view_with_committed
             .observed_at(generation)
             .await
             .map(|observed| observed.chain_configs),
-        Some(vec![json!({ "enabled": true })])
+        Some(Vec::new())
     );
 }
 
 #[tokio::test]
-async fn chain_update_finishes_audit_and_rebuild_after_client_disconnect() {
+async fn chain_delete_finishes_audit_and_rebuild_after_client_disconnect() {
     let harness = harness().await;
     let route = format!("/admin/v1/plugin-chain-entries/{}", harness.chain_id);
     let generation_before = harness.holder.generation();
     let (entered, release) = harness.rebinder.arm_gate().await;
 
     let mut in_flight = Box::pin(harness.app.clone().oneshot(request(
-        "PUT",
+        "DELETE",
         &route,
-        Some(json!({ "config": { "enabled": true } })),
+        None,
         Some("W/\"0\""),
     )));
     tokio::select! {
@@ -460,7 +455,7 @@ async fn chain_update_finishes_audit_and_rebuild_after_client_disconnect() {
             .observed_at(generation)
             .await
             .map(|observed| observed.chain_configs),
-        Some(vec![json!({ "enabled": true })])
+        Some(Vec::new())
     );
     let rows = audit_rows_for(&harness.storage, &route).await;
     assert_eq!(rows.len(), 1, "{rows:?}");

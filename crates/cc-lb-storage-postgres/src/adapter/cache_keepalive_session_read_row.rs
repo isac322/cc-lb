@@ -1,8 +1,8 @@
 use crate::error_map::map_sqlx_error;
 use cc_lb_storage_api::{
-    CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRecord, CacheKeepaliveEnqueueState,
-    CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionListItem, CacheKeepaliveSessionStatus,
-    CacheKeepaliveTerminalReason, CacheKeepaliveTurnRecord, CacheTtl, StorageError, StorageResult,
+    CacheKeepaliveConfigSnapshot, CacheKeepaliveEnqueueState, CacheKeepaliveSessionEntrySource,
+    CacheKeepaliveSessionListItem, CacheKeepaliveSessionStatus, CacheKeepaliveTerminalReason,
+    CacheKeepaliveTurnRecord, CacheTtl, StorageError, StorageResult,
 };
 use sqlx::{Row, postgres::PgRow};
 
@@ -124,34 +124,6 @@ pub(crate) fn turn_from_row(row: PgRow) -> StorageResult<CacheKeepaliveTurnRecor
         ts: i64_to_u64(
             row.try_get("ts").map_err(map_sqlx_error)?,
             "cache keepalive turn timestamp",
-        )?,
-    })
-}
-
-pub(crate) fn decision_from_row(row: PgRow) -> StorageResult<CacheKeepaliveDecisionRecord> {
-    Ok(CacheKeepaliveDecisionRecord {
-        source_ref_id: row.try_get("source_ref_id").map_err(map_sqlx_error)?,
-        principal_id: row.try_get("principal_id").map_err(map_sqlx_error)?,
-        session_key_hash: row.try_get("session_key_hash").map_err(map_sqlx_error)?,
-        upstream_id: row.try_get("upstream_id").map_err(map_sqlx_error)?,
-        decision: row.try_get("decision").map_err(map_sqlx_error)?,
-        reason: row.try_get("reason").map_err(map_sqlx_error)?,
-        error: row.try_get("error").map_err(map_sqlx_error)?,
-        generation: i64_to_u64(
-            row.try_get("generation").map_err(map_sqlx_error)?,
-            "cache keepalive decision generation",
-        )?,
-        ttl: ttl_from_db(&row.try_get::<String, _>("ttl").map_err(map_sqlx_error)?)?,
-        config_snapshot: config_snapshot_from_db(
-            row.try_get("config_snapshot").map_err(map_sqlx_error)?,
-        )?,
-        last_message_at_ms: i64_to_u64(
-            row.try_get("last_message_at_ms").map_err(map_sqlx_error)?,
-            "cache keepalive decision last message",
-        )?,
-        ts: i64_to_u64(
-            row.try_get("ts").map_err(map_sqlx_error)?,
-            "cache keepalive decision timestamp",
         )?,
     })
 }

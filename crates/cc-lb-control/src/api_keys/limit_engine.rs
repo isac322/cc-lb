@@ -9,8 +9,7 @@ use tokio::time::Instant;
 use cc_lb_storage_api::{
     ApiKeyConcurrencyHold, ApiKeyConcurrencyHoldStore, ApiKeyUsage, ApiKeyUsageBucketDelta,
     ApiKeyUsageBucketKey, ApiKeyUsageBucketQuery, ApiKeyUsageFlush, ApiKeyUsageFlushResult,
-    BackendKind, KeyStatus as StoredKeyStatus, PrincipalLimitIdentityKind, PrincipalLimitKind,
-    PrincipalLimitState, Storage, StorageError, StoredApiKeyRecord,
+    BackendKind, KeyStatus as StoredKeyStatus, Storage, StorageError, StoredApiKeyRecord,
 };
 use parking_lot::{Mutex, RwLock};
 use uuid::Uuid;
@@ -949,39 +948,6 @@ impl LimitEngine {
 }
 
 impl LimitEngine {
-    pub fn record_principal_limit_state(&self, state: &PrincipalLimitState) {
-        let kind = principal_limit_kind(state.kind);
-        let Some(window_sec) = parse_limit_window_secs(&state.window) else {
-            return;
-        };
-        let key_id = principal_limit_key_id(state);
-
-        if let Some(limit) = state.limit {
-            let limit = Limit {
-                kind,
-                window_secs: window_sec,
-                cap_micros: u64_to_i64_saturating(limit),
-            };
-            let mut effective_limits = self.inner.effective_limits.write();
-            let limits = effective_limits
-                .entry((key_id.clone(), state.principal_id.clone()))
-                .or_default();
-            limits.retain(|candidate| {
-                candidate.kind != limit.kind || candidate.window_secs != limit.window_secs
-            });
-            limits.push(limit);
-        }
-
-        if let (Some(limit), Some(remaining)) = (state.limit, state.remaining) {
-            let used = u64_to_i64_saturating(limit.saturating_sub(remaining));
-            let mut rolling = self.inner.rolling.write();
-            rolling
-                .entry((key_id, kind, window_sec))
-                .or_insert_with(|| RingCounter::new(window_sec))
-                .replace_total(state.observed_at_unix_secs, used);
-        }
-    }
-
     fn admission_cap(&self, key_id: &str, limit: &Limit, now_sec: u64) -> i64 {
         let Some(state) = self.inner.durable_usage.read().clone() else {
             return limit.cap_micros;
@@ -1609,7 +1575,6 @@ fn refund_difference(
             engine.record_amount(key_id, amount.kind, amount.window_sec, delta, now_sec);
         }
     }
-    // TODO(T22): enqueue PrincipalLimitStateRow via master's existing limit_state_writer
 }
 
 fn effective_limits(record: &StoredApiKeyRecord, defaults: &[Limit]) -> Vec<Limit> {
@@ -1632,51 +1597,6 @@ fn effective_limits(record: &StoredApiKeyRecord, defaults: &[Limit]) -> Vec<Limi
     }
 
     limits
-}
-
-fn principal_limit_kind(kind: PrincipalLimitKind) -> LimitKind {
-    match kind {
-        PrincipalLimitKind::Requests => LimitKind::Requests,
-        PrincipalLimitKind::Tokens => LimitKind::TotalTokens,
-        PrincipalLimitKind::InputTokens => LimitKind::InputTokens,
-        PrincipalLimitKind::OutputTokens => LimitKind::OutputTokens,
-    }
-}
-
-fn principal_limit_key_id(state: &PrincipalLimitState) -> String {
-    match state.identity_kind {
-        PrincipalLimitIdentityKind::Credential => state
-            .identity_value
-            .clone()
-            .unwrap_or_else(|| state.principal_id.clone()),
-        PrincipalLimitIdentityKind::Account | PrincipalLimitIdentityKind::Unobserved => {
-            state.principal_id.clone()
-        }
-    }
-}
-
-fn parse_limit_window_secs(window: &str) -> Option<u64> {
-    match window {
-        "default" | "minute" | "1m" => Some(60),
-        "hour" | "1h" => Some(3_600),
-        "5h" => Some(18_000),
-        "weekly" | "7d" => Some(604_800),
-        _ => parse_window_suffix(window),
-    }
-}
-
-fn parse_window_suffix(window: &str) -> Option<u64> {
-    let (value, multiplier) = if let Some(value) = window.strip_suffix('s') {
-        (value, 1)
-    } else if let Some(value) = window.strip_suffix('m') {
-        (value, 60)
-    } else if let Some(value) = window.strip_suffix('h') {
-        (value, 3_600)
-    } else {
-        let value = window.strip_suffix('d')?;
-        (value, 86_400)
-    };
-    value.parse::<u64>().ok()?.checked_mul(multiplier)
 }
 
 fn u64_to_i64_saturating(value: u64) -> i64 {
@@ -1806,45 +1726,10 @@ mod tests {
     use cc_lb_clock::Clock;
     use std::collections::HashMap;
 
-    use cc_lb_storage_api::{
-        MetaStore, PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState,
-    };
+    use cc_lb_storage_api::MetaStore;
 
     use super::*;
 
-    #[test]
-    fn record_principal_limit_state_feeds_rate_limit_headers() {
-        let engine = LimitEngine::new(
-            Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(cc_lb_clock::SystemClock),
-        );
-        let observed_at_unix_secs = unix_secs(engine.inner.clock.now());
-
-        engine.record_principal_limit_state(&PrincipalLimitState {
-            principal_id: "principal-a".to_owned(),
-            identity_kind: PrincipalLimitIdentityKind::Credential,
-            identity_value: Some("key-a".to_owned()),
-            account_observed: false,
-            window: "1m".to_owned(),
-            kind: PrincipalLimitKind::Requests,
-            limit: Some(10),
-            remaining: Some(7),
-            reset: None,
-            observed_at_unix_secs,
-            stored_at_unix_secs: observed_at_unix_secs,
-        });
-
-        let headers = engine.headers_for("key-a", "principal-a");
-        let header = |name: &str| {
-            headers
-                .iter()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.as_str())
-        };
-
-        assert_eq!(header("anthropic-ratelimit-requests-limit"), Some("10"));
-        assert_eq!(header("anthropic-ratelimit-requests-remaining"), Some("7"));
-    }
     fn formatter_fixture(limits: Vec<Limit>) -> (Arc<LimitEngine>, Arc<cc_lb_clock::TestClock>) {
         let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000));
         let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());

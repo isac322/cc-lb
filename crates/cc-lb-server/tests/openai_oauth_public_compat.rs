@@ -407,9 +407,9 @@ pub(crate) async fn setup(s: &common::TestServer, base: &str, c: &reqwest::Clien
         admin(
             c,
             s,
-            Method::POST,
-            &format!("/admin/v1/upstreams/{id}/disable"),
-            None,
+            Method::PATCH,
+            &format!("/admin/v1/upstreams/{id}"),
+            Some(json!({ "enabled": false })),
             e.as_deref(),
         )
         .await;

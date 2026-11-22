@@ -2,6 +2,7 @@
 extern crate alloc;
 use alloc::{boxed::Box, format, vec, vec::Vec};
 use cc_lb_pdk_wasmtime::types::v2::*;
+use cc_lb_pdk_wasmtime::types::v3;
 
 #[cc_lb_pdk_wasmtime::plugin(
     name = "dual-slot-regression",
@@ -36,7 +37,7 @@ mod fixture {
         }
     }
 
-    fn filter(req: FilterRequest) -> FilterResponse {
+    fn filter(req: v3::FilterRequest) -> FilterResponse {
         // The negative probe makes filter execution independently observable without editing a payload.
         let reject = req
             .headers
@@ -50,7 +51,7 @@ mod fixture {
                 .map(|candidate| PerCandidateReason {
                     upstream_id: candidate.upstream_id,
                     decision: Box::from(if reject { "reject" } else { "accept" }),
-                    reason: Box::from("qa-qualified-filter-v2"),
+                    reason: Box::from("qa-qualified-filter-v3"),
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
@@ -99,21 +100,21 @@ mod fixture {
     #[cc_lb_pdk_wasmtime::handler(
         filter,
         provider = "openai",
-        wire = 2,
+        wire = 3,
         description = "Filter OpenAI",
         usage = "QA"
     )]
-    pub fn filter_openai(req: FilterRequest) -> FilterResponse {
+    pub fn filter_openai(req: v3::FilterRequest) -> FilterResponse {
         filter(req)
     }
     #[cc_lb_pdk_wasmtime::handler(
         filter,
         provider = "gemini",
-        wire = 2,
+        wire = 3,
         description = "Filter Gemini",
         usage = "QA"
     )]
-    pub fn filter_gemini(req: FilterRequest) -> FilterResponse {
+    pub fn filter_gemini(req: v3::FilterRequest) -> FilterResponse {
         filter(req)
     }
     #[cc_lb_pdk_wasmtime::handler(

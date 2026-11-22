@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
-use cc_lb_observability::{RedactingMakeWriter, RedactionLayer, RedactionPolicy};
+use cc_lb_observability::{RedactingMakeWriter, RedactionPolicy};
 use tracing_subscriber::layer::SubscriberExt;
 
 #[derive(Clone, Default)]
@@ -44,14 +44,12 @@ impl Write for CapturedWrite {
 
 pub fn capture_event(policy: RedactionPolicy, emit: impl FnOnce()) -> String {
     let captured = CapturedWriter::default();
-    let subscriber = tracing_subscriber::registry()
-        .with(RedactionLayer::new(policy))
-        .with(
-            tracing_subscriber::fmt::layer()
-                .json()
-                .with_ansi(false)
-                .with_writer(RedactingMakeWriter::new(captured.clone(), policy)),
-        );
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .json()
+            .with_ansi(false)
+            .with_writer(RedactingMakeWriter::new(captured.clone(), policy)),
+    );
 
     tracing::subscriber::with_default(subscriber, emit);
     captured.output()

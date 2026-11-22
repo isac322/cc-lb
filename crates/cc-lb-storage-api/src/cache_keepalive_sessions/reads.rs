@@ -143,12 +143,6 @@ impl CacheKeepaliveSessionListItem {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CacheKeepaliveSummaryInput {
-    pub sessions: Vec<CacheKeepaliveSessionListItem>,
-    pub recent_decisions: u64,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheKeepaliveSessionPage {
     pub rows: Vec<CacheKeepaliveSessionListItem>,
@@ -173,21 +167,6 @@ pub struct CacheKeepaliveTurnRecord {
     /// Actual cost when available; renewal facts remain present when this is `None`.
     pub cost_micros: Option<i64>,
     pub hit_miss: String,
-    pub ts: u64,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CacheKeepaliveDecisionRecord {
-    pub source_ref_id: String,
-    pub principal_id: String,
-    pub session_key_hash: Option<String>,
-    pub upstream_id: Uuid,
-    pub decision: String,
-    pub reason: String,
-    pub error: Option<String>,
-    pub generation: u64,
-    pub ttl: CacheTtl,
-    pub config_snapshot: Option<CacheKeepaliveConfigSnapshot>,
-    pub last_message_at_ms: u64,
     pub ts: u64,
 }
 
@@ -255,12 +234,6 @@ pub trait CacheKeepaliveSessionReadStore: Send + Sync {
         query: &CacheKeepaliveSessionListQuery,
     ) -> StorageResult<CacheKeepaliveSessionPage>;
 
-    async fn read_cache_keepalive_summary_input(
-        &self,
-        principal_id: &str,
-        cutoff_ms: u64,
-    ) -> StorageResult<CacheKeepaliveSummaryInput>;
-
     async fn get_cache_keepalive_list_item(
         &self,
         principal_id: &str,
@@ -304,11 +277,6 @@ pub trait CacheKeepaliveSessionReadStore: Send + Sync {
         Ok(turns)
     }
 
-    async fn get_cache_keepalive_decision_for_principal(
-        &self,
-        principal_id: &str,
-        source_ref_id: &str,
-    ) -> StorageResult<Option<CacheKeepaliveDecisionRecord>>;
     async fn list_cache_keepalive_evidence_for_activity(
         &self,
         principal_id: &str,

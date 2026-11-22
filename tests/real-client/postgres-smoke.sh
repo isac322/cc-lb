@@ -173,7 +173,6 @@ fi
 echo "===> step 2: spawn cc-lb-server with [storage] kind=postgres"
 CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
 CC_LB_ADMIN_TOKEN=test \
-CC_LB_CLUSTER_TOKEN=0000000000000000000000000000000000000000000000000000000000000001 \
 cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$config_path" \
   > "$TMP_DIR/proxy.log" 2>&1 &
 PROXY_PID=$!

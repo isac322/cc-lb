@@ -212,7 +212,7 @@ Each role is one Tailwind utility (`@theme` in `index.css`) that sets size, line
 | `text-display` | 32 / 36 | 300 | -0.02em | KPI values and single headline figures in detail panes |
 | `text-title-page` | 24 / 32 | 600 | -0.01em | `PageHeader` h1 when it is not already the top bar's page name; entity titles on detail panes. Sans, never mono |
 | `text-title-section` | 15 / 22 | 600 | 0 | `Section` h2, top bar page name, quota window names on upstream detail, Modal and Drawer titles |
-| `text-title-card` | 14 / 20 | 600 | 0 | `CardHeader`, confirm-dialog title, empty-state title, `N% used` on a `md` meter |
+| `text-title-card` | 14 / 20 | 600 | 0 | Confirm-dialog title, empty-state title, `N% used` on a `md` meter |
 | `text-body` | 14 / 21 | 400 | 0 | Primary copy, table cells, dialog descriptions, notices |
 | `text-body-sm` | 13 / 20 | 400 | 0 | Section and card subtitles, window captions, field-adjacent copy |
 | `text-label` | 13 / 18 | 500 | 0 | Form labels, metric labels, `dl` keys, identity name. Sentence case |
@@ -237,7 +237,7 @@ Table headers use the `table-header` utility: 12 / 16, 500, `text-faint`, senten
 - Uppercase only through `text-overline`. Never uppercase a string that contains a unit, version or identifier (5h, 7d, 5m, v0.6.0).
 - Sentence case for every heading, button, tab and label ("Recent requests", "Delete plugin", "Pool quota usage"). Use plain words ("Admin address", not "Admin Addr").
 - No eyebrow or kicker text above a heading.
-- Every route renders exactly one `h1` through `PageHeader`. When its string title equals the page name the top bar already shows (`ShellPageTitleProvider`), the h1 stays for assistive tech but is visually hidden, so the name is never printed twice. `CardHeader` defaults to `h2`; cards nested under a titled section pass `headingLevel={3}`. Do not skip levels.
+- Every route renders exactly one `h1` through `PageHeader`. When its string title equals the page name the top bar already shows (`ShellPageTitleProvider`), the h1 stays for assistive tech but is visually hidden, so the name is never printed twice. Do not skip heading levels.
 - Keep dashboard copy short; detailed debug text belongs in drawers.
 
 ## 4. Spacing & Layout
@@ -307,7 +307,7 @@ Primitives live in `src/components/ui/`: `primitives.tsx` (Card, Button, Badge, 
 
 ### Card and Section
 
-- **Card** (`Card` + optional `CardHeader` + `CardBody`): a self-contained object with its own header or actions — a chart, a table, a form group, a detail block. Flat `panel` fill, 1px line, `rounded-md`. `CardHeader` owns `px-4 py-3`, a 1px rule below, and a `text-title-card` heading with an optional `text-caption` subtitle; `CardBody` owns `p-4`.
+- **Card** (`Card` + optional `CardBody`): a self-contained object with its own header or actions — a chart, a table, a form group, a detail block. Flat `panel` fill, 1px line, `rounded-md`. `CardBody` owns `p-4`.
 - **Section** (`Section`): a flat page region on the ground with a `text-title-section` h2, optional `text-body-sm` muted subtitle, and no box. Use it for groups of peers (quota windows, the upstream usage table, "Used by" lists) and around page-level tables that already have a frame.
 - A section title and a card title never share a size.
 

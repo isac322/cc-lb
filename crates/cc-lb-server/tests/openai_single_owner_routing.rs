@@ -128,9 +128,9 @@ async fn disable_seeded_upstreams(c: &reqwest::Client, s: &common::TestServer) {
         admin(
             c,
             s,
-            Method::POST,
-            &format!("/admin/v1/upstreams/{id}/disable"),
-            None,
+            Method::PATCH,
+            &format!("/admin/v1/upstreams/{id}"),
+            Some(json!({ "enabled": false })),
             etag.as_deref(),
         )
         .await;

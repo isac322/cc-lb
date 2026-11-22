@@ -1,5 +1,10 @@
 use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily, WireSchema};
-use cc_lb_plugin_wire::{ShapeRequest, ShapeResponse};
+use cc_lb_plugin_wire::v2::{
+    FilterResponse, ShapeRequest, ShapeResponse, TransformRealtimeFrameRequest,
+    TransformRealtimeFrameResult, TransformResponseRequest, TransformResponseResult,
+    TransformSseEventRequest, TransformSseEventResult,
+};
+use cc_lb_plugin_wire::v3::FilterRequest;
 use cc_lb_runtime_wasmtime::{
     RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch, WasmtimeRuntime,
 };
@@ -43,18 +48,18 @@ fn shape_module_with_modes(hooks: &[&str], metadata_version: u8, noop_hooks: &[&
         .iter()
         .all(|hook| hook.starts_with("transform_realtime_frame_"));
     let output = if hooks.iter().any(|hook| hook.starts_with("filter")) {
-        rkyv::to_bytes::<RkyvError>(&cc_lb_plugin_wire::FilterResponse {
+        rkyv::to_bytes::<RkyvError>(&FilterResponse {
             results: Box::new([]),
         })
         .expect("encode filter")
     } else if response_only {
-        rkyv::to_bytes::<RkyvError>(&cc_lb_plugin_wire::TransformResponseResult::Unchanged)
+        rkyv::to_bytes::<RkyvError>(&TransformResponseResult::Unchanged)
             .expect("encode response transform")
     } else if sse_only {
-        rkyv::to_bytes::<RkyvError>(&cc_lb_plugin_wire::TransformSseEventResult::Unchanged)
+        rkyv::to_bytes::<RkyvError>(&TransformSseEventResult::Unchanged)
             .expect("encode SSE transform")
     } else if frame_only {
-        rkyv::to_bytes::<RkyvError>(&cc_lb_plugin_wire::v2::TransformRealtimeFrameResult::Unchanged)
+        rkyv::to_bytes::<RkyvError>(&TransformRealtimeFrameResult::Unchanged)
             .expect("encode realtime frame transform")
     } else {
         rkyv::to_bytes::<RkyvError>(&response).expect("encode response")
@@ -78,10 +83,11 @@ fn shape_module_with_modes(hooks: &[&str], metadata_version: u8, noop_hooks: &[&
     for hook in hooks {
         let (kind, _) = HookKind::parse_entrypoint(hook).expect("known hook");
         kinds.insert(kind);
+        let wire_version = if kind == HookKind::Filter { 3 } else { 2 };
         metadata.insert(
             (*hook).to_owned(),
             serde_json::json!({
-                "wire_version": if kind == HookKind::TransformRealtimeFrame { 2 } else { 1 },
+                "wire_version": wire_version,
                 "description": "provider hook", "usage": "provider hook",
                 "mode": if noop_hooks.contains(hook) {
                     "noop"
@@ -99,21 +105,16 @@ fn shape_module_with_modes(hooks: &[&str], metadata_version: u8, noop_hooks: &[&
     }
     for kind in kinds {
         let (fingerprint, wire_version) = match kind {
-            HookKind::Shape => (<ShapeRequest as WireSchema>::FINGERPRINT, 1),
-            HookKind::TransformResponse => (
-                <cc_lb_plugin_wire::TransformResponseRequest as WireSchema>::FINGERPRINT,
-                1,
-            ),
-            HookKind::TransformSseEvent => (
-                <cc_lb_plugin_wire::TransformSseEventRequest as WireSchema>::FINGERPRINT,
-                1,
-            ),
-            HookKind::Filter => (
-                <cc_lb_plugin_wire::v1::FilterRequest as WireSchema>::FINGERPRINT,
-                1,
-            ),
+            HookKind::Shape => (<ShapeRequest as WireSchema>::FINGERPRINT, 2),
+            HookKind::TransformResponse => {
+                (<TransformResponseRequest as WireSchema>::FINGERPRINT, 2)
+            }
+            HookKind::TransformSseEvent => {
+                (<TransformSseEventRequest as WireSchema>::FINGERPRINT, 2)
+            }
+            HookKind::Filter => (<FilterRequest as WireSchema>::FINGERPRINT, 3),
             HookKind::TransformRealtimeFrame => (
-                <cc_lb_plugin_wire::v2::TransformRealtimeFrameRequest as WireSchema>::FINGERPRINT,
+                <TransformRealtimeFrameRequest as WireSchema>::FINGERPRINT,
                 2,
             ),
             HookKind::ShapeEnvelopeGemini => {
@@ -139,13 +140,13 @@ fn shape_module_with_modes(hooks: &[&str], metadata_version: u8, noop_hooks: &[&
     bytes
 }
 
-fn decode_frame_result(bytes: &[u8]) -> cc_lb_plugin_wire::v2::TransformRealtimeFrameResult {
+fn decode_frame_result(bytes: &[u8]) -> TransformRealtimeFrameResult {
     let archived = rkyv::access::<
         cc_lb_plugin_wire::v2::ArchivedTransformRealtimeFrameResult,
         RkyvError,
     >(bytes)
     .expect("frame result archives");
-    rkyv::deserialize::<cc_lb_plugin_wire::v2::TransformRealtimeFrameResult, RkyvError>(archived)
+    rkyv::deserialize::<TransformRealtimeFrameResult, RkyvError>(archived)
         .expect("frame result decodes")
 }
 
@@ -162,10 +163,14 @@ fn dispatch(wasm: &[u8]) -> WasmPluginWireDispatch {
 }
 
 #[test]
-fn legacy_shape_is_anthropic_only() {
+fn anthropic_shape_is_anthropic_only() {
     let dispatch = dispatch(&shape_module(
-        &["shape", "transform_response", "transform_sse_event"],
-        1,
+        &[
+            "shape_anthropic",
+            "transform_response_anthropic",
+            "transform_sse_event_anthropic",
+        ],
+        2,
     ));
     assert!(dispatch.for_provider(ProviderFamily::Anthropic).is_some());
     assert!(dispatch.for_provider(ProviderFamily::Openai).is_none());
@@ -187,6 +192,7 @@ fn openai_only_shape_is_optional_for_other_families_and_calls_qualified_export()
     assert!(!openai.has_response_transform());
     assert!(!openai.has_sse_event_transform());
 }
+
 #[test]
 fn openai_frame_only_shape_selects_openai_and_is_provider_isolated() {
     let dispatch = dispatch(&shape_module(&["transform_realtime_frame_openai"], 2));
@@ -208,7 +214,7 @@ fn openai_frame_only_shape_selects_openai_and_is_provider_isolated() {
                 .expect("qualified frame export called")
                 .as_slice()
         ),
-        cc_lb_plugin_wire::v2::TransformRealtimeFrameResult::Unchanged
+        TransformRealtimeFrameResult::Unchanged
     ));
 }
 
@@ -229,7 +235,7 @@ fn gemini_frame_only_shape_selects_gemini_and_is_provider_isolated() {
                 .expect("qualified frame export called")
                 .as_slice()
         ),
-        cc_lb_plugin_wire::v2::TransformRealtimeFrameResult::Unchanged
+        TransformRealtimeFrameResult::Unchanged
     ));
 }
 
@@ -246,30 +252,12 @@ fn noop_frame_only_shape_is_not_selected() {
 }
 
 #[test]
-fn legacy_and_qualified_anthropic_overlap_is_rejected() {
-    let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
-    let wasm = shape_module(
-        &[
-            "shape",
-            "transform_response",
-            "transform_sse_event",
-            "shape_anthropic",
-        ],
-        2,
-    );
-    let error = runtime
-        .admit_wasm_agnostic(&wasm)
-        .expect_err("overlap rejected");
-    assert!(error.to_string().contains("overlaps qualified"));
-}
-
-#[test]
-fn legacy_anthropic_and_qualified_openai_can_coexist() {
+fn qualified_anthropic_and_openai_shape_coexist() {
     let dispatch = dispatch(&shape_module(
         &[
-            "shape",
-            "transform_response",
-            "transform_sse_event",
+            "shape_anthropic",
+            "transform_response_anthropic",
+            "transform_sse_event_anthropic",
             "shape_openai",
         ],
         2,
@@ -294,22 +282,21 @@ fn qualified_response_only_plugin_is_admitted_without_a_request_hook() {
 }
 
 #[test]
-fn qualified_exports_require_v2_metadata() {
+fn qualified_exports_reject_v1_metadata() {
     let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
     let error = runtime
         .admit_wasm_agnostic(&shape_module(&["shape_openai"], 1))
-        .expect_err("v2 required");
-    assert!(error.to_string().contains("requires `cc_lb.plugin.v2`"));
+        .expect_err("v2 metadata required");
+    assert!(error.to_string().contains("cc_lb.plugin.v2"));
 }
 
 #[test]
-fn qualified_filter_is_provider_specific_and_legacy_filter_is_anthropic_only() {
-    for (hooks, metadata_version, supported) in [
-        (vec!["filter_openai"], 2, vec![ProviderFamily::Openai]),
-        (vec!["filter"], 1, vec![ProviderFamily::Anthropic]),
+fn qualified_filter_is_provider_specific() {
+    for (hooks, supported) in [
+        (vec!["filter_openai"], vec![ProviderFamily::Openai]),
+        (vec!["filter_anthropic"], vec![ProviderFamily::Anthropic]),
         (
-            vec!["filter", "filter_openai"],
-            2,
+            vec!["filter_anthropic", "filter_openai"],
             vec![ProviderFamily::Anthropic, ProviderFamily::Openai],
         ),
     ] {
@@ -318,7 +305,7 @@ fn qualified_filter_is_provider_specific_and_legacy_filter_is_anthropic_only() {
             .register_filter(
                 RuntimeSlotKey::global("filter-provider", RuntimeSlotRole::Filter),
                 "filter-provider",
-                &shape_module(&hooks, metadata_version),
+                &shape_module(&hooks, 2),
             )
             .expect("filter admitted");
         let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
@@ -336,15 +323,6 @@ fn qualified_filter_is_provider_specific_and_legacy_filter_is_anthropic_only() {
             }
         }
     }
-}
-
-#[test]
-fn legacy_filter_and_qualified_anthropic_filter_overlap_is_rejected() {
-    let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
-    let error = runtime
-        .admit_wasm_agnostic(&shape_module(&["filter", "filter_anthropic"], 2))
-        .expect_err("overlap rejected");
-    assert!(error.to_string().contains("overlaps qualified"));
 }
 
 #[test]

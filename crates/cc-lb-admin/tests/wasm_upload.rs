@@ -8,11 +8,12 @@ use crate::admin_test_common;
 
 use admin_test_common::spawn_admin_server;
 use axum::http::StatusCode;
-use cc_lb_plugin_wire::schema::{HookKind, WireSchema, WireVersion};
-use cc_lb_plugin_wire::{
-    FilterRequest, FilterResponse, ShapeRequest, ShapeResponse, TransformResponseRequest,
-    TransformSseEventRequest,
+use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily, WireSchema, WireVersion};
+use cc_lb_plugin_wire::v2::{
+    FilterResponse, ShapeEnvelopeGeminiRequest, ShapeEnvelopeGeminiResponse, ShapeRequest,
+    ShapeResponse, TransformResponseRequest, TransformSseEventRequest,
 };
+use cc_lb_plugin_wire::v3::FilterRequest;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -40,7 +41,7 @@ fn schema_section_name() -> String {
     format!(
         "{}.{}",
         HookKind::Filter.section_prefix(),
-        WireVersion::V1.as_str()
+        WireVersion::V3.as_str()
     )
 }
 
@@ -91,7 +92,7 @@ fn minimal_filter_wat() -> String {
         (data (i32.const 4096) "{data}")
         (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 1024)
         (func (export "cc_lb_free") (param i32 i32 i32))
-        (func (export "cc_lb_filter") (param i32 i32) (result i64) i64.const {packed})
+        (func (export "cc_lb_filter_anthropic") (param i32 i32) (result i64) i64.const {packed})
     )
     "#
     )
@@ -107,7 +108,7 @@ fn metadata(name: &str) -> String {
 
 fn metadata_with_version(name: &str, version: &str) -> String {
     format!(
-        r#"{{"name":"{name}","version":"{version}","description":"test plugin","usage":"test usage","hooks":{{"filter":{{"wire_version":1,"description":"filter hook","usage":"called by router","mode":"active"}}}}}}"#
+        r#"{{"name":"{name}","version":"{version}","description":"test plugin","usage":"test usage","hooks":{{"filter_anthropic":{{"wire_version":3,"description":"filter hook","usage":"called by router","mode":"active"}}}}}}"#
     )
 }
 
@@ -116,7 +117,7 @@ fn filter_wasm_valid() -> Vec<u8> {
         &minimal_filter_wat(),
         &[
             (&schema_section_name(), &schema_section_bytes()),
-            ("cc_lb.plugin.v1", metadata("cache-aware-test").as_bytes()),
+            ("cc_lb.plugin.v2", metadata("cache-aware-test").as_bytes()),
         ],
     )
 }
@@ -126,7 +127,7 @@ fn filter_wasm_wrong_schema() -> Vec<u8> {
         &minimal_filter_wat(),
         &[
             (&schema_section_name(), &[0u8; 32]),
-            ("cc_lb.plugin.v1", metadata("wrong-hash").as_bytes()),
+            ("cc_lb.plugin.v2", metadata("wrong-hash").as_bytes()),
         ],
     )
 }
@@ -137,12 +138,12 @@ fn filter_wasm_missing_export() -> Vec<u8> {
         (module
             (memory (export "memory") 1)
             (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 0)
-            (func (export "cc_lb_filter") (param i32 i32) (result i64) i64.const 0)
+            (func (export "cc_lb_filter_anthropic") (param i32 i32) (result i64) i64.const 0)
         )
         "#,
         &[
             (&schema_section_name(), &schema_section_bytes()),
-            ("cc_lb.plugin.v1", metadata("missing-free").as_bytes()),
+            ("cc_lb.plugin.v2", metadata("missing-free").as_bytes()),
         ],
     )
 }
@@ -155,12 +156,12 @@ fn filter_wasm_with_import() -> Vec<u8> {
             (memory (export "memory") 1)
             (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 0)
             (func (export "cc_lb_free") (param i32 i32 i32))
-            (func (export "cc_lb_filter") (param i32 i32) (result i64) i64.const 0)
+            (func (export "cc_lb_filter_anthropic") (param i32 i32) (result i64) i64.const 0)
         )
         "#,
         &[
             (&schema_section_name(), &schema_section_bytes()),
-            ("cc_lb.plugin.v1", metadata("with-import").as_bytes()),
+            ("cc_lb.plugin.v2", metadata("with-import").as_bytes()),
         ],
     )
 }
@@ -181,28 +182,35 @@ fn plugin_wasm(name: &str, declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
     .expect("encode shape response");
     let shape_response_data = wat_data_bytes(&shape_response);
     let packed_shape_response = ((8192u64) << 32) | shape_response.len() as u64;
+    let envelope_response = rkyv::to_bytes::<rkyv::rancor::Error>(&ShapeEnvelopeGeminiResponse {
+        envelope_body: None,
+        headers: None,
+    })
+    .expect("encode envelope response");
+    let envelope_data = wat_data_bytes(&envelope_response);
+    let packed_envelope = ((12288u64) << 32) | envelope_response.len() as u64;
     let hook_exports = declared_hooks
         .iter()
         .map(|(hook, _)| match hook {
             HookKind::Filter => format!(
-                r#"(func (export "cc_lb_filter") (param i32 i32) (result i64) i64.const {packed_response})"#
+                r#"(func (export "cc_lb_filter_anthropic") (param i32 i32) (result i64) i64.const {packed_response})"#
             ),
             HookKind::Shape => format!(
-                r#"(func (export "cc_lb_shape") (param i32 i32) (result i64) i64.const {packed_shape_response})"#
+                r#"(func (export "cc_lb_shape_anthropic") (param i32 i32) (result i64) i64.const {packed_shape_response})"#
             ),
             HookKind::TransformResponse => {
-                r#"(func (export "cc_lb_transform_response") (param i32 i32) (result i64) i64.const 0)"#
+                r#"(func (export "cc_lb_transform_response_anthropic") (param i32 i32) (result i64) i64.const 0)"#
                     .to_owned()
             }
             HookKind::TransformSseEvent => {
-                r#"(func (export "cc_lb_transform_sse_event") (param i32 i32) (result i64) i64.const 0)"#
+                r#"(func (export "cc_lb_transform_sse_event_anthropic") (param i32 i32) (result i64) i64.const 0)"#
                     .to_owned()
             }
+            HookKind::ShapeEnvelopeGemini => format!(
+                r#"(func (export "cc_lb_shape_envelope_gemini") (param i32 i32) (result i64) i64.const {packed_envelope})"#
+            ),
             HookKind::TransformRealtimeFrame => {
-                unreachable!("realtime frame hooks require a wire-v2 fixture")
-            }
-            HookKind::ShapeEnvelopeGemini => {
-                unreachable!("Gemini envelope hooks require a wire-v2 fixture")
+                unreachable!("realtime frame hooks are tested in conformance/provider_exports")
             }
         })
         .collect::<String>();
@@ -212,6 +220,7 @@ fn plugin_wasm(name: &str, declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
             (memory (export "memory") 1)
             (data (i32.const 4096) "{response_data}")
             (data (i32.const 8192) "{shape_response_data}")
+            (data (i32.const 12288) "{envelope_data}")
             (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 1024)
             (func (export "cc_lb_free") (param i32 i32 i32))
             {hook_exports}
@@ -220,31 +229,55 @@ fn plugin_wasm(name: &str, declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
     );
     let mut wasm = wat::parse_str(wat).expect("valid wat");
     for (hook, _) in declared_hooks {
-        let fingerprint = match hook {
-            HookKind::Filter => <FilterRequest as WireSchema>::FINGERPRINT,
-            HookKind::Shape => <ShapeRequest as WireSchema>::FINGERPRINT,
-            HookKind::TransformResponse => <TransformResponseRequest as WireSchema>::FINGERPRINT,
-            HookKind::TransformSseEvent => <TransformSseEventRequest as WireSchema>::FINGERPRINT,
-            HookKind::TransformRealtimeFrame | HookKind::ShapeEnvelopeGemini => {
-                unreachable!("wire-v2-only hooks require a wire-v2 fixture")
+        let (version, fingerprint) = match hook {
+            HookKind::Filter => (WireVersion::V3, <FilterRequest as WireSchema>::FINGERPRINT),
+            HookKind::Shape => (WireVersion::V2, <ShapeRequest as WireSchema>::FINGERPRINT),
+            HookKind::TransformResponse => (
+                WireVersion::V2,
+                <TransformResponseRequest as WireSchema>::FINGERPRINT,
+            ),
+            HookKind::TransformSseEvent => (
+                WireVersion::V2,
+                <TransformSseEventRequest as WireSchema>::FINGERPRINT,
+            ),
+            HookKind::ShapeEnvelopeGemini => (
+                WireVersion::V2,
+                <ShapeEnvelopeGeminiRequest as WireSchema>::FINGERPRINT,
+            ),
+            HookKind::TransformRealtimeFrame => {
+                unreachable!("realtime frame hooks are tested in conformance/provider_exports")
             }
         };
         append_custom_section(
             &mut wasm,
-            &format!("{}.{}", hook.section_prefix(), WireVersion::V1.as_str()),
+            &format!("{}.{}", hook.section_prefix(), version.as_str()),
             &fingerprint,
         );
     }
     let hooks = declared_hooks
         .iter()
         .map(|(hook, mode)| {
+            let wire_version = if matches!(hook, HookKind::Filter) {
+                3
+            } else {
+                2
+            };
+            let key = hook
+                .qualified_export_name(if matches!(hook, HookKind::ShapeEnvelopeGemini) {
+                    ProviderFamily::Gemini
+                } else {
+                    ProviderFamily::Anthropic
+                })
+                .strip_prefix("cc_lb_")
+                .expect("qualified prefix")
+                .to_owned();
             let metadata = serde_json::json!({
-                "wire_version": 1,
+                "wire_version": wire_version,
                 "description": format!("{} hook", hook.as_str()),
                 "usage": format!("call {}", hook.as_str()),
                 "mode": mode,
             });
-            (hook.as_str().to_owned(), metadata)
+            (key, metadata)
         })
         .collect::<serde_json::Map<_, _>>();
     let metadata = serde_json::to_vec(&serde_json::json!({
@@ -255,7 +288,7 @@ fn plugin_wasm(name: &str, declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
         "hooks": hooks,
     }))
     .expect("serialize metadata");
-    append_custom_section(&mut wasm, "cc_lb.plugin.v1", &metadata);
+    append_custom_section(&mut wasm, "cc_lb.plugin.v2", &metadata);
     wasm
 }
 
@@ -347,7 +380,7 @@ fn filter_wasm_with_name_version(name: &str, version: &str) -> Vec<u8> {
         &[
             (&schema_section_name(), &schema_section_bytes()),
             (
-                "cc_lb.plugin.v1",
+                "cc_lb.plugin.v2",
                 metadata_with_version(name, version).as_bytes(),
             ),
         ],
@@ -504,9 +537,12 @@ async fn registers_all_supported_slots_for_multi_hook_upload() {
 
 #[tokio::test]
 async fn rejects_incomplete_shape() {
-    // Given: Shape is declared without either Shape-owned response hook.
+    // Given: shape_envelope_gemini is declared without its required shape_gemini owner.
     let server = spawn_admin_server().await;
-    let wasm = plugin_wasm("incomplete-shape", &[(HookKind::Shape, "active")]);
+    let wasm = plugin_wasm(
+        "incomplete-shape",
+        &[(HookKind::ShapeEnvelopeGemini, "active")],
+    );
     let body = multipart_body(&[
         ("original_filename", b"incomplete-shape.wasm"),
         ("bytes", &wasm),
@@ -515,13 +551,13 @@ async fn rejects_incomplete_shape() {
     // When: upload runs the runtime's agnostic contract inspection.
     let (status, value) = upload(&server, body).await;
 
-    // Then: the incomplete Shape contract is rejected at upload time.
+    // Then: the incomplete Gemini envelope contract is rejected at upload time.
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={value}");
     assert_eq!(value["error"], "invalid_wasm");
     assert!(
         value["reason"]
             .as_str()
-            .is_some_and(|reason| reason.contains("transform_response")),
+            .is_some_and(|reason| reason.contains("shape")),
         "body={value}"
     );
 }
@@ -539,7 +575,7 @@ async fn rate_limits_uploads_via_shared_audit_store() {
             &minimal_filter_wat(),
             &[
                 (&schema_section_name(), &schema_section_bytes()),
-                ("cc_lb.plugin.v1", metadata(&name).as_bytes()),
+                ("cc_lb.plugin.v2", metadata(&name).as_bytes()),
             ],
         );
         let filename = format!("{name}.wasm");
@@ -555,7 +591,7 @@ async fn rate_limits_uploads_via_shared_audit_store() {
         &[
             (&schema_section_name(), &schema_section_bytes()),
             (
-                "cc_lb.plugin.v1",
+                "cc_lb.plugin.v2",
                 metadata("rate-limited-plugin-final").as_bytes(),
             ),
         ],
@@ -620,7 +656,6 @@ async fn build_admin_state(
         storage: Some(server.storage.clone()),
         key_store: Some(admin_test_common::key_store(server.storage.clone())),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
         lazy_refresher: None,
         runtime: None,

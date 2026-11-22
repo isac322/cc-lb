@@ -8,7 +8,9 @@
 //! The public surface for plugin authors is:
 //!
 //! ```ignore
-//! use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler, types::*};
+//! use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler};
+//! use cc_lb_pdk_wasmtime::types::v2::{FilterResponse, PerCandidateReason};
+//! use cc_lb_pdk_wasmtime::types::v3::FilterRequest;
 //!
 //! #[cc_lb_plugin(
 //!     name = "cache-aware",
@@ -21,7 +23,8 @@
 //!
 //!     #[handler(
 //!         filter,
-//!         wire = 1,
+//!         provider = "anthropic",
+//!         wire = 3,
 //!         description = "Filters upstream candidates",
 //!         usage = "Returns accept/reject decisions for each candidate.",
 //!     )]
@@ -82,17 +85,13 @@ pub mod __private {
     use core::slice;
 
     use cc_lb_plugin_wire::{
-        ArchivedFilterRequest, ArchivedShapeRequest, ArchivedTransformResponseRequest,
-        ArchivedTransformSseEventRequest, FilterRequest, FilterResponse, ShapeRequest,
-        ShapeResponse, TransformResponseRequest, TransformResponseResult, TransformSseEventRequest,
-        TransformSseEventResult, pack_ret,
+        pack_ret,
         v2::{
-            ArchivedFilterRequest as ArchivedFilterRequestV2,
             ArchivedShapeEnvelopeGeminiRequest as ArchivedShapeEnvelopeGeminiRequestV2,
             ArchivedShapeRequest as ArchivedShapeRequestV2,
             ArchivedTransformResponseRequest as ArchivedTransformResponseRequestV2,
             ArchivedTransformSseEventRequest as ArchivedTransformSseEventRequestV2,
-            FilterRequest as FilterRequestV2, FilterResponse as FilterResponseV2,
+            FilterResponse as FilterResponseV2,
             ShapeEnvelopeGeminiRequest as ShapeEnvelopeGeminiRequestV2,
             ShapeEnvelopeGeminiResponse as ShapeEnvelopeGeminiResponseV2,
             ShapeRequest as ShapeRequestV2, ShapeResponse as ShapeResponseV2,
@@ -246,207 +245,6 @@ pub mod __private {
         let _ = unsafe { munmap(ptr as usize as *mut c_void, size) };
     }
 
-    /// Owned-mode filter dispatch — invoked from the macro-generated
-    /// `cc_lb_filter` export when the handler signature takes
-    /// `FilterRequest` (default).
-    ///
-    /// Flow: read input bytes → `rkyv::access` → `rkyv::deserialize` →
-    /// free input → run handler → `rkyv::to_bytes` → allocate output →
-    /// copy → return packed `(out_ptr, out_len)`.
-    ///
-    /// Any rkyv failure or OOM panics, which the host's `TypedFunc::call`
-    /// surfaces as a trap; per RFC §실행 모델 the host then discards the
-    /// `Store` and the next call rebuilds a fresh worker.
-    #[allow(unsafe_code)]
-    pub fn run_filter<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
-    where
-        F: FnOnce(FilterRequest) -> FilterResponse,
-    {
-        // SAFETY: host promises `(in_ptr, in_len)` covers an initialised
-        // buffer obtained from `cc_lb_alloc` immediately before this call.
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
-
-        let archived: &ArchivedFilterRequest =
-            rkyv::access::<ArchivedFilterRequest, Error>(in_bytes)
-                .expect("rkyv::access(FilterRequest) failed — host/guest schema mismatch?");
-
-        let owned: FilterRequest = rkyv::deserialize::<FilterRequest, Error>(archived)
-            .expect("rkyv::deserialize(FilterRequest) failed");
-
-        // Free input as soon as we own a deserialised copy. Keeps guest
-        // peak memory close to one wire-buffer instead of two.
-        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
-
-        let response = handler(owned);
-
-        let bytes =
-            rkyv::to_bytes::<Error>(&response).expect("rkyv::to_bytes(FilterResponse) failed");
-
-        let out_len = bytes.len() as u32;
-        let out_ptr = alloc_bytes(out_len, DEFAULT_ALIGN);
-        assert!(
-            out_ptr != 0,
-            "cc_lb_alloc returned null for FilterResponse output buffer"
-        );
-
-        // SAFETY: out_ptr points to `out_len` bytes we just allocated.
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), out_ptr as *mut u8, out_len as usize);
-        }
-
-        pack_ret(out_ptr, out_len)
-    }
-
-    /// Zero-copy view-mode filter dispatch — invoked from the
-    /// macro-generated `cc_lb_filter` export when the handler is
-    /// declared with `#[handler(filter, wire = 1, ..., view)]` and takes
-    /// `&ArchivedFilterRequest`.
-    ///
-    /// Skips `rkyv::deserialize` entirely. Field access happens
-    /// straight against the archived bytes in guest memory, so the
-    /// handler must run BEFORE the input buffer is freed (view types
-    /// borrow from `in_bytes`).
-    #[allow(unsafe_code)]
-    pub fn run_filter_view<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
-    where
-        F: FnOnce(&ArchivedFilterRequest) -> FilterResponse,
-    {
-        // SAFETY: same as run_filter.
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
-
-        let archived: &ArchivedFilterRequest =
-            rkyv::access::<ArchivedFilterRequest, Error>(in_bytes)
-                .expect("rkyv::access(FilterRequest) failed — host/guest schema mismatch?");
-
-        let response = handler(archived);
-
-        // Now safe to free input — handler is done borrowing from it.
-        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
-
-        let bytes =
-            rkyv::to_bytes::<Error>(&response).expect("rkyv::to_bytes(FilterResponse) failed");
-
-        let out_len = bytes.len() as u32;
-        let out_ptr = alloc_bytes(out_len, DEFAULT_ALIGN);
-        assert!(
-            out_ptr != 0,
-            "cc_lb_alloc returned null for FilterResponse output buffer"
-        );
-
-        // SAFETY: out_ptr points to `out_len` bytes we just allocated.
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), out_ptr as *mut u8, out_len as usize);
-        }
-
-        pack_ret(out_ptr, out_len)
-    }
-
-    /// Owned-mode shape dispatch — invoked from `cc_lb_shape` when the
-    /// handler takes `ShapeRequest`.
-    #[allow(unsafe_code)]
-    pub fn run_shape<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
-    where
-        F: FnOnce(ShapeRequest) -> ShapeResponse,
-    {
-        // SAFETY: host promises `(in_ptr, in_len)` covers an initialised buffer.
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
-        let archived: &ArchivedShapeRequest = rkyv::access::<ArchivedShapeRequest, Error>(in_bytes)
-            .expect("rkyv::access(ShapeRequest) failed");
-        let owned: ShapeRequest = rkyv::deserialize::<ShapeRequest, Error>(archived)
-            .expect("rkyv::deserialize(ShapeRequest) failed");
-        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
-        let response = handler(owned);
-        encode_and_pack::<ShapeResponse>(&response, "ShapeResponse")
-    }
-
-    /// View-mode shape dispatch.
-    #[allow(unsafe_code)]
-    pub fn run_shape_view<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
-    where
-        F: FnOnce(&ArchivedShapeRequest) -> ShapeResponse,
-    {
-        // SAFETY: same as run_shape.
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
-        let archived: &ArchivedShapeRequest = rkyv::access::<ArchivedShapeRequest, Error>(in_bytes)
-            .expect("rkyv::access(ShapeRequest) failed");
-        let response = handler(archived);
-        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
-        encode_and_pack::<ShapeResponse>(&response, "ShapeResponse")
-    }
-
-    #[allow(unsafe_code)]
-    pub fn run_transform_response<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
-    where
-        F: FnOnce(TransformResponseRequest) -> TransformResponseResult,
-    {
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
-        let archived: &ArchivedTransformResponseRequest =
-            match rkyv::access::<ArchivedTransformResponseRequest, Error>(in_bytes) {
-                Ok(value) => value,
-                Err(_) => panic!("rkyv::access(TransformResponseRequest) failed"),
-            };
-        let owned: TransformResponseRequest =
-            match rkyv::deserialize::<TransformResponseRequest, Error>(archived) {
-                Ok(value) => value,
-                Err(_) => panic!("rkyv::deserialize(TransformResponseRequest) failed"),
-            };
-        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
-        let response = handler(owned);
-        encode_and_pack::<TransformResponseResult>(&response, "TransformResponseResult")
-    }
-
-    #[allow(unsafe_code)]
-    pub fn run_transform_response_view<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
-    where
-        F: FnOnce(&ArchivedTransformResponseRequest) -> TransformResponseResult,
-    {
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
-        let archived: &ArchivedTransformResponseRequest =
-            match rkyv::access::<ArchivedTransformResponseRequest, Error>(in_bytes) {
-                Ok(value) => value,
-                Err(_) => panic!("rkyv::access(TransformResponseRequest) failed"),
-            };
-        let response = handler(archived);
-        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
-        encode_and_pack::<TransformResponseResult>(&response, "TransformResponseResult")
-    }
-
-    #[allow(unsafe_code)]
-    pub fn run_transform_sse_event<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
-    where
-        F: FnOnce(TransformSseEventRequest) -> TransformSseEventResult,
-    {
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
-        let archived: &ArchivedTransformSseEventRequest =
-            match rkyv::access::<ArchivedTransformSseEventRequest, Error>(in_bytes) {
-                Ok(value) => value,
-                Err(_) => panic!("rkyv::access(TransformSseEventRequest) failed"),
-            };
-        let owned: TransformSseEventRequest =
-            match rkyv::deserialize::<TransformSseEventRequest, Error>(archived) {
-                Ok(value) => value,
-                Err(_) => panic!("rkyv::deserialize(TransformSseEventRequest) failed"),
-            };
-        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
-        let response = handler(owned);
-        encode_and_pack::<TransformSseEventResult>(&response, "TransformSseEventResult")
-    }
-
-    #[allow(unsafe_code)]
-    pub fn run_transform_sse_event_view<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
-    where
-        F: FnOnce(&ArchivedTransformSseEventRequest) -> TransformSseEventResult,
-    {
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
-        let archived: &ArchivedTransformSseEventRequest =
-            match rkyv::access::<ArchivedTransformSseEventRequest, Error>(in_bytes) {
-                Ok(value) => value,
-                Err(_) => panic!("rkyv::access(TransformSseEventRequest) failed"),
-            };
-        let response = handler(archived);
-        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
-        encode_and_pack::<TransformSseEventResult>(&response, "TransformSseEventResult")
-    }
     #[allow(unsafe_code)]
     pub fn run_transform_realtime_frame_v2<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
     where
@@ -493,36 +291,6 @@ pub mod __private {
             "v2::TransformRealtimeFrameResult",
         )
     }
-    #[allow(unsafe_code)]
-    pub fn run_filter_v2<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
-    where
-        F: FnOnce(FilterRequestV2) -> FilterResponseV2,
-    {
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
-        let archived: &ArchivedFilterRequestV2 =
-            rkyv::access::<ArchivedFilterRequestV2, Error>(in_bytes)
-                .expect("rkyv::access(v2::FilterRequest) failed");
-        let owned: FilterRequestV2 = rkyv::deserialize::<FilterRequestV2, Error>(archived)
-            .expect("rkyv::deserialize(v2::FilterRequest) failed");
-        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
-        let response = handler(owned);
-        encode_and_pack::<FilterResponseV2>(&response, "v2::FilterResponse")
-    }
-
-    #[allow(unsafe_code)]
-    pub fn run_filter_v2_view<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
-    where
-        F: FnOnce(&ArchivedFilterRequestV2) -> FilterResponseV2,
-    {
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
-        let archived: &ArchivedFilterRequestV2 =
-            rkyv::access::<ArchivedFilterRequestV2, Error>(in_bytes)
-                .expect("rkyv::access(v2::FilterRequest) failed");
-        let response = handler(archived);
-        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
-        encode_and_pack::<FilterResponseV2>(&response, "v2::FilterResponse")
-    }
-
     #[allow(unsafe_code)]
     pub fn run_filter_v3<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
     where

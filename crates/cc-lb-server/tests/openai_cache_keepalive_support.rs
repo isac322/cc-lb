@@ -395,7 +395,7 @@ impl OpenAiFixture {
         assert_eq!(status, StatusCode::OK);
         let response = self
             .client
-            .put(format!(
+            .patch(format!(
                 "http://{}/admin/v1/principals/{}",
                 self.server.admin_addr, self.principal_id
             ))
@@ -506,12 +506,13 @@ async fn disable_seeded_and_create_openai(
             .expect("upstream ETag string")
             .to_owned();
         let disabled = client
-            .post(format!(
-                "http://{}/admin/v1/upstreams/{id}/disable",
+            .patch(format!(
+                "http://{}/admin/v1/upstreams/{id}",
                 server.admin_addr
             ))
             .bearer_auth(server.admin_token)
             .header("if-match", etag)
+            .json(&json!({ "enabled": false }))
             .send()
             .await
             .expect("disable seeded upstream");
@@ -588,7 +589,7 @@ async fn configure_principal(
     let id = principal["id"].as_str().expect("principal id").to_owned();
     let (_, _, etag) = principal_get(client, server, &id).await;
     let response = client
-        .put(format!(
+        .patch(format!(
             "http://{}/admin/v1/principals/{id}",
             server.admin_addr
         ))

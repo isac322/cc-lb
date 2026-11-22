@@ -798,9 +798,9 @@ curl -s http://127.0.0.1:8080/v1/messages \
       <tr><td><code>POST /admin/v1/upstreams/{id}/preflight</code></td><td>저장된 키 재확인(Re-check) 후 <code>api_key_access</code> 갱신</td></tr>
       <tr><td><code>GET /admin/v1/upstreams/{id}/workspaces</code></td><td>org-scoped 키가 볼 수 있는 워크스페이스 목록. <code>api.anthropic.com</code>이 아니면 403 <code>non_anthropic_base_url</code>, role 부족 시 403 <code>workspace_list_denied</code></td></tr>
       <tr><td><code>GET /admin/v1/upstreams/{id}/usage?range=&amp;step=</code></td><td>API key 사용량(<code>source</code>: <code>real</code>/<code>estimated</code>, 이번 달 요약과 billing stop). storage만 읽고 외부 호출 없음</td></tr>
-      <tr><td><code>POST /admin/v1/upstreams/{id}/disable</code></td><td>upstream 비활성화</td></tr>
-      <tr><td><code>GET /admin/v1/config/editor</code></td><td>Config editor 메타데이터와 현재 파일 상태</td></tr>
-      <tr><td><code>GET /admin/v1/config/draft</code> · <code>PUT /admin/v1/config/draft</code></td><td>버전이 지정된 편집 초안 조회·저장</td></tr>
+      <tr><td><code>PATCH /admin/v1/upstreams/{id}</code></td><td>upstream 활성/비활성 및 속성 부분 수정</td></tr>
+      <tr><td><code>GET /admin/v1/config/editor</code></td><td>Config editor 메타데이터와 현재 파일·초안 상태</td></tr>
+      <tr><td><code>PUT /admin/v1/config/draft</code></td><td>버전이 지정된 편집 초안 저장</td></tr>
       <tr><td><code>POST /admin/v1/config/draft/validate</code></td><td>초안 검증 및 <code>last_validation</code> 결과 기록</td></tr>
       <tr><td><code>POST /admin/v1/config/save</code></td><td>검증된 초안을 파일에 저장; 저장한 설정은 재시작 후 적용</td></tr>
       <tr><td><code>POST /admin/v1/config/draft/download</code></td><td>현재 초안 다운로드</td></tr>
@@ -818,7 +818,7 @@ reload_on_sighup = true</code></pre><button class="copy">복사</button></div>
     <p><code>kill -HUP</code> 보내면 cert만 atomic 교체. 인증서 갱신 시 cc-lb 재시작 불필요. 실패하면 이전 cert 유지.</p>
 
     <h4>Config editor와 저장</h4>
-    <p>관리 UI는 <code>/admin/v1/config/editor</code>에서 파일의 writable/read-only 상태와 revision을 읽습니다. 초안은 <code>/admin/v1/config/draft</code>로 조회·저장하고, 저장 전에 <code>/admin/v1/config/draft/validate</code>를 호출하세요. 검증 결과는 초안의 <code>last_validation</code> JSON으로 확인할 수 있습니다.</p>
+    <p>관리 UI는 <code>/admin/v1/config/editor</code>에서 파일의 writable/read-only 상태, revision, 현재 저장된 초안을 읽습니다. 초안은 <code>PUT /admin/v1/config/draft</code>로 저장하고, 저장 전에 <code>/admin/v1/config/draft/validate</code>를 호출하세요. 검증 결과는 <code>last_validation</code> JSON으로 확인할 수 있습니다.</p>
     <p><code>/admin/v1/config/save</code>는 expected revision과 파일 fingerprint를 확인한 뒤 초안을 파일에 저장합니다. 저장 이력은 <code>/admin/v1/config/history</code>에서 metadata-only로 조회하고, <code>/admin/v1/config/draft/download</code>로 초안을 내려받습니다. 저장한 설정은 실행 중인 프로세스에 즉시 반영되지 않으며 항상 프로세스 재시작 후 적용됩니다.</p>
 
     <h4>Graceful drain</h4>

@@ -26,39 +26,14 @@ pub(super) async fn lock_logical_key(
 
 #[async_trait]
 impl PlanTierStore for PostgresStorage {
-    async fn upsert_plan_tier_ratio(&self, record: &PlanTierRatioRecord) -> StorageResult<()> {
-        ratios::upsert(self, record).await
-    }
-
     async fn list_current_plan_tier_ratios(&self) -> StorageResult<Vec<PlanTierRatioRecord>> {
         ratios::list_current(self).await
-    }
-
-    async fn list_plan_tier_ratios_as_of(
-        &self,
-        as_of_unix_millis: i64,
-    ) -> StorageResult<Vec<PlanTierRatioRecord>> {
-        ratios::list_as_of(self, as_of_unix_millis).await
-    }
-
-    async fn upsert_metadata_tier_override(
-        &self,
-        record: &MetadataTierMappingOverrideRecord,
-    ) -> StorageResult<()> {
-        metadata_overrides::upsert(self, record).await
     }
 
     async fn list_current_metadata_tier_overrides(
         &self,
     ) -> StorageResult<Vec<MetadataTierMappingOverrideRecord>> {
         metadata_overrides::list_current(self).await
-    }
-
-    async fn list_metadata_tier_overrides_as_of(
-        &self,
-        as_of_unix_millis: i64,
-    ) -> StorageResult<Vec<MetadataTierMappingOverrideRecord>> {
-        metadata_overrides::list_as_of(self, as_of_unix_millis).await
     }
 
     async fn append_upstream_plan_tier(
@@ -70,12 +45,5 @@ impl PlanTierStore for PostgresStorage {
 
     async fn list_current_upstream_plan_tiers(&self) -> StorageResult<Vec<UpstreamPlanTierRecord>> {
         upstreams::list_current(self).await
-    }
-
-    async fn list_upstream_plan_tiers_as_of(
-        &self,
-        as_of_unix_millis: i64,
-    ) -> StorageResult<Vec<UpstreamPlanTierRecord>> {
-        upstreams::list_as_of(self, as_of_unix_millis).await
     }
 }

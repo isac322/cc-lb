@@ -32,31 +32,7 @@ fn context() -> RoutingContext {
 }
 
 #[test]
-fn v1_encoding_includes_requested_service_tier() {
-    let principal = principal();
-    let context = context();
-    FilterWireRequest {
-        wire_version: WireVersion::V1,
-        ctx: &context,
-        principal: &principal,
-        candidates: &[],
-        cookie_redaction: false,
-    }
-    .encode(|bytes| {
-        let archived =
-            rkyv::access::<cc_lb_plugin_wire::v1::ArchivedFilterRequest, RkyvError>(bytes)
-                .expect("archived V1");
-        assert_eq!(archived.headers.len(), 1);
-        let header_name: &str = &archived.headers[0].name;
-        assert_eq!(header_name, "content-type");
-        let tier: Option<&str> = archived.service_tier.as_ref().map(|value| &**value);
-        assert_eq!(tier, Some("priority"));
-    })
-    .expect("encode V1");
-}
-
-#[test]
-fn v2_encoding_includes_provider_kind_and_quota_sample() {
+fn v3_encoding_includes_requested_service_tier_provider_kind_and_quota_sample() {
     let principal = principal();
     let context = context();
     let candidate = cc_lb_domain::UpstreamCandidate {
@@ -93,7 +69,6 @@ fn v2_encoding_includes_provider_kind_and_quota_sample() {
         seat_tier: None,
     };
     FilterWireRequest {
-        wire_version: WireVersion::V2,
         ctx: &context,
         principal: &principal,
         candidates: &[candidate],
@@ -101,8 +76,13 @@ fn v2_encoding_includes_provider_kind_and_quota_sample() {
     }
     .encode(|bytes| {
         let archived =
-            rkyv::access::<cc_lb_plugin_wire::v2::ArchivedFilterRequest, RkyvError>(bytes)
-                .expect("archived V2");
+            rkyv::access::<cc_lb_plugin_wire::v3::ArchivedFilterRequest, RkyvError>(bytes)
+                .expect("archived V3");
+        assert_eq!(archived.headers.len(), 1);
+        let header_name: &str = &archived.headers[0].name;
+        assert_eq!(header_name, "content-type");
+        let tier: Option<&str> = archived.service_tier.as_ref().map(|value| &**value);
+        assert_eq!(tier, Some("priority"));
         let candidate = &archived.candidates[0];
         assert_eq!(candidate.kind.as_ref(), "gemini_oauth");
         assert_eq!(
@@ -115,7 +95,7 @@ fn v2_encoding_includes_provider_kind_and_quota_sample() {
         );
         assert_eq!(candidate.subscription_quotas[0].utilization, Some(0.25));
     })
-    .expect("encode V2");
+    .expect("encode V3");
 }
 
 #[test]
@@ -141,7 +121,6 @@ fn v3_encoding_carries_provider_native_pricing_and_explicit_unknown_fallback() {
         ],
     });
     FilterWireRequest {
-        wire_version: WireVersion::V3,
         ctx: &native_ctx,
         principal: &principal,
         candidates: &[],
@@ -173,7 +152,6 @@ fn v3_encoding_carries_provider_native_pricing_and_explicit_unknown_fallback() {
     let mut fallback_ctx = context();
     fallback_ctx.cache_pricing.native = None;
     FilterWireRequest {
-        wire_version: WireVersion::V3,
         ctx: &fallback_ctx,
         principal: &principal,
         candidates: &[],

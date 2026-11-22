@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use cc_lb_domain::{Principal, PrincipalKind, Upstream};
-use cc_lb_plugin_wire::ShapeResponse;
-use cc_lb_plugin_wire::schema::WireSchema;
+use cc_lb_domain::{Principal, PrincipalKind, Provider, Upstream, UpstreamIdentity};
+use cc_lb_plugin_wire::schema::{ProviderFamily, WireSchema};
+use cc_lb_plugin_wire::v2::ShapeResponse;
 use cc_lb_runtime_wasmtime::{
     HotEngineConfig, RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch, WasmtimeRuntime,
     policy::ShapeOriginPolicy,
@@ -57,33 +57,33 @@ fn origin_mismatch_plugin() -> Vec<u8> {
             (data (i32.const 16) "{encoded}")
             (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 4096)
             (func (export "cc_lb_free") (param i32 i32 i32))
-            (func (export "cc_lb_shape") (param i32 i32) (result i64)
+            (func (export "cc_lb_shape_anthropic") (param i32 i32) (result i64)
                 i64.const {packed})
-            (func (export "cc_lb_transform_response") (param i32 i32) (result i64)
+            (func (export "cc_lb_transform_response_anthropic") (param i32 i32) (result i64)
                 i64.const 0)
-            (func (export "cc_lb_transform_sse_event") (param i32 i32) (result i64)
+            (func (export "cc_lb_transform_sse_event_anthropic") (param i32 i32) (result i64)
                 i64.const 0))"#,
     ))
     .expect("valid fixture WAT");
     append_custom_section(
         &mut module,
-        "cc_lb.schema.shape.v1",
-        &<cc_lb_plugin_wire::v1::ShapeRequest as WireSchema>::FINGERPRINT,
+        "cc_lb.schema.shape.v2",
+        &<cc_lb_plugin_wire::v2::ShapeRequest as WireSchema>::FINGERPRINT,
     );
     append_custom_section(
         &mut module,
-        "cc_lb.schema.transform_response.v1",
-        &<cc_lb_plugin_wire::v1::TransformResponseRequest as WireSchema>::FINGERPRINT,
+        "cc_lb.schema.transform_response.v2",
+        &<cc_lb_plugin_wire::v2::TransformResponseRequest as WireSchema>::FINGERPRINT,
     );
     append_custom_section(
         &mut module,
-        "cc_lb.schema.transform_sse_event.v1",
-        &<cc_lb_plugin_wire::v1::TransformSseEventRequest as WireSchema>::FINGERPRINT,
+        "cc_lb.schema.transform_sse_event.v2",
+        &<cc_lb_plugin_wire::v2::TransformSseEventRequest as WireSchema>::FINGERPRINT,
     );
     append_custom_section(
         &mut module,
-        "cc_lb.plugin.v1",
-        br#"{"name":"origin-mismatch","version":"0.0.1","description":"origin policy fixture","usage":"testing only","hooks":{"shape":{"wire_version":1,"description":"shape","usage":"test","mode":"active"},"transform_response":{"wire_version":1,"description":"response","usage":"test","mode":"noop"},"transform_sse_event":{"wire_version":1,"description":"sse","usage":"test","mode":"noop"}}}"#,
+        "cc_lb.plugin.v2",
+        br#"{"name":"origin-mismatch","version":"0.0.1","description":"origin policy fixture","usage":"testing only","hooks":{"shape_anthropic":{"wire_version":2,"description":"shape","usage":"test","mode":"active"},"transform_response_anthropic":{"wire_version":2,"description":"response","usage":"test","mode":"noop"},"transform_sse_event_anthropic":{"wire_version":2,"description":"sse","usage":"test","mode":"noop"}}}"#,
     );
     module
 }
@@ -105,10 +105,19 @@ fn shape_origin_mismatch_is_rejected_by_selected_upstream_policy() {
             &origin_mismatch_plugin(),
         )
         .expect("register shape fixture");
-    let dialect = WasmtimeUpstreamDialect::new(Arc::new(WasmPluginWireDispatch::from_slot(
-        slot,
-        runtime.config_arc(),
-    )));
+    let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc())
+        .for_provider(ProviderFamily::Anthropic)
+        .expect("anthropic shape hook");
+    let dialect =
+        WasmtimeUpstreamDialect::new(Arc::new(dispatch)).with_upstream_identity(UpstreamIdentity {
+            provider: Provider::Anthropic,
+            credential_kind: "anthropic_api_key".to_owned(),
+            upstream_id: "origin-mismatch".to_owned(),
+            name: "origin-mismatch".to_owned(),
+            base_url: Some("https://example.test".to_owned()),
+            gemini_oauth_profile: None,
+            code_assist_project_id: None,
+        });
     let context = DialectShapeContext {
         request_id: "req-origin".to_owned(),
         downstream_headers: HeaderMap::new(),

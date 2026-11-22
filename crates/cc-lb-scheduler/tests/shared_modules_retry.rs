@@ -36,10 +36,6 @@ proptest! {
 #[test]
 fn shared_modules_retry_curves_match_named_classes() {
     assert_eq!(
-        base_curve(RetryClass::Probe, 4),
-        vec![Some(1), Some(2), Some(4), None]
-    );
-    assert_eq!(
         base_curve(RetryClass::Adaptive, 6),
         vec![Some(30), Some(60), Some(120), Some(240), Some(480), None]
     );
@@ -74,11 +70,7 @@ fn shared_modules_retry_entity_jitter_distribution_is_uniform_enough() {
 }
 
 fn retry_class_strategy() -> impl Strategy<Value = RetryClass> {
-    prop::sample::select(vec![
-        RetryClass::Probe,
-        RetryClass::Adaptive,
-        RetryClass::Maintenance,
-    ])
+    prop::sample::select(vec![RetryClass::Adaptive, RetryClass::Maintenance])
 }
 
 fn base_curve(class: RetryClass, attempts: u32) -> Vec<Option<u64>> {
@@ -153,11 +145,7 @@ async fn retry_result(
 
 #[tokio::test]
 async fn retry_class_service_uses_one_based_ordinal_and_honors_no_retry_override() {
-    for class in [
-        RetryClass::Maintenance,
-        RetryClass::Probe,
-        RetryClass::Adaptive,
-    ] {
+    for class in [RetryClass::Maintenance, RetryClass::Adaptive] {
         for attempt in 0..=class.policy().max_attempts() {
             let outcome = retry_result(
                 class,
@@ -194,7 +182,6 @@ async fn retry_class_service_honors_and_clamps_explicit_positive_delay() {
         (RetryClass::Maintenance, 3_600, 60),
         (RetryClass::Adaptive, 7, 7),
         (RetryClass::Adaptive, 10_000, 600),
-        (RetryClass::Probe, 10, 5),
     ] {
         for seed in [0, 1, u64::MAX] {
             assert_eq!(
@@ -219,11 +206,7 @@ async fn retry_class_service_honors_and_clamps_explicit_positive_delay() {
 
 #[tokio::test]
 async fn retry_class_service_rejects_zero_retry_delay_as_error() {
-    for class in [
-        RetryClass::Maintenance,
-        RetryClass::Probe,
-        RetryClass::Adaptive,
-    ] {
+    for class in [RetryClass::Maintenance, RetryClass::Adaptive] {
         for attempt in (0..=class.policy().max_attempts() + 1).chain([u32::MAX]) {
             for allows_retry in [false, true] {
                 let error = retry_result(
@@ -249,11 +232,7 @@ async fn retry_class_service_rejects_zero_retry_delay_as_error() {
 
 #[tokio::test]
 async fn retry_class_service_none_uses_jittered_backoff_and_preserves_passthrough() {
-    for class in [
-        RetryClass::Maintenance,
-        RetryClass::Probe,
-        RetryClass::Adaptive,
-    ] {
+    for class in [RetryClass::Maintenance, RetryClass::Adaptive] {
         for attempt in 0..class.policy().max_attempts() {
             for seed in [0, 17, u64::MAX] {
                 let outcome = retry_result(
@@ -346,7 +325,6 @@ proptest! {
                 return Err(TestCaseError::fail("expected positive concrete backoff"));
             };
             let (initial, cap) = match class {
-                RetryClass::Probe => (1_u64, 5_u64),
                 RetryClass::Adaptive => (30, 600),
                 RetryClass::Maintenance => (60, 60),
             };

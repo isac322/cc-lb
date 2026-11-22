@@ -58,8 +58,6 @@ mod tests {
     use cc_lb_clock::{ClockHandle, TestClock};
     use cc_lb_config::Config;
     use cc_lb_control::DynamicViewHolder;
-    use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
-    use cc_lb_control::api_keys::limit_engine::LimitEngine;
     use cc_lb_control::api_keys::principal_view::PrincipalView;
     use cc_lb_control::{DynamicViewBuilder, anthropic_api_key::AnthropicOrgApi};
     use cc_lb_scheduler::admin::SchedulerAdminHandle;
@@ -136,7 +134,6 @@ mod tests {
             storage: None,
             key_store: None,
             aead: Arc::new(AeadService::from_master_key([0; 32])),
-            limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone()),
             lifecycle: None,
             lazy_refresher: None,
             runtime: None,

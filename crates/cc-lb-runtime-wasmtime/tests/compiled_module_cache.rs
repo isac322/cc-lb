@@ -112,7 +112,8 @@ fn recompile_after_evict_reuses_cached_artifact_instead_of_recompiling() {
         .expect("first register");
     let instance_pre_before_evict = Arc::clone(&slot1.current.load_full().instance_pre);
 
-    assert!(rt.evict_slot(&key), "evict registered slot");
+    let evicted = rt.retain_slots(&std::collections::HashSet::new());
+    assert_eq!(evicted, vec![key.clone()]);
 
     let slot2 = rt
         .register_filter(key.clone(), "cache-aware-wasmtime", &wasm)

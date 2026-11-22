@@ -52,49 +52,6 @@ async fn reorder_chain_revalidates_slot_drift() {
     );
 }
 
-#[tokio::test]
-async fn rebalance_chain_revalidates_slot_drift() {
-    let server = admin_test_common::spawn_admin_server().await;
-    let principal_id = seed_principal(&server.storage, "principal-rebalance-slot-drift").await;
-    let registry = seed_registry_with_slots(
-        &server.storage,
-        32,
-        "shape-drifted-to-router-rebalance",
-        vec![PluginSlotKind::Router],
-    )
-    .await;
-    seed_chain_with_slot(
-        &server.storage,
-        principal_id,
-        PluginSlotKind::Shape,
-        registry.id,
-        sparse_order::STEP,
-    )
-    .await;
-
-    let (status, _, body) = server
-        .client
-        .json(
-            "POST",
-            &format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=shape"),
-            None,
-            &[],
-        )
-        .await;
-
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(
-        body,
-        json!({
-            "error": "chain_drift_detected",
-            "principal_id": principal_id,
-            "wasm_registry_id": registry.id,
-            "chain_slot": "shape",
-            "supported_slots": ["router"],
-        })
-    );
-}
-
 async fn seed_principal(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &str) -> Uuid {
     storage
         .create(

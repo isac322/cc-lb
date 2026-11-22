@@ -323,10 +323,6 @@ impl Harness {
         config.listener.admin_addr = "127.0.0.1:0"
             .parse()
             .map_err(|error: std::net::AddrParseError| HarnessError::Setup(error.to_string()))?;
-        if options.backend == Backend::Postgres {
-            config.cluster.instance_url = Some("http://127.0.0.1:0".to_owned());
-            config.cluster.token_env = "CI_POSTGRES_URL".to_owned();
-        }
         config.admin.auth.providers = vec![cc_lb_config::AdminAuthProviderConfig::StaticToken {
             id: "test".to_owned(),
             token_env: "CARGO_PKG_NAME".to_owned(),

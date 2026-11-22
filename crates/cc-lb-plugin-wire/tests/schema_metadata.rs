@@ -2,13 +2,15 @@ use cc_lb_plugin_wire::{HookKind, WireVersion, schema};
 
 #[test]
 fn root_schema_exports_describe_supported_hooks() {
-    assert_eq!(WireVersion::V1.as_u8(), 1);
-    assert_eq!(WireVersion::from_u8(1), Some(WireVersion::V1));
+    assert_eq!(WireVersion::V2.as_u8(), 2);
+    assert_eq!(WireVersion::V3.as_u8(), 3);
+    assert_eq!(WireVersion::from_u8(1), None);
     assert_eq!(WireVersion::from_u8(2), Some(WireVersion::V2));
-    assert_eq!(WireVersion::V1.as_str(), "v1");
+    assert_eq!(WireVersion::from_u8(3), Some(WireVersion::V3));
+    assert_eq!(WireVersion::V2.as_str(), "v2");
+    assert_eq!(WireVersion::V3.as_str(), "v3");
 
     assert_eq!(HookKind::Filter.as_str(), "filter");
-    assert_eq!(HookKind::Filter.export_name(), "cc_lb_filter");
     assert_eq!(
         HookKind::Filter.qualified_export_name(schema::ProviderFamily::Openai),
         "cc_lb_filter_openai"
@@ -17,15 +19,13 @@ fn root_schema_exports_describe_supported_hooks() {
     assert_eq!(HookKind::parse("shape"), Some(HookKind::Shape));
     assert_eq!(
         HookKind::parse_entrypoint("shape_openai"),
-        Some((HookKind::Shape, Some(schema::ProviderFamily::Openai)))
+        Some((HookKind::Shape, schema::ProviderFamily::Openai))
     );
+    assert_eq!(HookKind::parse_entrypoint("filter"), None);
+    assert_eq!(HookKind::parse_entrypoint("shape"), None);
     assert_eq!(
-        HookKind::parse_entrypoint("filter"),
-        Some((HookKind::Filter, None))
-    );
-    assert_eq!(
-        HookKind::TransformResponse.export_name(),
-        "cc_lb_transform_response"
+        HookKind::parse_entrypoint("shape_envelope_gemini_openai"),
+        None
     );
     assert_eq!(
         HookKind::TransformResponse.section_prefix(),
@@ -35,23 +35,26 @@ fn root_schema_exports_describe_supported_hooks() {
         HookKind::parse("transform_sse_event"),
         Some(HookKind::TransformSseEvent)
     );
+    assert!(!schema::host_supports(
+        HookKind::TransformResponse,
+        WireVersion::V3
+    ));
     assert!(schema::host_supports(
         HookKind::TransformResponse,
-        WireVersion::V1
+        WireVersion::V2
     ));
     assert!(schema::host_supports(
         HookKind::TransformSseEvent,
-        WireVersion::V1
+        WireVersion::V2
     ));
-    assert!(schema::host_supports(HookKind::Filter, WireVersion::V1));
-    assert!(schema::host_supports(HookKind::Filter, WireVersion::V2));
+    assert!(!schema::host_supports(HookKind::Filter, WireVersion::V2));
     assert!(schema::host_supports(HookKind::Filter, WireVersion::V3));
     assert!(!schema::host_supports(HookKind::Shape, WireVersion::V3));
     assert_eq!(
         HookKind::parse_entrypoint("shape_envelope_gemini"),
         Some((
             HookKind::ShapeEnvelopeGemini,
-            Some(schema::ProviderFamily::Gemini)
+            schema::ProviderFamily::Gemini
         ))
     );
 }
@@ -66,7 +69,7 @@ fn realtime_frame_contract_is_provider_qualified_and_v2_only() {
         HookKind::parse_entrypoint("transform_realtime_frame_gemini"),
         Some((
             HookKind::TransformRealtimeFrame,
-            Some(schema::ProviderFamily::Gemini)
+            schema::ProviderFamily::Gemini
         ))
     );
     assert!(schema::host_supports(
@@ -75,7 +78,7 @@ fn realtime_frame_contract_is_provider_qualified_and_v2_only() {
     ));
     assert!(!schema::host_supports(
         HookKind::TransformRealtimeFrame,
-        WireVersion::V1
+        WireVersion::V3
     ));
 }
 
@@ -91,20 +94,20 @@ fn plugin_metadata_parse_validates_required_fields() {
             "description":"Routes requests by cache state.",
             "usage":"Attach to filter chains.",
             "hooks":{
-                "filter":{
-                    "wire_version":1,
+                "filter_anthropic":{
+                    "wire_version":3,
                     "description":"Filters upstream candidates.",
                     "usage":"Return accept/reject reasons.",
                     "mode":"active"
                 },
-                "transform_response":{
-                    "wire_version":1,
+                "transform_response_anthropic":{
+                    "wire_version":2,
                     "description":"Transforms buffered responses.",
                     "usage":"Return unchanged or replacement response parts.",
                     "mode":"noop"
                 },
-                "transform_sse_event":{
-                    "wire_version":1,
+                "transform_sse_event_anthropic":{
+                    "wire_version":2,
                     "description":"Transforms one SSE event.",
                     "usage":"Return unchanged, replacement events, or drop.",
                     "mode":"noop"
@@ -115,9 +118,34 @@ fn plugin_metadata_parse_validates_required_fields() {
     .expect("valid metadata parses");
 
     assert_eq!(metadata.name, "cache-aware");
-    assert_eq!(metadata.hooks["filter"].wire_version, 1);
-    assert_eq!(metadata.hooks["transform_response"].wire_version, 1);
-    assert_eq!(metadata.hooks["transform_sse_event"].wire_version, 1);
+    assert_eq!(metadata.hooks["filter_anthropic"].wire_version, 3);
+    assert_eq!(
+        metadata.hooks["transform_response_anthropic"].wire_version,
+        2
+    );
+    assert_eq!(
+        metadata.hooks["transform_sse_event_anthropic"].wire_version,
+        2
+    );
+
+    let bare_err = PluginMetadata::parse(
+        br#"{
+            "name":"cache-aware",
+            "version":"0.1.0",
+            "description":"Routes requests by cache state.",
+            "usage":"Attach to filter chains.",
+            "hooks":{
+                "filter":{
+                    "wire_version":3,
+                    "description":"Bare key.",
+                    "usage":"Should fail.",
+                    "mode":"active"
+                }
+            }
+        }"#,
+    )
+    .expect_err("bare hook key is rejected");
+    assert!(matches!(bare_err, MetadataError::UnknownHook(hook) if hook == "filter"));
 
     let error = PluginMetadata::parse(
         br#"{
@@ -127,7 +155,7 @@ fn plugin_metadata_parse_validates_required_fields() {
             "usage":"Attach to filter chains.",
             "hooks":{
                 "sign":{
-                    "wire_version":1,
+                    "wire_version":2,
                     "description":"Invalid hook.",
                     "usage":"Should fail.",
                     "mode":"active"
@@ -146,27 +174,35 @@ fn plugin_metadata_parse_validates_required_fields() {
 #[test]
 fn provider_entrypoints_cover_every_hook_without_changing_wire_sections() {
     for hook in HookKind::ALL {
-        assert_eq!(
-            HookKind::parse_entrypoint(hook.as_str()),
-            Some((*hook, None))
-        );
+        if *hook == HookKind::ShapeEnvelopeGemini {
+            assert_eq!(
+                HookKind::parse_entrypoint(hook.as_str()),
+                Some((*hook, schema::ProviderFamily::Gemini))
+            );
+            assert_eq!(
+                hook.qualified_export_name(schema::ProviderFamily::Gemini),
+                "cc_lb_shape_envelope_gemini"
+            );
+            continue;
+        }
+        assert_eq!(HookKind::parse_entrypoint(hook.as_str()), None);
         for provider in [
             schema::ProviderFamily::Anthropic,
             schema::ProviderFamily::Openai,
             schema::ProviderFamily::Gemini,
         ] {
             let key = format!("{}_{}", hook.as_str(), provider.as_str());
-            assert_eq!(
-                HookKind::parse_entrypoint(&key),
-                Some((*hook, Some(provider)))
-            );
+            assert_eq!(HookKind::parse_entrypoint(&key), Some((*hook, provider)));
             assert_eq!(
                 hook.qualified_export_name(provider),
-                format!("{}_{}", hook.export_name(), provider.as_str())
+                format!("cc_lb_{}_{}", hook.as_str(), provider.as_str())
             );
         }
     }
     for invalid in [
+        "filter",
+        "shape",
+        "shape_envelope_gemini_openai",
         "shape_unknown",
         "shape_openai_extra",
         "filter_OpenAI",
@@ -179,7 +215,7 @@ fn provider_entrypoints_cover_every_hook_without_changing_wire_sections() {
 
 #[cfg(feature = "std")]
 #[test]
-fn plugin_metadata_accepts_qualified_and_mixed_hook_keys() {
+fn plugin_metadata_accepts_qualified_hook_keys() {
     use cc_lb_plugin_wire::PluginMetadata;
 
     let metadata = PluginMetadata::parse(
@@ -189,20 +225,20 @@ fn plugin_metadata_accepts_qualified_and_mixed_hook_keys() {
             "description":"Provider-aware test plugin.",
             "usage":"Testing only.",
             "hooks":{
-                "filter":{
-                    "wire_version":1,
-                    "description":"Legacy Anthropic filter.",
+                "filter_anthropic":{
+                    "wire_version":3,
+                    "description":"Anthropic filter.",
                     "usage":"Testing only.",
                     "mode":"active"
                 },
                 "shape_openai":{
-                    "wire_version":1,
+                    "wire_version":2,
                     "description":"Shapes OpenAI requests.",
                     "usage":"Testing only.",
                     "mode":"active"
                 },
                 "transform_sse_event_gemini":{
-                    "wire_version":1,
+                    "wire_version":2,
                     "description":"Transforms Gemini SSE events.",
                     "usage":"Testing only.",
                     "mode":"active"
@@ -210,9 +246,9 @@ fn plugin_metadata_accepts_qualified_and_mixed_hook_keys() {
             }
         }"#,
     )
-    .expect("qualified and legacy metadata keys parse");
+    .expect("qualified metadata keys parse");
 
-    assert!(metadata.hooks.contains_key("filter"));
+    assert!(metadata.hooks.contains_key("filter_anthropic"));
     assert!(metadata.hooks.contains_key("shape_openai"));
     assert!(metadata.hooks.contains_key("transform_sse_event_gemini"));
     let round_trip = serde_json::to_vec(&metadata).expect("metadata serializes");
@@ -226,7 +262,7 @@ fn plugin_metadata_accepts_qualified_and_mixed_hook_keys() {
 #[test]
 fn plugin_metadata_rejects_unknown_provider_keys() {
     let error = cc_lb_plugin_wire::PluginMetadata::parse(
-        br#"{"name":"x","version":"1","description":"Test","usage":"Test","hooks":{"shape_unknown":{"wire_version":1,"description":"Test","usage":"Test","mode":"active"}}}"#,
+        br#"{"name":"x","version":"1","description":"Test","usage":"Test","hooks":{"shape_unknown":{"wire_version":2,"description":"Test","usage":"Test","mode":"active"}}}"#,
     )
     .expect_err("unknown provider is rejected");
     assert!(matches!(
@@ -241,17 +277,9 @@ fn author_documentation_matches_host_supported_wire_versions() {
     use std::path::{Path, PathBuf};
 
     let mut matrix = String::from("| Hook | Host-supported wire versions |\n| --- | --- |\n");
-    // HookKind::ALL omits the Gemini envelope hook.
-    for hook in [
-        HookKind::Filter,
-        HookKind::Shape,
-        HookKind::TransformResponse,
-        HookKind::TransformSseEvent,
-        HookKind::TransformRealtimeFrame,
-        HookKind::ShapeEnvelopeGemini,
-    ] {
+    for hook in HookKind::ALL {
         write!(&mut matrix, "| `{hook}` | ").unwrap();
-        for (index, version) in schema::host_supported_versions(hook).iter().enumerate() {
+        for (index, version) in schema::host_supported_versions(*hook).iter().enumerate() {
             if index > 0 {
                 matrix.push_str(", ");
             }

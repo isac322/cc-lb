@@ -23,11 +23,8 @@ pub const DEFAULT_ADMIN_TOKEN_ENV: &str = "CC_LB_ADMIN_TOKEN";
 pub const ADMIN_AUTH_PROVIDERS_JSON_ENV: &str = "CC_LB_ADMIN_AUTH_PROVIDERS_JSON";
 pub const DEFAULT_SQLITE_PATH: &str = "/var/lib/cc-lb/storage.sqlite";
 pub const DEFAULT_EVENT_BUS_BROADCAST_CAPACITY: usize = 4096;
-pub const DEFAULT_CLUSTER_TOKEN_ENV: &str = "CC_LB_CLUSTER_TOKEN";
 pub const DEFAULT_STORAGE_TAIL_POLL_INTERVAL_MS: u64 = 250;
 pub const DEFAULT_PG_NOTIFY_CHANNEL: &str = "cc_lb_events_partial";
-pub const DEFAULT_PARTIAL_RETENTION_TTL_SECS: u64 = 300;
-pub const DEFAULT_PARTIAL_RETENTION_MAX_ENTRIES: usize = 10_000;
 pub const DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS: u32 = 7;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -51,8 +48,6 @@ pub struct Config {
     pub admin: AdminConfig,
     #[serde(default)]
     pub event_bus: EventBusConfig,
-    #[serde(default)]
-    pub cluster: ClusterConfig,
     pub oauth: OAuthConfig,
     #[serde(default)]
     pub subscription_quota: SubscriptionQuotaConfig,
@@ -87,7 +82,6 @@ impl Default for Config {
             observability: ObservabilityConfig::default(),
             admin: AdminConfig::default(),
             event_bus: EventBusConfig::default(),
-            cluster: ClusterConfig::default(),
             oauth: OAuthConfig::default(),
             subscription_quota: SubscriptionQuotaConfig::default(),
             runtime: RuntimeConfig::default(),
@@ -250,10 +244,6 @@ pub struct EventBusConfig {
     pub storage_tail_poll_interval_ms: u64,
     #[serde(default = "default_pg_notify_channel")]
     pub pg_notify_channel: String,
-    #[serde(default = "default_partial_retention_ttl_secs")]
-    pub partial_retention_ttl_secs: u64,
-    #[serde(default = "default_partial_retention_max_entries")]
-    pub partial_retention_max_entries: usize,
 }
 
 impl Default for EventBusConfig {
@@ -262,26 +252,6 @@ impl Default for EventBusConfig {
             broadcast_capacity: DEFAULT_EVENT_BUS_BROADCAST_CAPACITY,
             storage_tail_poll_interval_ms: DEFAULT_STORAGE_TAIL_POLL_INTERVAL_MS,
             pg_notify_channel: DEFAULT_PG_NOTIFY_CHANNEL.to_owned(),
-            partial_retention_ttl_secs: DEFAULT_PARTIAL_RETENTION_TTL_SECS,
-            partial_retention_max_entries: DEFAULT_PARTIAL_RETENTION_MAX_ENTRIES,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct ClusterConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub instance_url: Option<String>,
-    #[serde(default = "default_cluster_token_env")]
-    pub token_env: String,
-}
-
-impl Default for ClusterConfig {
-    fn default() -> Self {
-        Self {
-            instance_url: None,
-            token_env: DEFAULT_CLUSTER_TOKEN_ENV.to_owned(),
         }
     }
 }
@@ -896,40 +866,6 @@ impl Default for BulkheadConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct ConfigOverrides {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub listener: Option<ListenerOverrides>,
-}
-
-impl ConfigOverrides {
-    pub fn from_listener(listener: ListenerOverrides) -> Self {
-        if listener.is_empty() {
-            Self::default()
-        } else {
-            Self {
-                listener: Some(listener),
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct ListenerOverrides {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub proxy_addr: Option<SocketAddr>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub admin_addr: Option<SocketAddr>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metrics_addr: Option<SocketAddr>,
-}
-
-impl ListenerOverrides {
-    fn is_empty(&self) -> bool {
-        self.proxy_addr.is_none() && self.admin_addr.is_none() && self.metrics_addr.is_none()
-    }
-}
-
 fn default_proxy_addr() -> SocketAddr {
     SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 8080)
 }
@@ -964,18 +900,6 @@ fn default_storage_tail_poll_interval_ms() -> u64 {
 
 fn default_pg_notify_channel() -> String {
     DEFAULT_PG_NOTIFY_CHANNEL.to_owned()
-}
-
-fn default_partial_retention_ttl_secs() -> u64 {
-    DEFAULT_PARTIAL_RETENTION_TTL_SECS
-}
-
-fn default_partial_retention_max_entries() -> usize {
-    DEFAULT_PARTIAL_RETENTION_MAX_ENTRIES
-}
-
-fn default_cluster_token_env() -> String {
-    DEFAULT_CLUSTER_TOKEN_ENV.to_owned()
 }
 
 fn default_upstream_total_secs() -> u64 {
@@ -1229,13 +1153,13 @@ fn default_prompt_cache_shadow_grace_margin_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Config, ConfigOverrides};
+    use crate::Config;
     use std::fs;
 
     fn load_config(toml: &str) -> Result<Config, crate::ConfigError> {
         let temp_file = tempfile::NamedTempFile::new().expect("create temp config");
         fs::write(temp_file.path(), toml).expect("write temp config");
-        Config::load_with_overrides(temp_file.path(), ConfigOverrides::default())
+        Config::load(temp_file.path())
     }
 
     #[test]
@@ -1362,11 +1286,6 @@ url = "postgres://localhost/cc_lb"
 broadcast_capacity = 8192
 storage_tail_poll_interval_ms = 125
 pg_notify_channel = "cc_lb_events_partial_custom"
-partial_retention_ttl_secs = 60
-partial_retention_max_entries = 256
-
-[cluster]
-instance_url = "http://127.0.0.1:9090"
 
 "#,
         )
@@ -1378,34 +1297,5 @@ instance_url = "http://127.0.0.1:9090"
             config.event_bus.pg_notify_channel,
             "cc_lb_events_partial_custom"
         );
-        assert_eq!(config.event_bus.partial_retention_ttl_secs, 60);
-        assert_eq!(config.event_bus.partial_retention_max_entries, 256);
-    }
-
-    #[test]
-    fn postgres_storage_requires_cluster_instance_url() {
-        load_config(
-            r#"
-[storage]
-kind = "postgres"
-url = "postgres://localhost/cc_lb"
-
-[cluster]
-instance_url = "http://127.0.0.1:9090"
-"#,
-        )
-        .expect("postgres with instance_url should load");
-
-        let missing_url = load_config(
-            r#"
-[storage]
-kind = "postgres"
-url = "postgres://localhost/cc_lb"
-"#,
-        )
-        .expect_err("postgres without instance_url should fail validation");
-        assert!(missing_url.to_string().contains("cluster.instance_url"));
-
-        load_config("[listener]\n").expect("sqlite without instance_url should load");
     }
 }

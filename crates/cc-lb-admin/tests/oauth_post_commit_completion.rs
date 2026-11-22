@@ -108,7 +108,6 @@ async fn harness_with_scheduler(
         storage: Some(storage.clone()),
         key_store: Some(admin_test_common::key_store(storage.clone())),
         aead: Arc::new(AeadService::from_master_key(MASTER_KEY)),
-        limit_engine: admin_test_common::limit_engine_with_clock(clock.clone()),
         lifecycle: None,
         dynamic_view: holder.clone(),
         config: Arc::new(config),

@@ -22,7 +22,6 @@ use sqlx::postgres::PgPoolOptions;
 use tower::ServiceExt;
 
 const ADMIN_TOKEN: &str = env!("CARGO_PKG_NAME");
-const CLUSTER_TOKEN_ENV: &str = "CI_POSTGRES_URL";
 const STORAGE_TAIL_TIMEOUT_DEFAULT: Duration = Duration::from_secs(30);
 
 // Hang-guard ceiling for cross-instance SSE propagation. The read is
@@ -54,8 +53,8 @@ async fn storage_tail_reaches_second_instance_over_pg_notify() -> TestResult<()>
     let database_url = db.url.clone();
 
     let outcome = AssertUnwindSafe(async move {
-        let instance_a = build_running_app(&database_url, "instance-a").await?;
-        let instance_b = build_running_app(&database_url, "instance-b").await?;
+        let instance_a = build_running_app(&database_url).await?;
+        let instance_b = build_running_app(&database_url).await?;
 
         let response = instance_b
             .app
@@ -108,7 +107,7 @@ fn ci_postgres_url() -> Option<String> {
     std::env::var("CI_POSTGRES_URL").ok()
 }
 
-async fn build_running_app(database_url: &str, label: &'static str) -> TestResult<RunningApp> {
+async fn build_running_app(database_url: &str) -> TestResult<RunningApp> {
     let clock: ClockHandle = Arc::new(SystemClock);
     let pool = PgPoolOptions::new()
         .max_connections(8)
@@ -124,7 +123,7 @@ async fn build_running_app(database_url: &str, label: &'static str) -> TestResul
         clock.clone(),
     ));
     let app = build_app_with_storage(
-        test_config(database_url, label),
+        test_config(database_url),
         None,
         managed_store,
         storage.clone(),
@@ -136,7 +135,7 @@ async fn build_running_app(database_url: &str, label: &'static str) -> TestResul
     Ok(RunningApp { app, storage })
 }
 
-fn test_config(database_url: &str, label: &str) -> Config {
+fn test_config(database_url: &str) -> Config {
     let mut config = Config::default();
     config.listener.proxy_addr = "127.0.0.1:0".parse().expect("valid proxy addr");
     config.listener.admin_addr = "127.0.0.1:0".parse().expect("valid admin addr");
@@ -149,8 +148,6 @@ fn test_config(database_url: &str, label: &str) -> Config {
         token_env: crate::common::TEST_NONEMPTY_ENV.to_owned(),
     }];
     config.event_bus.storage_tail_poll_interval_ms = 10;
-    config.cluster.instance_url = Some(format!("http://{label}.example.test"));
-    config.cluster.token_env = CLUSTER_TOKEN_ENV.to_owned();
     config
 }
 

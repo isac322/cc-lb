@@ -77,16 +77,6 @@ impl AnthropicCompatibilityKvStore for RecordingCompatibilityKv {
     ) -> StorageResult<Option<CompatibilityKvRecord>> {
         Ok(self.records.lock().expect("records lock").get(key).cloned())
     }
-
-    async fn list_compatibility_kv(&self) -> StorageResult<Vec<CompatibilityKvRecord>> {
-        Ok(self
-            .records
-            .lock()
-            .expect("records lock")
-            .values()
-            .cloned()
-            .collect())
-    }
 }
 
 /// In-memory compat-hash repository for exercising the all-keys dispatch loop

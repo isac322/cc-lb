@@ -1,13 +1,18 @@
 use crate::{
     HotEngineAllocationStrategy, HotEngineConfig, RuntimeSlotKey, RuntimeSlotRole, WasmtimeRuntime,
-    WasmtimeRuntimeError,
 };
 
 #[test]
 fn engine_build_only() {
     let rt = WasmtimeRuntime::with_defaults().expect("engine build");
     let _ = rt.engine();
-    assert_eq!(rt.slot_count(), 0);
+    assert!(
+        rt.get_slot(&RuntimeSlotKey::global(
+            "nonexistent",
+            RuntimeSlotRole::Filter
+        ))
+        .is_none()
+    );
 }
 
 #[test]
@@ -19,17 +24,11 @@ fn pooling_engine_builds_when_selected() {
     .expect("pooling engine build");
 
     let _ = rt.engine();
-    assert_eq!(rt.slot_count(), 0);
-}
-
-#[test]
-fn missing_slot_returns_error() {
-    let rt = WasmtimeRuntime::with_defaults().expect("engine build");
-    let err = rt
-        .call_filter(
-            &RuntimeSlotKey::global("nonexistent", RuntimeSlotRole::Filter),
-            &[],
-        )
-        .expect_err("must fail on missing slot");
-    assert!(matches!(err, WasmtimeRuntimeError::ModuleRejected { .. }));
+    assert!(
+        rt.get_slot(&RuntimeSlotKey::global(
+            "nonexistent",
+            RuntimeSlotRole::Filter
+        ))
+        .is_none()
+    );
 }

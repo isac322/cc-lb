@@ -362,14 +362,17 @@ impl Harness {
             .clone()
             .oneshot(
                 Request::builder()
-                    .method("POST")
-                    .uri(format!("{path}/disable"))
+                    .method("PATCH")
+                    .uri(&path)
                     .header(
                         "authorization",
                         format!("Bearer {}", env!("CARGO_PKG_NAME")),
                     )
                     .header("if-match", etag)
-                    .body(Body::empty())?,
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(
+                        &serde_json::json!({ "enabled": false }),
+                    )?))?,
             )
             .await?;
         assert_eq!(response.status(), StatusCode::OK);

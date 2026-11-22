@@ -11,7 +11,6 @@ mod budget;
 mod cache;
 mod cell;
 mod compiled_cache;
-mod dispatch;
 mod engine;
 mod error;
 mod inspect;
@@ -199,33 +198,6 @@ impl WasmtimeRuntime {
         self.slots.read().get(slot_key).map(Arc::clone)
     }
 
-    /// Remove a slot from the runtime map. Returns `true` if a slot
-    /// was present, `false` if the key was already gone (idempotent).
-    ///
-    /// The removed `Arc<LoadedPluginSlot>` is dropped AFTER the write lock
-    /// is released so any downstream `Drop` impl work (releasing the
-    /// pooled `InstancePre`, deregistering typed funcs) does not
-    /// block other registers. In-flight dispatchers that already
-    /// cloned an `Arc<LoadedPluginSlot>` via `get_slot` continue to run
-    /// against the retained clone — the runtime never yanks state
-    /// out from under a live call.
-    pub fn evict_slot(&self, slot_key: &RuntimeSlotKey) -> bool {
-        let removed = {
-            let mut slots = self.slots.write();
-            slots.remove(slot_key)
-        };
-        let existed = removed.is_some();
-        if existed {
-            tracing::info!(
-                target: "cc_lb_runtime_wasmtime::eviction",
-                ?slot_key,
-                "evicted plugin slot",
-            );
-        }
-        drop(removed);
-        existed
-    }
-
     /// Sweep the runtime map so only slots whose keys are in `keep`
     /// remain. Returns the keys that were evicted (for logging /
     /// metrics on the reconcile boundary).
@@ -262,11 +234,6 @@ impl WasmtimeRuntime {
         }
         drop(removed);
         evicted_keys
-    }
-
-    /// Number of currently registered slots. Test/observability helper.
-    pub fn slot_count(&self) -> usize {
-        self.slots.read().len()
     }
 
     /// Publish current PoolingAllocator utilization as gauges.

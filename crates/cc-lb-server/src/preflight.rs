@@ -38,8 +38,6 @@ pub struct PreflightOptions {
 pub enum PreflightError {
     #[error("storage master key env {0} is missing")]
     MasterKeyMissing(String),
-    #[error("cluster token env {0} is missing or empty")]
-    ClusterTokenMissing(String),
 
     #[error("storage master key must decode to 32 bytes; got {actual}")]
     MasterKeyBadLength { actual: usize },
@@ -116,15 +114,6 @@ async fn run_inner(
     clock: ClockHandle,
 ) -> Result<PreflightReport, PreflightError> {
     let report = PreflightReport::default();
-    if matches!(cfg.storage, StorageConfig::Postgres { .. })
-        && env::var(&cfg.cluster.token_env)
-            .ok()
-            .is_none_or(|token| token.trim().is_empty())
-    {
-        return Err(PreflightError::ClusterTokenMissing(
-            cfg.cluster.token_env.clone(),
-        ));
-    }
 
     if probe_storage {
         let key_name = &cfg.aead.key_env;

@@ -1,9 +1,21 @@
 use cc_lb_pdk_wasmtime::__private::{DEFAULT_ALIGN, alloc_bytes, free_bytes};
-use cc_lb_pdk_wasmtime::types::{
-    Header, Principal, TransformResponseRequest, TransformResponseResult, TransformSseEventRequest,
-    TransformSseEventResult, Upstream,
+use cc_lb_pdk_wasmtime::types::v2::{
+    Header, Principal, SseEvent, TransformResponseRequest, TransformResponseResult,
+    TransformSseEventRequest, TransformSseEventResult, Upstream, UpstreamIdentity,
 };
 use rkyv::rancor::Error as RkyvError;
+
+fn upstream_identity() -> UpstreamIdentity {
+    UpstreamIdentity {
+        provider: Box::from("anthropic"),
+        credential_kind: Box::from("anthropic_api_key"),
+        upstream_id: Box::from("upstream-1"),
+        name: Box::from("anthropic-direct"),
+        base_url: None,
+        gemini_oauth_profile: None,
+        code_assist_project_id: None,
+    }
+}
 
 fn response_request() -> TransformResponseRequest {
     TransformResponseRequest {
@@ -14,6 +26,7 @@ fn response_request() -> TransformResponseRequest {
             claims: Box::new([]),
         },
         upstream: Upstream::AnthropicDirect { base_url: None },
+        upstream_identity: upstream_identity(),
         request_method: Box::from("POST"),
         request_path: Box::from("/v1/messages"),
         canonical_model_id: Box::from("claude-test"),
@@ -31,12 +44,13 @@ fn sse_request() -> TransformSseEventRequest {
         request_id: Box::from("req-pdk-sse"),
         principal: response_request().principal,
         upstream: Upstream::AnthropicDirect { base_url: None },
+        upstream_identity: upstream_identity(),
         request_method: Box::from("POST"),
         request_path: Box::from("/v1/messages"),
         canonical_model_id: Box::from("claude-test"),
         response_status: 200,
         response_headers: Box::new([]),
-        event: cc_lb_pdk_wasmtime::types::SseEvent {
+        event: SseEvent {
             event: Box::from("message_start"),
             data: Box::from(&b"{}"[..]),
         },
@@ -66,7 +80,7 @@ where
 #[test]
 fn run_transform_response_dispatches_owned_request() {
     let (ptr, len) = copy_to_guest(&response_request());
-    let packed = cc_lb_pdk_wasmtime::__private::run_transform_response(ptr, len, |request| {
+    let packed = cc_lb_pdk_wasmtime::__private::run_transform_response_v2(ptr, len, |request| {
         assert_eq!(&*request.request_id, "req-pdk");
         TransformResponseResult::Unchanged
     });
@@ -79,7 +93,7 @@ fn run_transform_response_dispatches_owned_request() {
 #[test]
 fn run_transform_sse_event_dispatches_owned_request() {
     let (ptr, len) = copy_to_guest(&sse_request());
-    let packed = cc_lb_pdk_wasmtime::__private::run_transform_sse_event(ptr, len, |request| {
+    let packed = cc_lb_pdk_wasmtime::__private::run_transform_sse_event_v2(ptr, len, |request| {
         assert_eq!(&*request.event.event, "message_start");
         TransformSseEventResult::Unchanged
     });

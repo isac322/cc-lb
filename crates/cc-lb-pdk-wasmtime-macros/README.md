@@ -13,32 +13,33 @@ use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler};
 Annotate one inline module with the plugin's name, version, description, and
 usage text. The complete `accept-all` example below includes this metadata.
 
-The macro emits allocator exports, one hook export per handler, one schema
-custom section per distinct `(hook, wire)` pair, and one metadata section.
-Legacy-only modules emit `cc_lb.plugin.v1`; modules with any provider-qualified
-handler emit `cc_lb.plugin.v2`.
+The macro emits allocator exports, provider-qualified hook exports, one schema
+custom section per distinct `(hook, wire)` pair, and the `cc_lb.plugin.v2`
+metadata section.
 
 ## `#[handler]`
 
-Annotate each hook function with a hook kind, optional provider, wire version,
-description, and usage text inside the plugin module. For example,
-`#[handler(shape, provider = "openai", wire = 1, description = "...", usage = "...")]`
+Annotate each hook function with a hook kind, required `provider`, required
+`wire` version, description, and usage text inside the plugin module. For
+example,
+`#[handler(shape, provider = "openai", wire = 2, description = "...", usage = "...")]`
 selects the OpenAI request-shaping entrypoint.
 
 The provider selects exports such as `cc_lb_shape_openai`; the Rust function
-name remains author-controlled. Omitting `provider` preserves the legacy
-unqualified export, which the host maps to Anthropic only.
+name remains author-controlled.
 
 Supported providers are `anthropic`, `openai`, and `gemini`. Duplicate
-`(hook, provider)` entries are rejected, including legacy plus qualified
-Anthropic entries. Legacy entries may coexist with qualified OpenAI or Gemini
-entries.
+`(hook, provider)` entries are rejected.
 
-Supported hook kinds are `filter`, `shape`, `transform_response`, and
-`transform_sse_event`. Provider-qualified hooks are independent; omit hooks
-your plugin does not support. The PDK accepts `wire = 1` for every hook. Add
-`view` when the handler wants an archived zero-copy request reference instead
-of an owned request.
+Supported hook kinds and wire versions:
+
+- `filter`: requires `wire = 3` (`v3::FilterRequest` -> `v2::FilterResponse`).
+- `shape`, `transform_response`, `transform_sse_event`, `transform_realtime_frame`: require `wire = 2`.
+- `shape_envelope_gemini`: requires `provider = "gemini"` and `wire = 2`.
+
+Provider-qualified hooks are independent; omit hooks your plugin does not
+support. Add `view` when the handler wants an archived zero-copy request
+reference instead of an owned request.
 
 ## Minimal Complete Example
 
@@ -50,7 +51,8 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler};
-use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse, PerCandidateReason};
+use cc_lb_plugin_wire::v2::{FilterResponse, PerCandidateReason};
+use cc_lb_plugin_wire::v3::FilterRequest;
 
 #[cc_lb_plugin(
     name = "accept-all",
@@ -64,7 +66,7 @@ mod accept_all {
     #[handler(
         filter,
         provider = "openai",
-        wire = 1,
+        wire = 3,
         description = "Accepts all candidates.",
         usage = "No configuration required.",
     )]

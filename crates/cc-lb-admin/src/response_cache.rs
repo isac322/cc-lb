@@ -265,8 +265,11 @@ pub(crate) fn matches_if_none_match(headers: &HeaderMap, expected: &str) -> bool
     headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
-        .map(|raw| raw.split(',').any(|tag| tag.trim() == expected))
-        .unwrap_or(false)
+        .is_some_and(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .any(|tag| tag == "*" || tag == expected)
+        })
 }
 
 pub(crate) fn not_modified_response(etag: &str) -> Response {
@@ -291,4 +294,44 @@ fn apply_private_revalidation_headers(response: &mut Response, etag: Option<&str
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, no-cache"),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue, header};
+
+    use super::matches_if_none_match;
+
+    #[test]
+    fn matches_if_none_match_handles_exact_list_wildcard_and_mismatch() {
+        let missing = HeaderMap::new();
+        assert!(!matches_if_none_match(&missing, "\"etag-1\""));
+
+        let mut exact = HeaderMap::new();
+        exact.insert(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_static("\"etag-1\""),
+        );
+        assert!(matches_if_none_match(&exact, "\"etag-1\""));
+        assert!(!matches_if_none_match(&exact, "\"etag-2\""));
+
+        let mut list = HeaderMap::new();
+        list.insert(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_static("W/\"other\", \"etag-1\", \"etag-3\""),
+        );
+        assert!(matches_if_none_match(&list, "\"etag-1\""));
+        assert!(!matches_if_none_match(&list, "\"etag-2\""));
+
+        let mut wildcard = HeaderMap::new();
+        wildcard.insert(header::IF_NONE_MATCH, HeaderValue::from_static("*"));
+        assert!(matches_if_none_match(&wildcard, "\"etag-1\""));
+
+        let mut wildcard_in_list = HeaderMap::new();
+        wildcard_in_list.insert(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_static("\"other\", *"),
+        );
+        assert!(matches_if_none_match(&wildcard_in_list, "\"etag-1\""));
+    }
 }

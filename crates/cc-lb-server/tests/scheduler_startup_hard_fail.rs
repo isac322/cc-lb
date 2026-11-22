@@ -83,9 +83,6 @@ fn app_config(storage: StorageConfig) -> Config {
         ..Config::default()
     };
     config.aead.key_env = TEST_KEY_ENV.to_owned();
-    // Postgres validates the cluster token before opening the scheduler pool.
-    // Borrow an immutable harness variable instead of mutating process-wide env.
-    config.cluster.token_env = crate::common::TEST_NONEMPTY_ENV.to_owned();
     config.scheduler.separate_pool.min_connections = 0;
     config.scheduler.separate_pool.acquire_timeout_secs = 1;
     config

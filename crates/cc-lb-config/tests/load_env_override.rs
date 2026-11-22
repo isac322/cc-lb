@@ -90,16 +90,13 @@ max_connections = 3
 [scheduler.separate_pool]
 max_connections = 4
 {scheduler_sslmode}
-
-[cluster]
-instance_url = "http://127.0.0.1:9090"
 "#
     );
     let (_dir, path) = crate::common::temp_config(&raw_toml);
 
     for config in [
         Config::load(&path).expect("file config with TLS environment overrides"),
-        Config::from_stored_toml_with_env(&raw_toml, Default::default())
+        Config::from_stored_toml_with_env(&raw_toml)
             .expect("stored config with TLS environment overrides"),
     ] {
         let json = serde_json::to_value(&config).unwrap();

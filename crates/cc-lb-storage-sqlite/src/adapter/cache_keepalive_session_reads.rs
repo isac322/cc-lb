@@ -1,13 +1,13 @@
 use super::{
-    cache_keepalive_session_read_row::{decision_from_row, list_item_from_row, turn_from_row},
+    cache_keepalive_session_read_row::{list_item_from_row, turn_from_row},
     cache_keepalive_sessions::row_to_record,
 };
 use crate::{SqliteStorage, map_sqlx_error};
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    CacheKeepaliveDecisionRecord, CacheKeepaliveSessionCursor, CacheKeepaliveSessionFilter,
-    CacheKeepaliveSessionListQuery, CacheKeepaliveSessionPage, CacheKeepaliveSessionReadStore,
-    CacheKeepaliveSummaryInput, CacheKeepaliveTurnRecord, StorageError, StorageResult,
+    CacheKeepaliveSessionCursor, CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery,
+    CacheKeepaliveSessionPage, CacheKeepaliveSessionReadStore, CacheKeepaliveTurnRecord,
+    StorageError, StorageResult,
 };
 use sqlx::{QueryBuilder, Row, Sqlite};
 
@@ -512,53 +512,6 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         Ok(CacheKeepaliveSessionPage { rows, next_cursor })
     }
 
-    async fn read_cache_keepalive_summary_input(
-        &self,
-        principal_id: &str,
-        cutoff_ms: u64,
-    ) -> StorageResult<CacheKeepaliveSummaryInput> {
-        let cutoff_ms = u64_to_i64(
-            cutoff_ms,
-            "cache_keepalive_summary_cutoff_ms",
-            "value exceeds i64::MAX",
-        )?;
-        let mut sessions_query = QueryBuilder::<Sqlite>::new("");
-        push_session_entry_select(&mut sessions_query, None);
-        sessions_query
-            .push(" FROM cache_keepalive_sessions WHERE principal_id = ")
-            .push_bind(principal_id)
-            .push(" ORDER BY last_message_at_ms DESC, entry_id ASC");
-        let sessions = sessions_query
-            .build()
-            .fetch_all(self.pool())
-            .await
-            .map_err(map_sqlx_error)?
-            .into_iter()
-            .map(list_item_from_row)
-            .collect::<StorageResult<Vec<_>>>()?;
-
-        let recent_decisions = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)
-             FROM cache_keepalive_decisions
-             WHERE principal_id = ?
-               AND last_message_at_ms >= ?
-               AND NOT EXISTS (
-                   SELECT 1 FROM cache_keepalive_turns turn_row
-                   WHERE turn_row.source_ref_id = cache_keepalive_decisions.source_ref_id
-               )",
-        )
-        .bind(principal_id)
-        .bind(cutoff_ms)
-        .fetch_one(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-
-        Ok(CacheKeepaliveSummaryInput {
-            sessions,
-            recent_decisions: i64_to_u64_count(recent_decisions)?,
-        })
-    }
-
     async fn get_cache_keepalive_list_item(
         &self,
         principal_id: &str,
@@ -672,22 +625,6 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             }
         }
         Ok(turns)
-    }
-
-    async fn get_cache_keepalive_decision_for_principal(
-        &self,
-        principal_id: &str,
-        source_ref_id: &str,
-    ) -> StorageResult<Option<CacheKeepaliveDecisionRecord>> {
-        let row = sqlx::query(
-            "SELECT * FROM cache_keepalive_decisions WHERE principal_id = ? AND source_ref_id = ?",
-        )
-        .bind(principal_id)
-        .bind(source_ref_id)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-        row.map(decision_from_row).transpose()
     }
 
     async fn list_cache_keepalive_evidence_for_activity(

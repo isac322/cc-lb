@@ -9,7 +9,7 @@ Rules:
 - Obtain `Authenticated` from `authenticate_first` (or `Lifecycle::authenticate`, which wraps it). Never reconstruct, forge, transmute, or clone a proof into existence by another route.
 - Keep `&Authenticated` on every function that consumes a request body or dispatches upstream. Removing that parameter to make code compile defeats the entire mechanism.
 - Authentication *failure* is not "before authentication". It reached the credential check and was rejected, so it persists exactly one `request_events_v1` row. Only requests that never reach the check — 404 router fallback, 405, drain 503, pre-handler timeout — stay silent.
-- The intentionally public endpoints are exactly `/healthz`, `/readyz`, `/admin/health`, `/admin/health/state`, the two admin SPA asset routes, and the metrics listener. Adding to that list requires explicit user approval.
+- The intentionally public endpoints are exactly `/healthz`, `/readyz`, `/admin/health`, the two admin SPA asset routes, and the metrics listener. Adding to that list requires explicit user approval.
 - Keep every admin route behind the `require_admin_auth` `route_layer` in `crates/cc-lb-admin/src/routes.rs`. Never register an admin route outside that layer.
 
 Forbidden shortcuts:

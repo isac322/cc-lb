@@ -5,7 +5,7 @@ use axum::{
     http::{HeaderValue, Request, Response, StatusCode, header},
     middleware::{self, Next},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 
 use cc_lb_storage_api::{AuditQueryScope, Storage, StorageError};
@@ -30,10 +30,7 @@ pub fn build_router(state: AdminState) -> Router {
     let protected_routes = Router::new()
         .route("/admin/v1/audit", get(query_audit))
         .route("/admin/v1/config/editor", get(get_config_editor))
-        .route(
-            "/admin/v1/config/draft",
-            get(get_config_draft).put(put_config_draft),
-        )
+        .route("/admin/v1/config/draft", put(put_config_draft))
         .route(
             "/admin/v1/config/draft/validate",
             post(validate_config_draft),
@@ -70,7 +67,6 @@ pub fn build_router(state: AdminState) -> Router {
         )
         .merge(crate::events_detail_route::router())
         .merge(crate::subscription_quotas::router())
-        .merge(crate::scheduler::router())
         .merge(crate::v1::plugins::router())
         .merge(crate::v1::plugins_wasm::router())
         .merge(crate::v1::oauth::router())
@@ -374,44 +370,6 @@ async fn put_config_draft(
             }
         }
         Err(error) => settings_error_response(error, true),
-    }
-}
-
-async fn get_config_draft(
-    State(state): State<AdminState>,
-    Extension(identity): Extension<AdminIdentity>,
-) -> axum::response::Response {
-    if authorize(&identity, AdminAction::SensitiveRead).is_err() {
-        return dashboard_error(StatusCode::FORBIDDEN, "forbidden");
-    }
-    let storage = match config_storage(&state) {
-        Ok(storage) => storage,
-        Err(error) => return settings_error_response(error, false),
-    };
-    match crate::settings::get_draft(storage, &*state.clock).await {
-        Ok(response) => {
-            let action = "config_draft_read";
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action,
-                    route: "/admin/v1/config/draft",
-                    target_principal_id: None,
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: StatusCode::OK.as_u16(),
-                    payload: None,
-                },
-            )
-            .await
-            {
-                return audit_write_failed_response(action, &error);
-            }
-            ([(header::CACHE_CONTROL, "no-store")], Json(response)).into_response()
-        }
-        Err(error) => settings_error_response(error, false),
     }
 }
 

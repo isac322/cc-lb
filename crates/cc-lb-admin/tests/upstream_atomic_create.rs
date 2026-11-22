@@ -175,7 +175,6 @@ async fn admin_app(storage: Arc<dyn DynStorage>) -> axum::Router {
         storage: Some(storage),
         key_store: None,
         aead: Arc::new(AeadService::from_master_key(MASTER_KEY)),
-        limit_engine: admin_test_common::limit_engine_with_clock(clock.clone()),
         lifecycle: None,
         lazy_refresher: None,
         runtime: None,

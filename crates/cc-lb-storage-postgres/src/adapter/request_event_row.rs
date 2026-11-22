@@ -9,10 +9,6 @@ macro_rules! event_select {
 }
 
 pub(super) const CURSOR_SQL_PREFIX: &str = concat!(event_select!(), "WHERE seq > ");
-pub(super) const EXPORT_SQL: &str = concat!(
-    event_select!(),
-    "WHERE seq > $1 AND seq <= $2 AND ($3::bigint IS NULL OR list_ts_ms >= $3) AND ($4::bigint IS NULL OR list_ts_ms < $4) AND tx_id < pg_snapshot_xmin(pg_current_snapshot()) ORDER BY seq ASC LIMIT $5"
-);
 pub(crate) const GET_SQL: &str = concat!(event_select!(), "WHERE event_id = $1");
 
 pub(crate) fn from_row(row: &PgRow) -> StorageResult<RequestEvent> {

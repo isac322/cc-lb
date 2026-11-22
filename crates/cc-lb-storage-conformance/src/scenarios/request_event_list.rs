@@ -136,19 +136,18 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
         let until_seq = storage
             .request_event_stable_seq_ceiling(std::time::Duration::from_secs(5))
             .await?;
-        let exported = storage
-            .export_request_events(&cc_lb_storage_api::RequestEventExportPage {
-                after_seq: 0,
+        let cursor_page = storage
+            .query_request_events_between_cursors(
+                0,
                 until_seq,
-                from_ts_ms: None,
-                to_ts_ms: None,
-                limit: 100,
-            })
+                100,
+                &cc_lb_storage_api::RequestEventStreamFilters::default(),
+            )
             .await?;
-        let exported_matching = exported
+        let exported_matching = cursor_page
             .iter()
             .find(|(_, event)| event.event_id == matching.event_id)
-            .expect("matching request is exported");
+            .expect("matching request is present within stable seq ceiling");
         assert_eq!(exported_matching.1.thinking_level, matching.thinking_level);
 
         for index in 0..60 {

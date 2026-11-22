@@ -130,10 +130,11 @@ async fn update_correct_if_match_bumps_revision() {
 
     let (status, headers, body) = server
         .client
-        .put_json(
+        .json(
+            "PATCH",
             &format!("/admin/v1/principals/{id}"),
-            json!({ "name": "alpha-renamed", "allowed_upstreams": ["11111111-1111-1111-1111-111111111111"] }),
-            Some(etag),
+            Some(json!({ "name": "alpha-renamed", "allowed_upstreams": ["11111111-1111-1111-1111-111111111111"] })),
+            &[(header::IF_MATCH.as_str(), etag)],
         )
         .await;
 
@@ -161,10 +162,11 @@ async fn update_endpoints_audit_distinct_concrete_routes() {
 
     let (status, _, updated) = server
         .client
-        .put_json(
+        .json(
+            "PATCH",
             &principal_route,
-            json!({ "name": "audit-routes-renamed" }),
-            Some(etag),
+            Some(json!({ "name": "audit-routes-renamed" })),
+            &[(header::IF_MATCH.as_str(), etag)],
         )
         .await;
     assert_eq!(status, StatusCode::OK);
@@ -273,10 +275,11 @@ async fn update_stale_if_match_returns_conflict() {
     clock.advance(Duration::from_secs(1));
     let (status, _, first_update) = server
         .client
-        .put_json(
+        .json(
+            "PATCH",
             &format!("/admin/v1/principals/{id}"),
-            json!({ "name": "alpha-one" }),
-            Some(&etag),
+            Some(json!({ "name": "alpha-one" })),
+            &[(header::IF_MATCH.as_str(), etag.as_str())],
         )
         .await;
     assert_eq!(status, StatusCode::OK);
@@ -284,10 +287,11 @@ async fn update_stale_if_match_returns_conflict() {
 
     let (status, _, body) = server
         .client
-        .put_json(
+        .json(
+            "PATCH",
             &format!("/admin/v1/principals/{id}"),
-            json!({ "name": "alpha-two" }),
-            Some(&etag),
+            Some(json!({ "name": "alpha-two" })),
+            &[(header::IF_MATCH.as_str(), etag.as_str())],
         )
         .await;
 
@@ -307,10 +311,11 @@ async fn update_without_if_match_returns_428() {
 
     let (status, _, body) = server
         .client
-        .put_json(
+        .json(
+            "PATCH",
             &format!("/admin/v1/principals/{id}"),
-            json!({ "name": "alpha-renamed" }),
-            None,
+            Some(json!({ "name": "alpha-renamed" })),
+            &[],
         )
         .await;
 

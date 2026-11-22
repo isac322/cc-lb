@@ -10,9 +10,9 @@ use cc_lb_lifecycle::{
 };
 use cc_lb_observability::EngineMetricsHook;
 use cc_lb_request_log::{
-    CostBreakdown as LifecycleCostBreakdown, RequestCacheBreakpoint, RequestCacheState,
-    RequestDiagnostics, RequestDiagnosticsRecord, RequestDiagnosticsSource, RequestEventKind,
-    RequestEventPartial, RequestEventUpdate, RequestProtocol,
+    CostBreakdown as LifecycleCostBreakdown, RequestCacheBreakpoint, RequestDiagnostics,
+    RequestDiagnosticsRecord, RequestDiagnosticsSource, RequestEventKind, RequestEventPartial,
+    RequestEventUpdate, RequestProtocol,
 };
 use cc_lb_storage_api::{CacheKeepaliveEvidenceRow, RequestEvent, RequestEventStore};
 use sha2::{Digest, Sha256};
@@ -30,7 +30,7 @@ pub const DEFAULT_ASSEMBLER_MAX_TTL: Duration = cc_lb_lifecycle::DEFAULT_LIFECYC
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// After receiving `RequestTerminated`, the assembler holds the partial for
-/// this grace period so that late `CacheObserved` events (emitted by a separate
+/// this grace period so that late `Priced` events (emitted by a separate
 /// subscriber task) can still merge into the row.
 /// See RFC-0002 synthesis analysis for the ordering rationale.
 const FINALIZATION_GRACE: Duration = Duration::from_millis(200);
@@ -210,7 +210,6 @@ struct Partial {
     stream_error_code: Option<String>,
     upstream_stream_diagnostics: Option<UpstreamStreamDiagnostics>,
     cost: Option<LifecycleCostBreakdown>,
-    cache_state: Option<RequestCacheState>,
     thinking_budget_tokens: Option<u64>,
     reasoning_effort: Option<String>,
     thinking_level: Option<String>,
@@ -274,13 +273,11 @@ struct TerminationInfo {
     duration_ms: u64,
     deadline: Instant,
     expects_priced: bool,
-    expects_cache: bool,
 }
 
 impl TerminationInfo {
     fn is_ready(&self, partial: &Partial) -> bool {
-        (!self.expects_priced || partial.cost.is_some())
-            && (!self.expects_cache || partial.cache_state.is_some())
+        !self.expects_priced || partial.cost.is_some()
     }
 }
 
@@ -549,8 +546,7 @@ impl Partial {
 ///   attribution fields and published with the final write.
 /// - `UpstreamQuotaFrameObserved` / `RequestFundingObserved`: funding evidence
 ///   is merged into the row but published with the final write.
-/// - `Priced` / `CacheObserved`: merged into the row but published only with
-///   the final write.
+/// - `Priced`: merged into the row but published only with the final write.
 /// - `RequestActivity`: advisory stream heartbeat that refreshes
 ///   `last_activity_at` without altering the published row shape.
 fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
@@ -577,8 +573,7 @@ fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
         | LifecycleEvent::UpstreamQuotaFrameObserved { .. }
         | LifecycleEvent::RequestFundingObserved { .. }
         | LifecycleEvent::RequestActivity { .. }
-        | LifecycleEvent::Priced { .. }
-        | LifecycleEvent::CacheObserved { .. } => None,
+        | LifecycleEvent::Priced { .. } => None,
     }
 }
 
@@ -1270,15 +1265,12 @@ async fn handle_event(
         partial.funding_ambiguous |= *funding_ambiguous;
         let expects_priced =
             partial.usage_seen && partial.model().is_some() && partial.cost.is_none();
-        let expects_cache =
-            partial.upstream_response_status.is_some() && partial.cache_state.is_none();
         let termination = TerminationInfo {
             reason: reason.clone(),
             client_status: *client_status,
             duration_ms: *duration_ms,
             deadline: now + FINALIZATION_GRACE,
             expects_priced,
-            expects_cache,
         };
         publish_partial(bus, &partial, PartialTrigger::RequestTerminated, now_ms);
         if termination.is_ready(&partial) {
@@ -1617,9 +1609,6 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         LifecycleEvent::RequestTerminated { .. } | LifecycleEvent::RequestActivity { .. } => {}
         LifecycleEvent::Priced { cost, .. } => {
             partial.cost = Some(cost);
-        }
-        LifecycleEvent::CacheObserved { cache_state, .. } => {
-            partial.cache_state = Some(cache_state);
         }
         // Intentional no-op: principal identity is already carried by
         // `AuthCompleted`; this variant is metrics-only.
@@ -2411,6 +2400,11 @@ mod tests {
         let mut partial = Partial::new(Instant::now(), event_id.clone());
         partial.request_id = Some("req-preserve-first-terminal-timings".to_owned());
         partial.upstream_response_status = Some(200);
+        partial.usage_seen = true;
+        partial.parse = Some(ParseInfo {
+            model: Some("claude-sonnet-4-5".to_owned()),
+            ..ParseInfo::default()
+        });
         let mut partials = HashMap::from([(event_id.clone(), partial)]);
 
         handle_event(
@@ -4138,7 +4132,6 @@ mod tests {
             duration_ms: 42,
             deadline: Instant::now() + FINALIZATION_GRACE,
             expects_priced: false,
-            expects_cache: false,
         });
         partials.insert(oldest_id.clone(), oldest);
 
@@ -5641,7 +5634,6 @@ mod tests {
             duration_ms: 42,
             deadline,
             expects_priced: false,
-            expects_cache: true,
         }
     }
 

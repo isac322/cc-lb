@@ -22,7 +22,7 @@ async fn get_no_draft_returns_zero_revision_and_null_payload() {
     let (dir, storage) = temp_storage().await;
     let app = app_with_file(&dir, storage);
 
-    let (status, headers, json, _) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
+    let (status, headers, json, _) = authed_json(app, "GET", "/admin/v1/config/editor", None).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers.get("cache-control").unwrap(), "no-store");
@@ -52,7 +52,7 @@ async fn put_draft_saves_partial_json_without_validation_and_normalizes_nulls() 
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(saved["revision"], 1);
-    let (_, _, stored, _) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
+    let (_, _, stored, _) = authed_json(app, "GET", "/admin/v1/config/editor", None).await;
     assert_eq!(
         stored["draft"],
         json!({ "listener": {}, "not_config": true })
@@ -78,7 +78,7 @@ async fn put_draft_stores_only_storage_url_sentinel() {
     assert_eq!(saved["revision"], 1);
     assert!(!String::from_utf8_lossy(&bytes).contains(secret));
 
-    let (_, _, stored, bytes) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
+    let (_, _, stored, bytes) = authed_json(app, "GET", "/admin/v1/config/editor", None).await;
     assert_eq!(
         stored["draft"]["storage"]["url"],
         cc_lb_config::STORAGE_URL_REDACTION_SENTINEL
@@ -141,13 +141,13 @@ async fn saving_new_draft_invalidates_prior_validation() {
     .await;
     assert_eq!(second["revision"], 2);
 
-    let (_, _, draft, _) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
+    let (_, _, draft, _) = authed_json(app, "GET", "/admin/v1/config/editor", None).await;
     assert_eq!(draft["last_validated_revision"], serde_json::Value::Null);
     assert_eq!(draft["last_validation"], serde_json::Value::Null);
 }
 
 #[tokio::test]
-async fn get_draft_purges_expired_invalid_draft() {
+async fn editor_purges_expired_invalid_draft() {
     let (dir, storage) = temp_storage().await;
     storage
         .put_config_draft(
@@ -175,7 +175,7 @@ async fn get_draft_purges_expired_invalid_draft() {
         .unwrap();
     let app = app_with_file(&dir, storage);
 
-    let (_, _, body, _) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
+    let (_, _, body, _) = authed_json(app, "GET", "/admin/v1/config/editor", None).await;
 
     assert_eq!(body["draft"], serde_json::Value::Null);
     assert_eq!(body["last_validation"], serde_json::Value::Null);

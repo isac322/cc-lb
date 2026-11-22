@@ -46,6 +46,8 @@ struct Fixture {
     clock: ClockHandle,
     /// Mock OAuth server state; records the requests the flow issued.
     oauth_state: MockOAuthState,
+    #[cfg(feature = "sqlite")]
+    scheduler_pool: Option<sqlx::SqlitePool>,
 }
 
 impl Fixture {
@@ -55,12 +57,28 @@ impl Fixture {
 
     async fn with_oauth_state(oauth_state: MockOAuthState) -> Self {
         let (oauth_addr, oauth_state) = spawn_mock_anthropic(oauth_state).await;
-        Self::build(oauth_addr, oauth_state, None, None).await
+        Self::build(
+            oauth_addr,
+            oauth_state,
+            None,
+            #[cfg(feature = "sqlite")]
+            None,
+            None,
+        )
+        .await
     }
 
     async fn with_oauth_state_and_scopes(oauth_state: MockOAuthState, scopes: Vec<String>) -> Self {
         let (oauth_addr, oauth_state) = spawn_mock_anthropic(oauth_state).await;
-        Self::build(oauth_addr, oauth_state, None, Some(scopes)).await
+        Self::build(
+            oauth_addr,
+            oauth_state,
+            None,
+            #[cfg(feature = "sqlite")]
+            None,
+            Some(scopes),
+        )
+        .await
     }
 
     #[cfg(feature = "sqlite")]
@@ -86,13 +104,20 @@ impl Fixture {
         let scheduler = cc_lb_scheduler::admin::SchedulerAdminHandle::new(
             cc_lb_scheduler::worker::SchedulerBackend::Sqlite(
                 cc_lb_scheduler::worker::SqliteSchedulerBackend::new(
-                    pool,
+                    pool.clone(),
                     Arc::new(cc_lb_clock::SystemClock),
                 ),
             ),
         );
         let (oauth_addr, oauth_state) = spawn_mock_anthropic(oauth_state).await;
-        let fixture = Self::build(oauth_addr, oauth_state, Some(scheduler.clone()), None).await;
+        let fixture = Self::build(
+            oauth_addr,
+            oauth_state,
+            Some(scheduler.clone()),
+            Some(pool),
+            None,
+        )
+        .await;
         (fixture, scheduler)
     }
 
@@ -100,6 +125,7 @@ impl Fixture {
         oauth_addr: SocketAddr,
         oauth_state: MockOAuthState,
         scheduler: Option<cc_lb_scheduler::admin::SchedulerAdminHandle>,
+        #[cfg(feature = "sqlite")] scheduler_pool: Option<sqlx::SqlitePool>,
         scopes: Option<Vec<String>>,
     ) -> Self {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -120,7 +146,6 @@ impl Fixture {
             storage: Some(storage.clone()),
             key_store: Some(admin_test_common::key_store(storage.clone())),
             aead: Arc::clone(&aead),
-            limit_engine: admin_test_common::limit_engine_with_clock(clock.clone()),
             lifecycle: None,
             lazy_refresher: None,
             runtime: None,
@@ -148,6 +173,8 @@ impl Fixture {
             aead,
             clock,
             oauth_state,
+            #[cfg(feature = "sqlite")]
+            scheduler_pool,
         }
     }
 
@@ -1059,18 +1086,20 @@ async fn oauth_import_bootstrap_matrix(kind: UpstreamKind) {
             None,
             "only Antigravity Gemini credentials seed the third-party warmup lane"
         );
-        let scheduler_status = scheduler
-            .status(&cc_lb_config::SchedulerConfig::default())
-            .await
-            .expect("scheduler status query succeeds");
-        let usage_poll = scheduler_status
-            .recurring_jobs
-            .iter()
-            .find(|job| job.name == "oauth_usage_poll")
-            .expect("OAuth usage poll is configured");
+        let usage_poll_rows: Vec<(Vec<u8>, i64)> =
+            sqlx::query_as("SELECT job, run_at FROM Jobs WHERE job_type = 'cron'")
+                .fetch_all(fixture.scheduler_pool.as_ref().expect("scheduler pool"))
+                .await
+                .expect("cron jobs query succeeds");
+        let usage_poll_run_at = usage_poll_rows
+            .into_iter()
+            .find_map(|(body, run_at)| {
+                let job: Value = serde_json::from_slice(&body).expect("cron job JSON");
+                (job["type"] == "oauth_usage_poll").then_some(run_at)
+            })
+            .expect("OAuth usage poll is seeded");
         assert_eq!(
-            usage_poll.next_run_at,
-            Some(TEST_NOW_UNIX_SECS),
+            usage_poll_run_at, bootstrap_at,
             "refreshable and access-only imports must both seed an immediate usage poll"
         );
     }

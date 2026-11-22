@@ -62,7 +62,7 @@ impl Parse for PluginArgs {
 
 pub(crate) struct HandlerArgs {
     pub(crate) kind: HandlerKind,
-    pub(crate) provider: Option<ProviderFamily>,
+    pub(crate) provider: ProviderFamily,
     pub(crate) wire_version: u8,
     pub(crate) description: String,
     pub(crate) usage: String,
@@ -128,7 +128,7 @@ impl Parse for HandlerArgs {
                 other => {
                     return Err(Error::new_spanned(
                         other,
-                        "expected `<kind>`, `provider = \"anthropic\"|\"openai\"|\"gemini\"`, `wire = 1|2`, `description = \"...\"`, `usage = \"...\"`, `mode = \"active\"|\"noop\"`, or `view`",
+                        "expected `<kind>`, `provider = \"anthropic\"|\"openai\"|\"gemini\"`, `wire = 2|3`, `description = \"...\"`, `usage = \"...\"`, `mode = \"active\"|\"noop\"`, or `view`",
                     ));
                 }
             }
@@ -136,10 +136,16 @@ impl Parse for HandlerArgs {
         let kind = kind.ok_or_else(|| {
             Error::new(Span::call_site(), "#[handler] missing required hook kind")
         })?;
+        let provider = provider.ok_or_else(|| {
+            Error::new(
+                Span::call_site(),
+                "#[handler] missing required `provider = \"anthropic\"|\"openai\"|\"gemini\"`",
+            )
+        })?;
         if mode == HandlerMode::Noop && !kind.supports_noop_mode() {
             return Err(Error::new(
                 Span::call_site(),
-                "`mode = \"noop\"` is only valid for transform_response and transform_sse_event handlers",
+                "`mode = \"noop\"` is only valid for transform_response, transform_sse_event, and transform_realtime_frame handlers",
             ));
         }
         let wire_version = wire_version
@@ -147,7 +153,7 @@ impl Parse for HandlerArgs {
         if !kind.supports_wire_version(wire_version, provider) {
             return Err(Error::new(
                 Span::call_site(),
-                "this hook does not support the requested wire version/provider combination; wire 2 requires a provider-qualified existing hook, and shape_envelope_gemini requires provider = \"gemini\" and wire = 2",
+                "this hook does not support the requested wire version/provider combination; filter requires wire = 3, shape/response/sse/realtime hooks require wire = 2, and shape_envelope_gemini requires provider = \"gemini\" and wire = 2",
             ));
         }
         Ok(Self {
@@ -262,63 +268,47 @@ impl HandlerKind {
     pub(crate) const fn supports_wire_version(
         self,
         wire_version: u8,
-        provider: Option<ProviderFamily>,
+        provider: ProviderFamily,
     ) -> bool {
         match self {
+            Self::Filter => wire_version == 3,
             Self::ShapeEnvelopeGemini => {
-                wire_version == 2 && matches!(provider, Some(ProviderFamily::Gemini))
+                wire_version == 2 && matches!(provider, ProviderFamily::Gemini)
             }
-            Self::Filter | Self::Shape | Self::TransformResponse | Self::TransformSseEvent => {
-                wire_version == 1 || (wire_version == 2 && provider.is_some())
-            }
-            Self::TransformRealtimeFrame => wire_version == 2 && provider.is_some(),
+            Self::Shape
+            | Self::TransformResponse
+            | Self::TransformSseEvent
+            | Self::TransformRealtimeFrame => wire_version == 2,
         }
     }
 
-    pub(crate) fn export_name(self, provider: Option<ProviderFamily>) -> String {
+    pub(crate) fn export_name(self, provider: ProviderFamily) -> String {
         let base = match self {
             Self::Filter => "cc_lb_filter",
             Self::Shape => "cc_lb_shape",
             Self::TransformResponse => "cc_lb_transform_response",
             Self::TransformSseEvent => "cc_lb_transform_sse_event",
             Self::TransformRealtimeFrame => "cc_lb_transform_realtime_frame",
-            Self::ShapeEnvelopeGemini => "cc_lb_shape_envelope_gemini",
+            Self::ShapeEnvelopeGemini => return "cc_lb_shape_envelope_gemini".to_owned(),
         };
-        if matches!(self, Self::ShapeEnvelopeGemini) {
-            return base.to_owned();
-        }
-        match provider {
-            Some(provider) => format!("{base}_{}", provider.as_str()),
-            None => base.to_owned(),
-        }
+        format!("{base}_{}", provider.as_str())
     }
 
-    pub(crate) fn metadata_key(self, provider: Option<ProviderFamily>) -> String {
+    pub(crate) fn metadata_key(self, provider: ProviderFamily) -> String {
         if matches!(self, Self::ShapeEnvelopeGemini) {
             return "shape_envelope_gemini".to_owned();
         }
-        match provider {
-            Some(provider) => format!("{}_{}", self.wire_name(), provider.as_str()),
-            None => self.wire_name().to_owned(),
-        }
+        format!("{}_{}", self.wire_name(), provider.as_str())
     }
 
     pub(crate) fn dispatch_helper(self, wire_version: u8, view: bool) -> Option<&'static str> {
         match (self, wire_version, view) {
-            (Self::Filter, 1, false) => Some("run_filter"),
-            (Self::Filter, 1, true) => Some("run_filter_view"),
-            (Self::Filter, 2, false) => Some("run_filter_v2"),
-            (Self::Filter, 2, true) => Some("run_filter_v2_view"),
-            (Self::Shape, 1, false) => Some("run_shape"),
-            (Self::Shape, 1, true) => Some("run_shape_view"),
+            (Self::Filter, 3, false) => Some("run_filter_v3"),
+            (Self::Filter, 3, true) => Some("run_filter_v3_view"),
             (Self::Shape, 2, false) => Some("run_shape_v2"),
             (Self::Shape, 2, true) => Some("run_shape_v2_view"),
-            (Self::TransformResponse, 1, false) => Some("run_transform_response"),
-            (Self::TransformResponse, 1, true) => Some("run_transform_response_view"),
             (Self::TransformResponse, 2, false) => Some("run_transform_response_v2"),
             (Self::TransformResponse, 2, true) => Some("run_transform_response_v2_view"),
-            (Self::TransformSseEvent, 1, false) => Some("run_transform_sse_event"),
-            (Self::TransformSseEvent, 1, true) => Some("run_transform_sse_event_view"),
             (Self::TransformSseEvent, 2, false) => Some("run_transform_sse_event_v2"),
             (Self::TransformSseEvent, 2, true) => Some("run_transform_sse_event_v2_view"),
             (Self::TransformRealtimeFrame, 2, false) => Some("run_transform_realtime_frame_v2"),
@@ -335,15 +325,7 @@ impl HandlerKind {
 
     pub(crate) fn fingerprint_type(self, wire_version: u8) -> Option<TokenStream2> {
         match (self, wire_version) {
-            (Self::Filter, 1) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::FilterRequest }),
-            (Self::Shape, 1) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::ShapeRequest }),
-            (Self::TransformResponse, 1) => {
-                Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::TransformResponseRequest })
-            }
-            (Self::TransformSseEvent, 1) => {
-                Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::TransformSseEventRequest })
-            }
-            (Self::Filter, 2) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v2::FilterRequest }),
+            (Self::Filter, 3) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v3::FilterRequest }),
             (Self::Shape, 2) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v2::ShapeRequest }),
             (Self::TransformResponse, 2) => {
                 Some(quote! { ::cc_lb_pdk_wasmtime::types::v2::TransformResponseRequest })
@@ -376,7 +358,7 @@ impl HandlerKind {
 pub(crate) struct DiscoveredHandler {
     pub(crate) fn_ident: Ident,
     pub(crate) kind: HandlerKind,
-    pub(crate) provider: Option<ProviderFamily>,
+    pub(crate) provider: ProviderFamily,
     pub(crate) wire_version: u8,
     pub(crate) description: String,
     pub(crate) usage: String,

@@ -872,14 +872,6 @@ export interface ConfigEditorResponse {
   overrides: ConfigOverrideInfo[];
 }
 
-export interface ConfigDraftResponse {
-  draft: Record<string, unknown> | null;
-  revision: number;
-  last_validated_revision: number | null;
-  last_validation: ConfigValidationReport | null;
-  saved_at_unix_secs: number | null;
-}
-
 export interface ConfigDraftSavedResponse {
   revision: number;
   saved_at_unix_secs: number;

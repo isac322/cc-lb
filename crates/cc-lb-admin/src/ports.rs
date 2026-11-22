@@ -114,12 +114,3 @@ pub trait SubscriptionQuotaIngestionPort: Send + Sync {
         observed_at: SystemTime,
     );
 }
-
-#[derive(Debug)]
-pub struct RetainedPartialSnapshot {
-    pub payload: Vec<u8>,
-}
-
-pub trait RetainedPartialPort: Send + Sync {
-    fn retained_partial(&self, event_id: &str) -> Option<RetainedPartialSnapshot>;
-}

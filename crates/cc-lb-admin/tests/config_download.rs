@@ -14,9 +14,7 @@ const EFFECTIVE_FAILURE_CHILD: &str = "CC_LB_CONFIG_DOWNLOAD_EFFECTIVE_FAILURE_C
 async fn validated_download_restores_secret_only_in_attachment_and_audits_without_payload() {
     let (dir, storage) = temp_storage().await;
     let secret = "postgres://download-user:download-password@localhost/private-db";
-    let raw = format!(
-        "[storage]\nkind = \"postgres\"\nurl = \"{secret}\"\n\n[cluster]\ninstance_url = \"https://node.example\"\n"
-    );
+    let raw = format!("[storage]\nkind = \"postgres\"\nurl = \"{secret}\"\n");
     let path = dir.path().join("cc-lb.toml");
     fs::write(&path, &raw).unwrap();
     let config = cc_lb_config::Config::from_stored_toml(&raw).unwrap();

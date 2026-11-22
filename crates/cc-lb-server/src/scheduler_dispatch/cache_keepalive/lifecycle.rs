@@ -46,7 +46,6 @@ pub(super) fn publish_renewal_lifecycle(
             model: Some(input.model.to_owned()),
             stream: false,
             body_bytes: 0,
-            cache_control_block_count: None,
             cache_breakpoints: Vec::new(),
             cache_prefix_hash: None,
             native_cache: None,

@@ -73,11 +73,7 @@ pub(crate) fn expand(args: PluginArgs, mut module: ItemMod) -> TokenStream2 {
         Err(error) => return error.to_compile_error(),
     };
 
-    let metadata_section = if handlers.iter().any(|handler| handler.provider.is_some()) {
-        "cc_lb.plugin.v2"
-    } else {
-        "cc_lb.plugin.v1"
-    };
+    let metadata_section = "cc_lb.plugin.v2";
 
     quote! {
         #module
@@ -94,19 +90,15 @@ pub(crate) fn expand(args: PluginArgs, mut module: ItemMod) -> TokenStream2 {
 
 fn reject_duplicates(handlers: &[DiscoveredHandler]) -> syn::Result<()> {
     for (idx, handler) in handlers.iter().enumerate() {
-        if handlers.iter().skip(idx + 1).any(|other| {
-            other.kind == handler.kind
-                && other
-                    .provider
-                    .unwrap_or(crate::args::ProviderFamily::Anthropic)
-                    == handler
-                        .provider
-                        .unwrap_or(crate::args::ProviderFamily::Anthropic)
-        }) {
+        if handlers
+            .iter()
+            .skip(idx + 1)
+            .any(|other| other.kind == handler.kind && other.provider == handler.provider)
+        {
             return Err(Error::new_spanned(
                 &handler.fn_ident,
                 format!(
-                    "duplicate handler entrypoint `{}` — each (hook, provider) may appear once; legacy handlers occupy Anthropic",
+                    "duplicate handler entrypoint `{}` — each (hook, provider) may appear once",
                     handler.kind.metadata_key(handler.provider)
                 ),
             ));
@@ -205,9 +197,9 @@ mod tests {
     #[test]
     fn qualified_handlers_emit_provider_exports_and_one_shared_schema() {
         let module = module(quote! {
-            #[handler(shape, provider = "openai", wire = 1, description = "OpenAI", usage = "Test")]
+            #[handler(shape, provider = "openai", wire = 2, description = "OpenAI", usage = "Test")]
             fn openai(req: ShapeRequest) -> ShapeResponse { req.into() }
-            #[handler(shape, provider = "gemini", wire = 1, description = "Gemini", usage = "Test")]
+            #[handler(shape, provider = "gemini", wire = 2, description = "Gemini", usage = "Test")]
             fn gemini(req: ShapeRequest) -> ShapeResponse { req.into() }
         });
         let handlers = collect_handlers(&module).expect("handlers collected");
@@ -217,8 +209,8 @@ mod tests {
             1
         );
         let metadata = plugin_metadata_json(&plugin_args(), &handlers);
-        assert!(metadata.contains(r#""shape_openai":{"wire_version":1"#));
-        assert!(metadata.contains(r#""shape_gemini":{"wire_version":1"#));
+        assert!(metadata.contains(r#""shape_openai":{"wire_version":2"#));
+        assert!(metadata.contains(r#""shape_gemini":{"wire_version":2"#));
 
         let expanded = expand(plugin_args(), module);
         let file: syn::File =
@@ -253,11 +245,12 @@ mod tests {
         assert!(!exports.iter().any(|name| name == "cc_lb_shape"));
         assert!(expanded.to_string().contains("\"cc_lb.plugin.v2\""));
     }
+
     #[test]
-    fn wire_two_provider_hooks_emit_versioned_schema_statics_and_envelope_export() {
+    fn filter_v3_and_envelope_hooks_emit_versioned_schema_statics_and_exports() {
         let module = module(quote! {
-            #[handler(shape, wire = 1, description = "Legacy", usage = "Test")]
-            fn legacy_shape(req: ShapeRequest) -> ShapeResponse { req.into() }
+            #[handler(filter, provider = "anthropic", wire = 3, description = "Anthropic V3", usage = "Test")]
+            fn anthropic_filter(req: ::cc_lb_plugin_wire::v3::FilterRequest) -> ::cc_lb_plugin_wire::v2::FilterResponse { req.into() }
             #[handler(shape, provider = "openai", wire = 2, description = "OpenAI V2", usage = "Test")]
             fn openai_shape(req: ::cc_lb_plugin_wire::v2::ShapeRequest) -> ::cc_lb_plugin_wire::v2::ShapeResponse { req.into() }
             #[handler(shape_envelope_gemini, provider = "gemini", wire = 2, description = "Gemini envelope", usage = "Test")]
@@ -269,22 +262,26 @@ mod tests {
             3
         );
         let metadata = plugin_metadata_json(&plugin_args(), &handlers);
-        assert!(metadata.contains(r#""shape":{"wire_version":1"#));
+        assert!(metadata.contains(r#""filter_anthropic":{"wire_version":3"#));
         assert!(metadata.contains(r#""shape_openai":{"wire_version":2"#));
         assert!(metadata.contains(r#""shape_envelope_gemini":{"wire_version":2"#));
 
         let expanded = expand(plugin_args(), module).to_string();
-        assert!(expanded.contains("CC_LB_SCHEMA_HASH_SHAPE_V1"));
+        assert!(expanded.contains("CC_LB_SCHEMA_HASH_FILTER_V3"));
         assert!(expanded.contains("CC_LB_SCHEMA_HASH_SHAPE_V2"));
+        assert!(expanded.contains("CC_LB_SCHEMA_HASH_SHAPE_ENVELOPE_GEMINI_V2"));
+        assert!(expanded.contains("run_filter_v3"));
+        assert!(expanded.contains("cc_lb_filter_anthropic"));
         assert!(expanded.contains("cc_lb_shape_envelope_gemini"));
+        assert!(expanded.contains("\"cc_lb.plugin.v2\""));
     }
 
     #[test]
     fn duplicate_provider_handler_emits_compile_error() {
         let module = module(quote! {
-            #[handler(shape, provider = "openai", wire = 1, description = "One", usage = "Test")]
+            #[handler(shape, provider = "openai", wire = 2, description = "One", usage = "Test")]
             fn one() {}
-            #[handler(shape, provider = "openai", wire = 1, description = "Two", usage = "Test")]
+            #[handler(shape, provider = "openai", wire = 2, description = "Two", usage = "Test")]
             fn two() {}
         });
         let expanded = expand(plugin_args(), module).to_string();
@@ -294,37 +291,17 @@ mod tests {
     }
 
     #[test]
-    fn legacy_handler_keeps_export_section_and_metadata() {
-        let module = module(quote! {
-            #[handler(filter, wire = 1, description = "Filter", usage = "Test")]
-            fn filter() {}
-        });
-        let handlers = collect_handlers(&module).expect("handler collected");
-        assert_eq!(
-            plugin_metadata_json(&plugin_args(), &handlers),
-            r#"{"name":"test-plugin","version":"1.0.0","description":"Test plugin","usage":"Test only","hooks":{"filter":{"wire_version":1,"description":"Filter","usage":"Test","mode":"active"}}}"#
-        );
-        let expanded = expand(plugin_args(), module).to_string();
-        assert!(expanded.contains("fn cc_lb_filter"));
-        assert!(!expanded.contains("cc_lb_filter_anthropic"));
-        assert!(expanded.contains("\"cc_lb.plugin.v1\""));
-        assert!(!expanded.contains("\"cc_lb.plugin.v2\""));
-    }
-
-    #[test]
-    fn legacy_and_qualified_anthropic_overlap_is_compile_error() {
-        for kind in [
-            "filter",
-            "shape",
-            "transform_response",
-            "transform_sse_event",
+    fn missing_provider_emits_compile_error() {
+        for (kind, wire) in [
+            ("filter", 3u8),
+            ("shape", 2),
+            ("transform_response", 2),
+            ("transform_sse_event", 2),
         ] {
             let kind = syn::Ident::new(kind, Span::call_site());
             let module = module(quote! {
-                #[handler(#kind, wire = 1, description = "Legacy", usage = "Test")]
-                fn legacy() {}
-                #[handler(#kind, provider = "anthropic", wire = 1, description = "New", usage = "Test")]
-                fn qualified() {}
+                #[handler(#kind, wire = #wire, description = "Bare", usage = "Test")]
+                fn bare() {}
             });
             assert!(
                 expand(plugin_args(), module)
@@ -335,13 +312,13 @@ mod tests {
     }
 
     #[test]
-    fn legacy_and_other_provider_hooks_can_coexist() {
+    fn multiple_provider_filter_v3_hooks_share_schema_and_emit_v2_metadata() {
         let module = module(quote! {
-            #[handler(filter, wire = 1, description = "Legacy Anthropic", usage = "Test")]
-            fn legacy() {}
-            #[handler(filter, provider = "openai", wire = 1, description = "OpenAI", usage = "Test")]
+            #[handler(filter, provider = "anthropic", wire = 3, description = "Anthropic", usage = "Test")]
+            fn anthropic() {}
+            #[handler(filter, provider = "openai", wire = 3, description = "OpenAI", usage = "Test")]
             fn openai() {}
-            #[handler(filter, provider = "gemini", wire = 1, description = "Gemini", usage = "Test")]
+            #[handler(filter, provider = "gemini", wire = 3, description = "Gemini", usage = "Test")]
             fn gemini() {}
         });
         let handlers = collect_handlers(&module).expect("handlers collected");
@@ -352,7 +329,7 @@ mod tests {
         );
         let expanded = expand(plugin_args(), module).to_string();
         assert!(!expanded.contains("compile_error"));
-        assert!(expanded.contains("fn cc_lb_filter "));
+        assert!(expanded.contains("fn cc_lb_filter_anthropic "));
         assert!(expanded.contains("fn cc_lb_filter_openai "));
         assert!(expanded.contains("fn cc_lb_filter_gemini "));
         assert!(expanded.contains("\"cc_lb.plugin.v2\""));

@@ -356,7 +356,7 @@ async fn openai_oauth_public_transcription_compatibility() {
     let (st, _, _) = admin(
         &c,
         &s,
-        Method::PUT,
+        Method::PATCH,
         &format!("/admin/v1/principals/{id}"),
         Some(body),
         etag.as_deref(),

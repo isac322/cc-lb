@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use cc_lb_storage_api::{
-    MetaStore, MetadataTierMappingOverrideRecord, PlanTierRatioRecord, PlanTierStore,
-    TierResolutionSource, UpstreamPlanTierRecord,
-};
+use cc_lb_storage_api::{MetaStore, PlanTierStore, TierResolutionSource, UpstreamPlanTierRecord};
 use sqlx::AssertSqlSafe;
 use uuid::Uuid;
 
@@ -33,77 +30,12 @@ pub(super) async fn exercise_plan_tier_store(storage: &SqliteStorage) {
             .iter()
             .any(|record| record.tier_key == "max_5x" && record.pro_relative_ratio == 5.0)
     );
-
-    let changed_ratio = PlanTierRatioRecord {
-        tier_key: "max_5x".to_owned(),
-        pro_relative_ratio: 4.5,
-        effective_from_unix_millis: 1_000,
-        effective_to_unix_millis: None,
-        provenance: "test".to_owned(),
-        created_at_unix_millis: 1_000,
-    };
-    storage
-        .upsert_plan_tier_ratio(&changed_ratio)
-        .await
-        .expect("change ratio");
-    let current = storage
-        .list_current_plan_tier_ratios()
-        .await
-        .expect("current ratios");
-    let before_change = storage
-        .list_plan_tier_ratios_as_of(999)
-        .await
-        .expect("as-of ratios");
-    assert_eq!(
-        current
-            .iter()
-            .find(|record| record.tier_key == "max_5x")
-            .expect("current max_5x")
-            .pro_relative_ratio,
-        4.5
-    );
-    assert_eq!(
-        before_change
-            .iter()
-            .find(|record| record.tier_key == "max_5x")
-            .expect("old max_5x")
-            .pro_relative_ratio,
-        5.0
-    );
-    let ratio_rows = table_count(storage.pool(), "plan_tier_ratio_history_v1").await;
-    storage
-        .upsert_plan_tier_ratio(&changed_ratio)
-        .await
-        .expect("idempotent ratio");
-    assert_eq!(
-        table_count(storage.pool(), "plan_tier_ratio_history_v1").await,
-        ratio_rows
-    );
-
-    let override_record = MetadataTierMappingOverrideRecord {
-        organization_type: None,
-        rate_limit_tier: None,
-        seat_tier: None,
-        tier_key: "pro".to_owned(),
-        effective_from_unix_millis: 2_000,
-        effective_to_unix_millis: None,
-        provenance: "test".to_owned(),
-        created_at_unix_millis: 2_000,
-    };
-    storage
-        .upsert_metadata_tier_override(&override_record)
-        .await
-        .expect("insert override");
-    assert_eq!(
+    assert!(
         storage
             .list_current_metadata_tier_overrides()
             .await
-            .expect("current overrides"),
-        vec![override_record]
-    );
-    assert_eq!(
-        raw_override_key(storage.pool()).await,
-        (String::new(), String::new(), String::new())
+            .expect("current overrides")
+            .is_empty()
     );
 
     let upstream_id = Uuid::from_u128(42);
@@ -170,11 +102,4 @@ pub(super) async fn table_count(pool: &sqlx::SqlitePool, table: &str) -> i64 {
         .fetch_one(pool)
         .await
         .expect("count table")
-}
-
-pub(super) async fn raw_override_key(pool: &sqlx::SqlitePool) -> (String, String, String) {
-    sqlx::query_as("SELECT organization_type, rate_limit_tier, seat_tier FROM metadata_tier_mapping_override_v1 WHERE tier_key = 'pro'")
-        .fetch_one(pool)
-        .await
-        .expect("raw override key")
 }

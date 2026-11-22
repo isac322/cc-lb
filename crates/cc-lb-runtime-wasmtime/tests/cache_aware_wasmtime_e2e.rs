@@ -1,25 +1,17 @@
 //! End-to-end integration test against the wasm-compiled
 //! `cache-aware-wasmtime` plugin.
-//!
-//! Phase 1 W7 verification: the host inspect + register + call_filter
-//! path round-trips with a real plugin built by the W4 PDK macros and
-//! sees the BLAKE3 schema hash + required exports planted by the
-//! schema/plugin custom sections.
-//!
-//! The test assumes `cargo build --target wasm32-unknown-unknown
-//! --release -p cache-aware-wasmtime` has run beforehand. The
-//! `wasm32-unknown-unknown` toolchain is part of the standard dev
-//! setup per docs, so we don't shell out to cargo from the test.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cc_lb_plugin_wire::{
-    ArchivedFilterResponse, CachePricingSummary, FilterRequest, FilterResponse, Principal,
+use cc_lb_plugin_wire::v2::{
+    ArchivedFilterResponse, CachePricingSummary, Claim, FilterResponse, Principal,
     UpstreamCandidate,
 };
-use cc_lb_runtime_wasmtime::WasmtimeRuntime;
-use cc_lb_runtime_wasmtime::{RuntimeSlotKey, RuntimeSlotRole};
+use cc_lb_plugin_wire::v3::{FilterRequest, NativeCachePricing, NativeCachePricingProvider};
+use cc_lb_runtime_wasmtime::{
+    RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch, WasmtimeRuntime,
+};
 use rkyv::rancor::Error;
 use rkyv::util::AlignedVec;
 
@@ -49,7 +41,6 @@ fn load_wasm_or_skip() -> Option<Vec<u8>> {
 }
 
 fn fixture_request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRequest {
-    use cc_lb_plugin_wire::Claim;
     let claims: Box<[Claim]> = match keep_k {
         Some(k) => Box::new([Claim {
             key: Box::from("keep_k"),
@@ -63,6 +54,7 @@ fn fixture_request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRe
             upstream_id: Box::from(*id),
             name: format!("upstream-{id}").into_boxed_str(),
             kind: Box::from("anthropic_api_key"),
+            base_url: None,
             observed_at_unix_secs: 0,
             predicted_cache_read_tokens: *p,
             predicted_cache_creation_tokens_5m: 0,
@@ -72,6 +64,7 @@ fn fixture_request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRe
             organization_type: Box::from(""),
             rate_limit_tier: Box::from(""),
             seat_tier: Box::from(""),
+            subscription_quotas: Box::new([]),
         })
         .collect::<Vec<_>>()
         .into_boxed_slice();
@@ -86,6 +79,11 @@ fn fixture_request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRe
             cache_creation_5m_micros_per_million: None,
             cache_creation_1h_micros_per_million: None,
             cache_read_micros_per_million: None,
+        },
+        native_pricing: NativeCachePricing {
+            version: 1,
+            provider: NativeCachePricingProvider::Anthropic,
+            rates: Box::new([]),
         },
         method: Box::from("POST"),
         path: Box::from("/v1/messages"),
@@ -117,9 +115,10 @@ fn cache_aware_wasmtime_round_trips_filter() {
 
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let slot_key = RuntimeSlotKey::global("cache-aware-wasmtime", RuntimeSlotRole::Filter);
-    runtime
-        .register_filter(slot_key.clone(), "cache-aware-wasmtime", &wasm)
+    let slot = runtime
+        .register_filter(slot_key, "cache-aware-wasmtime", &wasm)
         .expect("inspect + register must accept the plugin");
+    let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
 
     let req = fixture_request(
         Some(2),
@@ -127,8 +126,8 @@ fn cache_aware_wasmtime_round_trips_filter() {
     );
     let in_bytes = rkyv::to_bytes::<Error>(&req).expect("rkyv encode request");
 
-    let out_bytes = runtime
-        .call_filter(&slot_key, in_bytes.as_slice())
+    let out_bytes = dispatch
+        .call_filter_scoped(in_bytes.as_slice(), <[u8]>::to_vec)
         .expect("filter call succeeds");
 
     let resp = decode_response(&out_bytes);
@@ -142,7 +141,6 @@ fn cache_aware_wasmtime_round_trips_filter() {
         .collect();
     assert_eq!(accepted.len(), 2, "keep_k=2 keeps two candidates");
 
-    // Top two by predicted_cache_read_tokens are bbbb(200) and dddd(80).
     let accepted: std::collections::BTreeSet<String> = accepted.into_iter().collect();
     let expected: std::collections::BTreeSet<String> =
         ["bbbb".to_owned(), "dddd".to_owned()].into_iter().collect();
@@ -157,15 +155,16 @@ fn cache_aware_wasmtime_default_keep_k_keeps_one() {
 
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let slot_key = RuntimeSlotKey::global("cache-aware-wasmtime-default", RuntimeSlotRole::Filter);
-    runtime
-        .register_filter(slot_key.clone(), "cache-aware-wasmtime", &wasm)
+    let slot = runtime
+        .register_filter(slot_key, "cache-aware-wasmtime", &wasm)
         .expect("register");
+    let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
 
     let req = fixture_request(None, &[("a", 10), ("b", 100), ("c", 50)]);
     let in_bytes = rkyv::to_bytes::<Error>(&req).expect("rkyv encode");
 
-    let out_bytes = runtime
-        .call_filter(&slot_key, in_bytes.as_slice())
+    let out_bytes = dispatch
+        .call_filter_scoped(in_bytes.as_slice(), <[u8]>::to_vec)
         .expect("filter");
 
     let resp = decode_response(&out_bytes);

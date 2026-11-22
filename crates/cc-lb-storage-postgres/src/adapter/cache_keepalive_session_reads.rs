@@ -1,15 +1,14 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    CacheKeepaliveDecisionRecord, CacheKeepaliveSessionCursor, CacheKeepaliveSessionFilter,
-    CacheKeepaliveSessionListItem, CacheKeepaliveSessionListQuery, CacheKeepaliveSessionPage,
-    CacheKeepaliveSessionReadStore, CacheKeepaliveSummaryInput, CacheKeepaliveTurnRecord,
-    StorageError, StorageResult,
+    CacheKeepaliveSessionCursor, CacheKeepaliveSessionFilter, CacheKeepaliveSessionListItem,
+    CacheKeepaliveSessionListQuery, CacheKeepaliveSessionPage, CacheKeepaliveSessionReadStore,
+    CacheKeepaliveTurnRecord, StorageError, StorageResult,
 };
 use sqlx::{Postgres, QueryBuilder, Row};
 
 use super::{
     PostgresStorage,
-    cache_keepalive_session_read_row::{decision_from_row, list_item_from_row, turn_from_row},
+    cache_keepalive_session_read_row::{list_item_from_row, turn_from_row},
     cache_keepalive_sessions::row_to_record,
     u64_to_i64,
 };
@@ -310,16 +309,6 @@ const VISIBLE_DECISION_ANTI_JOIN: &str = " AND NOT EXISTS (\
     SELECT 1 FROM cache_keepalive_turns turn_row \
     WHERE turn_row.source_ref_id = cache_keepalive_decisions.source_ref_id\
 )";
-
-const RECENT_VISIBLE_DECISION_COUNT_SQL: &str = "\
-SELECT COUNT(*) \
-FROM cache_keepalive_decisions \
-WHERE principal_id = $1 \
-  AND last_message_at_ms >= $2 \
-  AND NOT EXISTS (\
-      SELECT 1 FROM cache_keepalive_turns turn_row \
-      WHERE turn_row.source_ref_id = cache_keepalive_decisions.source_ref_id\
-  )";
 
 const LIST_TURNS_FOR_SESSIONS_SQL: &str = "
 SELECT
@@ -636,45 +625,6 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
         Ok(CacheKeepaliveSessionPage { rows, next_cursor })
     }
 
-    async fn read_cache_keepalive_summary_input(
-        &self,
-        principal_id: &str,
-        cutoff_ms: u64,
-    ) -> StorageResult<CacheKeepaliveSummaryInput> {
-        let cutoff_ms = query_u64_to_i64(
-            cutoff_ms,
-            "cache_keepalive_summary_cutoff_ms",
-            "value exceeds i64::MAX",
-        )?;
-        let mut sessions_query = QueryBuilder::<Postgres>::new("");
-        push_session_entry_select(&mut sessions_query, None);
-        sessions_query.push(" FROM cache_keepalive_sessions WHERE principal_id = ");
-        sessions_query.push_bind(principal_id);
-        sessions_query.push(" ORDER BY last_message_at_ms DESC, entry_id ASC");
-        let sessions = sessions_query
-            .build()
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?
-            .into_iter()
-            .map(list_item_from_row)
-            .collect::<StorageResult<Vec<CacheKeepaliveSessionListItem>>>()?;
-        let recent_decisions = sqlx::query_scalar::<_, i64>(RECENT_VISIBLE_DECISION_COUNT_SQL)
-            .bind(principal_id)
-            .bind(cutoff_ms)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?;
-        let recent_decisions =
-            u64::try_from(recent_decisions).map_err(|_| StorageError::Corrupted {
-                message: "negative cache keepalive recent decision count".to_owned(),
-            })?;
-        Ok(CacheKeepaliveSummaryInput {
-            sessions,
-            recent_decisions,
-        })
-    }
-
     async fn get_cache_keepalive_list_item(
         &self,
         principal_id: &str,
@@ -742,20 +692,6 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
             .await
             .map_err(map_sqlx_error)?;
         rows.into_iter().map(turn_from_row).collect()
-    }
-
-    async fn get_cache_keepalive_decision_for_principal(
-        &self,
-        principal_id: &str,
-        source_ref_id: &str,
-    ) -> StorageResult<Option<CacheKeepaliveDecisionRecord>> {
-        let row = sqlx::query("SELECT * FROM cache_keepalive_decisions WHERE principal_id = $1 AND source_ref_id = $2")
-            .bind(principal_id)
-            .bind(source_ref_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?;
-        row.map(decision_from_row).transpose()
     }
 
     async fn list_cache_keepalive_evidence_for_activity(

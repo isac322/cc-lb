@@ -1,10 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-pub trait AuditSink: Send + Sync {
-    fn sink_audit(&self, entry: AuditEntry);
-}
-
 /// Filters a recent-first audit query before its limit is applied.
 #[derive(Debug, Clone, Copy)]
 pub enum AuditQueryScope<'a> {

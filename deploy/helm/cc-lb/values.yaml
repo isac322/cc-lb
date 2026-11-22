@@ -116,12 +116,6 @@ config:
     # -- Env var name the server reads the 32-byte (64 hex) master key from.
     keyEnv: CC_LB_MASTER_KEY
 
-  # -- Cross-replica fanout identity. Required for the postgres backend: cc-lb
-  # always runs the pg_notify event fanout there. `instance_url` is injected
-  # from the pod IP at runtime; only the shared token comes from a Secret.
-  cluster:
-    tokenEnv: CC_LB_CLUSTER_TOKEN
-
   # -- Days to retain request events in the database.
   requestEventRetentionDays: 90
 
@@ -150,14 +144,10 @@ secrets:
   # -- REQUIRED token for the chart's static-token admin auth provider unless
   # an existing Secret supplies it.
   adminToken: ""
-  # -- Shared cross-replica fanout token. REQUIRED for the postgres backend
-  # unless existingSecret provides it. Generate with: `openssl rand -hex 32`.
-  clusterToken: ""
   # Key names to read from `existingSecret` (change if your secret differs).
   keys:
     masterKey: CC_LB_MASTER_KEY
     adminToken: CC_LB_ADMIN_TOKEN
-    clusterToken: CC_LB_CLUSTER_TOKEN
 
 # -- Additional environment variables (raw EnvVar list).
 env: []

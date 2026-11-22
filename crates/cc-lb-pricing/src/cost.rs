@@ -1,12 +1,17 @@
+#[cfg(test)]
+use crate::tier_resolver::resolve_native_rate;
 use crate::tier_resolver::{
-    apply_threshold_bands, resolve_native_cached_read_rate, resolve_native_rate,
-    resolve_optional_price, resolve_tier_rate,
+    apply_threshold_bands, resolve_native_cached_read_rate, resolve_optional_price,
+    resolve_tier_rate,
 };
 use crate::{
-    ComputedCostBreakdown, NativePricingLifetime, NativePricingStatus, PricingStatus,
-    ProviderNativePricing, UsdPerMillion, canonical_service_tier, global_catalog,
-    normalize_model_id,
+    ComputedCostBreakdown, NativePricingStatus, PricingStatus, UsdPerMillion,
+    canonical_service_tier, global_catalog, normalize_model_id,
 };
+#[cfg(test)]
+use crate::{NativePricingLifetime, ProviderNativePricing};
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NativeCostBreakdown {
     pub ordinary_input_micros: u64,
@@ -16,6 +21,7 @@ pub struct NativeCostBreakdown {
     pub pricing_status: PricingStatus,
 }
 
+#[cfg(test)]
 impl NativeCostBreakdown {
     pub const fn unknown() -> Self {
         Self {
@@ -31,6 +37,7 @@ impl NativeCostBreakdown {
 /// Computes provider-native cache economics. `write_tokens` contains complete
 /// native write regions; those tokens are deliberately not included in
 /// `ordinary_input_tokens`.
+#[cfg(test)]
 pub fn native_cost_micros(
     pricing: &ProviderNativePricing,
     ordinary_input_tokens: u64,
@@ -108,19 +115,25 @@ pub fn virtual_cost_micros_full(
     cache_read_input: u64,
     service_tier: Option<&str>,
 ) -> ComputedCostBreakdown {
-    virtual_cost_micros_full_with_context(
+    virtual_cost_micros_full_with_context_and_provider_writes(
         model,
         input,
         output,
+        0,
+        0,
         cache_creation_5m_input.saturating_add(cache_creation_1h_input),
         cache_creation_5m_input,
         cache_creation_1h_input,
         cache_read_input,
+        None,
+        None,
+        None,
         service_tier,
     )
     .unwrap_or_else(ComputedCostBreakdown::unknown)
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn virtual_cost_micros_full_with_context(
     model: &str,
@@ -149,6 +162,7 @@ pub fn virtual_cost_micros_full_with_context(
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn virtual_cost_micros_full_with_context_and_images(
     model: &str,

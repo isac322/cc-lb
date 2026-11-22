@@ -28,8 +28,6 @@ parking_lot = "0.13"
 rkyv = { workspace = true, features = ["std", "bytecheck"] }
 blake3 = { workspace = true, features = ["std"] }
 serde.workspace = true
-bytes.workspace = true
-url.workspace = true
 metrics.workspace = true
 
 [dev-dependencies]

@@ -1,5 +1,5 @@
 use cc_lb_domain::PrincipalKindLite;
-use cc_lb_request_log::{CostBreakdown, HeaderSnapshot, RequestCacheState};
+use cc_lb_request_log::{CostBreakdown, HeaderSnapshot};
 use uuid::Uuid;
 
 use crate::*;
@@ -223,11 +223,6 @@ fn kind_labels_cover_every_variant() {
             cost: CostBreakdown::default(),
         }
         .kind(),
-        LifecycleEvent::CacheObserved {
-            event_id: sample_event_id(),
-            cache_state: RequestCacheState::Unknown,
-        }
-        .kind(),
     ];
     assert_eq!(
         labels,
@@ -247,7 +242,6 @@ fn kind_labels_cover_every_variant() {
             "request_terminated",
             "request_activity",
             "priced",
-            "cache_observed",
         ],
     );
 }

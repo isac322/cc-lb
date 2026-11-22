@@ -56,12 +56,6 @@ pub enum AuditPayload {
     UpstreamDelete {
         upstream_id: String,
     },
-    UpstreamEnable {
-        upstream_id: String,
-    },
-    UpstreamDisable {
-        upstream_id: String,
-    },
     UpstreamOauthStart {
         upstream_id: String,
         upstream_name: String,
@@ -195,12 +189,6 @@ impl fmt::Display for AuditPayload {
             }
             AuditPayload::UpstreamDelete { upstream_id } => {
                 write!(f, "upstream_delete(id={})", upstream_id)
-            }
-            AuditPayload::UpstreamEnable { upstream_id } => {
-                write!(f, "upstream_enable(id={})", upstream_id)
-            }
-            AuditPayload::UpstreamDisable { upstream_id } => {
-                write!(f, "upstream_disable(id={})", upstream_id)
             }
             AuditPayload::UpstreamOauthStart {
                 upstream_id,

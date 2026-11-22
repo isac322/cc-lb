@@ -373,14 +373,6 @@ pub fn validate_step_for_range(
     Ok(())
 }
 
-pub async fn build_dashboard_summary(
-    storage: &dyn Storage,
-    range: DashboardRange,
-    now_unix_secs: u64,
-) -> Result<DashboardSummaryResponse, StorageError> {
-    build_dashboard_summary_filtered(storage, range, now_unix_secs, &ProviderScope::none()).await
-}
-
 pub(crate) async fn build_dashboard_summary_filtered(
     storage: &dyn Storage,
     range: DashboardRange,

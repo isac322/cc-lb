@@ -43,8 +43,6 @@ mod composite_signer_factory;
 mod db_unreachable_503;
 #[path = "dispatch_uses_resolved_upstream_base_url.rs"]
 mod dispatch_uses_resolved_upstream_base_url;
-#[path = "doctor_command.rs"]
-mod doctor_command;
 #[path = "dynamic_view_rebind.rs"]
 mod dynamic_view_rebind;
 #[path = "dynamic_view_rebuild_serialization.rs"]

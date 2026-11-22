@@ -56,22 +56,10 @@ fn embedded_asset_response(
         (header::CACHE_CONTROL, cache_control.to_owned()),
         (header::ETAG, etag.clone()),
     ];
-    if if_none_match_matches(headers, &etag) {
+    if crate::response_cache::matches_if_none_match(headers, &etag) {
         return (StatusCode::NOT_MODIFIED, response_headers).into_response();
     }
     (response_headers, content.data).into_response()
-}
-
-fn if_none_match_matches(headers: &HeaderMap, etag: &str) -> bool {
-    headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .any(|token| token == "*" || token == etag)
-        })
 }
 
 #[cfg(all(test, not(debug_assertions)))]

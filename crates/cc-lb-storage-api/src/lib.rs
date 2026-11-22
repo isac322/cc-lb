@@ -78,7 +78,7 @@ pub use warmup_attempts::*;
 
 pub use cc_lb_domain::PrincipalKindLite;
 pub use cc_lb_request_log::{
-    FinalRequestEventUpdate, RequestCacheBreakpoint, RequestCacheBreakpointSource,
-    RequestCacheState, RequestEvent, RequestEventKind, RequestEventPartial, RequestEventPhase,
-    RequestEventUpdate, RequestFunding, RequestProtocol,
+    FinalRequestEventUpdate, RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestEvent,
+    RequestEventKind, RequestEventPartial, RequestEventPhase, RequestEventUpdate, RequestFunding,
+    RequestProtocol,
 };

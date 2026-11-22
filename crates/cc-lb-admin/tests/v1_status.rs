@@ -92,20 +92,6 @@ async fn admin_build_metadata_is_fixture_local_and_auth_boundaries_hold()
             )
             .await?;
         assert_eq!(unauthenticated_status.status(), StatusCode::UNAUTHORIZED);
-
-        let unauthenticated_scheduler = app(state.clone())
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/admin/scheduler/status")
-                    .body(Body::empty())?,
-            )
-            .await?;
-        assert_eq!(unauthenticated_scheduler.status(), StatusCode::UNAUTHORIZED);
-
-        let scheduler_absent =
-            authed_json(app(state), "GET", "/admin/scheduler/status", None).await;
-        assert_eq!(scheduler_absent.0, StatusCode::NOT_IMPLEMENTED);
     }
     Ok(())
 }

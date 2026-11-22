@@ -246,13 +246,6 @@ impl fmt::Debug for CacheKeepaliveHitRefreshRequest {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CacheKeepaliveGenerationCheck {
-    pub generation: u64,
-    pub status: CacheKeepaliveSessionStatus,
-    pub enqueue_state: CacheKeepaliveEnqueueState,
-}
-
 /// A request owner is unique within a leased ordering namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheKeepaliveCompletionTicket {
@@ -401,11 +394,6 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
         now_unix_secs: u64,
     ) -> StorageResult<bool>;
 
-    async fn check_cache_keepalive_generation(
-        &self,
-        session_key_hash: &str,
-    ) -> StorageResult<Option<CacheKeepaliveGenerationCheck>>;
-
     /// Returns the updated row image; a later replacement or cancellation may supersede it.
     async fn reschedule_after_cache_hit(
         &self,
@@ -418,13 +406,6 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
         generation: u64,
         reason: CacheKeepaliveTerminalReason,
         error: Option<&str>,
-        now_unix_secs: u64,
-    ) -> StorageResult<bool>;
-
-    async fn mark_latest_cache_keepalive_terminal(
-        &self,
-        session_key_hash: &str,
-        reason: CacheKeepaliveTerminalReason,
         now_unix_secs: u64,
     ) -> StorageResult<bool>;
 

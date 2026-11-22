@@ -129,7 +129,6 @@ fn admin_state(
         storage: Some(storage.clone()),
         key_store: Some(admin_test_common::key_store(storage)),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
         dynamic_view: holder,
         config: Arc::new(config),

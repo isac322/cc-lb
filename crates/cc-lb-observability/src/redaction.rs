@@ -1,26 +1,16 @@
 use std::borrow::Cow;
-use std::fmt;
 use std::io::{self, Write};
 
-use cc_lb_domain::{
-    CandidateUrgency, InternalError, MAX_ERROR_MESSAGE_LEN, MAX_ROUTING_TRACE_STAGES,
-    MAX_STAGE_NAME_LEN, RoutingTrace, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
-    TerminalDecision, TerminalStrategy,
-};
+use cc_lb_domain::{InternalError, MAX_ERROR_MESSAGE_LEN};
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex, RegexSet};
-use tracing::field::{Field, Visit};
-use tracing::{Event, Id, Metadata, Subscriber};
+use tracing::Metadata;
 use tracing_subscriber::fmt::MakeWriter;
-use tracing_subscriber::layer::{Context, Layer};
-use tracing_subscriber::registry::LookupSpan;
 
 pub const REDACTED: &str = "[REDACTED]";
-pub const ROUTING_TRACE_SIZE_CAP_BYTES: usize = 4 * 1024;
 pub const ROUTING_REASON_MAX_BYTES: usize = MAX_ERROR_MESSAGE_LEN;
 
 const TRUNCATED_SUFFIX: &str = "...[truncated]";
-const ROUTING_TRACE_TRUNCATED_STAGE: &str = "routing_trace_truncated";
 
 /// Masks case-insensitive `key` query parameter values in a URL.
 #[must_use]
@@ -176,20 +166,6 @@ impl Default for RedactionPolicy {
     }
 }
 
-pub fn redact_routing_trace(trace: &RoutingTrace) -> RoutingTrace {
-    let policy = RedactionPolicy::default();
-    let mut redacted = trace.clone();
-
-    for stage in &mut redacted.stages {
-        stage.stage_name = truncate_plain_text(&stage.stage_name, MAX_STAGE_NAME_LEN);
-        if let Some(reason) = &stage.reason {
-            stage.reason = Some(truncate_reason(&policy.redact_text(reason)));
-        }
-    }
-
-    redacted
-}
-
 pub fn redact_internal_errors(errors: &[InternalError]) -> Vec<InternalError> {
     let policy = RedactionPolicy::default();
 
@@ -205,98 +181,8 @@ pub fn redact_internal_errors(errors: &[InternalError]) -> Vec<InternalError> {
         .collect()
 }
 
-pub fn enforce_routing_trace_caps(trace: &RoutingTrace) -> RoutingTrace {
-    let mut capped = trace.clone();
-    normalize_trace_fields(&mut capped);
-
-    let mut removed_stages = 0;
-    if capped.stages.len() > MAX_ROUTING_TRACE_STAGES {
-        removed_stages += capped.stages.len() - MAX_ROUTING_TRACE_STAGES + 1;
-        capped
-            .stages
-            .truncate(MAX_ROUTING_TRACE_STAGES.saturating_sub(1));
-        upsert_truncation_marker(&mut capped, removed_stages);
-    }
-
-    while routing_trace_json_len(&capped) > ROUTING_TRACE_SIZE_CAP_BYTES {
-        if !remove_last_original_stage(&mut capped) {
-            break;
-        }
-        removed_stages += 1;
-        upsert_truncation_marker(&mut capped, removed_stages);
-    }
-
-    capped
-}
-
 pub fn truncate_reason(reason: &str) -> String {
     truncate_with_suffix(reason, ROUTING_REASON_MAX_BYTES)
-}
-
-#[derive(Clone, Debug)]
-pub struct RedactionLayer {
-    policy: RedactionPolicy,
-}
-
-impl RedactionLayer {
-    pub fn new(policy: RedactionPolicy) -> Self {
-        Self { policy }
-    }
-
-    pub fn policy(&self) -> RedactionPolicy {
-        self.policy
-    }
-}
-
-impl Default for RedactionLayer {
-    fn default() -> Self {
-        Self::new(RedactionPolicy::default())
-    }
-}
-
-impl<S> Layer<S> for RedactionLayer
-where
-    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
-{
-    fn on_new_span(&self, attrs: &tracing::span::Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
-        let mut visitor = RedactingVisitor::new(self.policy);
-        attrs.record(&mut visitor);
-
-        if let Some(span) = ctx.span(id) {
-            span.extensions_mut().insert(visitor.into_fields());
-        }
-    }
-
-    fn on_record(&self, span_id: &Id, values: &tracing::span::Record<'_>, ctx: Context<'_, S>) {
-        let mut visitor = RedactingVisitor::new(self.policy);
-        values.record(&mut visitor);
-
-        if let Some(span) = ctx.span(span_id) {
-            let mut extensions = span.extensions_mut();
-            if let Some(fields) = extensions.get_mut::<RedactedFields>() {
-                fields.extend(visitor.into_fields());
-            } else {
-                extensions.insert(visitor.into_fields());
-            }
-        }
-    }
-
-    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        let mut visitor = RedactingVisitor::new(self.policy);
-        event.record(&mut visitor);
-        let _redacted_fields = visitor.into_fields();
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct RedactedFields {
-    values: Vec<(String, String)>,
-}
-
-impl RedactedFields {
-    fn extend(&mut self, other: RedactedFields) {
-        self.values.extend(other.values);
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -384,39 +270,6 @@ where
     }
 }
 
-struct RedactingVisitor {
-    policy: RedactionPolicy,
-    fields: RedactedFields,
-}
-
-impl RedactingVisitor {
-    fn new(policy: RedactionPolicy) -> Self {
-        Self {
-            policy,
-            fields: RedactedFields::default(),
-        }
-    }
-
-    fn into_fields(self) -> RedactedFields {
-        self.fields
-    }
-
-    fn record_value(&mut self, field: &Field, value: &str) {
-        let redacted = self.policy.redact_field_value(field.name(), value);
-        self.fields.values.push((field.name().to_owned(), redacted));
-    }
-}
-
-impl Visit for RedactingVisitor {
-    fn record_str(&mut self, field: &Field, value: &str) {
-        self.record_value(field, value);
-    }
-
-    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        self.record_value(field, &format!("{value:?}"));
-    }
-}
-
 fn redact_known_secret_patterns(value: &str) -> String {
     if let Ok(regex_set) = SECRET_REGEX_SET.as_ref()
         && !regex_set.is_match(value)
@@ -457,215 +310,6 @@ fn redact_text_fields(value: &str, regex: &Lazy<Result<Regex, regex::Error>>) ->
     }
 }
 
-fn normalize_trace_fields(trace: &mut RoutingTrace) {
-    for stage in &mut trace.stages {
-        stage.stage_name = truncate_plain_text(&stage.stage_name, MAX_STAGE_NAME_LEN);
-        if let Some(reason) = &stage.reason {
-            stage.reason = Some(truncate_reason(reason));
-        }
-    }
-}
-
-fn upsert_truncation_marker(trace: &mut RoutingTrace, removed_stages: usize) {
-    let marker = StageDecision {
-        stage_name: ROUTING_TRACE_TRUNCATED_STAGE.to_owned(),
-        upstream_id: None,
-        reason: Some(format!(
-            "routing trace truncated; removed {removed_stages} stage(s)"
-        )),
-        duration_us: 0,
-        subscription_preference: None,
-    };
-
-    if trace
-        .stages
-        .last()
-        .is_some_and(|stage| stage.stage_name == ROUTING_TRACE_TRUNCATED_STAGE)
-    {
-        let last_index = trace.stages.len() - 1;
-        trace.stages[last_index] = marker;
-    } else {
-        trace.stages.push(marker);
-    }
-}
-
-fn remove_last_original_stage(trace: &mut RoutingTrace) -> bool {
-    if trace.stages.is_empty() {
-        return false;
-    }
-
-    if trace
-        .stages
-        .last()
-        .is_some_and(|stage| stage.stage_name == ROUTING_TRACE_TRUNCATED_STAGE)
-    {
-        if trace.stages.len() == 1 {
-            return false;
-        }
-        trace.stages.remove(trace.stages.len() - 2);
-        true
-    } else {
-        trace.stages.pop();
-        true
-    }
-}
-
-fn routing_trace_json_len(trace: &RoutingTrace) -> usize {
-    let mut len = "{\"stages\":[".len();
-
-    for (index, stage) in trace.stages.iter().enumerate() {
-        if index > 0 {
-            len += 1;
-        }
-        len += stage_json_len(stage);
-    }
-
-    len += "]".len();
-    if let Some(terminal_decision) = &trace.terminal_decision {
-        len += ",\"terminal_decision\":".len() + terminal_decision_json_len(terminal_decision);
-    }
-    len + "}".len()
-}
-
-fn stage_json_len(stage: &StageDecision) -> usize {
-    let mut len = "{\"stage_name\":".len() + json_string_len(&stage.stage_name);
-
-    if let Some(upstream_id) = stage.upstream_id {
-        len += ",\"upstream_id\":".len() + json_string_len(&upstream_id.to_string());
-    }
-    if let Some(reason) = &stage.reason {
-        len += ",\"reason\":".len() + json_string_len(reason);
-    }
-    if stage.duration_us != 0 {
-        len += ",\"duration_us\":".len() + stage.duration_us.to_string().len();
-    }
-    if let Some(subscription_preference) = &stage.subscription_preference {
-        len += ",\"subscription_preference\":".len()
-            + subscription_preference_json_len(subscription_preference);
-    }
-    len + "}".len()
-}
-
-fn subscription_preference_json_len(trace: &SubscriptionPreferenceTrace) -> usize {
-    let mut len =
-        "{\"chosen_tier\":".len() + tier_json_len(trace.chosen_tier) + ",\"candidates\":[".len();
-    for (index, candidate) in trace.candidates.iter().enumerate() {
-        if index > 0 {
-            len += 1;
-        }
-        len += candidate_urgency_json_len(candidate);
-    }
-    len += "]".len();
-    if let Some(formula_version) = &trace.formula_version {
-        len += ",\"formula_version\":".len() + json_string_len(formula_version);
-    }
-    if let Some(cache_cost_basis_version) = &trace.cache_cost_basis_version {
-        len += ",\"cache_cost_basis_version\":".len() + json_string_len(cache_cost_basis_version);
-    }
-    if let Some(formula_winner_upstream_id) = trace.formula_winner_upstream_id {
-        len += ",\"formula_winner_upstream_id\":".len()
-            + json_string_len(&formula_winner_upstream_id.to_string());
-    }
-    if let Some(kept_upstream_id) = trace.kept_upstream_id {
-        len += ",\"kept_upstream_id\":".len() + json_string_len(&kept_upstream_id.to_string());
-    }
-    if let Some(switch_gate_reason) = &trace.switch_gate_reason {
-        len += ",\"switch_gate_reason\":".len() + json_string_len(switch_gate_reason);
-    }
-    len + "}".len()
-}
-
-fn candidate_urgency_json_len(candidate: &CandidateUrgency) -> usize {
-    "{\"upstream_id\":".len()
-        + json_string_len(&candidate.upstream_id.to_string())
-        + ",\"tier\":".len()
-        + tier_json_len(candidate.tier)
-        + ",\"quota_urgency\":".len()
-        + f64_json_len(candidate.quota_urgency)
-        + ",\"quota_urgency_5h\":".len()
-        + option_f64_json_len(candidate.quota_urgency_5h)
-        + ",\"quota_urgency_7d\":".len()
-        + option_f64_json_len(candidate.quota_urgency_7d)
-        + ",\"quota_urgency_combined\":".len()
-        + option_f64_json_len(candidate.quota_urgency_combined)
-        + ",\"predicted_cache_read_tokens\":".len()
-        + candidate.predicted_cache_read_tokens.to_string().len()
-        + ",\"predicted_cache_creation_tokens_5m\":".len()
-        + candidate
-            .predicted_cache_creation_tokens_5m
-            .to_string()
-            .len()
-        + ",\"predicted_cache_creation_tokens_1h\":".len()
-        + candidate
-            .predicted_cache_creation_tokens_1h
-            .to_string()
-            .len()
-        + ",\"predicted_uncached_input_tokens\":".len()
-        + candidate.predicted_uncached_input_tokens.to_string().len()
-        + ",\"cache_ratio\":".len()
-        + f64_json_len(candidate.cache_ratio)
-        + ",\"warning_multiplier\":".len()
-        + f64_json_len(candidate.warning_multiplier)
-        + ",\"cache_savings_ratio\":".len()
-        + f64_json_len(candidate.cache_savings_ratio)
-        + ",\"estimated_input_cost_micros\":".len()
-        + candidate.estimated_input_cost_micros.to_string().len()
-        + "}".len()
-}
-
-fn tier_json_len(tier: SubscriptionTier) -> usize {
-    match tier {
-        SubscriptionTier::KnownBase => "\"known_base\"".len(),
-        SubscriptionTier::PartialBase => "\"partial_base\"".len(),
-        SubscriptionTier::Overage => "\"overage\"".len(),
-        SubscriptionTier::UnknownProbe => "\"unknown_probe\"".len(),
-    }
-}
-
-fn f64_json_len(value: f64) -> usize {
-    if value.is_finite() { 24 } else { 4 }
-}
-
-fn option_f64_json_len(value: Option<f64>) -> usize {
-    value.map_or("null".len(), f64_json_len)
-}
-
-fn terminal_decision_json_len(terminal_decision: &TerminalDecision) -> usize {
-    let mut len = "{".len();
-    let mut needs_comma = false;
-
-    if let Some(upstream_id) = terminal_decision.upstream_id {
-        len += "\"upstream_id\":".len() + json_string_len(&upstream_id.to_string());
-        needs_comma = true;
-    }
-
-    if needs_comma {
-        len += 1;
-    }
-    len += "\"strategy\":".len()
-        + json_string_len(terminal_strategy_json(&terminal_decision.strategy));
-
-    len + "}".len()
-}
-
-fn terminal_strategy_json(strategy: &TerminalStrategy) -> &'static str {
-    match strategy {
-        TerminalStrategy::FirstPick => "first-pick",
-        TerminalStrategy::Random => "random",
-    }
-}
-
-fn json_string_len(value: &str) -> usize {
-    value.chars().fold(2, |len, ch| {
-        len + match ch {
-            '"' | '\\' => 2,
-            '\u{08}' | '\u{0c}' | '\n' | '\r' | '\t' => 2,
-            '\u{00}'..='\u{1f}' => 6,
-            ch => ch.len_utf8(),
-        }
-    })
-}
-
 fn truncate_with_suffix(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_owned();
@@ -678,15 +322,6 @@ fn truncate_with_suffix(value: &str, max_bytes: usize) -> String {
     let value_limit = max_bytes - TRUNCATED_SUFFIX.len();
     let end = floor_char_boundary(value, value_limit);
     format!("{}{}", &value[..end], TRUNCATED_SUFFIX)
-}
-
-fn truncate_plain_text(value: &str, max_bytes: usize) -> String {
-    if value.len() <= max_bytes {
-        return value.to_owned();
-    }
-
-    let end = floor_char_boundary(value, max_bytes);
-    value[..end].to_owned()
 }
 
 fn floor_char_boundary(value: &str, max_bytes: usize) -> usize {

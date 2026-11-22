@@ -462,6 +462,7 @@ impl GeminiSubscriptionSigner {
         Self::new_with_policy(access_token, project_id, expires_at_unix_secs, true, clock)
     }
 
+    #[cfg(test)]
     pub fn new_refreshing(
         access_token: &str,
         project_id: Option<&str>,
@@ -580,6 +581,7 @@ impl GeminiSubscriptionSigner {
     }
 
     /// Builds the Antigravity profile with endpoint and headers parsed once.
+    #[cfg(test)]
     pub fn new_antigravity(
         access_token: &str,
         project_id: Option<&str>,
@@ -599,6 +601,7 @@ impl GeminiSubscriptionSigner {
         )
     }
 
+    #[cfg(test)]
     pub fn new_antigravity_refreshing(
         access_token: &str,
         project_id: Option<&str>,
@@ -618,6 +621,7 @@ impl GeminiSubscriptionSigner {
         )
     }
 
+    #[cfg(test)]
     fn new_antigravity_with_policy(
         access_token: &str,
         project_id: Option<&str>,

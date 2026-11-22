@@ -34,10 +34,6 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    Doctor {
-        #[command(subcommand)]
-        command: DoctorCommand,
-    },
     Admin {
         #[arg(long, value_name = "URL")]
         base_url: String,
@@ -81,11 +77,6 @@ pub enum ConfigCommand {
         #[arg(long, value_name = "PATH")]
         config: PathBuf,
     },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum DoctorCommand {
-    ListAbandonedChainEntries,
 }
 
 #[cfg(test)]

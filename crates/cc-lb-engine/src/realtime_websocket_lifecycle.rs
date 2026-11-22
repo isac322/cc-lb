@@ -94,7 +94,6 @@ impl Lifecycle {
                     model: model.map(str::to_owned),
                     stream: true,
                     body_bytes: setup.len() as u64,
-                    cache_control_block_count: None,
                     thinking_budget_tokens: None,
                     reasoning_effort: None,
                     thinking_level: None,

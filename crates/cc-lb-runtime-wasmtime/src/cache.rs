@@ -153,7 +153,7 @@ where
     .ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
         reason: format!(
             "plugin does not export `{}` — slot kind mismatch (inspect should have caught this)",
-            hook.export_name()
+            hook.as_str()
         ),
     })?;
 
@@ -197,7 +197,7 @@ where
     let packed = hook_fn
         .call(&mut *store, (in_ptr, input_len))
         .map_err(|e| WasmtimeRuntimeError::GuestTrap {
-            phase: hook.export_name(),
+            phase: hook.as_str(),
             source: anyhow::Error::from(e),
         })?;
 
@@ -211,7 +211,7 @@ where
         return Err(WasmtimeRuntimeError::ModuleRejected {
             reason: format!(
                 "{}: guest returned invalid (ptr={out_ptr}, len={out_len})",
-                hook.export_name()
+                hook.as_str()
             ),
         });
     }

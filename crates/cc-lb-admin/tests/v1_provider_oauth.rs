@@ -110,7 +110,6 @@ impl Fixture {
             storage: Some(storage.clone()),
             key_store: Some(admin_test_common::key_store(storage.clone())),
             aead: aead.clone(),
-            limit_engine: admin_test_common::limit_engine_with_clock(clock_handle.clone()),
             lifecycle: None,
             lazy_refresher: None,
             runtime: None,

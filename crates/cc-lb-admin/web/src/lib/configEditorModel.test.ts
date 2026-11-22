@@ -492,7 +492,7 @@ describe('resolved editor model', () => {
     );
 
     expect(CONFIG_EDITOR_CATEGORIES).toHaveLength(7);
-    expect(new Set(roots).size).toBe(23);
+    expect(new Set(roots).size).toBe(22);
     expect(roots).toEqual(
       expect.arrayContaining([
         'listener',
@@ -509,7 +509,6 @@ describe('resolved editor model', () => {
         'observability',
         'admin',
         'event_bus',
-        'cluster',
         'oauth',
         'openai_oauth_compat',
         'subscription_quota',

@@ -1,6 +1,7 @@
 use cc_lb_pdk_wasmtime::__private::{DEFAULT_ALIGN, alloc_bytes, free_bytes};
-use cc_lb_pdk_wasmtime::types::v1::{
-    CachePricingSummary, FilterRequest, FilterResponse, Principal,
+use cc_lb_pdk_wasmtime::types::v2::{CachePricingSummary, FilterResponse, Principal};
+use cc_lb_pdk_wasmtime::types::v3::{
+    FilterRequest, NativeCachePricing, NativeCachePricingProvider,
 };
 use rkyv::rancor::Error as RkyvError;
 
@@ -16,6 +17,11 @@ fn request() -> FilterRequest {
             cache_creation_5m_micros_per_million: None,
             cache_creation_1h_micros_per_million: None,
             cache_read_micros_per_million: None,
+        },
+        native_pricing: NativeCachePricing {
+            version: 1,
+            provider: NativeCachePricingProvider::Anthropic,
+            rates: Box::new([]),
         },
         method: Box::from("POST"),
         path: Box::from("/v1/messages"),
@@ -54,7 +60,7 @@ fn free_response(packed: u64) {
 #[test]
 fn run_filter_dispatches_owned_service_tier() {
     let (ptr, len) = copy_to_guest(&request());
-    let packed = cc_lb_pdk_wasmtime::__private::run_filter(ptr, len, |request| {
+    let packed = cc_lb_pdk_wasmtime::__private::run_filter_v3(ptr, len, |request| {
         assert_eq!(request.service_tier.as_deref(), Some("priority"));
         FilterResponse {
             results: Box::new([]),
@@ -67,7 +73,7 @@ fn run_filter_dispatches_owned_service_tier() {
 #[test]
 fn run_filter_dispatches_archived_service_tier() {
     let (ptr, len) = copy_to_guest(&request());
-    let packed = cc_lb_pdk_wasmtime::__private::run_filter_view(ptr, len, |request| {
+    let packed = cc_lb_pdk_wasmtime::__private::run_filter_v3_view(ptr, len, |request| {
         let tier: Option<&str> = request.service_tier.as_ref().map(|value| &**value);
         assert_eq!(tier, Some("priority"));
         FilterResponse {

@@ -1,34 +1,26 @@
 #![cfg(feature = "postgres")]
 
-// A producer stores oversized partials in local retention and emits a small PG
-// NOTIFY marker. A second instance receives that marker, fetches the retained
-// payload over the internal HTTP endpoint, then republishes it to its local bus.
+// Producers trim oversized optional metadata from partials so every event fits
+// within Postgres NOTIFY's 8KB wire budget and is delivered inline without HTTP
+// callbacks; irreducibly oversized partials are dropped and counted.
 
 use std::error::Error;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_admin::internal_partials::{InternalPartialsState, router as internal_partials_router};
-use cc_lb_admin::ports::{RetainedPartialPort, RetainedPartialSnapshot};
 use cc_lb_control::{InMemoryBus, RequestEventBus};
-use cc_lb_engine::{PartialRetentionCache, PgListener, PgNotifier};
+use cc_lb_engine::{PgListener, PgNotifier};
 use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
 use futures_util::FutureExt as _;
 use metrics_exporter_prometheus::PrometheusHandle;
-use secrecy::SecretString;
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use tokio::net::TcpListener;
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 
-const CLUSTER_TOKEN: &str = "test-cluster-token";
 const LARGE_PAYLOAD_MIN_BYTES: usize = 7_500;
-// CI latency budgets (not correctness bounds): positive-path SSE receipt +
-// warmup normally finish fast, but under llvm-cov plus a co-scheduled heavy
-// build on the shared runner they can overrun. Scale by
-// CC_LB_TEST_READY_TIMEOUT_SECS (120 in CI), the repo's convention.
-// NEGATIVE_RECEIVE_TIMEOUT stays fixed: it bounds a "confirm nothing arrives"
-// wait, which contention cannot make flake (an absent event never appears).
+const NEGATIVE_RECEIVE_TIMEOUT: Duration = Duration::from_millis(500);
+const WARMUP_PROBE_INTERVAL: Duration = Duration::from_millis(100);
+
 fn receive_timeout() -> Duration {
     std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
         .ok()
@@ -36,7 +28,7 @@ fn receive_timeout() -> Duration {
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(15))
 }
-const NEGATIVE_RECEIVE_TIMEOUT: Duration = Duration::from_millis(500);
+
 fn warmup_timeout() -> Duration {
     std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
         .ok()
@@ -44,57 +36,11 @@ fn warmup_timeout() -> Duration {
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(10))
 }
-const WARMUP_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-struct TestRetainedPartialPort {
-    cache: PartialRetentionCache,
-}
-
-impl TestRetainedPartialPort {
-    const fn new(cache: PartialRetentionCache) -> Self {
-        Self { cache }
-    }
-}
-
-impl RetainedPartialPort for TestRetainedPartialPort {
-    fn retained_partial(&self, event_id: &str) -> Option<RetainedPartialSnapshot> {
-        self.cache
-            .get(event_id)
-            .map(|payload| RetainedPartialSnapshot { payload })
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn truncated_partial_http_fallback_reaches_consumer_bus() -> TestResult<()> {
-    run_truncated_partial_case(true).await
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn truncated_partial_http_fallback_rejects_wrong_token() -> TestResult<()> {
-    run_truncated_partial_case(false).await
-}
-
-async fn run_truncated_partial_case(expect_delivery: bool) -> TestResult<()> {
-    let (producer_token, consumer_token, metric_name, metric_outcome, partial_name) =
-        if expect_delivery {
-            (
-                CLUSTER_TOKEN,
-                CLUSTER_TOKEN,
-                "sse_partial_notify_sent_total",
-                "truncated_sent",
-                "fallback-happy",
-            )
-        } else {
-            (
-                "right-token",
-                "wrong-token",
-                "sse_notify_http_fetches_total",
-                "unauthorized",
-                "fallback-wrong-token",
-            )
-        };
+async fn trimmed_oversized_partial_delivers_inline_and_irreducible_drops() -> TestResult<()> {
     let Some(admin_url) = ci_postgres_url() else {
         eprintln!("SKIP: CI_POSTGRES_URL unset");
         return Ok(());
@@ -111,44 +57,24 @@ async fn run_truncated_partial_case(expect_delivery: bool) -> TestResult<()> {
         let handle = metrics_handle();
         let producer_pool = pg_pool(&database_url, 4).await?;
         let consumer_pool = pg_pool(&database_url, 4).await?;
-        let retention = PartialRetentionCache::new(Duration::from_secs(300), 256);
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let producer_url = format!("http://{}", listener.local_addr()?);
-        let app = internal_partials_router(InternalPartialsState {
-            retention: Arc::new(TestRetainedPartialPort::new(retention.clone())),
-            cluster_token: producer_token.to_owned(),
-        });
-        let (http_shutdown_tx, http_shutdown_rx) = oneshot::channel();
-        let http_task = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    let _ = http_shutdown_rx.await;
-                })
-                .await
-        });
         let channel = format!("cc_lb_test_partial_{}", uuid::Uuid::now_v7().simple());
         let (producer_tx, producer_rx) = mpsc::channel(16);
         let (notifier_shutdown_tx, notifier_shutdown_rx) = watch::channel(false);
         let notifier_task = PgNotifier::spawn_with_channel(
             producer_pool.clone(),
             producer_rx,
-            retention,
-            producer_url,
+            "producer-a".to_owned(),
             channel.clone(),
             notifier_shutdown_rx,
         );
         let consumer_bus = Arc::new(InMemoryBus::new());
         let mut consumer_rx = consumer_bus.subscribe();
         let (listener_shutdown_tx, listener_shutdown_rx) = watch::channel(false);
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let client = reqwest::Client::new();
         let listener_task = PgListener::spawn_with_channel(
             consumer_pool.clone(),
             consumer_bus,
-            client,
-            SecretString::new(consumer_token.to_owned().into()),
             channel,
-            "http://consumer.local".to_owned(),
+            "consumer-b".to_owned(),
             listener_shutdown_rx,
         );
 
@@ -159,9 +85,15 @@ async fn run_truncated_partial_case(expect_delivery: bool) -> TestResult<()> {
         )
         .await?;
 
-        let before = labeled_counter_value(handle, metric_name, metric_outcome);
-        let partial = large_partial(partial_name);
+        let trimmed_before = labeled_counter_value(
+            handle,
+            "sse_partial_notify_sent_total",
+            "outcome",
+            "trimmed_sent",
+        );
+        let partial = large_partial("trimmed-inline");
         let expected_event_id = partial.event_id.clone();
+        let expected_request_id = partial.request_id.clone();
         let update = RequestEventUpdate::Partial(partial);
         let payload = serde_json::to_vec(&update)?;
         assert!(
@@ -171,22 +103,59 @@ async fn run_truncated_partial_case(expect_delivery: bool) -> TestResult<()> {
         );
 
         producer_tx.send(update).await?;
-        wait_for_partial(&mut consumer_rx, &expected_event_id, expect_delivery).await?;
-        // The producer increments the counter only after its `pg_notify` await, which
-        // is not ordered against the consumer-side delivery `wait_for_partial` sees, so
-        // under scheduler starvation delivery can beat the increment. Poll to a bound;
-        // the assertion stays exact (precisely `before + 1.0`).
-        let observed = wait_for_counter(handle, metric_name, metric_outcome, before + 1.0).await;
-        assert_eq!(observed, before + 1.0);
+        let delivered = wait_for_partial(&mut consumer_rx, &expected_event_id)
+            .await?
+            .expect("trimmed partial must reach consumer bus");
+        assert_eq!(delivered.request_id, expected_request_id);
+        assert_eq!(delivered.input_tokens, Some(100));
+        assert_eq!(delivered.output_tokens, Some(25));
+        assert!(delivered.thread_id.is_none());
+
+        let observed_trimmed = wait_for_counter(
+            handle,
+            "sse_partial_notify_sent_total",
+            "outcome",
+            "trimmed_sent",
+            trimmed_before + 1.0,
+        )
+        .await;
+        assert_eq!(observed_trimmed, trimmed_before + 1.0);
+
+        let dropped_before = labeled_counter_value(
+            handle,
+            "sse_partial_notify_dropped_total",
+            "reason",
+            "payload_too_large",
+        );
+        let mut irreducible = small_partial("irreducible");
+        irreducible.event_id = "e".repeat(8_000);
+        let irreducible_id = irreducible.event_id.clone();
+        producer_tx
+            .send(RequestEventUpdate::Partial(irreducible))
+            .await?;
+        let received_irreducible =
+            try_receive_matching(&mut consumer_rx, &irreducible_id, NEGATIVE_RECEIVE_TIMEOUT)
+                .await?;
+        assert!(
+            received_irreducible.is_none(),
+            "irreducibly oversized partial must not be delivered"
+        );
+        let observed_dropped = wait_for_counter(
+            handle,
+            "sse_partial_notify_dropped_total",
+            "reason",
+            "payload_too_large",
+            dropped_before + 1.0,
+        )
+        .await;
+        assert_eq!(observed_dropped, dropped_before + 1.0);
 
         notifier_shutdown_tx.send(true)?;
         listener_shutdown_tx.send(true)?;
-        let _ = http_shutdown_tx.send(());
         producer_pool.close().await;
         consumer_pool.close().await;
         notifier_task.await?;
         listener_task.await?;
-        http_task.await??;
         Ok(())
     })
     .catch_unwind()
@@ -213,12 +182,6 @@ async fn pg_pool(database_url: &str, max_connections: u32) -> Result<PgPool, sql
         .await
 }
 
-// Postgres LISTEN/NOTIFY only delivers to sessions subscribed at NOTIFY time.
-// `PgListener::spawn` returns before the underlying `LISTEN` runs inside the
-// spawned task, so a single warmup NOTIFY can race the registration and be
-// silently dropped by Postgres. Resend the warmup partial at
-// `WARMUP_PROBE_INTERVAL` until the consumer bus actually observes it — this
-// mirrors `pg_listener_recovery::publish_until_received`.
 async fn publish_until_received(
     producer_tx: &mpsc::Sender<RequestEventUpdate>,
     receiver: &mut broadcast::Receiver<RequestEventUpdate>,
@@ -230,7 +193,10 @@ async fn publish_until_received(
         producer_tx
             .send(RequestEventUpdate::Partial(partial.clone()))
             .await?;
-        if try_receive_matching(receiver, &event_id, WARMUP_PROBE_INTERVAL).await? {
+        if try_receive_matching(receiver, &event_id, WARMUP_PROBE_INTERVAL)
+            .await?
+            .is_some()
+        {
             return Ok(());
         }
     }
@@ -243,55 +209,29 @@ async fn try_receive_matching(
     rx: &mut broadcast::Receiver<RequestEventUpdate>,
     expected_event_id: &str,
     timeout: Duration,
-) -> TestResult<bool> {
+) -> TestResult<Option<RequestEventPartial>> {
     match tokio::time::timeout(timeout, async {
         loop {
             if let RequestEventUpdate::Partial(partial) = rx.recv().await?
                 && partial.event_id == expected_event_id
             {
-                return Ok::<(), Box<dyn Error + Send + Sync>>(());
+                return Ok::<_, Box<dyn Error + Send + Sync>>(partial);
             }
         }
     })
     .await
     {
-        Ok(Ok(())) => Ok(true),
+        Ok(Ok(partial)) => Ok(Some(partial)),
         Ok(Err(error)) => Err(error),
-        Err(_) => Ok(false),
+        Err(_) => Ok(None),
     }
 }
 
 async fn wait_for_partial(
     rx: &mut broadcast::Receiver<RequestEventUpdate>,
     expected_event_id: &str,
-    expect_delivery: bool,
-) -> TestResult<()> {
-    let timeout = if expect_delivery {
-        receive_timeout()
-    } else {
-        NEGATIVE_RECEIVE_TIMEOUT
-    };
-    let received = tokio::time::timeout(timeout, async {
-        loop {
-            if let RequestEventUpdate::Partial(partial) = rx.recv().await?
-                && partial.event_id == expected_event_id
-            {
-                return Ok(partial.event_id);
-            }
-        }
-    })
-    .await;
-    match received {
-        Ok(Ok(_)) if expect_delivery => Ok(()),
-        Err(_) if !expect_delivery => Ok(()),
-        Err(_) => Err(error(format!(
-            "timed out waiting for partial {expected_event_id}"
-        ))),
-        Ok(Ok(event_id)) => Err(error(format!(
-            "unexpected partial {event_id} reached consumer bus"
-        ))),
-        Ok(Err(error)) => Err(error),
-    }
+) -> TestResult<Option<RequestEventPartial>> {
+    try_receive_matching(rx, expected_event_id, receive_timeout()).await
 }
 
 fn small_partial(name: &str) -> RequestEventPartial {
@@ -305,15 +245,6 @@ fn small_partial(name: &str) -> RequestEventPartial {
         stream: true,
         principal_id: Some("principal-a".to_owned()),
         model: Some("claude-sonnet-4-5".to_owned()),
-        request_body_first_chunk_ms: None,
-        request_body_receive_ms: None,
-        request_body_wait_ms: None,
-        request_body_process_ms: None,
-        request_body_chunk_count: None,
-        response_body_wait_ms: None,
-        response_body_process_ms: None,
-        response_body_downstream_poll_gap_ms: None,
-        retry_overhead_ms: None,
         ..RequestEventPartial::default()
     }
 }
@@ -323,15 +254,6 @@ fn large_partial(name: &str) -> RequestEventPartial {
         thread_id: Some(format!("thread:{}", "x".repeat(8_192))),
         upstream_name: Some(format!("upstream-{name}")),
         input_tokens: Some(100),
-        request_body_first_chunk_ms: None,
-        request_body_receive_ms: None,
-        request_body_wait_ms: None,
-        request_body_process_ms: None,
-        request_body_chunk_count: None,
-        response_body_wait_ms: None,
-        response_body_process_ms: None,
-        response_body_downstream_poll_gap_ms: None,
-        retry_overhead_ms: None,
         output_tokens: Some(25),
         ..small_partial(name)
     }
@@ -340,12 +262,13 @@ fn large_partial(name: &str) -> RequestEventPartial {
 async fn wait_for_counter(
     handle: &PrometheusHandle,
     name: &str,
-    outcome: &str,
+    label_key: &str,
+    label_val: &str,
     expected: f64,
 ) -> f64 {
     let deadline = Instant::now() + receive_timeout();
     loop {
-        let value = labeled_counter_value(handle, name, outcome);
+        let value = labeled_counter_value(handle, name, label_key, label_val);
         if value >= expected || Instant::now() >= deadline {
             return value;
         }
@@ -353,9 +276,14 @@ async fn wait_for_counter(
     }
 }
 
-fn labeled_counter_value(handle: &PrometheusHandle, name: &str, outcome: &str) -> f64 {
+fn labeled_counter_value(
+    handle: &PrometheusHandle,
+    name: &str,
+    label_key: &str,
+    label_val: &str,
+) -> f64 {
     let metric_prefix = format!("{name}{{");
-    let label_fragment = format!("outcome=\"{outcome}\"");
+    let label_fragment = format!("{label_key}=\"{label_val}\"");
     handle
         .render()
         .lines()

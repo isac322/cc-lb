@@ -243,7 +243,7 @@ describe('WarmupCardMinimal current plugin config', () => {
             usage: 'fixture',
             hook_metadata: {
               shape_anthropic: {
-                wire_version: 1,
+                wire_version: 2,
                 description: 'fixture',
                 usage: 'fixture',
                 mode: 'active',
@@ -331,7 +331,7 @@ test.each(['anthropic_oauth', 'openai_oauth', 'gemini_oauth'] as const)(
     const provider = kind.replace('_oauth', '');
     const entries: queries.PluginEntry[] = [
       ...providers,
-      'legacy',
+      'other-provider',
       'response-only',
     ].map((name) => ({
       id: `plugin-${name}`,
@@ -341,12 +341,12 @@ test.each(['anthropic_oauth', 'openai_oauth', 'gemini_oauth'] as const)(
       description: 'fixture',
       usage: 'fixture',
       hook_metadata: {
-        [name === 'legacy'
-          ? 'shape'
+        [name === 'other-provider'
+          ? 'shape_unknown'
           : name === 'response-only'
             ? `transform_response_${provider}`
             : `shape_${name}`]: {
-          wire_version: 1,
+          wire_version: 2,
           description: 'fixture',
           usage: 'fixture',
           mode: 'active',
@@ -372,9 +372,7 @@ test.each(['anthropic_oauth', 'openai_oauth', 'gemini_oauth'] as const)(
       expect(screen.queryByRole('option', { name: other })).toBeNull();
     }
     expect(screen.queryByRole('option', { name: 'response-only' })).toBeNull();
-    expect(screen.queryByRole('option', { name: 'legacy' }) !== null).toBe(
-      provider === 'anthropic',
-    );
+    expect(screen.queryByRole('option', { name: 'other-provider' })).toBeNull();
     await user.click(screen.getByRole('option', { name: provider }));
     expect(
       vi.mocked(queries.useUpdateUpstreamWarmupSettings).mock.results.at(-1)

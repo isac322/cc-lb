@@ -1,8 +1,11 @@
 use std::collections::BTreeMap;
 
-use crate::{NativePricingLifetime, NativePricingRate, NativePricingStatus, ProviderNativePricing};
+#[cfg(test)]
+use crate::NativePricingLifetime;
+use crate::{NativePricingRate, NativePricingStatus, ProviderNativePricing};
 use crate::{Pricing, ThresholdBand, TierRate, UsdPerMillion};
 
+#[cfg(test)]
 pub(crate) fn resolve_native_rate(
     pricing: &ProviderNativePricing,
     lifetime: NativePricingLifetime,

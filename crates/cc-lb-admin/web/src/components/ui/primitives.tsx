@@ -33,54 +33,6 @@ export function cx(...parts: Array<string | false | null | undefined>): string {
 export function Card({ className, ...rest }: HTMLAttributes<HTMLDivElement>) {
   return <div className={cx('glass rounded-md', className)} {...rest} />;
 }
-export function CardHeader({
-  title,
-  titleId,
-  action,
-  subtitle,
-  className,
-  align = 'start',
-  headingLevel = 2,
-}: {
-  readonly title: ReactNode;
-  readonly titleId?: string;
-  readonly subtitle?: ReactNode;
-  readonly action?: ReactNode;
-  readonly className?: string;
-  readonly align?: 'start' | 'center';
-  /** Card titles sit under the page `h1`; use 3/4 for cards nested in a titled section. */
-  readonly headingLevel?: 2 | 3 | 4;
-}) {
-  const Heading = `h${headingLevel}` as const;
-  return (
-    <div
-      className={cx(
-        'flex flex-col sm:flex-row sm:justify-between gap-3 sm:gap-4 px-4 py-3 border-b border-subtle',
-        align === 'center' ? 'sm:items-center' : 'sm:items-start',
-        className,
-      )}
-    >
-      <div className="min-w-0">
-        <Heading id={titleId} className="text-title-card text-text">
-          {title}
-        </Heading>
-        {subtitle ? (
-          <div
-            className="mt-0.5 min-h-4 text-caption text-text-faint"
-            data-slot="card-subtitle"
-          >
-            {subtitle}
-          </div>
-        ) : null}
-      </div>
-      {action ? (
-        <div className="flex flex-wrap items-center gap-2 min-w-0 w-full sm:w-auto">
-          {action}
-        </div>
-      ) : null}
-    </div>
-  );
-}
 export function CardBody({
   className,
   ...rest

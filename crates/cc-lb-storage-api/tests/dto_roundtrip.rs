@@ -11,8 +11,7 @@ use cc_lb_storage_api::{
     CacheKeepaliveEnqueueState, CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus,
     CacheKeepaliveTerminalReason, CacheTtl, ClassifierConfig, ConfigDraftState, HistoryEntry,
     JudgeResponseFormat, KeyStatus, LlmJudgeConfig, OAuthCredentials, PrincipalCreate,
-    PrincipalKind, PrincipalKindLite, PrincipalLimitIdentityKind, PrincipalLimitKind,
-    PrincipalLimitState, RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState,
+    PrincipalKind, PrincipalKindLite, RequestCacheBreakpoint, RequestCacheBreakpointSource,
     RequestEvent, RequestEventKind, RequestProtocol, StorageError, UsageRollup,
     UsageRollupResolution, UsageRollupRun,
 };
@@ -152,20 +151,6 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         finalize_ms: Some(4),
         error_code: Some("rate_limit".to_owned()),
         ..Default::default()
-    });
-
-    assert_json_roundtrip(PrincipalLimitState {
-        principal_id: "principal_a".to_owned(),
-        identity_kind: PrincipalLimitIdentityKind::Credential,
-        identity_value: Some("credential_123".to_owned()),
-        account_observed: true,
-        window: "2026-05-24T10:00:00Z/PT1H".to_owned(),
-        kind: PrincipalLimitKind::InputTokens,
-        limit: Some(10_000),
-        remaining: Some(9_700),
-        reset: Some("2026-05-24T11:00:00Z".to_owned()),
-        observed_at_unix_secs: 1_716_000_002,
-        stored_at_unix_secs: 1_716_000_003,
     });
 
     assert_json_roundtrip(ConfigDraftState {
@@ -341,13 +326,6 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
 fn batch_b_wire_snapshots_are_stable() {
     assert_wire(PrincipalKindLite::Machine, json!("machine"));
     assert_wire(PrincipalKindLite::Human, json!("human"));
-
-    assert_wire(RequestCacheState::Hit, json!("hit"));
-    assert_wire(RequestCacheState::Write, json!("write"));
-    assert_wire(RequestCacheState::Refresh, json!("refresh"));
-    assert_wire(RequestCacheState::Miss, json!("miss"));
-    assert_wire(RequestCacheState::None, json!("none"));
-    assert_wire(RequestCacheState::Unknown, json!("unknown"));
 
     assert_wire(RequestCacheBreakpointSource::Message, json!("message"));
     assert_wire(

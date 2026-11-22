@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cc_lb_plugin_wire::{
-    ArchivedShapeResponse, ShapeRequest, ShapeResponse, Upstream as WireUpstream,
+use cc_lb_plugin_wire::schema::ProviderFamily;
+use cc_lb_plugin_wire::v2::{
+    ArchivedShapeResponse, Header, Principal as WirePrincipal, ShapeRequest, ShapeResponse,
+    Upstream as WireUpstream, UpstreamIdentity,
 };
 use cc_lb_runtime_wasmtime::{
     RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch, WasmtimeRuntime,
@@ -36,7 +38,6 @@ fn load_wasm_or_skip() -> Option<Vec<u8>> {
 }
 
 fn fixture_wire_request() -> ShapeRequest {
-    use cc_lb_plugin_wire::{Header, Principal as WirePrincipal};
     ShapeRequest {
         request_id: Box::from("req-shape"),
         method: Box::from("POST"),
@@ -60,6 +61,15 @@ fn fixture_wire_request() -> ShapeRequest {
         },
         upstream: WireUpstream::AnthropicDirect {
             base_url: Some(Box::from("https://example.test")),
+        },
+        upstream_identity: UpstreamIdentity {
+            provider: Box::from("anthropic"),
+            credential_kind: Box::from("anthropic_api_key"),
+            upstream_id: Box::from("upstream-shape"),
+            name: Box::from("anthropic-direct"),
+            base_url: Some(Box::from("https://example.test")),
+            gemini_oauth_profile: None,
+            code_assist_project_id: None,
         },
     }
 }
@@ -94,39 +104,36 @@ fn shape_passthrough_echoes_request_via_wire_dispatch() {
     let response: ShapeResponse =
         rkyv::deserialize::<ShapeResponse, RkyvError>(archived).expect("rkyv deserialize");
 
-    let url: &str = &response.url;
-    assert_eq!(url, "https://example.test/v1/messages?stream=true");
-    let method: &str = &response.method;
-    assert_eq!(method, "POST");
+    assert_eq!(
+        &*response.url,
+        "https://example.test/v1/messages?stream=true"
+    );
+    assert_eq!(&*response.method, "POST");
     assert_eq!(&*response.body, b"{\"prompt\":\"hi\"}");
 
-    let has_ct = response.headers.iter().any(|h| {
-        let name: &str = &h.name;
-        name == "content-type"
-    });
-    assert!(has_ct, "content-type must be forwarded");
-
-    let has_trace = response.headers.iter().any(|h| {
-        let name: &str = &h.name;
-        name == "x-trace-id"
-    });
-    assert!(has_trace, "x-trace-id must be forwarded");
+    assert!(
+        response.headers.iter().any(|h| &*h.name == "content-type"),
+        "content-type must be forwarded"
+    );
+    assert!(
+        response.headers.iter().any(|h| &*h.name == "x-trace-id"),
+        "x-trace-id must be forwarded"
+    );
 }
 
 #[test]
-fn legacy_shape_passthrough_is_not_selected_for_other_providers() {
-    use cc_lb_plugin_wire::schema::ProviderFamily;
+fn anthropic_shape_passthrough_is_not_selected_for_other_providers() {
     let Some(wasm_bytes) = load_wasm_or_skip() else {
         return;
     };
     let runtime = WasmtimeRuntime::with_defaults().expect("engine build");
     let slot = runtime
         .register_shape(
-            RuntimeSlotKey::global("legacy-provider-shape", RuntimeSlotRole::Shape),
-            "legacy-provider-shape",
+            RuntimeSlotKey::global("anthropic-provider-shape", RuntimeSlotRole::Shape),
+            "anthropic-provider-shape",
             &wasm_bytes,
         )
-        .expect("register legacy fixture");
+        .expect("register fixture");
     let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
     assert!(dispatch.for_provider(ProviderFamily::Anthropic).is_some());
     assert!(dispatch.for_provider(ProviderFamily::Openai).is_none());

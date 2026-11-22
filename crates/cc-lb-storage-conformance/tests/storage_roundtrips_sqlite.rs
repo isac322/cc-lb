@@ -456,10 +456,6 @@ anthropic_compatibility_kv_sqlite_test!(
     failure_on_never_seen_key_is_noop
 );
 anthropic_compatibility_kv_sqlite_test!(
-    anthropic_compatibility_kv_list_returns_keys_in_some_order_sqlite,
-    list_returns_keys_in_some_order
-);
-anthropic_compatibility_kv_sqlite_test!(
     anthropic_compatibility_kv_older_observation_does_not_replace_newer_sqlite,
     older_observation_does_not_replace_newer
 );
