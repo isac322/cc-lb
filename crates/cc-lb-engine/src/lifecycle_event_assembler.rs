@@ -1190,6 +1190,7 @@ async fn handle_event(
         finalize_ms,
         proxy_setup_ms,
         setup_timings,
+        upstream_ttfb_ms,
         upstream_body_ms,
         dns_ms,
         connect_ms,
@@ -1216,6 +1217,7 @@ async fn handle_event(
             partial.finalize_ms = *finalize_ms;
             partial.proxy_setup_ms = *proxy_setup_ms;
             apply_setup_timings(&mut partial, setup_timings);
+            partial.upstream_ttfb_ms = *upstream_ttfb_ms;
             partial.upstream_body_ms = *upstream_body_ms;
             // Orphan rows have no prior `UpstreamResponseStarted`, so the
             // terminal snapshot is the only carrier of connection timings.
@@ -1251,6 +1253,7 @@ async fn handle_event(
         partial.finalize_ms = partial.finalize_ms.or(*finalize_ms);
         partial.proxy_setup_ms = partial.proxy_setup_ms.or(*proxy_setup_ms);
         apply_setup_timings(&mut partial, setup_timings);
+        partial.upstream_ttfb_ms = partial.upstream_ttfb_ms.or(*upstream_ttfb_ms);
         partial.upstream_body_ms = partial.upstream_body_ms.or(*upstream_body_ms);
         // Terminal-carried connection timings fill gaps only: a successful
         // `UpstreamResponseStarted` already recorded the authoritative values.
@@ -2385,6 +2388,7 @@ mod tests {
                 upstream_body_ms: None,
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
                 protocol: None,
             },
         )
@@ -2455,6 +2459,7 @@ mod tests {
                 internal_errors: Vec::new(),
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
                 protocol: None,
             },
         )
@@ -2487,6 +2492,7 @@ mod tests {
                 internal_errors: Vec::new(),
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
                 protocol: None,
             },
         )
@@ -2577,6 +2583,7 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -2648,6 +2655,7 @@ mod tests {
                 internal_errors: Vec::new(),
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
                 protocol: None,
             })
             .await
@@ -2709,6 +2717,7 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -2761,6 +2770,7 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -2813,6 +2823,7 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -2854,6 +2865,7 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: Some(RequestEventKind::Messages),
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -2898,6 +2910,7 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -2946,6 +2959,7 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: Some(RequestEventKind::Messages),
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -2999,6 +3013,7 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: Some(RequestEventKind::Messages),
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -3059,6 +3074,7 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -3123,6 +3139,7 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -3172,6 +3189,7 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         }
     }
@@ -3477,6 +3495,7 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -3516,6 +3535,7 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -3568,6 +3588,7 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -3643,6 +3664,7 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -3689,6 +3711,7 @@ mod tests {
             upstream_body_ms: Some(4),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -3934,6 +3957,7 @@ mod tests {
                 finalize_ms: None,
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
                 protocol: None,
             },
         )
@@ -4245,6 +4269,7 @@ mod tests {
                 upstream_body_ms: None,
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
                 protocol: None,
             },
         )
@@ -4317,6 +4342,7 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -4540,6 +4566,7 @@ mod tests {
                 upstream_body_ms: None,
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
                 protocol: None,
             })
             .await
@@ -4650,6 +4677,7 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -4899,6 +4927,7 @@ mod tests {
             upstream_body_ms: Some(12),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -5093,6 +5122,7 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await
@@ -5221,6 +5251,7 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         });
 
@@ -5598,6 +5629,7 @@ mod tests {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         }
     }
@@ -6679,6 +6711,7 @@ mod tests {
                     upstream_body_ms: None,
                     event_kind: None,
                     funding_ambiguous: false,
+                    upstream_ttfb_ms: None,
                     protocol,
                 },
             )
@@ -6693,6 +6726,58 @@ mod tests {
                 .expect("persisted row");
             assert_eq!(row.protocol, expected_protocol, "{event_id}");
             assert_eq!(row.sse_event_count, expected_sse, "{event_id}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminal_upstream_ttfb_fills_gap_without_overwriting_started_value() {
+        for (started_ttfb, terminal_ttfb, expected_ttfb) in
+            [(None, Some(116), Some(116)), (Some(42), Some(99), Some(42))]
+        {
+            let store = CapturingStore::default();
+            let metrics = noop_metrics();
+            let event_id = eid(&format!("ttfb-{started_ttfb:?}-{terminal_ttfb:?}"));
+            let mut partial = Partial::new(Instant::now(), event_id.clone());
+            partial.request_id = Some("req-ttfb-merge".to_owned());
+            partial.upstream_ttfb_ms = started_ttfb;
+            let mut partials = HashMap::from([(event_id.clone(), partial)]);
+
+            handle_event(
+                &store,
+                None,
+                metrics.as_ref(),
+                &mut RowWriter::default(),
+                &mut partials,
+                DEFAULT_ASSEMBLER_MAP_CAP,
+                LifecycleEvent::RequestTerminated {
+                    event_id,
+                    reason: TerminationReason::Success,
+                    client_status: 101,
+                    duration_ms: 200,
+                    request_body_read_ms: None,
+                    request_body_bytes: None,
+                    finalize_ms: Some(1),
+                    first_body_chunk_ms: Some(0),
+                    first_content_delta_ms: None,
+                    dns_ms: Some(7),
+                    connect_ms: Some(19),
+                    connection_reused: Some(false),
+                    internal_errors: Vec::new(),
+                    proxy_setup_ms: Some(2),
+                    setup_timings: Default::default(),
+                    io_timings: Default::default(),
+                    upstream_ttfb_ms: terminal_ttfb,
+                    upstream_body_ms: Some(50),
+                    event_kind: None,
+                    funding_ambiguous: false,
+                    protocol: Some(cc_lb_request_log::RequestProtocol::Websocket),
+                },
+            )
+            .await;
+
+            let rows = store.rows.lock().expect("capturing store lock");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].upstream_ttfb_ms, expected_ttfb);
         }
     }
 }

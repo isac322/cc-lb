@@ -617,6 +617,9 @@ impl Lifecycle {
                     ..Default::default()
                 },
                 sign_ms: Some(sign_ms),
+                connection_timings: Default::default(),
+                connected_at: None,
+                first_frame_observed: false,
             })
         }
         .await;

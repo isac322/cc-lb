@@ -256,6 +256,7 @@ async fn renewal_row_yields_one_diagnostics_line_with_the_finalizer_seq() {
         upstream_body_ms: None,
         event_kind: Some(RequestEventKind::Renewal),
         funding_ambiguous: false,
+        upstream_ttfb_ms: None,
         protocol: None,
     })
     .await

@@ -148,6 +148,7 @@ fn realtime_terminal_outcome(
 #[derive(Debug)]
 pub struct RealtimeStreamMetrics {
     started: Instant,
+    relay_started: Option<Instant>,
     first_frame_ms: Option<u64>,
     last_frame_ms: Option<u64>,
     last_activity_heartbeat_ms: u64,
@@ -165,6 +166,7 @@ impl RealtimeStreamMetrics {
     pub fn new() -> Self {
         Self {
             started: Instant::now(),
+            relay_started: None,
             first_frame_ms: None,
             last_frame_ms: None,
             last_activity_heartbeat_ms: 0,
@@ -197,15 +199,31 @@ impl RealtimeStreamMetrics {
     }
 
     pub fn observe_frame(&mut self, bytes: &[u8]) -> bool {
-        let elapsed_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        self.first_frame_ms.get_or_insert(elapsed_ms);
-        self.last_frame_ms = Some(elapsed_ms);
+        self.observe_frame_at(bytes, Instant::now())
+    }
+
+    pub fn observe_frame_at(&mut self, bytes: &[u8], now: Instant) -> bool {
+        let relay_start = *self.relay_started.get_or_insert(now);
+        let frame_elapsed_ms = now
+            .saturating_duration_since(relay_start)
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        self.first_frame_ms.get_or_insert(frame_elapsed_ms);
+        self.last_frame_ms = Some(frame_elapsed_ms);
         self.event_count = self.event_count.saturating_add(1);
         self.total_bytes = self.total_bytes.saturating_add(bytes.len() as u64);
+        let heartbeat_elapsed_ms = now
+            .saturating_duration_since(self.started)
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
         let interval_ms = cc_lb_lifecycle::DEFAULT_STREAM_ACTIVITY_HEARTBEAT_INTERVAL
             .as_millis()
             .min(u128::from(u64::MAX)) as u64;
-        self.maybe_record_heartbeat(elapsed_ms, interval_ms)
+        self.maybe_record_heartbeat(heartbeat_elapsed_ms, interval_ms)
+    }
+
+    pub fn first_frame_at(&self) -> Option<Instant> {
+        self.relay_started
     }
 
     /// Observe provider turn boundaries on the relay path, which sees every
@@ -301,7 +319,15 @@ impl RealtimeStreamMetrics {
         self.ping_count = self.ping_count.saturating_add(1);
     }
     fn latency(&self, status: u16) -> StreamLatency {
-        let stream_total_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        self.latency_at(status, Instant::now())
+    }
+
+    fn latency_at(&self, status: u16, now: Instant) -> StreamLatency {
+        let stream_total_ms = self.relay_started.map_or(0, |start| {
+            now.saturating_duration_since(start)
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64
+        });
         let inter_output_avg_ms = match (self.first_frame_ms, self.last_frame_ms) {
             (Some(first), Some(last)) if self.event_count > 1 => {
                 Some(last.saturating_sub(first) / (self.event_count - 1))
@@ -459,7 +485,6 @@ pub struct RealtimeConnectionTimings {
     pub dns_ms: Option<u64>,
     pub connect_ms: Option<u64>,
     pub connection_reused: Option<bool>,
-    pub upstream_ttfb_ms: Option<u64>,
 }
 
 pub struct RealtimeWebSocketSession {
@@ -481,6 +506,9 @@ pub struct RealtimeWebSocketSession {
     pub(crate) proxy_setup_ms: Option<u64>,
     pub(crate) setup_timings: cc_lb_lifecycle::RequestSetupTimings,
     pub(crate) sign_ms: Option<u64>,
+    pub(crate) connection_timings: RealtimeConnectionTimings,
+    pub(crate) connected_at: Option<Instant>,
+    pub(crate) first_frame_observed: bool,
 }
 
 impl RealtimeWebSocketSession {
@@ -529,6 +557,9 @@ impl RealtimeWebSocketSession {
         response_headers: &HeaderMap,
         timings: RealtimeConnectionTimings,
     ) {
+        self.connection_timings = timings;
+        self.connected_at = Some(Instant::now());
+        self.first_frame_observed = false;
         self.provider_request_id = ["x-request-id", "request-id", "x-goog-request-id"]
             .iter()
             .find_map(|name| {
@@ -549,7 +580,7 @@ impl RealtimeWebSocketSession {
                 timings.connect_ms,
                 timings.connection_reused,
             );
-            observer.set_attempt_timings(None, self.sign_ms, timings.upstream_ttfb_ms);
+            observer.set_attempt_timings(None, self.sign_ms, None);
             observer.set_success_status(StatusCode::SWITCHING_PROTOCOLS);
             observer.emit_lifecycle(LifecycleEvent::UpstreamResponseStarted {
                 event_id: observer.event_id().to_owned(),
@@ -561,11 +592,38 @@ impl RealtimeWebSocketSession {
                 connection_reused: timings.connection_reused,
                 shape_ms: None,
                 sign_ms: self.sign_ms,
-                upstream_ttfb_ms: timings.upstream_ttfb_ms,
+                upstream_ttfb_ms: None,
                 observed_at_unix_millis: None,
                 protocol: Some(cc_lb_request_log::RequestProtocol::Websocket),
             });
         }
+    }
+
+    /// Record first-byte/first-frame latency when the first provider data frame arrives,
+    /// including the connection phase (`bulkhead_wait_ms + dns_ms + connect_ms`) and the
+    /// setup/send wait after upgrade.
+    pub fn record_first_provider_frame_at(&mut self, observed_at: Instant) -> Option<u64> {
+        if self.first_frame_observed {
+            return None;
+        }
+        self.first_frame_observed = true;
+        let wait_ms = self.connected_at.map_or(0, |connected| {
+            observed_at
+                .saturating_duration_since(connected)
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64
+        });
+        let ttfb_ms = self
+            .connection_timings
+            .bulkhead_wait_ms
+            .unwrap_or(0)
+            .saturating_add(self.connection_timings.dns_ms.unwrap_or(0))
+            .saturating_add(self.connection_timings.connect_ms.unwrap_or(0))
+            .saturating_add(wait_ms);
+        if let Some(observer) = &self.observer {
+            observer.set_attempt_timings(None, self.sign_ms, Some(ttfb_ms));
+        }
+        Some(ttfb_ms)
     }
 
     /// Trace propagation belongs to the engine-created connection child span.
@@ -649,6 +707,11 @@ impl RealtimeWebSocketSession {
             error_type,
             if complete { None } else { error_message },
         );
+        if !self.first_frame_observed
+            && let Some(first_frame_at) = metrics.first_frame_at()
+        {
+            self.record_first_provider_frame_at(first_frame_at);
+        }
         if let Some(observer) = &self.observer {
             if let Some(counts) = usage.counts.as_ref() {
                 observer.set_usage_counts(counts, complete);
@@ -1351,6 +1414,9 @@ mod tests {
                     proxy_setup_ms: None,
                     setup_timings: Default::default(),
                     sign_ms: None,
+                    connection_timings: Default::default(),
+                    connected_at: None,
+                    first_frame_observed: false,
                 };
                 session.finish(
                     usage,
@@ -1797,5 +1863,143 @@ mod tests {
         assert_eq!(latency.sse_event_count, 0);
         assert_eq!(latency.content_delta_count, 0);
         assert_eq!(latency.ping_count, 0);
+    }
+
+    #[test]
+    fn realtime_stream_metrics_separates_first_frame_wait_from_relay_duration() {
+        use std::time::Duration;
+
+        let idle = RealtimeStreamMetrics::new();
+        assert_eq!(idle.first_frame_at(), None);
+        let idle_latency = idle.latency_at(
+            StatusCode::SWITCHING_PROTOCOLS.as_u16(),
+            idle.started + Duration::from_millis(120),
+        );
+        assert_eq!(idle_latency.stream_first_output_ms, None);
+        assert_eq!(idle_latency.stream_total_ms, 0);
+
+        let mut metrics = RealtimeStreamMetrics::new();
+        let base = metrics.started;
+        metrics.observe_frame_at(
+            br#"{"type":"response.created"}"#,
+            base + Duration::from_millis(45),
+        );
+        metrics.observe_frame_at(
+            br#"{"type":"response.done"}"#,
+            base + Duration::from_millis(95),
+        );
+        assert_eq!(
+            metrics.first_frame_at(),
+            Some(base + Duration::from_millis(45))
+        );
+
+        let latency = metrics.latency_at(
+            StatusCode::SWITCHING_PROTOCOLS.as_u16(),
+            base + Duration::from_millis(115),
+        );
+        assert_eq!(latency.stream_first_output_ms, Some(0));
+        assert_eq!(latency.stream_last_output_ms, Some(50));
+        assert_eq!(latency.stream_total_ms, 70);
+        assert_eq!(latency.stream_inter_output_avg_ms, Some(50));
+    }
+
+    #[test]
+    fn realtime_session_defers_upstream_ttfb_until_first_provider_frame() {
+        use cc_lb_clock::{ClockHandle, SystemClock};
+        use cc_lb_control::RequestEventBus;
+        use cc_lb_control::event_bus::InMemoryBus;
+        use cc_lb_lifecycle::LifecycleEvent;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let bus = Arc::new(InMemoryBus::new());
+        let mut events = bus.subscribe_lifecycle();
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = crate::terminal_observer::LifecycleContext::new(
+            "realtime-ttfb-defer".to_owned(),
+            bus,
+            &clock,
+        );
+        observer.mark_authn_reached();
+
+        let mut session = super::RealtimeWebSocketSession {
+            candidate: crate::responses_websocket::WebSocketCandidate {
+                upstream_id: uuid::Uuid::nil(),
+                upstream_name: "realtime-ttfb".to_owned(),
+                socket_per_lane: false,
+            },
+            url: "wss://provider.invalid/realtime".parse().unwrap(),
+            headers: http::HeaderMap::new(),
+            observer: Some(observer),
+            completion_observer: Arc::new(crate::completion_observer::CompletionObserver::new()),
+            stream_span: tracing::Span::none(),
+            reservation: None,
+            limit_engine: None,
+            model: "gpt-realtime".to_owned(),
+            principal: cc_lb_domain::Principal {
+                id: DIRECT_PRINCIPAL.to_owned(),
+                kind: cc_lb_domain::PrincipalKind::InternalKey,
+            },
+            vertex_config: None,
+            upstream: cc_lb_domain::Upstream::OpenaiDirect { base_url: None },
+            path: "/v1/realtime".to_owned(),
+            dialect: Arc::new(UnusedRealtimeDialect),
+            provider_request_id: None,
+            proxy_setup_ms: Some(2),
+            setup_timings: Default::default(),
+            sign_ms: Some(3),
+            connection_timings: Default::default(),
+            connected_at: None,
+            first_frame_observed: false,
+        };
+
+        session.connected_with_timings(
+            &http::HeaderMap::new(),
+            super::RealtimeConnectionTimings {
+                bulkhead_wait_ms: Some(5),
+                dns_ms: Some(7),
+                connect_ms: Some(19),
+                connection_reused: Some(false),
+            },
+        );
+        let connected_at = session.connected_at.expect("connected_at captured");
+        let first_frame_at = connected_at + Duration::from_millis(85);
+        assert_eq!(
+            session.record_first_provider_frame_at(first_frame_at),
+            Some(5 + 7 + 19 + 85)
+        );
+        assert_eq!(
+            session.record_first_provider_frame_at(connected_at + Duration::from_millis(200)),
+            None
+        );
+
+        let mut metrics = RealtimeStreamMetrics::new();
+        metrics.observe_frame_at(br#"{"type":"response.done"}"#, first_frame_at);
+        session.finish(
+            RealtimeUsage::default(),
+            metrics,
+            RealtimeWebSocketTermination::ProviderClosed,
+            super::RealtimeWebSocketDiagnostics::default(),
+        );
+
+        let mut started_ttfb = None;
+        let mut terminated_ttfb = None;
+        while let Ok(ev) = events.try_recv() {
+            match ev {
+                LifecycleEvent::UpstreamResponseStarted {
+                    upstream_ttfb_ms, ..
+                } => {
+                    started_ttfb = Some(upstream_ttfb_ms);
+                }
+                LifecycleEvent::RequestTerminated {
+                    upstream_ttfb_ms, ..
+                } => {
+                    terminated_ttfb = Some(upstream_ttfb_ms);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(started_ttfb, Some(None));
+        assert_eq!(terminated_ttfb, Some(Some(116)));
     }
 }

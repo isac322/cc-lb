@@ -83,6 +83,7 @@ async fn renewal_is_priced_only_after_terminal() {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         })
         .await

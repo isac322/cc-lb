@@ -1189,6 +1189,7 @@ impl Inner {
                     proxy_setup_ms: state.proxy_setup_ms,
                     setup_timings: state.setup_timings,
                     io_timings: state.io_timings,
+                    upstream_ttfb_ms: state.upstream_ttfb_ms,
                     upstream_body_ms: state.upstream_body_ms,
                     dns_ms: state.dns_ms,
                     connect_ms: state.connect_ms,

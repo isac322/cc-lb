@@ -271,6 +271,8 @@ pub enum LifecycleEvent {
         #[serde(default)]
         io_timings: RequestIoTimings,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        upstream_ttfb_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         upstream_body_ms: Option<u64>,
         /// Connection timings measured for the last dispatch attempt.
         /// Carried on the terminal snapshot so dispatch failures (which never

@@ -191,15 +191,11 @@ async fn connect_realtime_provider(
         let (upstream, headers, guard, connect_timings) =
             connect_provider_websocket(state, session.candidate.upstream_id, request, guard)
                 .await?;
-        let upstream_ttfb_ms = bulkhead_wait_ms
-            .saturating_add(connect_timings.dns_ms.unwrap_or(0))
-            .saturating_add(connect_timings.connect_ms.unwrap_or(0));
         let timings = cc_lb_engine::realtime_websocket::RealtimeConnectionTimings {
             bulkhead_wait_ms: Some(bulkhead_wait_ms),
             dns_ms: connect_timings.dns_ms,
             connect_ms: connect_timings.connect_ms,
             connection_reused: Some(false),
-            upstream_ttfb_ms: Some(upstream_ttfb_ms),
         };
         Ok((upstream, headers, guard, timings))
     };
@@ -657,7 +653,7 @@ async fn relay_realtime_websocket(
     mut downstream: WebSocket,
     mut upstream: RealtimeProvider,
     state: &ProxyState,
-    session: RealtimeWebSocketSession,
+    mut session: RealtimeWebSocketSession,
     kind: RealtimeWebSocketKind,
 ) {
     // Usage frames are already marker-filtered, so an unbounded handoff keeps
@@ -739,7 +735,9 @@ async fn relay_realtime_websocket(
                     let message = match message {
                         Some(Ok(message @ UpstreamMessage::Text(_))) => {
                             if let UpstreamMessage::Text(frame) = &message {
-                                if metrics.observe_frame(frame.as_bytes()) {
+                                let now = std::time::Instant::now();
+                                session.record_first_provider_frame_at(now);
+                                if metrics.observe_frame_at(frame.as_bytes(), now) {
                                     session.emit_request_activity();
                                 }
                                 metrics.observe_turn_boundary(kind, frame.as_bytes());
@@ -752,7 +750,9 @@ async fn relay_realtime_websocket(
                         }
                         Some(Ok(message @ UpstreamMessage::Binary(_))) => {
                             if let UpstreamMessage::Binary(frame) = &message {
-                                if metrics.observe_frame(frame) {
+                                let now = std::time::Instant::now();
+                                session.record_first_provider_frame_at(now);
+                                if metrics.observe_frame_at(frame, now) {
                                     session.emit_request_activity();
                                 }
                                 metrics.observe_turn_boundary(kind, frame);

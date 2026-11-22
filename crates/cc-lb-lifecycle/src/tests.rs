@@ -52,6 +52,7 @@ fn request_terminated_preserves_nested_io_timings() {
             response_body_downstream_poll_gap_ms: Some(2.0),
             retry_overhead_ms: None,
         },
+        upstream_ttfb_ms: Some(12),
         upstream_body_ms: None,
         dns_ms: Some(3),
         connect_ms: Some(41),
@@ -209,6 +210,7 @@ fn kind_labels_cover_every_variant() {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         }
         .kind(),

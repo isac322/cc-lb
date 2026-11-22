@@ -879,6 +879,7 @@ mod tests {
             internal_errors: Vec::new(),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         }
     }
@@ -1458,6 +1459,7 @@ mod tests {
                 internal_errors: Vec::new(),
                 event_kind: None,
                 funding_ambiguous: false,
+                upstream_ttfb_ms: None,
                 protocol: None,
             },
         ]);

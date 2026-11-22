@@ -316,6 +316,7 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
             upstream_body_ms: Some(profile.token_base() + 10),
             event_kind: None,
             funding_ambiguous: false,
+            upstream_ttfb_ms: None,
             protocol: None,
         },
     }
