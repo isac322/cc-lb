@@ -93,12 +93,13 @@ impl GatedHook {
 
 /// Builds an `App` on reserved loopback ports. The reservations are handed back
 /// and must be dropped right after `tokio::spawn(app.start())` so `start` owns
-/// the listeners, keeping the release-to-bind window minimal.
-async fn reserved_app() -> (App, [StdTcpListener; 2]) {
-    let reservations = [
-        StdTcpListener::bind("127.0.0.1:0").expect("reserve proxy port"),
-        StdTcpListener::bind("127.0.0.1:0").expect("reserve admin port"),
-    ];
+/// the listeners, keeping the release-to-bind window minimal while `_port_leases`
+/// stay held until the test completes.
+async fn reserved_app() -> (App, [StdTcpListener; 2], [crate::common::PortLease; 2]) {
+    let (proxy_listener, proxy_lease) = crate::common::reserve_test_port();
+    let (admin_listener, admin_lease) = crate::common::reserve_test_port();
+    let reservations = [proxy_listener, admin_listener];
+    let leases = [proxy_lease, admin_lease];
     let mut config = Config::default();
     config.listener.proxy_addr = reservations[0].local_addr().expect("proxy addr");
     config.listener.admin_addr = reservations[1].local_addr().expect("admin addr");
@@ -106,12 +107,12 @@ async fn reserved_app() -> (App, [StdTcpListener; 2]) {
     let app = build_app_for_testing(config, clock)
         .await
         .expect("test app builds");
-    (app, reservations)
+    (app, reservations, leases)
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn start_waits_for_shutdown_hooks_before_returning() {
-    let (app, reservations) = reserved_app().await;
+    let (app, reservations, _port_leases) = reserved_app().await;
     let signal = app.signal_handle();
     let mut hook = GatedHook::install(&signal);
 
@@ -150,7 +151,7 @@ async fn start_waits_for_shutdown_hooks_before_returning() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn start_returns_at_the_hook_bound_and_the_hook_task_survives() {
-    let (app, reservations) = reserved_app().await;
+    let (app, reservations, _port_leases) = reserved_app().await;
     let signal = app.signal_handle();
     let mut hook = GatedHook::install(&signal);
 

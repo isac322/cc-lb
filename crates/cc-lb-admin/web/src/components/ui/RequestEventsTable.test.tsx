@@ -46,26 +46,26 @@ describe('RequestEventsTable', () => {
   it('infers every request kind through the shared provider taxonomy', () => {
     const expected: Record<
       RequestEventKind,
-      'anthropic' | 'openai' | 'gemini'
+      'anthropic' | 'openai' | 'gemini' | null
     > = {
       messages: 'anthropic',
-      count_tokens: 'anthropic',
+      count_tokens: null,
       openai_responses: 'openai',
       gemini_generate_content: 'gemini',
       gemini_count_tokens: 'gemini',
-      chat_completions: 'anthropic',
-      completions: 'anthropic',
-      embeddings: 'anthropic',
+      chat_completions: null,
+      completions: null,
+      embeddings: null,
       moderations: 'openai',
       audio: 'openai',
       images: 'openai',
       codex_auxiliary: 'openai',
       gemini_predict: 'gemini',
-      models: 'anthropic',
-      files: 'anthropic',
-      other: 'anthropic',
-      renewal: 'anthropic',
-      unclassified: 'anthropic',
+      models: null,
+      files: null,
+      other: null,
+      renewal: null,
+      unclassified: null,
     };
     for (const kind of RequestEventKindSchema.options) {
       expect(
@@ -74,6 +74,53 @@ describe('RequestEventsTable', () => {
         } as RequestEventWithPhase),
       ).toBe(expected[kind]);
     }
+  });
+  it('infers unrouted provider from model prefix and avoids fake provider logos on empty unrouted rows', () => {
+    expect(
+      providerForEvent({
+        event_kind: 'chat_completions',
+        model: 'openai/gpt-5.4',
+      } as RequestEventWithPhase),
+    ).toBe('openai');
+    expect(
+      providerForEvent({
+        event_kind: 'chat_completions',
+        model: 'o3-mini',
+      } as RequestEventWithPhase),
+    ).toBe('openai');
+    expect(
+      providerForEvent({
+        event_kind: 'chat_completions',
+        model: 'claude-sonnet-4-6',
+      } as RequestEventWithPhase),
+    ).toBe('anthropic');
+    expect(
+      providerForEvent({
+        event_kind: 'chat_completions',
+        model: 'gemini-2.5-pro',
+      } as RequestEventWithPhase),
+    ).toBe('gemini');
+
+    const { container } = render(
+      <RequestEventsTable
+        events={[
+          {
+            event_id: 'evt_unrouted_404',
+            request_id: 'req_unrouted_404',
+            ts: 1718553120,
+            status: 404,
+            duration_ms: 2,
+            event_kind: 'models',
+            _phase: 'final',
+          } satisfies RequestEventWithPhase,
+        ]}
+        principalNameMap={new Map()}
+      />,
+    );
+    const noModel = screen.getByText('No model');
+    const modelCell = noModel.closest('td');
+    expect(modelCell?.querySelector('svg')).toBeNull();
+    expect(container.querySelector('[title="Anthropic provider"]')).toBeNull();
   });
   it('uses the active provider scope for shared request kinds without inventory identity', () => {
     const event = {
@@ -1014,6 +1061,45 @@ describe('RequestEventsTable', () => {
       // The exact total remains in the accessible trigger and tooltip.
       const totals = screen.getAllByText('$0.0035');
       expect(totals.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('shows <$0.0001 instead of $0.0000 for sub-0.0001 positive components', async () => {
+      const user = userEvent.setup();
+      const events: RequestEventWithPhase[] = [
+        {
+          event_id: 'evt_sub_cent_micros',
+          request_id: 'req_sub_cent_micros',
+          ts: 1718553120,
+          ts_ms: 1718553120000,
+          status: 200,
+          duration_ms: 100,
+          cost_input_micros: 6,
+          cost_output_micros: 6_500,
+          cost_cache_read_micros: 155_400,
+          cost_usd_micros: 161_906,
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+      ];
+
+      render(
+        <RequestEventsTable
+          events={events}
+          principalNameMap={principalNameMap}
+        />,
+      );
+
+      const costCell = screen.getByRole('button', {
+        name: 'Cost $0.1619, show breakdown',
+      });
+      await user.hover(costCell);
+
+      const subUnit = await screen.findAllByText(
+        '<$0.0001',
+        {},
+        { timeout: 1000 },
+      );
+      expect(subUnit.length).toBeGreaterThan(0);
+      expect(screen.queryByText('$0.0000')).toBeNull();
     });
 
     it('shows em-dash for partial rows', async () => {

@@ -136,6 +136,7 @@ export function formatBigInteger(
 export function formatCostMicros(micros?: number | null): string {
   if (micros == null || !Number.isFinite(micros) || micros < 0) return DASH;
   if (micros > Number.MAX_SAFE_INTEGER) return DASH;
+  if (micros > 0 && micros < 100) return '<$0.0001';
   return formatUsdValue(micros / 1_000_000, 4);
 }
 

@@ -422,6 +422,170 @@ event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\
     Ok(())
 }
 
+#[tokio::test]
+async fn openai_oauth_responses_aggregate_records_upstream_body_timing()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::VecDeque;
+    use std::future::Future;
+    use std::time::Duration;
+
+    struct DelayedChunksDispatch {
+        chunks: Vec<Bytes>,
+        delay: Duration,
+    }
+
+    struct DelayedChunksBody {
+        chunks: VecDeque<Bytes>,
+        delay: Duration,
+        sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    }
+
+    #[async_trait]
+    impl UpstreamDispatch for DelayedChunksDispatch {
+        async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+            let mut response = Response::new(Body::new(DelayedChunksBody {
+                chunks: self.chunks.iter().cloned().collect(),
+                delay: self.delay,
+                sleep: None,
+            }));
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+            Ok(response)
+        }
+    }
+
+    impl HttpBody for DelayedChunksBody {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            if let Some(sleep) = self.sleep.as_mut() {
+                match sleep.as_mut().poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(()) => self.sleep = None,
+                }
+            }
+            match self.chunks.pop_front() {
+                Some(chunk) => {
+                    if !self.chunks.is_empty() {
+                        self.sleep = Some(Box::pin(tokio::time::sleep(self.delay)));
+                    }
+                    Poll::Ready(Some(Ok(Frame::data(chunk))))
+                }
+                None => Poll::Ready(None),
+            }
+        }
+
+        fn is_end_stream(&self) -> bool {
+            self.chunks.is_empty() && self.sleep.is_none()
+        }
+
+        fn size_hint(&self) -> SizeHint {
+            SizeHint::default()
+        }
+    }
+
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "responses-aggregate-body-timing.sqlite").await?);
+    let mut bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut rx = lifecycle_receiver(&bus);
+    let chunks = vec![
+        Bytes::from_static(
+            b"event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_agg_wait\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+        ),
+        Bytes::from_static(
+            b"event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"id\":\"resp_agg_wait\",\"object\":\"response\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":12,\"output_tokens\":3,\"total_tokens\":15}}}\n\n",
+        ),
+    ];
+    let mut record = upstream_record(upstream_id(4), "responses-agg");
+    record.kind = StorageUpstreamKind::OpenaiOauth;
+    record.base_url = Some(Url::parse("https://chatgpt.com/backend-api/")?);
+    let lifecycle = lifecycle_with_terminal_and_upstream_dispatch(
+        TerminalStrategy::FirstPick,
+        Vec::new(),
+        vec![record],
+        Arc::new(Mutex::new(Vec::new())),
+        false,
+        TestState::default(),
+        Arc::new(DelayedChunksDispatch {
+            chunks,
+            delay: Duration::from_millis(45),
+        }),
+    )
+    .with_upstream_affinity_store(Arc::new(
+        crate::upstream_affinity::MemoryAffinityStore::default(),
+    ))
+    .with_event_bus(bus.bus_arc());
+
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header("x-api-key", common::managed_api_key())
+        .body(Bytes::from_static(
+            br#"{"model":"gpt-test","input":"hello","stream":false}"#,
+        ))?;
+    let auth = lifecycle.authenticate(request.headers()).await?;
+    let response = lifecycle.handle(request, &auth).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let collected = response.into_body().collect().await?.to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&collected)?;
+    assert_eq!(payload["id"], "resp_agg_wait");
+    assert_eq!(payload["output"][0]["content"][0]["text"], "ok");
+
+    let (terminal, stream_completed) = wait_for_terminal(&mut rx).await;
+    assert!(stream_completed);
+    let LifecycleEvent::RequestTerminated {
+        client_status,
+        upstream_body_ms,
+        finalize_ms,
+        ..
+    } = terminal
+    else {
+        unreachable!("wait_for_terminal returns RequestTerminated")
+    };
+    assert_eq!(client_status, 200);
+    assert!(
+        upstream_body_ms.is_some_and(|ms| ms >= 35),
+        "upstream_body_ms={upstream_body_ms:?}"
+    );
+    assert!(finalize_ms.is_some());
+
+    bus.shutdown().await;
+    let rows = wait_for_events(storage.as_ref(), 1).await?;
+    assert_eq!(rows.len(), 1, "one durable request outcome");
+    assert_eq!(rows[0].status, 200);
+    assert_eq!(
+        rows[0].protocol,
+        Some(cc_lb_storage_api::RequestProtocol::Http)
+    );
+    assert!(
+        rows[0].upstream_body_ms.is_some_and(|ms| ms >= 35),
+        "expected non-trivial upstream_body_ms for buffered compat aggregation, got {:?}",
+        rows[0].upstream_body_ms
+    );
+    assert!(
+        rows[0].response_body_wait_ms.is_some_and(|ms| ms >= 30.0),
+        "expected response_body_wait_ms to include compat SSE wait, got {:?}",
+        rows[0].response_body_wait_ms
+    );
+    assert!(
+        rows[0].response_body_process_ms.is_some(),
+        "expected response_body_process_ms for buffered compat aggregation, got {:?}",
+        rows[0].response_body_process_ms
+    );
+    assert!(
+        rows[0].body_chunk_count.is_some_and(|count| count >= 2),
+        "expected body_chunk_count >= 2, got {:?}",
+        rows[0].body_chunk_count
+    );
+    Ok(())
+}
+
 fn assert_tail_error_frame(frame: &Bytes) {
     let text = std::str::from_utf8(frame).expect("tail error frame is UTF-8");
     let event = text.lines().find_map(|line| line.strip_prefix("event:"));

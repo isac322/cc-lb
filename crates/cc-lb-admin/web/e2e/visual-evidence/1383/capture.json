@@ -1,0 +1,42 @@
+{
+  "pr": 1383,
+  "afterSource": "725539be4a37b367772b61add14e2f8ab626f112",
+  "surface": "Request events table sub-cent cost formatting (<$0.0001), provider-logo attribution on unrouted/inferred rows, and plain HTTP detail drawer",
+  "widths": [
+    390,
+    768,
+    1440
+  ],
+  "height": 900,
+  "fixture": "Synthetic sanitized Admin Logs fixture covering OpenAI sub-cent HTTP (42 micros), Anthropic sub-cent SSE (35 micros), Gemini normal SSE (1,500 micros), model-inferred count_tokens (gpt-5.4, no upstream), and unrouted 404/400 rows without upstream or model",
+  "backend": "Production Admin Web bundle served via bun run preview (Vite preview) with Playwright route intercepts returning sanitized fixtures and empty SSE cursor events",
+  "captureScript": "Out-of-tree Playwright (Chromium) script rendering dark (390/768/1440) and light (1440) views, Cost breakdown popover, and HTTP Request detail drawer while checking scrollWidth, <$0.0001 / $0.0000 invariants, provider SVG presence/absence, and console/page errors",
+  "browser": "Chromium",
+  "checks": [
+    {
+      "name": "No horizontal overflow",
+      "outcome": "passed",
+      "details": "All desktop, tablet, and mobile captures: document.documentElement.scrollWidth <= window.innerWidth (390===390, 768===768, 1440===1440)."
+    },
+    {
+      "name": "Sub-cent cost floor formatting (<$0.0001)",
+      "outcome": "passed",
+      "details": "Positive sub-$0.0001 costs (42 micros OpenAI, 35 micros Anthropic) render <$0.0001 in table cells, breakdown popover, and detail drawer with zero $0.0000 occurrences and zero-cost categories hidden."
+    },
+    {
+      "name": "No fake provider logo on unrouted/ambiguous rows",
+      "outcome": "passed",
+      "details": "evt-unrouted-models-404 and evt-unrouted-count-400 render 0 provider logo SVGs at all widths; evt-openai-model-inferred (count_tokens with gpt-5.4) renders 1 OpenAI logo SVG."
+    },
+    {
+      "name": "Plain HTTP drawer protocol and body collect timing",
+      "outcome": "passed",
+      "details": "Request detail drawer for evt-openai-subcent-http displays Protocol HTTP, Cost <$0.0001, and Body 165 ms (40%) stage in Request timeline."
+    },
+    {
+      "name": "No secrets or console errors",
+      "outcome": "passed",
+      "details": "Zero console errors, zero uncaught page errors, and all 6 PNGs visually inspected with synthetic demo labels only."
+    }
+  ]
+}

@@ -186,7 +186,7 @@ describe('CostCell alignment', () => {
 describe('CostCell breakdown layout', () => {
   it.each([
     ['zero', 0, '$0.0000'],
-    ['small', 1, '$0.0000'],
+    ['small', 1, '<$0.0001'],
     ['large', 123_456_789_012, '$123,456.7890'],
   ])('shows a %s total unclipped', (_size, micros, expected) => {
     renderCost({ ...baseEvent, cost_usd_micros: micros });

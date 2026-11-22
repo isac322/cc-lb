@@ -232,6 +232,56 @@ where
     }
 }
 
+struct CompatBodyTimingGuard {
+    observer: Option<LifecycleContext>,
+    timing: compat_response::CompatBodyTiming,
+}
+
+impl CompatBodyTimingGuard {
+    fn start(observer: LifecycleContext) -> Self {
+        Self {
+            observer: Some(observer),
+            timing: compat_response::CompatBodyTiming::start(),
+        }
+    }
+
+    fn publish(&mut self) {
+        let Some(observer) = self.observer.take() else {
+            return;
+        };
+        let now = Instant::now();
+        observer.set_io_timings(self.timing.snapshot(now));
+        let first_body_chunk_ms = self
+            .timing
+            .first_body_chunk_at
+            .map(|at| duration_to_ms(at.saturating_duration_since(self.timing.collect_started)));
+        observer.set_termination_timings(None, None, first_body_chunk_ms);
+    }
+}
+
+impl Drop for CompatBodyTimingGuard {
+    fn drop(&mut self) {
+        self.publish();
+    }
+}
+
+fn push_buffered_data(
+    data: &[u8],
+    body: &Body,
+    body_cap: usize,
+    body_buf: &mut Vec<u8>,
+    body_collect_failed: &mut bool,
+    body_limit_terminal: &mut bool,
+) -> bool {
+    if data.len() > body_cap.saturating_sub(body_buf.len()) {
+        *body_collect_failed = true;
+        *body_limit_terminal = body.is_end_stream();
+        return false;
+    }
+    body_buf.extend_from_slice(data);
+    true
+}
+
 const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
 const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
@@ -7713,16 +7763,20 @@ impl Lifecycle {
         dispatch_unix_secs: u64,
     ) -> Response<Body> {
         let mut compat_compact_pending = None;
+        let mut compat_body_timing: Option<CompatBodyTimingGuard> = None;
         if let Some(plan) = compat_response_plan.as_ref() {
             match &plan.kind {
                 CompatResponseKind::ResponsesAggregate { echo_metadata } => {
-                    response = match compat_response::aggregate_response(
+                    let mut guard = observer.clone().map(CompatBodyTimingGuard::start);
+                    let aggregated = compat_response::aggregate_response(
                         response,
                         echo_metadata.clone(),
                         decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
+                        guard.as_mut().map(|g| &mut g.timing),
                     )
-                    .await
-                    {
+                    .await;
+                    compat_body_timing = guard;
+                    response = match aggregated {
                         Ok(response) => response,
                         Err(error) => provider_error_response(
                             response_affinity_context.capability,
@@ -7734,13 +7788,16 @@ impl Lifecycle {
                     };
                 }
                 CompatResponseKind::Compact { original_request } => {
-                    response = match compat_response::aggregate_response(
+                    let mut guard = observer.clone().map(CompatBodyTimingGuard::start);
+                    let aggregated = compat_response::aggregate_response(
                         response,
                         None,
                         decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
+                        guard.as_mut().map(|g| &mut g.timing),
                     )
-                    .await
-                    {
+                    .await;
+                    compat_body_timing = guard;
+                    response = match aggregated {
                         Ok(response) => {
                             compat_compact_pending = Some(original_request.clone());
                             response
@@ -7858,16 +7915,7 @@ impl Lifecycle {
             body = Body::empty();
         }
         strip_hop_by_hop(&mut parts.headers);
-        let body_collect_started = Instant::now();
-        let mut last_activity_heartbeat_at = body_collect_started;
-        let mut activity_heartbeat = new_activity_heartbeat_interval();
-        let response_body_timing = BodyIoTiming::default();
-        let mut response_body_timing_guard =
-            BodyIoTimingObserverGuard::new(observer.clone(), response_body_timing.clone());
-        response_body_timing.transition(Some(BodyIoPhase::Process));
-        let mut first_body_chunk_at: Option<Instant> = None;
         let mut body_buf: Vec<u8> = Vec::new();
-        let mut body_chunk_count: u64 = 0;
         // Ordinary buffered responses remain uncapped. Requested streams
         // requiring JSON/OAuth transforms use the path's cap; non-SSE,
         // non-JSON streaming responses instead relay incrementally above.
@@ -7878,55 +7926,103 @@ impl Lifecycle {
         };
         let mut body_collect_failed = false;
         let mut body_limit_terminal = false;
-        while !unexpected_catalog_sse
-            && let Some(frame) = timed_body_frame_with_heartbeat(
-                &mut body,
-                &response_body_timing,
-                observer.as_ref(),
-                &mut last_activity_heartbeat_at,
-                &mut activity_heartbeat,
-            )
-            .await
-        {
-            match frame {
-                Ok(frame) => {
-                    if let Ok(data) = frame.into_data() {
-                        let chunk_now = Instant::now();
-                        maybe_emit_chunk_heartbeat(
-                            chunk_now,
-                            &mut last_activity_heartbeat_at,
-                            &mut activity_heartbeat,
-                            observer.as_ref(),
-                        );
-                        if first_body_chunk_at.is_none() {
-                            first_body_chunk_at = Some(chunk_now);
-                            if let Some(o) = observer.as_ref() {
-                                o.set_termination_timings(
-                                    None,
-                                    None,
-                                    Some(duration_to_ms(
-                                        chunk_now.saturating_duration_since(body_collect_started),
-                                    )),
-                                );
-                            }
-                        }
-                        body_chunk_count = body_chunk_count.saturating_add(1);
-                        if data.len() > body_cap.saturating_sub(body_buf.len()) {
-                            body_collect_failed = true;
-                            body_limit_terminal = body.is_end_stream();
+        let body_collect_started;
+        let first_body_chunk_at;
+        let body_chunk_count;
+        if let Some(mut guard) = compat_body_timing.take() {
+            while !unexpected_catalog_sse && let Some(frame) = body.frame().await {
+                match frame {
+                    Ok(frame) => {
+                        if let Ok(data) = frame.into_data()
+                            && !push_buffered_data(
+                                &data,
+                                &body,
+                                body_cap,
+                                &mut body_buf,
+                                &mut body_collect_failed,
+                                &mut body_limit_terminal,
+                            )
+                        {
                             break;
                         }
-                        body_buf.extend_from_slice(&data);
+                    }
+                    Err(_source) => {
+                        body_collect_failed = true;
+                        break;
                     }
                 }
-                Err(_source) => {
-                    body_collect_failed = true;
-                    break;
+            }
+            body_collect_started = guard.timing.collect_started;
+            first_body_chunk_at = guard.timing.first_body_chunk_at;
+            body_chunk_count = guard.timing.body_chunk_count;
+            guard.publish();
+        } else {
+            body_collect_started = Instant::now();
+            let mut last_activity_heartbeat_at = body_collect_started;
+            let mut activity_heartbeat = new_activity_heartbeat_interval();
+            let response_body_timing = BodyIoTiming::default();
+            let mut response_body_timing_guard =
+                BodyIoTimingObserverGuard::new(observer.clone(), response_body_timing.clone());
+            response_body_timing.transition(Some(BodyIoPhase::Process));
+            let mut first_chunk_at: Option<Instant> = None;
+            let mut chunk_count: u64 = 0;
+            while !unexpected_catalog_sse
+                && let Some(frame) = timed_body_frame_with_heartbeat(
+                    &mut body,
+                    &response_body_timing,
+                    observer.as_ref(),
+                    &mut last_activity_heartbeat_at,
+                    &mut activity_heartbeat,
+                )
+                .await
+            {
+                match frame {
+                    Ok(frame) => {
+                        if let Ok(data) = frame.into_data() {
+                            let chunk_now = Instant::now();
+                            maybe_emit_chunk_heartbeat(
+                                chunk_now,
+                                &mut last_activity_heartbeat_at,
+                                &mut activity_heartbeat,
+                                observer.as_ref(),
+                            );
+                            if first_chunk_at.is_none() {
+                                first_chunk_at = Some(chunk_now);
+                                if let Some(o) = observer.as_ref() {
+                                    o.set_termination_timings(
+                                        None,
+                                        None,
+                                        Some(duration_to_ms(
+                                            chunk_now
+                                                .saturating_duration_since(body_collect_started),
+                                        )),
+                                    );
+                                }
+                            }
+                            chunk_count = chunk_count.saturating_add(1);
+                            if !push_buffered_data(
+                                &data,
+                                &body,
+                                body_cap,
+                                &mut body_buf,
+                                &mut body_collect_failed,
+                                &mut body_limit_terminal,
+                            ) {
+                                break;
+                            }
+                        }
+                    }
+                    Err(_source) => {
+                        body_collect_failed = true;
+                        break;
+                    }
                 }
             }
+            response_body_timing.stop();
+            response_body_timing_guard.record();
+            first_body_chunk_at = first_chunk_at;
+            body_chunk_count = chunk_count;
         }
-        response_body_timing.stop();
-        response_body_timing_guard.record();
         let finalize_started = Instant::now();
         let body = if body_collect_failed {
             Bytes::new()
