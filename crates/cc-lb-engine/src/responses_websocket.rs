@@ -175,12 +175,13 @@ pub(crate) enum WsUnknownReasoningPlan {
     },
     /// Single eligible upstream with unestablished reasoning: send verbatim first;
     /// bind `unknown_keys` on success, or retry once stripping all reasoning on
-    /// pre-created `invalid_encrypted_content` error.
+    /// HTTP-400 `invalid_encrypted_content` before any response frame is emitted.
     RetryStripAll {
         unknown_keys: Vec<UpstreamAffinityKey>,
     },
     /// Resolved owner with unmatched pending reasoning digests: send verbatim first;
-    /// retry once stripping only `pending_digests` on pre-created `invalid_encrypted_content`.
+    /// retry once stripping only `pending_digests` on HTTP-400 `invalid_encrypted_content`
+    /// before any response frame is emitted.
     RetryStripPending {
         pending_digests: HashSet<[u8; 32]>,
         pending_keys: Vec<UpstreamAffinityKey>,
@@ -589,6 +590,7 @@ struct Turn {
     echo_metadata: Option<Value>,
     funding_ambiguous: bool,
     response_created: bool,
+    provider_frame_forwarded: bool,
     unknown_reasoning_retry: Option<WsUnknownReasoningRetry>,
     unknown_reasoning_retried: bool,
     pending_affinity_keys: Vec<UpstreamAffinityKey>,
@@ -1003,6 +1005,7 @@ impl ResponsesWebSocketGateway {
                 metrics,
                 funding_ambiguous: false,
                 response_created: false,
+                provider_frame_forwarded: false,
                 unknown_reasoning_retry,
                 unknown_reasoning_retried: false,
                 pending_affinity_keys,
@@ -1197,6 +1200,7 @@ impl ResponsesWebSocketGateway {
                 metrics,
                 funding_ambiguous: false,
                 response_created: false,
+                provider_frame_forwarded: false,
                 unknown_reasoning_retry: None,
                 unknown_reasoning_retried: false,
                 pending_affinity_keys: Vec::new(),
@@ -2307,10 +2311,19 @@ impl ResponsesWebSocketGateway {
             )
             .with_stream(lane));
         }
+        // Only retry before any response identity or lifecycle frame (`response.queued`,
+        // `response.in_progress`, `response.created`, or other non-terminal output) has
+        // been observed/forwarded to the client. Once a response lifecycle frame arrives,
+        // `self.owners`, client-visible response identity, and `pending_affinity_keys`
+        // have already committed; retrying after that would emit a second response id
+        // on the client stream and leave rejected keys bound. Also require explicit status 400
+        // so 429/5xx or statusless errors are never swallowed or replayed.
         if kind == "error"
+            && value.get("status").and_then(Value::as_u64) == Some(400)
             && transform_error.is_none()
             && turn.response_id.is_none()
             && !turn.response_created
+            && !turn.provider_frame_forwarded
             && !turn.unknown_reasoning_retried
             && turn.unknown_reasoning_retry.is_some()
             && is_openai_invalid_encrypted_content_error_value(&value)
@@ -2515,6 +2528,12 @@ impl ResponsesWebSocketGateway {
             && let Some(turn) = self.turns.get_mut(&turn_id)
         {
             turn.response_created = true;
+        }
+        if !terminal
+            && transform_error.is_none()
+            && let Some(turn) = self.turns.get_mut(&turn_id)
+        {
+            turn.provider_frame_forwarded = true;
         }
         let mut result = WebSocketEventResult {
             forward: true,
@@ -3613,6 +3632,7 @@ pub(crate) mod tests {
                 metrics: ResponsesStreamMetrics::new(),
                 funding_ambiguous: false,
                 response_created: false,
+                provider_frame_forwarded: false,
                 unknown_reasoning_retry: None,
                 unknown_reasoning_retried: false,
                 pending_affinity_keys: Vec::new(),
@@ -4243,6 +4263,7 @@ pub(crate) mod tests {
                     metrics: ResponsesStreamMetrics::new(),
                     funding_ambiguous: false,
                     response_created: false,
+                    provider_frame_forwarded: false,
                     unknown_reasoning_retry: None,
                     unknown_reasoning_retried: false,
                     pending_affinity_keys: Vec::new(),

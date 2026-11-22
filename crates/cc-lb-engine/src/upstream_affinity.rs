@@ -671,10 +671,13 @@ pub(crate) fn is_openai_invalid_encrypted_content_error_value(value: &Value) -> 
     (lower.contains("encrypted content") || lower.contains("encrypted_content"))
         && [
             "could not be verified",
-            "decrypt",
-            "organization",
-            "invalid",
-            "verify",
+            "cannot be verified",
+            "failed to verify",
+            "could not be decrypted",
+            "cannot be decrypted",
+            "failed to decrypt",
+            "unable to decrypt",
+            "encrypted content organization_id did not match",
         ]
         .iter()
         .any(|needle| lower.contains(needle))
@@ -1567,6 +1570,15 @@ mod tests {
             }
         });
         assert!(!is_openai_invalid_encrypted_content_error_value(&unrelated));
+        let unrelated_no_code = serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "message": "Invalid encrypted_content must be omitted for an unsupported model flag"
+            }
+        });
+        assert!(!is_openai_invalid_encrypted_content_error_value(
+            &unrelated_no_code
+        ));
         let unrelated_model = serde_json::json!({
             "error": {
                 "type": "invalid_request_error",

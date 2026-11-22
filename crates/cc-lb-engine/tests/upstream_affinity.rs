@@ -3859,3 +3859,108 @@ async fn hybrid_negative_controls_keep_fail_closed_boundaries() {
     assert_eq!(ws_fc_err.code, "upstream_affinity_unavailable");
     gw_fc.close();
 }
+
+#[tokio::test]
+async fn hybrid_ws_rejects_non_400_and_post_queued_errors_without_retry() {
+    let oauth_a = Uuid::parse_str("10000000-0000-0000-0000-000000000051").unwrap();
+    let store = Arc::new(MemoryAffinityStore::default());
+    let mut gateway = ws1296_gateway(lifecycle(
+        vec![openai_oauth_upstream_record(oauth_a, "oauth-a", true)],
+        Arc::new(RecordingDispatch::default()),
+        Some(store.clone()),
+    ))
+    .await;
+
+    // 1) Non-400 (500, 429) or statusless WS error frames with code="invalid_encrypted_content"
+    // must be forwarded without retry or replay.
+    for (idx, status_field) in [Some(500u64), Some(429u64), None].into_iter().enumerate() {
+        let foreign = format!("gAAAAABws_non400_{idx}");
+        let dispatch = ws1296_admit(&mut gateway, ws1296_create(None, Some(&foreign)))
+            .await
+            .expect("WS single-upstream admits")
+            .expect("dispatch queued");
+        ws_hybrid_send(&mut gateway, &dispatch, 90 + idx as u64, oauth_a, "oauth-a").await;
+        let mut err_frame = json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_encrypted_content",
+                "message": "The encrypted content could not be verified."
+            }
+        });
+        if let Some(status) = status_field {
+            err_frame["status"] = json!(status);
+        }
+        let res = gateway
+            .provider_message(90 + idx as u64, &Bytes::from(err_frame.to_string()))
+            .await
+            .expect("non-400 error forwards cleanly");
+        assert!(res.forward, "case {idx} must forward original error frame");
+        assert!(
+            res.dispatches.is_empty(),
+            "case {idx} must not schedule a retry dispatch"
+        );
+        assert!(res.errors.is_empty());
+        assert!(!gateway.has_active_turns());
+        assert_eq!(store.upstream_for(&ws1296_openai_key(&foreign)), None);
+    }
+
+    // 2) Once response.queued has been forwarded for the turn, a subsequent 400
+    // invalid_encrypted_content error must NOT retry (response identity is already live).
+    let foreign_queued = "gAAAAABws_post_queued";
+    let dispatch = ws1296_admit(&mut gateway, ws1296_create(None, Some(foreign_queued)))
+        .await
+        .expect("WS turn admits")
+        .expect("dispatch queued");
+    ws_hybrid_send(&mut gateway, &dispatch, 99, oauth_a, "oauth-a").await;
+
+    let queued_frame = Bytes::from(
+        json!({
+            "type": "response.queued",
+            "sequence_number": 0,
+            "response": {
+                "id": "resp_queued_live",
+                "object": "response",
+                "model": "gpt-5-codex",
+                "status": "queued",
+                "store": false,
+                "output": [],
+                "usage": null
+            }
+        })
+        .to_string(),
+    );
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(99, &queued_frame)
+            .await
+            .expect("response.queued forwards"),
+    );
+
+    let err_400 = Bytes::from(
+        json!({
+            "type": "error",
+            "status": 400,
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_encrypted_content",
+                "message": "The encrypted content for item rs_ws1296 could not be verified."
+            }
+        })
+        .to_string(),
+    );
+    let post_queued_res = gateway
+        .provider_message(99, &err_400)
+        .await
+        .expect("post-queued error forwards without panic");
+    assert!(
+        post_queued_res.forward,
+        "post-queued 400 must forward rather than re-creating after response.queued"
+    );
+    assert!(
+        post_queued_res.dispatches.is_empty(),
+        "post-queued 400 must not retry"
+    );
+    assert!(!gateway.has_active_turns());
+    gateway.close();
+}
