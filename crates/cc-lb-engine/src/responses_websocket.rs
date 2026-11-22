@@ -2503,11 +2503,18 @@ impl ResponsesWebSocketGateway {
                         .and_then(|value| value.get("store"))
                         .and_then(Value::as_bool)
                         .unwrap_or(true);
-                // Only bind unverified input `pending_affinity_keys` once the upstream
-                // completes cleanly (`response.completed`); `response.queued`,
-                // `response.in_progress`, and other non-terminal frames must never persist
-                // unverified input reasoning before a subsequent `400` or stream failure.
-                let pending_keys = if kind == "response.completed" {
+                // Only bind unverified input `pending_affinity_keys` on accepted terminal frames
+                // (`response.completed` or error-free `response.incomplete`), matching
+                // `classify_terminal_frame`; `response.queued`, `response.in_progress`,
+                // `response.failed`, and error-bearing `response.incomplete` must not bind
+                // unverified input reasoning.
+                let clean_incomplete = kind == "response.incomplete"
+                    && !value
+                        .pointer("/response/error")
+                        .is_some_and(|error| !error.is_null());
+                let pending_keys = if transform_error.is_none()
+                    && (kind == "response.completed" || clean_incomplete)
+                {
                     std::mem::take(&mut turn.pending_affinity_keys)
                 } else {
                     Vec::new()

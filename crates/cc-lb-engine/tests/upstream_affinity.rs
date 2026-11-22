@@ -4027,3 +4027,151 @@ async fn hybrid_ws_rejects_non_400_and_post_queued_errors_without_retry() {
     );
     gateway.close();
 }
+
+#[tokio::test]
+async fn hybrid_ws_pending_affinity_binds_clean_incomplete_and_skips_error_incomplete() {
+    let oauth_a = Uuid::parse_str("10000000-0000-0000-0000-000000000052").unwrap();
+    let store = Arc::new(MemoryAffinityStore::default());
+    let mut gateway = ws1296_gateway(lifecycle(
+        vec![openai_oauth_upstream_record(oauth_a, "oauth-a", true)],
+        Arc::new(RecordingDispatch::default()),
+        Some(store.clone()),
+    ))
+    .await;
+
+    // 1) Clean response.incomplete (no error / null error) completes the turn cleanly and
+    // must bind accepted unknown input reasoning to oauth_a.
+    let clean_incomplete_cipher = "gAAAAABws_clean_incomplete";
+    let d_clean = ws1296_admit(
+        &mut gateway,
+        ws1296_create(None, Some(clean_incomplete_cipher)),
+    )
+    .await
+    .expect("WS single-upstream admits clean incomplete turn")
+    .expect("dispatch queued");
+    ws_hybrid_send(&mut gateway, &d_clean, 101, oauth_a, "oauth-a").await;
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(101, &ws1296_created("resp_clean_inc"))
+            .await
+            .unwrap(),
+    );
+    let clean_incomplete_frame = Bytes::from(
+        json!({
+            "type": "response.incomplete",
+            "sequence_number": 2,
+            "response": {
+                "id": "resp_clean_inc",
+                "object": "response",
+                "model": "gpt-5-codex",
+                "status": "incomplete",
+                "store": false,
+                "error": null,
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "output": [],
+                "usage": {"input_tokens": 5, "output_tokens": 3}
+            }
+        })
+        .to_string(),
+    );
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(101, &clean_incomplete_frame)
+            .await
+            .expect("clean response.incomplete forwards"),
+    );
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key(clean_incomplete_cipher)),
+        Some(oauth_a),
+        "clean response.incomplete must persist accepted input reasoning affinity"
+    );
+
+    // 2) Error-bearing response.incomplete must NOT bind pending input reasoning.
+    let err_incomplete_cipher = "gAAAAABws_err_incomplete";
+    let d_err_inc = ws1296_admit(
+        &mut gateway,
+        ws1296_create(None, Some(err_incomplete_cipher)),
+    )
+    .await
+    .expect("WS admits turn")
+    .expect("dispatch queued");
+    ws_hybrid_send(&mut gateway, &d_err_inc, 102, oauth_a, "oauth-a").await;
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(102, &ws1296_created("resp_err_inc"))
+            .await
+            .unwrap(),
+    );
+    let err_incomplete_frame = Bytes::from(
+        json!({
+            "type": "response.incomplete",
+            "sequence_number": 2,
+            "response": {
+                "id": "resp_err_inc",
+                "object": "response",
+                "model": "gpt-5-codex",
+                "status": "incomplete",
+                "store": false,
+                "error": {"code": "server_error", "message": "failed"},
+                "output": [],
+                "usage": null
+            }
+        })
+        .to_string(),
+    );
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(102, &err_incomplete_frame)
+            .await
+            .expect("error response.incomplete forwards"),
+    );
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key(err_incomplete_cipher)),
+        None,
+        "error-bearing response.incomplete must leave pending input reasoning unbound"
+    );
+
+    // 3) response.failed must NOT bind pending input reasoning.
+    let failed_cipher = "gAAAAABws_failed";
+    let d_failed = ws1296_admit(&mut gateway, ws1296_create(None, Some(failed_cipher)))
+        .await
+        .expect("WS admits turn")
+        .expect("dispatch queued");
+    ws_hybrid_send(&mut gateway, &d_failed, 103, oauth_a, "oauth-a").await;
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(103, &ws1296_created("resp_failed"))
+            .await
+            .unwrap(),
+    );
+    let failed_frame = Bytes::from(
+        json!({
+            "type": "response.failed",
+            "sequence_number": 2,
+            "response": {
+                "id": "resp_failed",
+                "object": "response",
+                "model": "gpt-5-codex",
+                "status": "failed",
+                "store": false,
+                "error": {"code": "server_error", "message": "failed"},
+                "output": [],
+                "usage": null
+            }
+        })
+        .to_string(),
+    );
+    ws1296_assert_raw_forward(
+        &gateway
+            .provider_message(103, &failed_frame)
+            .await
+            .expect("response.failed forwards"),
+    );
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key(failed_cipher)),
+        None,
+        "response.failed must leave pending input reasoning unbound"
+    );
+    assert!(!gateway.has_active_turns());
+    gateway.close();
+}
