@@ -106,6 +106,7 @@ fn terminated(event_id: &str) -> LifecycleEvent {
         finalize_ms: None,
         event_kind: None,
         funding_ambiguous: false,
+        protocol: None,
     }
 }
 

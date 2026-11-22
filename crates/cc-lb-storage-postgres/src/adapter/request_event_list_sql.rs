@@ -1,6 +1,6 @@
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventKind, RequestEventListItem, RequestEventListQuery, StatusClass,
-    StorageError, StorageResult, model_filter_like_patterns,
+    RequestEvent, RequestEventKind, RequestEventListItem, RequestEventListQuery, RequestProtocol,
+    StatusClass, StorageError, StorageResult, model_filter_like_patterns,
 };
 use sqlx::{FromRow, Postgres, QueryBuilder};
 
@@ -64,6 +64,7 @@ SELECT \
     r.event_id, \
     r.source_kind, \
     r.event_kind, \
+    r.protocol, \
     r.principal_id, \
     r.upstream_id, \
     r.upstream_name, \
@@ -151,6 +152,7 @@ pub(super) struct ListRow {
     pub(super) event_id: Option<String>,
     pub(super) source_kind: Option<String>,
     pub(super) event_kind: Option<String>,
+    pub(super) protocol: Option<String>,
     pub(super) principal_id: Option<String>,
     pub(super) upstream_id: Option<uuid::Uuid>,
     pub(super) upstream_name: Option<String>,
@@ -358,5 +360,11 @@ pub(super) fn status_class_range(class: StatusClass) -> (i32, i32) {
 pub(super) fn parse_event_kind(value: &str) -> StorageResult<RequestEventKind> {
     value.parse().map_err(|_| StorageError::Corrupted {
         message: format!("request event unknown event_kind value: {value}"),
+    })
+}
+
+pub(super) fn parse_protocol(value: &str) -> StorageResult<RequestProtocol> {
+    value.parse().map_err(|_| StorageError::Corrupted {
+        message: format!("request event unknown protocol value: {value}"),
     })
 }

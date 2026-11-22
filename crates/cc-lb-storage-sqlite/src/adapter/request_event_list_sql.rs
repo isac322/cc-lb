@@ -18,6 +18,7 @@ SELECT \
     event_id, \
     source_kind, \
     event_kind, \
+    protocol, \
     principal_id, \
     upstream_id, \
     upstream_name, \
@@ -145,6 +146,7 @@ pub(super) struct ListRow {
     pub(super) event_id: Option<String>,
     pub(super) source_kind: Option<String>,
     pub(super) event_kind: Option<String>,
+    pub(super) protocol: Option<String>,
     pub(super) principal_id: Option<String>,
     pub(super) upstream_id: Option<String>,
     pub(super) upstream_name: Option<String>,

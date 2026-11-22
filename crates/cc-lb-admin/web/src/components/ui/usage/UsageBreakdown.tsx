@@ -84,14 +84,32 @@ export function TokenBreakdown({ event }: { event: RequestEventWithPhase }) {
     input: event.input_tokens ?? 0,
     output: event.output_tokens ?? 0,
   };
+  const residualCacheWrite = Math.max(
+    0,
+    (event.cache_write_input_tokens ?? 0) -
+      tokens.cache_write_30m -
+      tokens.cache_write_12h,
+  );
   const rows = USAGE_CATEGORIES.map((category) => ({
-    key: category.key,
-    label: category.label,
+    key: category.key as string,
+    label: category.label as string,
     value: tokens[category.key],
-    color: category.color,
+    color: category.color as string,
   }))
     .filter((row) => row.value > 0)
     .map((row) => ({ ...row, formatted: fmtN(row.value) }));
+  if (residualCacheWrite > 0) {
+    const inputIdx = rows.findIndex((row) => row.key === 'input');
+    const writeRow = {
+      key: 'cache_write',
+      label: 'Cache write',
+      value: residualCacheWrite,
+      color: 'var(--color-series-cache-create-5m)',
+      formatted: fmtN(residualCacheWrite),
+    };
+    if (inputIdx >= 0) rows.splice(inputIdx, 0, writeRow);
+    else rows.push(writeRow);
+  }
   const totalTokens = rows.reduce((sum, row) => sum + row.value, 0);
 
   return (
@@ -114,14 +132,32 @@ export function CostBreakdown({ event }: { event: RequestEventWithPhase }) {
     input: event.cost_input_micros ?? 0,
     output: event.cost_output_micros ?? 0,
   };
+  const residualCacheWrite = Math.max(
+    0,
+    (event.cost_cache_write_micros ?? 0) -
+      micros.cache_write_30m -
+      micros.cache_write_12h,
+  );
   const rows = USAGE_CATEGORIES.map((category) => ({
-    key: category.key,
-    label: category.label,
+    key: category.key as string,
+    label: category.label as string,
     value: micros[category.key],
-    color: category.color,
+    color: category.color as string,
   }))
     .filter((row) => row.value > 0)
     .map((row) => ({ ...row, formatted: formatCostMicros(row.value) }));
+  if (residualCacheWrite > 0) {
+    const inputIdx = rows.findIndex((row) => row.key === 'input');
+    const writeRow = {
+      key: 'cache_write',
+      label: 'Cache write',
+      value: residualCacheWrite,
+      color: 'var(--color-series-cache-create-5m)',
+      formatted: formatCostMicros(residualCacheWrite),
+    };
+    if (inputIdx >= 0) rows.splice(inputIdx, 0, writeRow);
+    else rows.push(writeRow);
+  }
   const totalMicros =
     event.cost_usd_micros ?? rows.reduce((sum, row) => sum + row.value, 0);
   if (rows.length === 0) {

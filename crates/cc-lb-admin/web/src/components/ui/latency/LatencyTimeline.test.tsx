@@ -1062,4 +1062,113 @@ describe('LatencyTimeline', () => {
     render(<LatencyTimeline event={event} />);
     expect(screen.getByText('No latency data recorded.')).toBeTruthy();
   });
+
+  it('renders WebSocket terminology, frames counter, and WebSocket markers without SSE labels', () => {
+    render(
+      <LatencyTimeline
+        provider="openai"
+        event={ev({
+          source_kind: 'proxy',
+          event_kind: 'openai_responses',
+          protocol: 'websocket',
+          status: 101,
+          connection_reused: true,
+          duration_ms: 1000,
+          proxy_setup_ms: 10,
+          upstream_ttfb_ms: 200,
+          stream_message_start_ms: 0,
+          stream_content_block_start_ms: 10,
+          stream_first_content_delta_ms: 20,
+          stream_last_content_delta_ms: 700,
+          stream_message_stop_ms: 760,
+          stream_last_chunk_ms: 780,
+          stream_total_ms: 780,
+          sse_event_count: 0,
+          body_chunk_count: 14,
+          content_delta_count: 10,
+          ping_count: 1,
+          inter_token_avg_ms: 75,
+          finalize_ms: 10,
+        })}
+      />,
+    );
+
+    expect(screen.getByText('WebSocket markers')).toBeTruthy();
+    expect(screen.getByText('WebSocket marker details (6)')).toBeTruthy();
+    expect(screen.getByText('Reused socket')).toBeTruthy();
+    expect(screen.getByText('frames:')).toBeTruthy();
+    expect(screen.queryByText('SSE:')).toBeNull();
+    expect(screen.queryByText('SSE markers')).toBeNull();
+    expect(screen.getAllByText('First frame wait').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('WebSocket relay').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Response created').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Output started').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Response completed').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Last frame').length).toBeGreaterThan(0);
+  });
+
+  it('anchors legacy WebSocket markers at 0 when stream_total_ms spans full duration without upstream_ttfb_ms', () => {
+    const legacyWs = ev({
+      source_kind: 'proxy',
+      event_kind: 'openai_responses',
+      protocol: 'websocket',
+      status: 101,
+      duration_ms: 1000,
+      proxy_setup_ms: 40,
+      upstream_ttfb_ms: undefined,
+      stream_first_output_ms: 250,
+      stream_last_chunk_ms: 990,
+      stream_total_ms: 990,
+      body_chunk_count: 6,
+    });
+    const markers = buildSseMarkers(legacyWs);
+    expect(markers.map((m) => [m.key, m.absMs])).toEqual([
+      ['first_output', 250],
+      ['last_chunk', 990],
+    ]);
+    render(<LatencyTimeline provider="openai" event={legacyWs} />);
+    expect(screen.getAllByText('First output frame').length).toBeGreaterThan(0);
+    expect(screen.queryByText('SSE:')).toBeNull();
+  });
+
+  it('adapts headings for http_stream and hides marker lane for plain http', () => {
+    render(
+      <LatencyTimeline
+        provider="openai"
+        event={ev({
+          source_kind: 'proxy',
+          protocol: 'http_stream',
+          duration_ms: 800,
+          upstream_ttfb_ms: 100,
+          stream_message_start_ms: 0,
+          stream_last_chunk_ms: 600,
+          stream_total_ms: 600,
+          body_chunk_count: 8,
+        })}
+      />,
+    );
+    expect(screen.getByText('Stream markers')).toBeTruthy();
+    expect(screen.getByText('Stream marker details (2)')).toBeTruthy();
+    expect(screen.getByText('chunks:')).toBeTruthy();
+    expect(screen.queryByText('SSE:')).toBeNull();
+
+    cleanup();
+
+    render(
+      <LatencyTimeline
+        provider="openai"
+        event={ev({
+          source_kind: 'proxy',
+          protocol: 'http',
+          duration_ms: 200,
+          upstream_ttfb_ms: 150,
+          upstream_body_ms: 40,
+          stream_last_chunk_ms: 40,
+        })}
+      />,
+    );
+    expect(screen.queryByText('SSE markers')).toBeNull();
+    expect(screen.queryByText('Stream markers')).toBeNull();
+    expect(screen.queryByText('WebSocket markers')).toBeNull();
+  });
 });

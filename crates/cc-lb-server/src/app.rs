@@ -72,7 +72,9 @@ use tokio::task::{JoinError, JoinHandle};
 use tokio_tungstenite::tungstenite::{
     Message as UpstreamMessage, client::IntoClientRequest, protocol::WebSocketConfig,
 };
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, client_async_tls_with_config, connect_async_with_config,
+};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tracing::Instrument as _;
@@ -3261,6 +3263,12 @@ fn websocket_breaker_key(upstream_id: uuid::Uuid) -> String {
     format!("websocket:{upstream_id}")
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct WsConnectTimings {
+    dns_ms: Option<u64>,
+    connect_ms: Option<u64>,
+}
+
 async fn connect_provider_websocket(
     state: &ProxyState,
     upstream_id: uuid::Uuid,
@@ -3271,6 +3279,7 @@ async fn connect_provider_websocket(
         WebSocketStream<MaybeTlsStream<TcpStream>>,
         HeaderMap,
         cc_lb_engine::OwnedBulkheadGuard,
+        WsConnectTimings,
     ),
     WebSocketError,
 > {
@@ -3286,20 +3295,77 @@ async fn connect_provider_websocket(
             "provider WebSocket connection is unavailable",
         )
     })?;
-    let result = tokio::time::timeout(
-        WS_PROVIDER_CONNECT_TIMEOUT,
-        connect_async_with_config(
-            request,
-            Some(responses_websocket_config(state.body_caps.messages)),
-            false,
-        ),
-    )
+    let Some(host) = request.uri().host().map(str::to_owned) else {
+        drop(permit);
+        return Err(WebSocketError::new(
+            502,
+            "upstream_unavailable",
+            "provider WebSocket connection failed",
+        ));
+    };
+    let port = request.uri().port_u16().unwrap_or_else(|| {
+        if request.uri().scheme_str() == Some("wss") {
+            443
+        } else {
+            80
+        }
+    });
+    let ws_config = responses_websocket_config(state.body_caps.messages);
+    let result = tokio::time::timeout(WS_PROVIDER_CONNECT_TIMEOUT, async move {
+        let mut connect_timings = WsConnectTimings::default();
+        let ip_literal = host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .ok();
+        let addrs: Vec<std::net::SocketAddr> = match ip_literal {
+            Some(ip) => {
+                connect_timings.dns_ms = Some(0);
+                vec![std::net::SocketAddr::new(ip, port)]
+            }
+            None => {
+                let dns_started = std::time::Instant::now();
+                let resolved = tokio::net::lookup_host((host.as_str(), port))
+                    .await
+                    .map_err(tokio_tungstenite::tungstenite::Error::Io)?;
+                connect_timings.dns_ms =
+                    Some(dns_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
+                resolved.collect()
+            }
+        };
+        if addrs.is_empty() {
+            return Err(tokio_tungstenite::tungstenite::Error::Io(
+                std::io::Error::new(
+                    std::io::ErrorKind::AddrNotAvailable,
+                    "DNS resolution returned no socket addresses",
+                ),
+            ));
+        }
+        let connect_started = std::time::Instant::now();
+        let tcp = TcpStream::connect(addrs.as_slice())
+            .await
+            .map_err(tokio_tungstenite::tungstenite::Error::Io)?;
+        let (stream, response) =
+            client_async_tls_with_config(request, tcp, Some(ws_config), None).await?;
+        connect_timings.connect_ms = Some(
+            connect_started
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
+        );
+        Ok::<_, tokio_tungstenite::tungstenite::Error>((stream, response, connect_timings))
+    })
     .await;
     match result {
-        Ok(Ok((stream, response))) => {
+        Ok(Ok((stream, response, connect_timings))) => {
             let (response_parts, _) = response.into_parts();
             permit.record_success();
-            Ok((stream, response_parts.headers, bulkhead_guard))
+            Ok((
+                stream,
+                response_parts.headers,
+                bulkhead_guard,
+                connect_timings,
+            ))
         }
         Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response))) => {
             let error = provider_websocket_error_from_http(*response);
@@ -3351,7 +3417,7 @@ struct ResponsesProviderParams<'a> {
 
 async fn start_responses_provider(
     params: ResponsesProviderParams<'_>,
-) -> Result<WsProviderConnection, WebSocketError> {
+) -> Result<(WsProviderConnection, WsConnectTimings), WebSocketError> {
     let ResponsesProviderParams {
         state,
         request,
@@ -3362,7 +3428,7 @@ async fn start_responses_provider(
         bulkhead_guard,
         events,
     } = params;
-    let (upstream, _response_headers, bulkhead_guard) =
+    let (upstream, _response_headers, bulkhead_guard, connect_timings) =
         connect_provider_websocket(state, upstream_id, request, bulkhead_guard).await?;
     let (sink, mut stream) = upstream.split();
     let task = tokio::spawn(async move {
@@ -3401,14 +3467,17 @@ async fn start_responses_provider(
             })
             .await;
     });
-    Ok(WsProviderConnection {
-        upstream_id,
-        upstream_name,
-        lane,
-        sink,
-        task,
-        _bulkhead_guard: bulkhead_guard,
-    })
+    Ok((
+        WsProviderConnection {
+            upstream_id,
+            upstream_name,
+            lane,
+            sink,
+            task,
+            _bulkhead_guard: bulkhead_guard,
+        },
+        connect_timings,
+    ))
 }
 
 fn responses_websocket_config(message_cap: usize) -> WebSocketConfig {
@@ -3457,6 +3526,7 @@ async fn send_responses_dispatch(
     dispatch: WebSocketDispatch,
     connection_id: u64,
     connections: &mut HashMap<u64, WsProviderConnection>,
+    dispatch_timings: cc_lb_engine::responses_websocket::ResponsesDispatchTimings,
 ) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
     let Some(connection) = connections.get_mut(&connection_id) else {
         let mut result =
@@ -3527,6 +3597,7 @@ async fn send_responses_dispatch(
         connection.upstream_id,
         &connection.upstream_name,
     );
+    gateway.record_dispatch_timings(dispatch.turn_id, dispatch_timings);
     if let Err(error) = gateway.validate_send(dispatch.turn_id).await {
         let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
         return (ready, vec![error]);
@@ -3550,6 +3621,7 @@ async fn send_responses_dispatch(
             return (ready, vec![error]);
         }
     };
+    let send_started = std::time::Instant::now();
     // After the first write is attempted, failure may have reached the
     // provider. Never retry or replay it on a different connection.
     if connection.sink.send(frame).await.is_err() {
@@ -3559,7 +3631,10 @@ async fn send_responses_dispatch(
         let result = gateway.connection_closed(connection_id, "provider write failed");
         return (result.dispatches, result.errors);
     }
-    (gateway.sent(dispatch.turn_id), Vec::new())
+    (
+        gateway.sent_with_timings(dispatch.turn_id, dispatch_timings, send_started),
+        Vec::new(),
+    )
 }
 
 async fn dispatch_responses_websocket(
@@ -3572,7 +3647,14 @@ async fn dispatch_responses_websocket(
     connection_capacity: usize,
 ) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
     if let Some(connection_id) = dispatch.connection_id {
-        return send_responses_dispatch(gateway, dispatch, connection_id, connections).await;
+        return send_responses_dispatch(
+            gateway,
+            dispatch,
+            connection_id,
+            connections,
+            cc_lb_engine::responses_websocket::ResponsesDispatchTimings::reused(),
+        )
+        .await;
     }
 
     let mut last_error = None;
@@ -3583,7 +3665,14 @@ async fn dispatch_responses_websocket(
                 .then_some(*id)
         });
         if let Some(connection_id) = existing {
-            return send_responses_dispatch(gateway, dispatch, connection_id, connections).await;
+            return send_responses_dispatch(
+                gateway,
+                dispatch,
+                connection_id,
+                connections,
+                cc_lb_engine::responses_websocket::ResponsesDispatchTimings::reused(),
+            )
+            .await;
         }
         if connections.len() >= connection_capacity {
             last_error = Some(WebSocketError::new(
@@ -3598,6 +3687,7 @@ async fn dispatch_responses_websocket(
         let bulkhead = state
             .websocket_bulkheads
             .bulkhead(candidate.upstream_name.clone(), bulkhead_config);
+        let bulkhead_started = std::time::Instant::now();
         let bulkhead_guard = match bulkhead.acquire_owned().await {
             Ok(guard) => guard,
             Err(error) => {
@@ -3609,6 +3699,10 @@ async fn dispatch_responses_websocket(
                 break;
             }
         };
+        let bulkhead_wait_ms = bulkhead_started
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
         let prepared = match gateway.prepare_connection(&dispatch, candidate).await {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -3637,26 +3731,40 @@ async fn dispatch_responses_websocket(
         };
         let connection_id = *next_connection_id;
         *next_connection_id = next_id;
-        let connection = match start_responses_provider(ResponsesProviderParams {
-            state,
-            request,
-            connection_id,
-            upstream_id: candidate.upstream_id,
-            lane: dispatch.stream_id.clone(),
-            upstream_name: candidate.upstream_name.clone(),
-            bulkhead_guard,
-            events: events.clone(),
-        })
-        .await
-        {
-            Ok(connection) => connection,
-            Err(error) => {
-                last_error = Some(error);
-                continue;
-            }
+        let (connection, connect_timings) =
+            match start_responses_provider(ResponsesProviderParams {
+                state,
+                request,
+                connection_id,
+                upstream_id: candidate.upstream_id,
+                lane: dispatch.stream_id.clone(),
+                upstream_name: candidate.upstream_name.clone(),
+                bulkhead_guard,
+                events: events.clone(),
+            })
+            .await
+            {
+                Ok(connection) => connection,
+                Err(error) => {
+                    last_error = Some(error);
+                    continue;
+                }
+            };
+        let dispatch_timings = cc_lb_engine::responses_websocket::ResponsesDispatchTimings {
+            connection_reused: Some(false),
+            bulkhead_wait_ms: Some(bulkhead_wait_ms),
+            dns_ms: connect_timings.dns_ms,
+            connect_ms: connect_timings.connect_ms,
         };
         connections.insert(connection_id, connection);
-        return send_responses_dispatch(gateway, dispatch, connection_id, connections).await;
+        return send_responses_dispatch(
+            gateway,
+            dispatch,
+            connection_id,
+            connections,
+            dispatch_timings,
+        )
+        .await;
     }
     let error = last_error
         .unwrap_or_else(|| {
@@ -3879,6 +3987,12 @@ async fn relay_responses_websocket(
                             }
                             match gateway.provider_message(connection_id, &bytes).await {
                                 Ok(result) => {
+                                    let sending_downstream = result.frames.is_some()
+                                        || result.forward
+                                        || !result.errors.is_empty();
+                                    if sending_downstream {
+                                        gateway.begin_downstream_send(connection_id);
+                                    }
                                     if let Some(frames) = result.frames {
                                         for frame in frames {
                                             let message = Message::Text(
@@ -3902,6 +4016,9 @@ async fn relay_responses_websocket(
                                         if downstream_sink.send(websocket_error_message(&error)).await.is_err() {
                                             break 'relay;
                                         }
+                                    }
+                                    if sending_downstream {
+                                        gateway.finish_downstream_send(connection_id);
                                     }
                                     dispatches.extend(result.dispatches);
                                 }

@@ -997,12 +997,9 @@ describe('RequestEventsTable', () => {
       const tooltips = await screen.findAllByText('Cost');
       expect(tooltips.length).toBeGreaterThan(0);
 
-      // Explicitly reported zero categories remain visible so the tooltip
-      // distinguishes a measured zero from an unavailable component.
-      expect(screen.getByText('Cache create 5m')).toBeDefined();
-      expect(screen.getByText('Cache create 1h')).toBeDefined();
-
-      // Absent categories stay out of the popover.
+      // Zero-cost and absent categories stay out of the popover.
+      expect(screen.queryByText('Cache create 5m')).toBeNull();
+      expect(screen.queryByText('Cache create 1h')).toBeNull();
       expect(screen.queryByText('Cache write 30m')).toBeNull();
       expect(screen.queryByText('Cache write 12h')).toBeNull();
 
@@ -1065,8 +1062,9 @@ describe('RequestEventsTable', () => {
       const tooltips = await screen.findAllByText('Estimated cost');
       expect(tooltips.length).toBeGreaterThan(0);
 
-      // Partial rows retain their component labels, while zero estimates use
-      // the em dash marker instead of presenting a measured value.
+      // Zero-estimate partial rows omit zero-value component rows instead of
+      // presenting muted rows, showing the note and em-dash Total.
+      expect(screen.getByText('No billable cost')).toBeDefined();
       for (const label of [
         'Input',
         'Output',
@@ -1074,9 +1072,10 @@ describe('RequestEventsTable', () => {
         'Cache create 1h',
         'Cache read',
       ]) {
-        const labelElement = screen.getByText(label);
-        expect(labelElement.parentElement?.textContent).toContain('—');
+        expect(screen.queryByText(label)).toBeNull();
       }
+      const totalLabel = screen.getByText('Total');
+      expect(totalLabel.parentElement?.textContent).toContain('—');
     });
   });
 

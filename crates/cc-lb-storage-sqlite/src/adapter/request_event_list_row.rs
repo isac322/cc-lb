@@ -1,4 +1,6 @@
-use cc_lb_storage_api::{RequestEventKind, RequestEventListItem, StorageError, StorageResult};
+use cc_lb_storage_api::{
+    RequestEventKind, RequestEventListItem, RequestProtocol, StorageError, StorageResult,
+};
 use uuid::Uuid;
 
 use super::request_event_list_sql::ListRow;
@@ -19,6 +21,7 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
             .as_deref()
             .map(parse_event_kind)
             .transpose()?,
+        protocol: row.protocol.as_deref().map(parse_protocol).transpose()?,
         principal_id: row.principal_id,
         upstream_id: row
             .upstream_id
@@ -204,6 +207,12 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
 fn parse_event_kind(value: &str) -> StorageResult<RequestEventKind> {
     value.parse().map_err(|_| StorageError::Corrupted {
         message: format!("request event list unknown event_kind value: {value}"),
+    })
+}
+
+fn parse_protocol(value: &str) -> StorageResult<RequestProtocol> {
+    value.parse().map_err(|_| StorageError::Corrupted {
+        message: format!("request event list unknown protocol value: {value}"),
     })
 }
 

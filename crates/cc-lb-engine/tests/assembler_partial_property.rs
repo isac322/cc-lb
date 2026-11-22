@@ -223,6 +223,7 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
             source_kind: None,
             source_ref_id: None,
             event_kind: None,
+            protocol: None,
         },
         EventOp::Parse => LifecycleEvent::ParseCompleted {
             event_id,
@@ -278,6 +279,7 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
             sign_ms: Some(profile.token_base() + 4),
             upstream_ttfb_ms: Some(profile.token_base() + 5),
             observed_at_unix_millis: None,
+            protocol: None,
         },
         EventOp::Usage => LifecycleEvent::UsageObserved {
             event_id,
@@ -314,6 +316,7 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
             upstream_body_ms: Some(profile.token_base() + 10),
             event_kind: None,
             funding_ambiguous: false,
+            protocol: None,
         },
     }
 }

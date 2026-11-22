@@ -2,7 +2,7 @@ use cc_lb_storage_api::{RequestEventListItem, StorageError, StorageResult};
 
 use crate::adapter::i64_to_u64;
 
-use super::request_event_list_sql::{ListRow, parse_event_kind};
+use super::request_event_list_sql::{ListRow, parse_event_kind, parse_protocol};
 
 pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListItem> {
     Ok(RequestEventListItem {
@@ -19,6 +19,7 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
             .as_deref()
             .map(parse_event_kind)
             .transpose()?,
+        protocol: row.protocol.as_deref().map(parse_protocol).transpose()?,
         principal_id: row.principal_id,
         upstream_id: row.upstream_id,
         upstream_name: row.upstream_name,

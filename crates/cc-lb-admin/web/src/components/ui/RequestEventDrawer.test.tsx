@@ -1225,4 +1225,87 @@ describe('RequestEventDrawer', () => {
       expect(screen.queryByText('batch')).toBeNull();
     });
   });
+
+  describe('WebSocket status and protocol identity', () => {
+    it('shows Protocol WebSocket, Completed badge, and hides HTTP status 101 for completed WS turns', () => {
+      const event = {
+        event_id: 'evt_ws_ok',
+        request_id: 'req_ws_ok',
+        ts: 1718553120,
+        ts_ms: 1718553120000,
+        status: 101,
+        protocol: 'websocket',
+        duration_ms: 450,
+        event_kind: 'openai_responses',
+        _phase: 'final',
+      } satisfies RequestEventWithPhase;
+
+      render(
+        <RequestEventDrawer
+          event={event}
+          principalName={null}
+          onClose={() => {}}
+        />,
+      );
+
+      expect(screen.getByText('Protocol')).toBeDefined();
+      expect(screen.getByText('WebSocket')).toBeDefined();
+      expect(screen.getByText('Completed')).toBeDefined();
+      expect(screen.queryByText('101')).toBeNull();
+      expect(screen.queryByText('Status code')).toBeNull();
+      expect(screen.queryByText('HTTP status')).toBeNull();
+    });
+
+    it('suppresses Status code 101 on WebSocket client disconnects and semantic errors', () => {
+      const disconnected = {
+        event_id: 'evt_ws_disc',
+        request_id: 'req_ws_disc',
+        ts: 1718553120,
+        ts_ms: 1718553120000,
+        status: 101,
+        protocol: 'websocket',
+        error_code: 'client_closed_request',
+        duration_ms: 200,
+        _phase: 'final',
+      } satisfies RequestEventWithPhase;
+
+      render(
+        <RequestEventDrawer
+          event={disconnected}
+          principalName={null}
+          onClose={() => {}}
+        />,
+      );
+
+      expect(screen.getByText('Client disconnected')).toBeDefined();
+      expect(screen.queryByText('101')).toBeNull();
+      expect(screen.queryByText('Status code')).toBeNull();
+
+      cleanup();
+
+      const failed = {
+        event_id: 'evt_ws_err',
+        request_id: 'req_ws_err',
+        ts: 1718553120,
+        ts_ms: 1718553120000,
+        status: 101,
+        protocol: 'websocket',
+        error_code: 'upstream_5xx',
+        duration_ms: 200,
+        _phase: 'final',
+      } satisfies RequestEventWithPhase;
+
+      render(
+        <RequestEventDrawer
+          event={failed}
+          principalName={null}
+          onClose={() => {}}
+        />,
+      );
+
+      expect(screen.getByText('Error')).toBeDefined();
+      expect(screen.queryByText('101')).toBeNull();
+      expect(screen.queryByText('HTTP status')).toBeNull();
+    });
+  });
 });

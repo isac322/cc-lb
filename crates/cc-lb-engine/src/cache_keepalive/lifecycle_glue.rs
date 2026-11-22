@@ -1532,6 +1532,10 @@ fn is_keepalive_eligible_request_kind(request_kind: Option<&str>) -> bool {
                 | "notification"
                 | "side"
                 | "look_at"
+                | "prewarm"
+                | "review"
+                | "memory"
+                | "guardian"
         )
     )
 }

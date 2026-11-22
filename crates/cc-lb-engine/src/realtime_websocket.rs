@@ -453,6 +453,15 @@ impl RealtimeWebSocketObservation {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RealtimeConnectionTimings {
+    pub bulkhead_wait_ms: Option<u64>,
+    pub dns_ms: Option<u64>,
+    pub connect_ms: Option<u64>,
+    pub connection_reused: Option<bool>,
+    pub upstream_ttfb_ms: Option<u64>,
+}
+
 pub struct RealtimeWebSocketSession {
     pub candidate: WebSocketCandidate,
     pub url: Url,
@@ -469,6 +478,9 @@ pub struct RealtimeWebSocketSession {
     pub(crate) path: String,
     pub(crate) dialect: Arc<dyn cc_lb_upstream::UpstreamDialect>,
     pub(crate) provider_request_id: Option<String>,
+    pub(crate) proxy_setup_ms: Option<u64>,
+    pub(crate) setup_timings: cc_lb_lifecycle::RequestSetupTimings,
+    pub(crate) sign_ms: Option<u64>,
 }
 
 impl RealtimeWebSocketSession {
@@ -508,6 +520,15 @@ impl RealtimeWebSocketSession {
 
     /// Publish the actual successful provider upgrade, not an HTTP body milestone.
     pub fn connected(&mut self, response_headers: &HeaderMap) {
+        self.connected_with_timings(response_headers, RealtimeConnectionTimings::default());
+    }
+
+    /// Publish the actual successful provider upgrade along with dial/queue timings.
+    pub fn connected_with_timings(
+        &mut self,
+        response_headers: &HeaderMap,
+        timings: RealtimeConnectionTimings,
+    ) {
         self.provider_request_id = ["x-request-id", "request-id", "x-goog-request-id"]
             .iter()
             .find_map(|name| {
@@ -522,19 +543,27 @@ impl RealtimeWebSocketSession {
                 attempt_num: 1,
                 upstream_id: self.candidate.upstream_id,
             });
+            observer.set_attempt_bulkhead_wait_ms(timings.bulkhead_wait_ms);
+            observer.set_attempt_connection_timings(
+                timings.dns_ms,
+                timings.connect_ms,
+                timings.connection_reused,
+            );
+            observer.set_attempt_timings(None, self.sign_ms, timings.upstream_ttfb_ms);
             observer.set_success_status(StatusCode::SWITCHING_PROTOCOLS);
             observer.emit_lifecycle(LifecycleEvent::UpstreamResponseStarted {
                 event_id: observer.event_id().to_owned(),
                 status: StatusCode::SWITCHING_PROTOCOLS.as_u16(),
                 headers: Default::default(),
-                bulkhead_wait_ms: None,
-                dns_ms: None,
-                connect_ms: None,
-                connection_reused: None,
+                bulkhead_wait_ms: timings.bulkhead_wait_ms,
+                dns_ms: timings.dns_ms,
+                connect_ms: timings.connect_ms,
+                connection_reused: timings.connection_reused,
                 shape_ms: None,
-                sign_ms: None,
-                upstream_ttfb_ms: None,
+                sign_ms: self.sign_ms,
+                upstream_ttfb_ms: timings.upstream_ttfb_ms,
                 observed_at_unix_millis: None,
+                protocol: Some(cc_lb_request_log::RequestProtocol::Websocket),
             });
         }
     }
@@ -660,6 +689,13 @@ impl RealtimeWebSocketSession {
             }
             let latency = metrics.latency(status.as_u16());
             latency.record_on_span(&self.stream_span);
+            let finalize_started = Instant::now();
+            observer.set_setup_timings(self.setup_timings);
+            observer.set_termination_timings(
+                self.proxy_setup_ms,
+                Some(latency.stream_total_ms),
+                latency.stream_first_output_ms,
+            );
             observer.emit_lifecycle(LifecycleEvent::StreamCompleted {
                 event_id: observer.event_id().to_owned(),
                 result: if complete {
@@ -745,6 +781,12 @@ impl RealtimeWebSocketSession {
                     observer.set_upstream_error(status, UpstreamErrorCode::StreamError);
                 }
             }
+            observer.set_finalize_ms(
+                finalize_started
+                    .elapsed()
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64,
+            );
             observer.finish();
             if let Some(dispatch) = tracing::enabled!(
                 target: "cc_lb_engine::lifecycle",
@@ -1306,6 +1348,9 @@ mod tests {
                     path: "/realtime".to_owned(),
                     dialect: Arc::new(UnusedRealtimeDialect),
                     provider_request_id: None,
+                    proxy_setup_ms: None,
+                    setup_timings: Default::default(),
+                    sign_ms: None,
                 };
                 session.finish(
                     usage,

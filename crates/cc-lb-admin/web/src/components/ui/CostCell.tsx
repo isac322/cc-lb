@@ -12,7 +12,10 @@ import {
 
 type CostBreakdownT = {
   components: CostComponentMicros;
-  available: Record<keyof CostComponentMicros, boolean>;
+  residualCacheWrite: number;
+  available: Record<keyof CostComponentMicros, boolean> & {
+    cache_write: boolean;
+  };
   total: number;
   hasComponents: boolean;
 };
@@ -27,6 +30,12 @@ function costBreakdown(e: RequestEventWithPhase): CostBreakdownT {
     cache_write_30m: e.cost_cache_write_30m_micros ?? 0,
     cache_write_12h: e.cost_cache_write_12h_micros ?? 0,
   };
+  const residualCacheWrite = Math.max(
+    0,
+    (e.cost_cache_write_micros ?? 0) -
+      components.cache_write_30m -
+      components.cache_write_12h,
+  );
   const available = {
     input: e.cost_input_micros != null,
     output: e.cost_output_micros != null,
@@ -35,10 +44,12 @@ function costBreakdown(e: RequestEventWithPhase): CostBreakdownT {
     cache_read: e.cost_cache_read_micros != null,
     cache_write_30m: e.cost_cache_write_30m_micros != null,
     cache_write_12h: e.cost_cache_write_12h_micros != null,
+    cache_write: e.cost_cache_write_micros != null,
   };
   const hasComponents = Object.values(available).some(Boolean);
-  const total = e.cost_usd_micros ?? sumCostMicros(components);
-  return { components, available, total, hasComponents };
+  const total =
+    e.cost_usd_micros ?? sumCostMicros(components) + residualCacheWrite;
+  return { components, residualCacheWrite, available, total, hasComponents };
 }
 
 /*
@@ -67,9 +78,28 @@ export function CostCell({
   className?: string;
 }) {
   const c = costBreakdown(event);
-  const segments = costCategorySegments(c.components).filter(
-    (segment) => segment.key !== 'unattributed' && c.available[segment.key],
-  );
+  const segments = costCategorySegments(c.components)
+    .filter((segment) => segment.key !== 'unattributed' && segment.value > 0)
+    .map((segment) => ({
+      label: segment.label,
+      color: segment.color,
+      value: segment.value,
+      key: segment.key as string,
+    }));
+  if (c.residualCacheWrite > 0) {
+    const inputIdx = segments.findIndex((segment) => segment.key === 'input');
+    const writeSegment = {
+      key: 'cache_write',
+      label: 'Cache write',
+      color: 'var(--color-series-cache-create-5m)',
+      value: c.residualCacheWrite,
+    };
+    if (inputIdx >= 0) {
+      segments.splice(inputIdx, 0, writeSegment);
+    } else {
+      segments.push(writeSegment);
+    }
+  }
 
   const cellClassName = cx(className, COST_EDGE_CLASS);
 
@@ -85,9 +115,15 @@ export function CostCell({
         label: segment.label,
         value: segment.value,
         color: segment.color,
-        available: true,
         fmt: formatCostMicros,
       }))}
+      note={
+        segments.length === 0
+          ? c.total === 0
+            ? 'No billable cost'
+            : 'Per-category cost not recorded'
+          : undefined
+      }
       footer={{ label: 'Total', value: c.total, fmt: formatCostMicros }}
     />
   );

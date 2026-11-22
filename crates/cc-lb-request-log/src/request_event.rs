@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
-use crate::{RequestCacheBreakpoint, RequestEventKind, cache::is_zero};
+use crate::{RequestCacheBreakpoint, RequestEventKind, RequestProtocol, cache::is_zero};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RequestEvent {
@@ -20,6 +20,11 @@ pub struct RequestEvent {
     /// [`RequestEventKind::effective`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_kind: Option<RequestEventKind>,
+    /// Transport/framing protocol observed for this request (`http`, `http_sse`,
+    /// `http_stream`, or `websocket`). `None` on historical rows persisted before
+    /// the column existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<RequestProtocol>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ts_ms: Option<u64>,
     pub principal_id: Option<String>,

@@ -902,6 +902,7 @@ mod tests {
             source_kind: None,
             source_ref_id: None,
             event_kind: None,
+            protocol: None,
         }
     }
 

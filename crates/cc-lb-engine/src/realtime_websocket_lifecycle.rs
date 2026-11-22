@@ -13,6 +13,7 @@ impl Lifecycle {
         let (observer, request_id) = self.websocket_observer(path);
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
+            observer.set_protocol(cc_lb_request_log::RequestProtocol::Websocket);
             observer.emit_request_started(true);
             observer.set_success_status(StatusCode::SWITCHING_PROTOCOLS);
             observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
@@ -38,6 +39,7 @@ impl Lifecycle {
         target: RealtimeWebSocketTarget<'_>,
         setup: Bytes,
     ) -> Result<RealtimeWebSocketSession, WebSocketError> {
+        let setup_started = Instant::now();
         let RealtimeWebSocketTarget {
             path,
             query,
@@ -71,7 +73,7 @@ impl Lifecycle {
         // request-body formats handled by the shared metadata fallbacks.
         // Header identity is still parsed after authentication, with the
         // canonical twelve-header precedence and 512-byte bounds.
-        let identity = request_identity_metadata(headers, None);
+        let identity = request_identity_metadata(headers, None, None);
         let thread_id = identity.thread_id.clone();
         let observed_session_id = identity.observed_session_id.clone();
         let client_app = identity.client_app.clone();
@@ -312,7 +314,7 @@ impl Lifecycle {
             };
             let mut attempted_id = None;
             let mut last_signing_error = None;
-            let (routed, signed, url) = loop {
+            let (routed, signed, url, prepare_signer_ms, sign_ms) = loop {
                 let id = match attempted_id {
                     None => first_id,
                     Some(failed_id) => filtered
@@ -378,6 +380,7 @@ impl Lifecycle {
                     )
                 })?;
                 let factory = view.signer_factory.with_router_choice(record.name.clone());
+                let signer_started = Instant::now();
                 let signer = match factory.build(&upstream).await {
                     Ok(signer) => signer,
                     Err(_) => {
@@ -398,6 +401,8 @@ impl Lifecycle {
                         return Err(error);
                     }
                 };
+                let prepare_signer_ms = signer_started.elapsed().as_secs_f64() * 1_000.0;
+                let sign_started = Instant::now();
                 let signed = match sign_request(signer.as_ref(), shaped).await {
                     Ok(signed) => signed,
                     Err(_) => {
@@ -418,6 +423,7 @@ impl Lifecycle {
                         return Err(error);
                     }
                 };
+                let sign_ms = duration_to_ms(sign_started.elapsed());
                 let mut url = signed.url().clone();
                 if matches!(kind, RealtimeWebSocketKind::Gemini)
                     && matches!(
@@ -461,7 +467,7 @@ impl Lifecycle {
                         WebSocketError::new(502, "invalid_upstream_url", "invalid WebSocket URL")
                     })?;
                 }
-                break (routed, signed, url);
+                break (routed, signed, url, prepare_signer_ms, sign_ms);
             };
             if let Some(observer) = observer.as_ref() {
                 let info = route_info_for_routed(&routed, model);
@@ -473,6 +479,7 @@ impl Lifecycle {
             }
             let record = routed.record;
             let id = routed.route.upstream_id;
+            let reserve_started = Instant::now();
             let mut limit = match self
                 .reserve_limit(
                     &view.principal_view,
@@ -536,7 +543,7 @@ impl Lifecycle {
                         amount: limit.as_ref().map_or(0, |limit| {
                             limit.request.max_tokens.unwrap_or(0).max(0) as u64
                         }),
-                        limit_reserve_ms: None,
+                        limit_reserve_ms: Some(duration_to_ms(reserve_started.elapsed())),
                     },
                 });
             }
@@ -604,6 +611,12 @@ impl Lifecycle {
                 path: path.to_owned(),
                 dialect: routed.route.dialect.clone(),
                 provider_request_id: None,
+                proxy_setup_ms: Some(duration_to_ms(setup_started.elapsed())),
+                setup_timings: cc_lb_lifecycle::RequestSetupTimings {
+                    prepare_signer_ms: Some(prepare_signer_ms),
+                    ..Default::default()
+                },
+                sign_ms: Some(sign_ms),
             })
         }
         .await;
@@ -667,7 +680,7 @@ mod tests {
             HeaderValue::from_static("not-claude"),
         );
 
-        let identity = request_identity_metadata(&headers, None);
+        let identity = request_identity_metadata(&headers, None, None);
         assert_eq!(identity.thread_id.as_deref(), Some("claude"));
         assert_eq!(identity.observed_session_id.as_deref(), Some("claude"));
         assert_eq!(
@@ -681,7 +694,7 @@ mod tests {
             "x-claude-session-id",
             HeaderValue::from_str(&"x".repeat(MAX_IDENTITY_VALUE_BYTES + 1)).unwrap(),
         );
-        let identity = request_identity_metadata(&headers, None);
+        let identity = request_identity_metadata(&headers, None, None);
         assert_eq!(identity.thread_id.as_deref(), Some("opencode"));
         assert_eq!(
             identity.session_id_source.as_deref(),

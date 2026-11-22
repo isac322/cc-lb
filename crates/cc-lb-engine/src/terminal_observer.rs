@@ -432,6 +432,8 @@ struct Inner {
 struct TerminalState {
     request_id: String,
     event_kind: Option<cc_lb_request_log::RequestEventKind>,
+    protocol: Option<cc_lb_request_log::RequestProtocol>,
+    stream: bool,
     status: u16,
     error_code: Option<&'static str>,
     internal_errors: Vec<InternalError>,
@@ -543,6 +545,14 @@ impl LifecycleContext {
     /// rejections (400/413/auth) are categorized before parsing runs.
     pub fn set_event_kind(&self, event_kind: cc_lb_request_log::RequestEventKind) {
         self.lock_state().event_kind = Some(event_kind);
+    }
+
+    pub(crate) fn set_protocol(&self, protocol: cc_lb_request_log::RequestProtocol) {
+        self.lock_state().protocol = Some(protocol);
+    }
+
+    pub(crate) fn stream_requested(&self) -> bool {
+        self.lock_state().stream
     }
 
     pub(crate) fn set_attempt_timings(
@@ -801,13 +811,14 @@ impl LifecycleContext {
     /// response. Idempotent: a second call is a no-op, so terminal paths may
     /// emit it unconditionally to cover requests the handler never saw.
     pub(crate) fn emit_request_started(&self, stream: bool) {
-        let (request_id, event_kind) = {
+        let (request_id, event_kind, protocol) = {
             let mut state = self.lock_state();
             if state.request_started_emitted {
                 return;
             }
             state.request_started_emitted = true;
-            (state.request_id.clone(), state.event_kind)
+            state.stream = stream;
+            (state.request_id.clone(), state.event_kind, state.protocol)
         };
         self.inner.emit_or_buffer(LifecycleEvent::RequestStarted {
             event_id: self.inner.event_id.clone(),
@@ -817,6 +828,7 @@ impl LifecycleContext {
             source_kind: Some("proxy".to_owned()),
             source_ref_id: None,
             event_kind,
+            protocol,
         });
     }
 
@@ -835,6 +847,7 @@ impl LifecycleContext {
                 dns_ms,
                 connect_ms,
                 connection_reused,
+                protocol,
                 ..
             } => {
                 let mut state = self.lock_state();
@@ -842,6 +855,9 @@ impl LifecycleContext {
                 state.dns_ms = *dns_ms;
                 state.connect_ms = *connect_ms;
                 state.connection_reused = *connection_reused;
+                if let Some(protocol) = protocol {
+                    state.protocol = Some(*protocol);
+                }
             }
             _ => {}
         }
@@ -1183,6 +1199,7 @@ impl Inner {
                     internal_errors: state.internal_errors.clone(),
                     event_kind: state.event_kind,
                     funding_ambiguous: self.funding_ambiguous.load(Ordering::Acquire),
+                    protocol: state.protocol,
                 });
         }
     }

@@ -255,6 +255,7 @@ async fn local_final_and_cross_replica_tail_carry_the_same_relational_row() {
         upstream_body_ms: None,
         event_kind: None,
         funding_ambiguous: false,
+        protocol: None,
     })
     .await
     .expect("assembler is running");

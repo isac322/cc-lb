@@ -5,8 +5,10 @@ import { eventTime } from '../../lib/api';
 import {
   getRequestOutcome,
   httpStatusTextClass,
+  protocolLabel,
   type RequestOutcome,
   requestOutcomeTone,
+  resolveRequestProtocol,
 } from '../../lib/format';
 import { formatAbsolute, useLocale, useTimezone } from '../../lib/locale';
 import type { ProviderFamily } from '../../lib/providers';
@@ -78,6 +80,16 @@ export function RequestOutcomeBadge({ outcome }: { outcome: RequestOutcome }) {
       </Badge>
     );
   }
+  if (outcome.type === 'ws_completed') {
+    return (
+      <Badge
+        tone="ok"
+        className="min-w-0 whitespace-normal text-right break-words"
+      >
+        Completed
+      </Badge>
+    );
+  }
   if (outcome.type === 'semantic_error') {
     return (
       <Badge
@@ -127,11 +139,13 @@ export function RequestEventIdentity({
   provider?: ProviderFamily;
 }) {
   const { copy } = useCopyButton();
+  const protocol = resolveRequestProtocol(event);
   const outcome = getRequestOutcome(
     isPartial,
     event._phase === 'final' ? event.status : 0,
     event._phase === 'final' ? event.error_code : undefined,
     event._phase === 'final' ? event.upstream_error_type : undefined,
+    protocol,
   );
   const thinkingLevel = event.thinking_level?.trim() || null;
   const reasoningText = reasoningBadgeText(
@@ -374,11 +388,15 @@ export function RequestEventIdentity({
             }
           />
         )}
+        {protocol != null ? (
+          <KvRow label="Protocol" value={protocolLabel(protocol)} />
+        ) : null}
         <KvRow
           label="Status"
           value={<RequestOutcomeBadge outcome={outcome} />}
         />
-        {outcome.type === 'client_disconnected' ? (
+        {outcome.type === 'client_disconnected' &&
+        outcome.protocol !== 'websocket' ? (
           <KvRow
             label="Status code"
             value={
@@ -393,7 +411,8 @@ export function RequestEventIdentity({
             }
           />
         ) : null}
-        {outcome.type === 'semantic_error' ? (
+        {outcome.type === 'semantic_error' &&
+        outcome.protocol !== 'websocket' ? (
           <KvRow
             label="HTTP status"
             value={

@@ -478,4 +478,26 @@ describe('LatencyCell timing breakdown', () => {
     expect(screen.queryByText('Request body read')).toBeNull();
     expect(screen.queryByText('Finalize')).toBeNull();
   });
+
+  it('adapts labels for WebSocket requests without HTTP/SSE terminology', () => {
+    renderCell({
+      ...baseEvent,
+      source_kind: 'proxy',
+      event_kind: 'openai_responses',
+      protocol: 'websocket',
+      status: 101,
+      connection_reused: true,
+      upstream_ttfb_ms: 120,
+      stream_total_ms: 600,
+      upstream_body_ms: 600,
+      finalize_ms: 10,
+    });
+
+    expect(screen.getByText('Reused socket')).toBeDefined();
+    expect(screen.getByText('First frame wait')).toBeDefined();
+    expect(screen.getByText('WebSocket relay')).toBeDefined();
+    expect(screen.queryByText('Warm pool')).toBeNull();
+    expect(screen.queryByText('Header wait')).toBeNull();
+    expect(screen.queryByText('Stream relay')).toBeNull();
+  });
 });

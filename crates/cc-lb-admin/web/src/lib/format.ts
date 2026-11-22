@@ -33,21 +33,23 @@ export interface TokenComponents {
   input_tokens?: number | null;
   output_tokens?: number | null;
   cache_creation_input_tokens?: number | null;
+  cache_write_input_tokens?: number | null;
   cache_read_input_tokens?: number | null;
 }
 
 /**
  * Total tokens the model processed.
  *
- * All four components must be summed: `input_tokens` counts only the tokens after the last cache
- * breakpoint, so on a cached workload the cache read and creation terms carry most of the volume
- * and an input+output sum understates throughput by an order of magnitude.
+ * All components must be summed: `input_tokens` counts only the tokens after the last cache
+ * breakpoint, so on a cached workload the cache read and creation/write terms carry most of
+ * the volume and an input+output sum understates throughput by an order of magnitude.
  */
 export function sumTokens(b: TokenComponents): number {
   return (
     (b.input_tokens ?? 0) +
     (b.output_tokens ?? 0) +
     (b.cache_creation_input_tokens ?? 0) +
+    (b.cache_write_input_tokens ?? 0) +
     (b.cache_read_input_tokens ?? 0)
   );
 }
@@ -137,25 +139,117 @@ export function formatCostMicros(micros?: number | null): string {
   return formatUsdValue(micros / 1_000_000, 4);
 }
 
+export type RequestProtocol = 'http' | 'http_sse' | 'http_stream' | 'websocket';
+
+export function resolveRequestProtocol(event: {
+  protocol?: RequestProtocol | null;
+  source_kind?: string | null;
+  status?: number | null;
+  provider_session_id?: string | null;
+  provider_connection_id?: string | null;
+  sse_event_count?: number | null;
+  stream_total_ms?: number | null;
+  stream?: boolean | null;
+}): RequestProtocol | null {
+  if (event.protocol != null) return event.protocol;
+  if (event.source_kind === 'renewal') return null;
+  if (
+    event.status === 101 ||
+    event.provider_session_id != null ||
+    event.provider_connection_id != null
+  ) {
+    return 'websocket';
+  }
+  if (
+    event.sse_event_count != null ||
+    event.stream_total_ms != null ||
+    event.stream === true
+  ) {
+    return 'http_sse';
+  }
+  return 'http';
+}
+
+export function protocolLabel(
+  protocol: RequestProtocol | null | undefined,
+): string {
+  switch (protocol) {
+    case 'websocket':
+      return 'WebSocket';
+    case 'http_sse':
+      return 'HTTP (SSE)';
+    case 'http_stream':
+      return 'HTTP (Stream)';
+    case 'http':
+      return 'HTTP';
+    default:
+      return DASH;
+  }
+}
+
 export type RequestOutcome =
   | { type: 'partial' }
-  | { type: 'client_disconnected'; status: number; error_code: string }
+  | {
+      type: 'client_disconnected';
+      status: number;
+      error_code: string;
+      protocol?: RequestProtocol | null;
+    }
+  | {
+      type: 'ws_completed';
+      status: number;
+      error_code: null;
+      protocol: 'websocket';
+    }
   | {
       type: 'semantic_error';
       status: number;
       error_code?: string | null;
       upstream_error_type?: string | null;
       label: string;
+      protocol?: RequestProtocol | null;
     }
-  | { type: 'completed'; status: number; error_code?: string | null };
+  | {
+      type: 'completed';
+      status: number;
+      error_code?: string | null;
+      protocol?: RequestProtocol | null;
+    };
 
 export function getRequestOutcome(
   isPartial: boolean,
   status: number,
   error_code?: string | null,
   upstream_error_type?: string | null,
+  protocol?: RequestProtocol | null,
 ): RequestOutcome {
   if (isPartial) return { type: 'partial' };
+  if (protocol === 'websocket') {
+    if (error_code === 'client_closed_request') {
+      return {
+        type: 'client_disconnected',
+        status,
+        error_code,
+        protocol,
+      };
+    }
+    if (error_code == null && upstream_error_type == null && status < 400) {
+      return {
+        type: 'ws_completed',
+        status,
+        error_code: null,
+        protocol,
+      };
+    }
+    return {
+      type: 'semantic_error',
+      status,
+      error_code,
+      upstream_error_type,
+      label: upstream_error_type || error_code || 'Request failed',
+      protocol,
+    };
+  }
   if (status === 499 && error_code === 'client_closed_request') {
     return { type: 'client_disconnected', status, error_code };
   }
@@ -204,6 +298,7 @@ export function requestOutcomeTone(
 ): 'ok' | 'warn' | 'danger' | 'neutral' {
   if (outcome.type === 'partial') return 'neutral';
   if (outcome.type === 'client_disconnected') return 'warn';
+  if (outcome.type === 'ws_completed') return 'ok';
   if (outcome.type === 'semantic_error') return 'danger';
   return statusTone(outcome.status);
 }
@@ -211,8 +306,9 @@ export function requestOutcomeTone(
 export function cacheHitRatio(components: TokenComponents): number | null {
   const input = components.input_tokens ?? 0;
   const created = components.cache_creation_input_tokens ?? 0;
+  const written = components.cache_write_input_tokens ?? 0;
   const read = components.cache_read_input_tokens ?? 0;
-  const denom = input + created + read;
+  const denom = input + created + written + read;
   if (denom <= 0) return null;
   return read / denom;
 }
@@ -220,10 +316,11 @@ export function cacheHitRatio(components: TokenComponents): number | null {
 export function cacheMissRatio(components: TokenComponents): number | null {
   const input = components.input_tokens ?? 0;
   const created = components.cache_creation_input_tokens ?? 0;
+  const written = components.cache_write_input_tokens ?? 0;
   const read = components.cache_read_input_tokens ?? 0;
-  const denom = input + created + read;
+  const denom = input + created + written + read;
   if (denom <= 0) return null;
-  return (input + created) / denom;
+  return (input + created + written) / denom;
 }
 
 export interface SplitNumber {

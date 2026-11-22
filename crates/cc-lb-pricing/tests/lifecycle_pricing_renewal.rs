@@ -83,6 +83,7 @@ async fn renewal_is_priced_only_after_terminal() {
             upstream_body_ms: None,
             event_kind: None,
             funding_ambiguous: false,
+            protocol: None,
         })
         .await
         .expect("send renewal terminal");
@@ -138,6 +139,7 @@ async fn send_renewal_pricing_inputs(tx: &mpsc::Sender<LifecycleEvent>, event_id
         source_kind: Some("renewal".to_owned()),
         source_ref_id: Some(format!("session-{event_id}")),
         event_kind: Some(cc_lb_request_log::RequestEventKind::Renewal),
+        protocol: None,
     })
     .await
     .expect("send renewal start");

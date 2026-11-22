@@ -516,6 +516,14 @@ export const RequestEventKindSchema = z.enum([
 ]);
 export type RequestEventKind = z.infer<typeof RequestEventKindSchema>;
 
+export const RequestProtocolSchema = z.enum([
+  'http',
+  'http_sse',
+  'http_stream',
+  'websocket',
+]);
+export type RequestProtocol = z.infer<typeof RequestProtocolSchema>;
+
 export const RequestEventPartialSchema = z.looseObject({
   event_id: z.string().min(1),
   request_id: z.string().min(1),
@@ -526,6 +534,7 @@ export const RequestEventPartialSchema = z.looseObject({
   stream: z.boolean().nullable().optional(),
   source_kind: z.string().nullable().optional(),
   event_kind: RequestEventKindSchema.nullable().optional(),
+  protocol: RequestProtocolSchema.nullable().optional(),
   principal_id: z.string().nullable().optional(),
   principal_kind: z.string().nullable().optional(),
   key_id: z.string().nullable().optional(),
@@ -661,6 +670,7 @@ export interface RequestEvent {
   model?: string;
   source_kind?: string;
   event_kind?: RequestEventKind | null;
+  protocol?: RequestProtocol | null;
   status: number;
   upstream_error_type?: string;
   upstream_error_message?: string;

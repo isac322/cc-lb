@@ -12,6 +12,10 @@ import {
   formatRate,
   formatUsdAmount,
   getRequestOutcome,
+  protocolLabel,
+  requestOutcomeTone,
+  resolveRequestProtocol,
+  sumTokens,
 } from './format';
 
 describe('cache ratios', () => {
@@ -33,7 +37,7 @@ describe('cache ratios', () => {
     expect(cacheMissRatio(components)).toBe(1);
   });
 
-  it('includes input, creation, and read tokens in the denominator', () => {
+  it('includes input, creation, write, and read tokens in the denominator and sumTokens', () => {
     const components = {
       input_tokens: 200,
       cache_creation_input_tokens: 300,
@@ -41,6 +45,16 @@ describe('cache ratios', () => {
     };
     expect(cacheHitRatio(components)).toBe(0.5);
     expect(cacheMissRatio(components)).toBe(0.5);
+
+    const openaiWritten = {
+      input_tokens: 200,
+      output_tokens: 100,
+      cache_write_input_tokens: 300,
+      cache_read_input_tokens: 500,
+    };
+    expect(sumTokens(openaiWritten)).toBe(1100);
+    expect(cacheHitRatio(openaiWritten)).toBe(0.5);
+    expect(cacheMissRatio(openaiWritten)).toBe(0.5);
   });
 });
 
@@ -138,6 +152,90 @@ describe('getRequestOutcome', () => {
       status: 429,
       error_code: 'upstream_4xx',
     });
+  });
+
+  it('classifies websocket outcomes without surfacing HTTP 101 errors on normal completion', () => {
+    expect(getRequestOutcome(false, 101, null, null, 'websocket')).toEqual({
+      type: 'ws_completed',
+      status: 101,
+      error_code: null,
+      protocol: 'websocket',
+    });
+    expect(
+      requestOutcomeTone(
+        getRequestOutcome(false, 101, null, null, 'websocket'),
+      ),
+    ).toBe('ok');
+
+    const wsDisconnected = getRequestOutcome(
+      false,
+      101,
+      'client_closed_request',
+      null,
+      'websocket',
+    );
+    expect(wsDisconnected).toEqual({
+      type: 'client_disconnected',
+      status: 101,
+      error_code: 'client_closed_request',
+      protocol: 'websocket',
+    });
+    expect(requestOutcomeTone(wsDisconnected)).toBe('warn');
+
+    const wsError = getRequestOutcome(
+      false,
+      101,
+      'upstream_connection_closed',
+      'upstream_error',
+      'websocket',
+    );
+    expect(wsError.type).toBe('semantic_error');
+    expect(requestOutcomeTone(wsError)).toBe('danger');
+
+    const wsSyntheticError = getRequestOutcome(
+      false,
+      502,
+      'upstream_5xx',
+      null,
+      'websocket',
+    );
+    expect(wsSyntheticError).toEqual({
+      type: 'semantic_error',
+      status: 502,
+      error_code: 'upstream_5xx',
+      upstream_error_type: null,
+      label: 'upstream_5xx',
+      protocol: 'websocket',
+    });
+    expect(requestOutcomeTone(wsSyntheticError)).toBe('danger');
+  });
+});
+
+describe('resolveRequestProtocol & protocolLabel', () => {
+  it('prefers explicit protocol and handles renewals and legacy fallbacks', () => {
+    expect(
+      resolveRequestProtocol({ protocol: 'http_stream', status: 200 }),
+    ).toBe('http_stream');
+    expect(
+      resolveRequestProtocol({ source_kind: 'renewal', status: 200 }),
+    ).toBeNull();
+    expect(resolveRequestProtocol({ status: 101 })).toBe('websocket');
+    expect(
+      resolveRequestProtocol({ status: 200, provider_session_id: 'resp_1' }),
+    ).toBe('websocket');
+    expect(resolveRequestProtocol({ status: 200, sse_event_count: 3 })).toBe(
+      'http_sse',
+    );
+    expect(resolveRequestProtocol({ status: 200, stream: true })).toBe(
+      'http_sse',
+    );
+    expect(resolveRequestProtocol({ status: 200 })).toBe('http');
+
+    expect(protocolLabel('websocket')).toBe('WebSocket');
+    expect(protocolLabel('http_sse')).toBe('HTTP (SSE)');
+    expect(protocolLabel('http_stream')).toBe('HTTP (Stream)');
+    expect(protocolLabel('http')).toBe('HTTP');
+    expect(protocolLabel(null)).toBe('—');
   });
 });
 
