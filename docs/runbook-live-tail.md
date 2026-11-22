@@ -12,7 +12,7 @@ Import [`deploy/grafana/live-tail.json`](../deploy/grafana/live-tail.json) into 
 | `LiveTailAssemblerMpscOverflow` | *Assembler overflow (should be 0)* (stat, red on any nonzero) |
 | `LiveTailStorageTailLag` | *Storage tail lag p95* (timeseries with p95 + p99 lines and 1000 ms red threshold) |
 
-The dashboard's tripwire row (collapsed by default) covers `sse_malformed_frames_total`, `sse_lagged` drops, PG NOTIFY send/drop outcomes, HTTP fallback outcomes, and storage tail poll cadence. Expand it during an incident to eliminate whole classes of causes at a glance.
+The dashboard's tripwire row (collapsed by default) covers `sse_malformed_frames_total`, `sse_lagged` drops, PG NOTIFY send/drop outcomes, PG listener reconnects, and storage tail poll cadence. Expand it during an incident to eliminate whole classes of causes at a glance.
 
 ## Load Testing
 
@@ -74,8 +74,9 @@ Operationally important labels:
 
 - Reset reasons: `backfill_cap`, `bus_lagged`, `storage_error`.
 - Partial triggers: `request_started`, `parse_completed`, `auth_completed`, `route_completed`, `upstream_response_started`, `usage_observed`, `stream_completed`, `request_terminated`. These eight snapshots are memory-only; only final request events are persisted.
-- Notify drop reasons: `queue_full`, `queue_closed`, `serialize_error`, `pg_error`.
-- Notify HTTP outcomes: `success`, `not_found`, `unauthorized`, `timeout`, `network_error`.
+- Notify sent outcomes: `sent`, `trimmed_sent`, `failed`.
+- Notify drop reasons: `queue_full`, `queue_closed`, `serialize_error`, `payload_too_large`, `pg_error`.
+- PG listener reconnect reasons: `connect_failed`, `subscribe_failed`, `recv_failed`.
 
 ## Rollback
 
