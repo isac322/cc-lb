@@ -431,13 +431,17 @@ async fn backend_api_unknown_paths_authenticate_then_return_local_404() {
             .iter()
             .all(|(path, _, _)| path != "/codex/memories/trace_summarize")
     );
+    // Ignore background warmup probes on `/codex/responses`, which do not pass
+    // through `request_id_middleware` and carry no `request-id` header.
     let before = fake
         .state
         .0
         .lock()
         .unwrap()
         .iter()
-        .filter(|(path, _, _)| path == "/codex/responses")
+        .filter(|(path, headers, _)| {
+            path == "/codex/responses" && headers.iter().any(|(name, _)| name == "request-id")
+        })
         .count();
     let unknown = client
         .post(format!(
@@ -458,9 +462,14 @@ async fn backend_api_unknown_paths_authenticate_then_return_local_404() {
         .lock()
         .unwrap()
         .iter()
-        .filter(|(path, _, _)| path == "/codex/responses")
+        .filter(|(path, headers, _)| {
+            path == "/codex/responses" && headers.iter().any(|(name, _)| name == "request-id")
+        })
         .count();
     assert_eq!(before, after);
+    assert!(fake.state.0.lock().unwrap().iter().all(|(path, _, body)| {
+        path != "/codex/responses" || !String::from_utf8_lossy(body).contains("resp-unknown")
+    }));
 }
 
 #[tokio::test]
