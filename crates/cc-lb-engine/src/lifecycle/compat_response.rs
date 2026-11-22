@@ -31,74 +31,100 @@ impl CollectError {
     }
 }
 
-/// Collect an upstream body without allowing an unbounded compatibility buffer.
-pub(crate) struct CompatBodyTiming<'a> {
+/// Stack-local body collection timings for buffered compatibility paths (`ResponsesAggregate`
+/// and `Compact`), avoiding per-frame locks and heartbeat `select!` polling on the proxy path.
+pub(crate) struct CompatBodyTiming {
     pub(crate) collect_started: std::time::Instant,
-    pub(crate) timing: &'a crate::body_io_timing::BodyIoTiming,
-    pub(crate) observer: Option<&'a crate::terminal_observer::LifecycleContext>,
-    pub(crate) last_activity_heartbeat_at: &'a mut std::time::Instant,
-    pub(crate) activity_heartbeat: &'a mut tokio::time::Interval,
-    pub(crate) first_body_chunk_at: &'a mut Option<std::time::Instant>,
-    pub(crate) body_chunk_count: &'a mut u64,
+    wait_elapsed: std::time::Duration,
+    wait_started: bool,
+    active_wait_started: Option<std::time::Instant>,
+    process_elapsed: std::time::Duration,
+    process_started: bool,
+    pub(crate) first_body_chunk_at: Option<std::time::Instant>,
+    pub(crate) body_chunk_count: u64,
 }
 
-async fn next_body_frame(
-    body: &mut Body,
-    timing: Option<&mut CompatBodyTiming<'_>>,
-) -> Option<Result<hyper::body::Frame<Bytes>, axum::Error>> {
-    match timing {
-        Some(ctx) => {
-            super::timed_body_frame_with_heartbeat(
-                body,
-                ctx.timing,
-                ctx.observer,
-                ctx.last_activity_heartbeat_at,
-                ctx.activity_heartbeat,
-            )
-            .await
+impl CompatBodyTiming {
+    pub(crate) fn start() -> Self {
+        Self {
+            collect_started: std::time::Instant::now(),
+            wait_elapsed: std::time::Duration::ZERO,
+            wait_started: false,
+            active_wait_started: None,
+            process_elapsed: std::time::Duration::ZERO,
+            process_started: false,
+            first_body_chunk_at: None,
+            body_chunk_count: 0,
         }
-        None => body.frame().await,
+    }
+
+    pub(crate) fn snapshot(&self, now: std::time::Instant) -> cc_lb_lifecycle::RequestIoTimings {
+        let mut wait_elapsed = self.wait_elapsed;
+        if let Some(started_at) = self.active_wait_started {
+            wait_elapsed = wait_elapsed.saturating_add(now.saturating_duration_since(started_at));
+        }
+        cc_lb_lifecycle::RequestIoTimings {
+            response_body_wait_ms: self
+                .wait_started
+                .then_some(wait_elapsed.as_secs_f64() * 1_000.0),
+            response_body_process_ms: self
+                .process_started
+                .then_some(self.process_elapsed.as_secs_f64() * 1_000.0),
+            ..Default::default()
+        }
     }
 }
 
+/// Collect an upstream body without allowing an unbounded compatibility buffer.
 pub(crate) async fn collect_body_with_timing(
     body: Body,
     cap: usize,
-    mut timing: Option<&mut CompatBodyTiming<'_>>,
+    mut timing: Option<&mut CompatBodyTiming>,
 ) -> Result<Bytes, CollectError> {
     let mut body = body;
     let mut bytes = BytesMut::new();
-    while let Some(frame) = next_body_frame(&mut body, timing.as_deref_mut()).await {
-        let frame = frame.map_err(|_| CollectError::BodyRead)?;
-        let Ok(data) = frame.into_data() else {
-            continue;
-        };
-        if let Some(ctx) = timing.as_deref_mut() {
-            let chunk_now = std::time::Instant::now();
-            super::maybe_emit_chunk_heartbeat(
-                chunk_now,
-                ctx.last_activity_heartbeat_at,
-                ctx.activity_heartbeat,
-                ctx.observer,
-            );
-            if ctx.first_body_chunk_at.is_none() {
-                *ctx.first_body_chunk_at = Some(chunk_now);
-                if let Some(o) = ctx.observer {
-                    o.set_termination_timings(
-                        None,
-                        None,
-                        Some(super::duration_to_ms(
-                            chunk_now.saturating_duration_since(ctx.collect_started),
-                        )),
-                    );
-                }
+    loop {
+        let (frame, frame_ready_at) = match timing.as_deref_mut() {
+            Some(stats) => {
+                let wait_started_at = std::time::Instant::now();
+                stats.wait_started = true;
+                stats.active_wait_started = Some(wait_started_at);
+                let frame = body.frame().await;
+                let ready_at = std::time::Instant::now();
+                stats.active_wait_started = None;
+                stats.wait_elapsed = stats
+                    .wait_elapsed
+                    .saturating_add(ready_at.saturating_duration_since(wait_started_at));
+                (frame, Some(ready_at))
             }
-            *ctx.body_chunk_count = ctx.body_chunk_count.saturating_add(1);
+            None => (body.frame().await, None),
+        };
+        let Some(frame) = frame else {
+            break;
+        };
+        let result = match frame {
+            Ok(frame) => match frame.into_data() {
+                Ok(data) => {
+                    if let (Some(stats), Some(ready_at)) = (timing.as_deref_mut(), frame_ready_at) {
+                        stats.first_body_chunk_at.get_or_insert(ready_at);
+                        stats.body_chunk_count = stats.body_chunk_count.saturating_add(1);
+                    }
+                    if data.len() > cap.saturating_sub(bytes.len()) {
+                        Err(CollectError::BodyTooLarge)
+                    } else {
+                        bytes.extend_from_slice(&data);
+                        Ok(())
+                    }
+                }
+                Err(_) => Ok(()),
+            },
+            Err(_) => Err(CollectError::BodyRead),
+        };
+        if let (Some(stats), Some(ready_at)) = (timing.as_deref_mut(), frame_ready_at) {
+            stats.process_started = true;
+            stats.process_elapsed = stats.process_elapsed.saturating_add(ready_at.elapsed());
         }
-        if data.len() > cap.saturating_sub(bytes.len()) {
-            return Err(CollectError::BodyTooLarge);
-        }
-        bytes.extend_from_slice(&data);
+        result?;
     }
     Ok(bytes.freeze())
 }
@@ -116,17 +142,32 @@ pub(crate) async fn aggregate_response(
     response: Response<Body>,
     echo_metadata: Option<Value>,
     cap: usize,
-    timing: Option<&mut CompatBodyTiming<'_>>,
+    mut timing: Option<&mut CompatBodyTiming>,
 ) -> Result<Response<Body>, CollectError> {
     let (parts, body) = response.into_parts();
     let status = parts.status;
     let headers = parts.headers;
-    let body = collect_body_with_timing(body, cap, timing).await?;
+    let body = collect_body_with_timing(body, cap, timing.as_deref_mut()).await?;
 
-    if !is_sse_content_type(&headers) {
+    let process_started_at = timing.as_ref().map(|_| std::time::Instant::now());
+    let aggregated = finish_aggregate_response(status, &headers, &body, echo_metadata);
+    if let (Some(stats), Some(started_at)) = (timing, process_started_at) {
+        stats.process_started = true;
+        stats.process_elapsed = stats.process_elapsed.saturating_add(started_at.elapsed());
+    }
+    aggregated
+}
+
+fn finish_aggregate_response(
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &Bytes,
+    echo_metadata: Option<Value>,
+) -> Result<Response<Body>, CollectError> {
+    if !is_sse_content_type(headers) {
         if !status.is_success()
             && let Some(public) =
-                openai_compat::response::public_error_from_detail(status.as_u16(), &body)
+                openai_compat::response::public_error_from_detail(status.as_u16(), body)
         {
             return Ok(json_response(status, public));
         }
@@ -134,7 +175,7 @@ pub(crate) async fn aggregate_response(
     }
 
     let mut aggregator = openai_compat::response::SseAggregator::new(echo_metadata);
-    for payload in sse_payloads(&body) {
+    for payload in sse_payloads(body) {
         if payload == b"[DONE]" {
             continue;
         }

@@ -574,6 +574,11 @@ async fn openai_oauth_responses_aggregate_records_upstream_body_timing()
         rows[0].response_body_wait_ms
     );
     assert!(
+        rows[0].response_body_process_ms.is_some(),
+        "expected response_body_process_ms for buffered compat aggregation, got {:?}",
+        rows[0].response_body_process_ms
+    );
+    assert!(
         rows[0].body_chunk_count.is_some_and(|count| count >= 2),
         "expected body_chunk_count >= 2, got {:?}",
         rows[0].body_chunk_count
