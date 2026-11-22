@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use axum::body::Body as AxumBody;
 use bytes::{Bytes, BytesMut};
-use cc_lb_config::{PromptCacheShadowConfig, UpstreamAffinityConfig};
+use cc_lb_config::UpstreamAffinityConfig;
 #[cfg(test)]
 use cc_lb_control::dynamic_view::DynamicViewBuilder;
 use cc_lb_domain::{
@@ -3231,7 +3231,6 @@ pub struct LifecycleConfig {
     pub messages_body_cap_bytes: usize,
     pub files_body_cap_bytes: usize,
     pub replica_identity: Option<ReplicaIdentity>,
-    pub prompt_cache_shadow: PromptCacheShadowConfig,
     pub upstream_affinity_ttl: Duration,
     pub unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy,
     pub openai_oauth_compat: cc_lb_domain::OpenaiOauthCompatPolicy,
@@ -3244,8 +3243,7 @@ impl Default for LifecycleConfig {
             messages_body_cap_bytes: DEFAULT_MESSAGES_CAP_BYTES,
             files_body_cap_bytes: DEFAULT_FILES_CAP_BYTES,
             replica_identity: None,
-            prompt_cache_shadow: PromptCacheShadowConfig::default(),
-            upstream_affinity_ttl: Duration::from_secs(
+            upstream_affinity_ttl: std::time::Duration::from_secs(
                 UpstreamAffinityConfig::default().ttl_secs(),
             ),
             unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy::default(),
@@ -4952,7 +4950,6 @@ impl Lifecycle {
                         model: body.get("model").and_then(Value::as_str).map(str::to_owned),
                         stream: true,
                         body_bytes: ingress.frame.len() as u64,
-                        cache_control_block_count: None,
                         thinking_budget_tokens: None,
                         reasoning_effort: body
                             .pointer("/reasoning/effort")
@@ -6205,7 +6202,6 @@ impl Lifecycle {
                     model: request_model.clone(),
                     stream: body_view.stream(),
                     body_bytes: ctx.body_bytes.len() as u64,
-                    cache_control_block_count: cache_metadata.cache_control_block_count,
                     thinking_budget_tokens: cache_metadata.thinking_budget_tokens,
                     reasoning_effort: cache_metadata.reasoning_effort.clone(),
                     thinking_level: cache_metadata.thinking_level.clone(),
@@ -14200,7 +14196,6 @@ pub(crate) struct RequestCacheMetadata {
     message_id: Option<String>,
     message_index: Option<u64>,
     message_count: Option<u64>,
-    cache_control_block_count: Option<u64>,
     thinking_budget_tokens: Option<u64>,
     reasoning_effort: Option<String>,
     thinking_level: Option<String>,
@@ -14870,7 +14865,6 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
         .collect::<Vec<_>>();
     cache_control_message_indices.sort_unstable();
     cache_control_message_indices.dedup();
-    let cache_control_block_count = raw_cache_breakpoints.len() as u64;
     let (thinking_budget_tokens, reasoning_effort) = request_reasoning_metadata(value, capability);
     let cache_prefix_hash = cache_breakpoints
         .last()
@@ -14944,7 +14938,6 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
         message_id,
         message_index,
         message_count,
-        cache_control_block_count: Some(cache_control_block_count),
         thinking_budget_tokens,
         reasoning_effort,
         thinking_level: request_thinking_level(value, capability),
@@ -17626,8 +17619,8 @@ mod tests {
     #[test]
     fn issue_1002_default_observations_stay_warm_until_provider_ttl() {
         let dispatch = 1_800_000_000;
-        let defaults = PromptCacheShadowConfig::default();
-        let explicit_grace = PromptCacheShadowConfig {
+        let defaults = cc_lb_config::PromptCacheShadowConfig::default();
+        let explicit_grace = cc_lb_config::PromptCacheShadowConfig {
             grace_margin_secs: 60,
         };
         for (ttl, ttl_secs) in [(TtlClass::Ephemeral5m, 300), (TtlClass::Ephemeral1h, 3_600)] {
@@ -19261,7 +19254,6 @@ mod tests {
         assert_eq!(metadata.message_id.as_deref(), Some("msg_2"));
         assert_eq!(metadata.message_index, Some(1));
         assert_eq!(metadata.message_count, Some(2));
-        assert_eq!(metadata.cache_control_block_count, Some(3));
         assert_eq!(metadata.cache_control_message_indices, vec![1]);
         assert_eq!(metadata.cache_breakpoints.len(), 3);
         assert_eq!(metadata.cache_breakpoints[0].block_index, 0);

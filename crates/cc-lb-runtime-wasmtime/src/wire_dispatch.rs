@@ -80,19 +80,13 @@ impl WasmPluginWireDispatch {
             return None;
         }
         let export = hook.qualified_export_name(provider);
-        if let Some(metadata) = self.cell.metadata.hooks.get(export.strip_prefix("cc_lb_")?) {
-            return Some(ResolvedHook {
-                export,
-                version: WireVersion::from_u8(metadata.wire_version)?,
-                active: !metadata.mode.is_noop(),
-            });
-        }
-        if provider != ProviderFamily::Anthropic {
-            return None;
-        }
-        let metadata = self.cell.metadata.hooks.get(hook.as_str())?;
+        let metadata = self
+            .cell
+            .metadata
+            .hooks
+            .get(export.strip_prefix("cc_lb_")?)?;
         Some(ResolvedHook {
-            export: hook.export_name(),
+            export,
             version: WireVersion::from_u8(metadata.wire_version)?,
             active: !metadata.mode.is_noop(),
         })
@@ -241,9 +235,6 @@ impl WasmPluginWireDispatch {
     }
     pub fn sse_wire_version(&self) -> Option<WireVersion> {
         self.sse.map(|h| h.version)
-    }
-    pub fn envelope_wire_version(&self) -> Option<WireVersion> {
-        self.envelope.map(|h| h.version)
     }
 
     pub fn has_shape_envelope_gemini(&self) -> bool {

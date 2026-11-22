@@ -8,8 +8,9 @@ use bytes::Bytes;
 use cc_lb_observability::{
     EngineMetricsHook, MetricDefinition, MetricKind, MetricsCrateHook, ProxyOnBodyChunk,
     ProxyOnResponse, cache_observation_dropped_reason, cache_observation_store_kind,
-    inc_cache_observation_read_failed, inc_cache_observation_write_failed, metric_definitions,
-    prometheus14_metric_definitions, register_metrics,
+    inc_cache_observation_dropped, inc_cache_observation_read_failed,
+    inc_cache_observation_write_failed, metric_definitions, prometheus14_metric_definitions,
+    register_metrics,
 };
 use http::{Response, StatusCode};
 use metrics_exporter_prometheus::PrometheusBuilder;
@@ -265,7 +266,7 @@ fn emit_representative_samples() {
     let engine_hook = MetricsCrateHook;
     engine_hook.record_cache_hit("upstream-a", "claude-test");
     engine_hook.record_cache_miss("upstream-a", "claude-test");
-    engine_hook.record_cache_observation_dropped(cache_observation_dropped_reason::QUEUE_FULL);
+    inc_cache_observation_dropped(cache_observation_dropped_reason::QUEUE_FULL);
     engine_hook.record_dropped_events_by("queue_full", 1);
     engine_hook.record_routing_tier_selection("known_base", "upstream-a", "principal-a");
     inc_cache_observation_write_failed(cache_observation_store_kind::SQLITE);

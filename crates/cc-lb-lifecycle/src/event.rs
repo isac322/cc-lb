@@ -316,14 +316,6 @@ pub enum LifecycleEvent {
     /// tracked partials and limit reservations up to their hard max-TTL cap
     /// without creating new partials or publishing UI updates.
     RequestActivity { event_id: EventId },
-    /// Emitted by the cache-observation subscriber when the final
-    /// prompt-cache state can be derived from the usage counters plus
-    /// parse-time cache metadata. The assembler merges this into the
-    /// request row's `cache_state` column.
-    CacheObserved {
-        event_id: EventId,
-        cache_state: cc_lb_request_log::RequestCacheState,
-    },
 }
 
 impl LifecycleEvent {
@@ -346,8 +338,7 @@ impl LifecycleEvent {
             | Self::StreamCompleted { event_id, .. }
             | Self::RequestTerminated { event_id, .. }
             | Self::RequestActivity { event_id }
-            | Self::Priced { event_id, .. }
-            | Self::CacheObserved { event_id, .. } => event_id,
+            | Self::Priced { event_id, .. } => event_id,
         }
     }
 
@@ -373,7 +364,6 @@ impl LifecycleEvent {
             Self::RequestTerminated { .. } => "request_terminated",
             Self::RequestActivity { .. } => "request_activity",
             Self::Priced { .. } => "priced",
-            Self::CacheObserved { .. } => "cache_observed",
         }
     }
 }

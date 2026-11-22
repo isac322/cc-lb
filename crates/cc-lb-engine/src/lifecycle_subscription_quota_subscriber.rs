@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::subscription_quota_events::SubscriptionQuotaSink;
-use cc_lb_control::{RequestEventBus, SubscriptionQuotaCacheLike};
+use cc_lb_control::SubscriptionQuotaCacheLike;
 
 pub const DEFAULT_SUBSCRIPTION_QUOTA_MAP_CAP: usize = 4096;
 pub const DEFAULT_SUBSCRIPTION_QUOTA_TTL: Duration = cc_lb_lifecycle::DEFAULT_LIFECYCLE_IDLE_TTL;
@@ -49,13 +49,11 @@ pub fn spawn_lifecycle_subscription_quota_subscriber(
     rx: mpsc::Receiver<LifecycleEvent>,
     cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     sink: Option<SubscriptionQuotaSink>,
-    bus: Option<Arc<dyn RequestEventBus>>,
 ) -> SubscriptionQuotaSubscriberHandle {
     spawn_with_config(
         rx,
         cache,
         sink,
-        bus,
         DEFAULT_SUBSCRIPTION_QUOTA_MAP_CAP,
         DEFAULT_SUBSCRIPTION_QUOTA_TTL,
     )
@@ -65,7 +63,6 @@ pub fn spawn_with_config(
     rx: mpsc::Receiver<LifecycleEvent>,
     cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     sink: Option<SubscriptionQuotaSink>,
-    bus: Option<Arc<dyn RequestEventBus>>,
     map_cap: usize,
     ttl: Duration,
 ) -> SubscriptionQuotaSubscriberHandle {
@@ -73,7 +70,6 @@ pub fn spawn_with_config(
         rx,
         cache,
         sink,
-        bus,
         map_cap,
         ttl,
         ttl.max(DEFAULT_SUBSCRIPTION_QUOTA_MAX_TTL),
@@ -84,7 +80,6 @@ pub fn spawn_with_ttls(
     rx: mpsc::Receiver<LifecycleEvent>,
     cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     sink: Option<SubscriptionQuotaSink>,
-    bus: Option<Arc<dyn RequestEventBus>>,
     map_cap: usize,
     idle_ttl: Duration,
     max_ttl: Duration,
@@ -94,15 +89,7 @@ pub fn spawn_with_ttls(
         max: max_ttl.max(idle_ttl),
     };
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(subscriber_loop(
-        rx,
-        cache,
-        sink,
-        bus,
-        map_cap,
-        ttls,
-        shutdown_rx,
-    ));
+    let join = tokio::spawn(subscriber_loop(rx, cache, sink, map_cap, ttls, shutdown_rx));
     SubscriptionQuotaSubscriberHandle { shutdown_tx, join }
 }
 
@@ -141,7 +128,6 @@ async fn subscriber_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
     cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     sink: Option<SubscriptionQuotaSink>,
-    bus: Option<Arc<dyn RequestEventBus>>,
     map_cap: usize,
     ttls: TtlBounds,
     mut shutdown: oneshot::Receiver<()>,
@@ -156,7 +142,7 @@ async fn subscriber_loop(
             biased;
             event = rx.recv() => {
                 match event {
-                    Some(event) => handle_event(cache.as_deref(), sink.as_ref(), bus.as_deref(), &mut partials, map_cap, event),
+                    Some(event) => handle_event(cache.as_deref(), sink.as_ref(), &mut partials, map_cap, event),
                     None => break,
                 }
             }
@@ -169,7 +155,6 @@ async fn subscriber_loop(
         handle_event(
             cache.as_deref(),
             sink.as_ref(),
-            bus.as_deref(),
             &mut partials,
             map_cap,
             event,
@@ -180,7 +165,6 @@ async fn subscriber_loop(
 fn handle_event(
     cache: Option<&dyn SubscriptionQuotaCacheLike>,
     sink: Option<&SubscriptionQuotaSink>,
-    bus: Option<&dyn RequestEventBus>,
     partials: &mut HashMap<EventId, Partial>,
     map_cap: usize,
     event: LifecycleEvent,
@@ -240,7 +224,7 @@ fn handle_event(
             if !is_observable_status {
                 return;
             }
-            if cache.is_none() && sink.is_none() && bus.is_none() {
+            if cache.is_none() && sink.is_none() {
                 return;
             }
             let Some(partial) = partials.get(&event_id) else {
@@ -474,12 +458,8 @@ mod tests {
         let cache = Arc::new(RecordingSubscriptionQuotaCache::default());
         let subscriber_cache: Arc<dyn SubscriptionQuotaCacheLike> = cache.clone();
         let (sink, mut sink_rx) = SubscriptionQuotaSink::with_capacity(16);
-        let handle = spawn_lifecycle_subscription_quota_subscriber(
-            rx,
-            Some(subscriber_cache),
-            Some(sink),
-            None,
-        );
+        let handle =
+            spawn_lifecycle_subscription_quota_subscriber(rx, Some(subscriber_cache), Some(sink));
 
         tx.send(LifecycleEvent::UpstreamAttempt {
             event_id: eid("quota-a"),
@@ -518,12 +498,8 @@ mod tests {
         let cache = Arc::new(RecordingSubscriptionQuotaCache::default());
         let subscriber_cache: Arc<dyn SubscriptionQuotaCacheLike> = cache.clone();
         let (sink, mut sink_rx) = SubscriptionQuotaSink::with_capacity(16);
-        let handle = spawn_lifecycle_subscription_quota_subscriber(
-            rx,
-            Some(subscriber_cache),
-            Some(sink),
-            None,
-        );
+        let handle =
+            spawn_lifecycle_subscription_quota_subscriber(rx, Some(subscriber_cache), Some(sink));
 
         tx.send(response_started("quota-b", quota_headers()))
             .await

@@ -11,9 +11,8 @@ use cc_lb_control::AuditPayload;
 use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginChainConflictReason, PluginChainEntry,
-    PluginChainEntryInput, PluginChainEntryUpdate, PluginMetadata, PluginSlotKind, PrincipalStore,
-    Storage, StorageError, UpstreamStore, WasmRegistryEntry, WasmRegistryReference,
-    WasmRegistryReferenceFingerprint, sparse_order,
+    PluginChainEntryInput, PluginMetadata, PluginSlotKind, PrincipalStore, Storage, StorageError,
+    WasmRegistryEntry, WasmRegistryReference, WasmRegistryReferenceFingerprint, sparse_order,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -53,12 +52,8 @@ pub fn router() -> Router<AdminState> {
             post(reorder_chain),
         )
         .route(
-            "/admin/v1/principals/{principal_id}/plugin-chain/rebalance",
-            post(rebalance_chain),
-        )
-        .route(
             "/admin/v1/plugin-chain-entries/{id}",
-            get(get_chain).put(update_chain).delete(delete_chain),
+            get(get_chain).delete(delete_chain),
         )
 }
 
@@ -164,16 +159,6 @@ struct RegistryCascadeDeleteResponse {
 #[derive(Debug, Serialize)]
 struct ChainListResponse {
     entries: Vec<PluginChainEntry>,
-    warnings: Vec<PluginChainWarning>,
-}
-
-#[derive(Debug, Serialize)]
-struct PluginChainWarning {
-    code: &'static str,
-    message: &'static str,
-    chain_entry_id: Uuid,
-    wasm_registry_id: Uuid,
-    unsupported_providers: Vec<String>,
 }
 
 struct PluginChainAuditMetadata {
@@ -468,86 +453,9 @@ async fn list_chain(
         .list_chain_for_principal(principal_id, query.slot)
         .await
     {
-        Ok(entries) => match legacy_provider_warnings(storage, principal_id, &entries).await {
-            Ok(warnings) => Json(ChainListResponse { entries, warnings }).into_response(),
-            Err(error) => storage_error(error),
-        },
+        Ok(entries) => Json(ChainListResponse { entries }).into_response(),
         Err(error) => storage_error(error),
     }
-}
-
-async fn legacy_provider_warnings(
-    storage: &dyn Storage,
-    principal_id: Uuid,
-    entries: &[PluginChainEntry],
-) -> Result<Vec<PluginChainWarning>, StorageError> {
-    use cc_lb_domain::Provider;
-    if entries.is_empty() {
-        return Ok(Vec::new());
-    }
-    let Some(principal) = PrincipalStore::get_by_id(storage, principal_id).await? else {
-        return Ok(Vec::new());
-    };
-    let mut non_anthropic_providers = Vec::new();
-    let mut after = None;
-    loop {
-        let upstreams = UpstreamStore::list(storage, after, DEFAULT_LIMIT).await?;
-        if upstreams.is_empty() {
-            break;
-        }
-        after = upstreams.last().map(|record| record.id);
-        for upstream in upstreams {
-            if !upstream.enabled
-                || upstream.deleted_at_unix_secs.is_some()
-                || (!principal.allowed_upstreams.is_empty()
-                    && !principal.allowed_upstreams.contains(&upstream.id))
-            {
-                continue;
-            }
-            let name = match upstream.kind.provider() {
-                Provider::Anthropic => continue,
-                Provider::Openai => "openai",
-                Provider::Gemini => "gemini",
-            };
-            if !non_anthropic_providers
-                .iter()
-                .any(|provider| provider == name)
-            {
-                non_anthropic_providers.push(name.to_owned());
-            }
-        }
-    }
-    non_anthropic_providers.sort();
-    if non_anthropic_providers.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut warnings = Vec::new();
-    for entry in entries {
-        let Some(registry) = storage
-            .get_registry_entry_by_id(entry.wasm_registry_id)
-            .await?
-        else {
-            continue;
-        };
-        if registry.is_builtin {
-            continue;
-        }
-        let hooks = &registry.hook_metadata;
-        if !hooks.is_empty()
-            && hooks
-                .keys()
-                .all(|name| cc_lb_plugin_wire::schema::HookKind::parse(name).is_some())
-        {
-            warnings.push(PluginChainWarning {
-                code: "legacy_plugin_anthropic_only",
-                message: "This legacy plugin runs only for Anthropic. Add provider-qualified exports to run it for OpenAI or Gemini.",
-                chain_entry_id: entry.id,
-                wasm_registry_id: entry.wasm_registry_id,
-                unsupported_providers: non_anthropic_providers.clone(),
-            });
-        }
-    }
-    Ok(warnings)
 }
 
 async fn insert_chain(
@@ -646,103 +554,6 @@ async fn insert_chain(
     }
 }
 
-async fn update_chain(
-    State(state): State<AdminState>,
-    Extension(identity): Extension<AdminIdentity>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(update): Json<PluginChainEntryUpdate>,
-) -> axum::response::Response {
-    let Some(expected_revision) = if_match_revision(&headers) else {
-        return error(StatusCode::PRECONDITION_REQUIRED, "if_match_required");
-    };
-    let Some(storage_handle) = state.storage.clone() else {
-        return storage_unavailable();
-    };
-    let storage: &dyn Storage = &*storage_handle;
-    if plugin_chain_update_empty(&update) {
-        return error(StatusCode::BAD_REQUEST, "empty_update");
-    }
-    let current_entry = match find_chain_entry(storage, id).await {
-        Ok(Some(entry)) => entry,
-        Ok(None) => return error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry"),
-        Err(error) => return storage_error(error),
-    };
-    if current_entry.revision != expected_revision {
-        return stale_revision(current_entry.revision);
-    }
-    match storage
-        .get_registry_entry_by_id(current_entry.wasm_registry_id)
-        .await
-    {
-        Ok(Some(registry_entry)) => {
-            if registry_entry_unsupported_slot(&registry_entry, current_entry.slot) {
-                return unsupported_slot(&registry_entry.name, current_entry.slot);
-            }
-        }
-        Ok(None) => {}
-        Err(error) => return storage_error(error),
-    }
-    match storage
-        .update_chain_entry(id, expected_revision, update)
-        .await
-    {
-        Ok(Some(entry)) => {
-            let state = state.clone();
-            let storage_handle = Arc::clone(&storage_handle);
-            finish_after_commit(async move {
-                let audit_metadata = match fetch_plugin_chain_audit_metadata(
-                    &*storage_handle,
-                    entry.wasm_registry_id,
-                )
-                .await
-                {
-                    Ok(metadata) => metadata,
-                    Err(error) => return post_commit_storage_error(&state, error).await,
-                };
-                let target_principal_id = entry.principal_id.to_string();
-                let payload = AuditPayload::PluginChainUpdate {
-                    principal_id: target_principal_id.clone(),
-                    slots_changed: vec![entry.slot.as_str()],
-                    wasm_registry_id: audit_metadata.wasm_registry_id,
-                    sha256_hex: audit_metadata.sha256_hex,
-                    supported_slots: audit_metadata.supported_slots,
-                };
-                let action = payload.to_string();
-                let route = format!("/admin/v1/plugin-chain-entries/{id}");
-                if let Some(response) = audit_committed_change(
-                    &state,
-                    AdminAuditEvent {
-                        identity: Some(&identity),
-                        system_component: None,
-                        action: &action,
-                        route: &route,
-                        target_principal_id: Some(&target_principal_id),
-                        target_upstream: None,
-                        api_key_id: None,
-                        status: StatusCode::OK.as_u16(),
-                        payload: None,
-                    },
-                )
-                .await
-                {
-                    return response;
-                }
-                let mut response = chain_with_etag(entry);
-                add_dynamic_rebind_headers(&mut response, &state).await;
-                response
-            })
-            .await
-        }
-        Ok(None) => error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry"),
-        Err(StorageError::InvalidInput { reason, .. }) if reason.contains("empty_update") => {
-            error(StatusCode::BAD_REQUEST, "empty_update")
-        }
-        Err(StorageError::StalePluginChainRevision { current }) => stale_revision(current),
-        Err(error) => storage_mutation_error(error),
-    }
-}
-
 async fn get_chain(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
@@ -825,17 +636,7 @@ async fn reorder_chain(
                 {
                     return response;
                 }
-                let warnings = match legacy_provider_warnings(
-                    &*storage_handle,
-                    principal_id,
-                    &entries,
-                )
-                .await
-                {
-                    Ok(warnings) => warnings,
-                    Err(error) => return post_commit_storage_error(&state, error).await,
-                };
-                let mut response = Json(ChainListResponse { entries, warnings }).into_response();
+                let mut response = Json(ChainListResponse { entries }).into_response();
                 add_dynamic_rebind_headers(&mut response, &state).await;
                 response
             })
@@ -845,82 +646,6 @@ async fn reorder_chain(
             reason: PluginChainConflictReason::InvalidOrderGap,
         }) => invalid_order(),
         Err(error) => storage_mutation_error(error),
-    }
-}
-
-async fn rebalance_chain(
-    State(state): State<AdminState>,
-    Extension(identity): Extension<AdminIdentity>,
-    Path(principal_id): Path<Uuid>,
-    Query(query): Query<SlotQuery>,
-) -> axum::response::Response {
-    let Some(storage_handle) = state.storage.clone() else {
-        return storage_unavailable();
-    };
-    let storage: &dyn Storage = &*storage_handle;
-    let slot = query.slot;
-    let existing = match storage.list_chain_for_principal(principal_id, slot).await {
-        Ok(entries) => entries,
-        Err(error) => return storage_error(error),
-    };
-    if let Err(response) = revalidate_chain_registry_slots(storage, principal_id, &existing).await {
-        return *response;
-    }
-    match storage.rebalance_chain(principal_id, slot).await {
-        Ok(entries) => {
-            let state = state.clone();
-            let storage_handle = Arc::clone(&storage_handle);
-            finish_after_commit(async move {
-                let audit_metadata =
-                    match first_plugin_chain_audit_metadata(&*storage_handle, &entries).await {
-                        Ok(metadata) => metadata,
-                        Err(error) => return post_commit_storage_error(&state, error).await,
-                    };
-                let target_principal_id = principal_id.to_string();
-                let payload = AuditPayload::PluginChainUpdate {
-                    principal_id: target_principal_id.clone(),
-                    slots_changed: vec![slot.as_str()],
-                    wasm_registry_id: audit_metadata.wasm_registry_id,
-                    sha256_hex: audit_metadata.sha256_hex,
-                    supported_slots: audit_metadata.supported_slots,
-                };
-                let action = payload.to_string();
-                let route = format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance");
-                if let Some(response) = audit_committed_change(
-                    &state,
-                    AdminAuditEvent {
-                        identity: Some(&identity),
-                        system_component: None,
-                        action: &action,
-                        route: &route,
-                        target_principal_id: Some(&target_principal_id),
-                        target_upstream: None,
-                        api_key_id: None,
-                        status: StatusCode::OK.as_u16(),
-                        payload: None,
-                    },
-                )
-                .await
-                {
-                    return response;
-                }
-                let warnings = match legacy_provider_warnings(
-                    &*storage_handle,
-                    principal_id,
-                    &entries,
-                )
-                .await
-                {
-                    Ok(warnings) => warnings,
-                    Err(error) => return post_commit_storage_error(&state, error).await,
-                };
-                let mut response = Json(ChainListResponse { entries, warnings }).into_response();
-                add_dynamic_rebind_headers(&mut response, &state).await;
-                response
-            })
-            .await
-        }
-        Err(error) => storage_error(error),
     }
 }
 
@@ -1033,10 +758,6 @@ async fn find_chain_entry(
             }
         }
     }
-}
-
-fn plugin_chain_update_empty(update: &PluginChainEntryUpdate) -> bool {
-    update.config.is_none()
 }
 
 fn registry_entry_unsupported_slot(
@@ -1246,24 +967,17 @@ fn provider_hook_credential_kinds(
 fn provider_hooks(
     hooks: &std::collections::BTreeMap<String, HookMetadata>,
 ) -> std::collections::BTreeMap<String, Vec<String>> {
-    use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily};
+    use cc_lb_plugin_wire::schema::HookKind;
     let mut providers: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
     for name in hooks.keys() {
         let Some((hook, provider)) = HookKind::parse_entrypoint(name) else {
             continue;
         };
-        if let Some(provider) = provider {
-            providers
-                .entry(provider.as_str().to_owned())
-                .or_default()
-                .push(hook.as_str().to_owned());
-        } else {
-            providers
-                .entry(ProviderFamily::Anthropic.as_str().to_owned())
-                .or_default()
-                .push(hook.as_str().to_owned());
-        }
+        providers
+            .entry(provider.as_str().to_owned())
+            .or_default()
+            .push(hook.as_str().to_owned());
     }
     for hooks in providers.values_mut() {
         hooks.sort();
@@ -1374,7 +1088,7 @@ fn insert_header(
 fn needs_rebalance() -> axum::response::Response {
     (
         StatusCode::CONFLICT,
-        Json(json!({ "error": "needs_rebalance", "hint": "call /rebalance first" })),
+        Json(json!({ "error": "needs_rebalance", "hint": "call /reorder to rebalance first" })),
     )
         .into_response()
 }
@@ -1586,12 +1300,12 @@ mod provider_capability_tests {
     use super::*;
 
     #[test]
-    fn registry_capabilities_map_legacy_shape_to_anthropic_and_qualified_hooks_to_their_provider() {
+    fn registry_capabilities_map_qualified_hooks_to_their_provider() {
         let metadata = cc_lb_plugin_wire::metadata::PluginMetadata::parse(br#"{
             "name":"test","version":"1","description":"test","usage":"test",
             "hooks":{
-                "shape":{"wire_version":1,"description":"legacy","usage":"test","mode":"active"},
-                "transform_response_openai":{"wire_version":1,"description":"OpenAI","usage":"test","mode":"active"}
+                "shape_anthropic":{"wire_version":2,"description":"Anthropic","usage":"test","mode":"active"},
+                "transform_response_openai":{"wire_version":2,"description":"OpenAI","usage":"test","mode":"active"}
             }
         }"#).expect("valid metadata");
         let providers = provider_hooks(&metadata.hooks);
@@ -1604,10 +1318,10 @@ mod provider_capability_tests {
     }
 
     #[test]
-    fn registry_capabilities_map_legacy_router_to_anthropic_only() {
+    fn registry_capabilities_map_qualified_filter_to_matching_provider() {
         let metadata = cc_lb_plugin_wire::metadata::PluginMetadata::parse(br#"{
             "name":"test","version":"1","description":"test","usage":"test",
-            "hooks":{"filter":{"wire_version":1,"description":"shared","usage":"test","mode":"active"}}
+            "hooks":{"filter_anthropic":{"wire_version":3,"description":"shared","usage":"test","mode":"active"}}
         }"#).expect("valid metadata");
         let providers = provider_hooks(&metadata.hooks);
         assert_eq!(providers.get("anthropic"), Some(&vec!["filter".to_owned()]));

@@ -183,12 +183,13 @@ async fn backend_codex_websocket_strips_actor_authorization_on_responses() {
             .unwrap()
             .to_owned();
         let _ = client
-            .post(format!(
-                "http://{}/admin/v1/upstreams/{id}/disable",
+            .patch(format!(
+                "http://{}/admin/v1/upstreams/{id}",
                 server.admin_addr
             ))
             .bearer_auth("admin-token")
             .header("if-match", etag)
+            .json(&json!({ "enabled": false }))
             .send()
             .await
             .unwrap();
@@ -274,9 +275,9 @@ async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinni
         let _ = crate::openai_oauth_public_compat::admin(
             &client,
             &server,
-            reqwest::Method::POST,
-            &format!("/admin/v1/upstreams/{id}/disable"),
-            None,
+            reqwest::Method::PATCH,
+            &format!("/admin/v1/upstreams/{id}"),
+            Some(json!({ "enabled": false })),
             etag.as_deref(),
         )
         .await;
@@ -545,7 +546,7 @@ async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinni
     let (status, _, _) = crate::openai_oauth_public_compat::admin(
         &client,
         &server,
-        reqwest::Method::PUT,
+        reqwest::Method::PATCH,
         &format!("/admin/v1/principals/{principal_id}"),
         Some(detail),
         etag.as_deref(),
@@ -633,9 +634,9 @@ async fn backend_codex_realtime_websocket_never_routes_to_api_key_or_api_key_cal
         let _ = crate::openai_oauth_public_compat::admin(
             &client,
             &server,
-            reqwest::Method::POST,
-            &format!("/admin/v1/upstreams/{id}/disable"),
-            None,
+            reqwest::Method::PATCH,
+            &format!("/admin/v1/upstreams/{id}"),
+            Some(json!({ "enabled": false })),
             etag.as_deref(),
         )
         .await;
@@ -744,9 +745,9 @@ async fn backend_codex_root_supports_standalone_realtime_ws_and_rejects_http_wit
         let _ = crate::openai_oauth_public_compat::admin(
             &client,
             &server,
-            reqwest::Method::POST,
-            &format!("/admin/v1/upstreams/{id}/disable"),
-            None,
+            reqwest::Method::PATCH,
+            &format!("/admin/v1/upstreams/{id}"),
+            Some(json!({ "enabled": false })),
             etag.as_deref(),
         )
         .await;
@@ -897,9 +898,9 @@ async fn backend_codex_realtime_v3_live_supports_standalone_sideband_and_pinning
         let _ = crate::openai_oauth_public_compat::admin(
             &client,
             &server,
-            reqwest::Method::POST,
-            &format!("/admin/v1/upstreams/{id}/disable"),
-            None,
+            reqwest::Method::PATCH,
+            &format!("/admin/v1/upstreams/{id}"),
+            Some(json!({ "enabled": false })),
             etag.as_deref(),
         )
         .await;
@@ -1169,7 +1170,7 @@ async fn backend_codex_realtime_v3_live_supports_standalone_sideband_and_pinning
     let (status, _, _) = crate::openai_oauth_public_compat::admin(
         &client,
         &server,
-        reqwest::Method::PUT,
+        reqwest::Method::PATCH,
         &format!("/admin/v1/principals/{principal_id}"),
         Some(detail),
         etag.as_deref(),

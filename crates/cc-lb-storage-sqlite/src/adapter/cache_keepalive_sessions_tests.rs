@@ -1640,13 +1640,6 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe() {
         .expect("load terminal session")
         .expect("terminal session exists");
     assert!(terminal.encrypted_payload.is_empty());
-    let check = storage
-        .check_cache_keepalive_generation("session-hash")
-        .await
-        .expect("check")
-        .expect("row exists");
-    assert_eq!(check.status, CacheKeepaliveSessionStatus::Terminal);
-    assert_eq!(check.enqueue_state, CacheKeepaliveEnqueueState::Pending);
 
     let removed = storage
         .purge_cache_keepalive_expired(401)
@@ -1778,13 +1771,15 @@ async fn fenced_terminal_paths_reset_enqueue_state_and_reschedule_clears_error()
     );
     assert!(
         storage
-            .mark_latest_cache_keepalive_terminal(
+            .mark_cache_keepalive_terminal(
                 "session-hash",
+                active.generation,
                 CacheKeepaliveTerminalReason::Cancelled,
+                None,
                 113,
             )
             .await
-            .expect("mark latest terminal")
+            .expect("mark terminal")
     );
     let latest = storage
         .get_cache_keepalive_session("session-hash")
@@ -1821,55 +1816,6 @@ async fn fenced_terminal_paths_reset_enqueue_state_and_reschedule_clears_error()
         .expect("reschedule after cache hit")
         .expect("rescheduled session exists");
     assert_eq!(refreshed.error, None);
-}
-
-#[tokio::test]
-async fn mark_latest_terminal_only_mutates_active_latest_session() {
-    let (_dir, storage) = storage().await;
-    let first = storage
-        .replace_from_real_request(&replace_request(b"ciphertext-one", 100))
-        .await
-        .expect("insert first session");
-    let second = storage
-        .replace_from_real_request(&replace_request(b"ciphertext-two", 110))
-        .await
-        .expect("replace session");
-
-    assert_eq!(first.generation, 1);
-    assert_eq!(second.generation, 2);
-    assert!(
-        storage
-            .mark_latest_cache_keepalive_terminal(
-                "session-hash",
-                CacheKeepaliveTerminalReason::Cancelled,
-                120,
-            )
-            .await
-            .expect("mark latest terminal")
-    );
-    assert!(
-        !storage
-            .mark_latest_cache_keepalive_terminal(
-                "session-hash",
-                CacheKeepaliveTerminalReason::CacheMiss,
-                121,
-            )
-            .await
-            .expect("terminal row no-op")
-    );
-
-    let record = storage
-        .get_cache_keepalive_session("session-hash")
-        .await
-        .expect("load session")
-        .expect("row exists");
-    assert_eq!(record.generation, 2);
-    assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
-    assert_eq!(
-        record.terminal_reason,
-        Some(CacheKeepaliveTerminalReason::Cancelled)
-    );
-    assert!(record.encrypted_payload.is_empty());
 }
 
 #[tokio::test]

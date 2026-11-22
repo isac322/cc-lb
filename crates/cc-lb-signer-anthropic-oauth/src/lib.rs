@@ -1,8 +1,5 @@
 #![forbid(unsafe_code)]
 
-mod http_client;
-mod pkce;
-mod refresh;
 mod single_flight;
 
 use std::fmt;
@@ -23,16 +20,12 @@ use secrecy::{ExposeSecret, SecretString};
 use uuid::Uuid;
 
 const OAUTH_EXPIRY_SKEW_SECS: u64 = 30;
+pub const REFRESH_SOFT_BUFFER_SECS: u64 = 300;
 const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 /// `last_apply_error` for a credential rejected with HTTP 401;
 /// `refresh_requires_reconnect` treats it as reconnect-required.
 const REJECTED_STATUS_401_REASON: &str = "status_401";
 
-pub use http_client::{
-    HyperOAuthHttpClient, OAuthHttpClient, OAuthHttpError, OAuthTokenRequest, OAuthTokenResponse,
-};
-pub use pkce::{PkceHandshake, PkceHandshakeState, complete_pkce_flow, start_pkce_flow};
-pub use refresh::RefreshError;
 pub use single_flight::{
     ForcedRefreshGenerations, RefreshLocks, lock_for, new_forced_refresh_generations,
     new_refresh_locks,
@@ -570,7 +563,7 @@ impl PersistedAnthropicOAuthSigner {
         }
         if self
             .expires_at_unix_secs
-            .saturating_sub(refresh::REFRESH_SOFT_BUFFER_SECS)
+            .saturating_sub(REFRESH_SOFT_BUFFER_SECS)
             > now_unix_secs
         {
             return;

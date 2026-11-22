@@ -77,17 +77,6 @@ impl AnthropicCompatibilityKvStore for PostgresStorage {
         .map_err(map_sqlx_error)?;
         row.map(row_to_record).transpose()
     }
-
-    async fn list_compatibility_kv(&self) -> StorageResult<Vec<CompatibilityKvRecord>> {
-        let rows = sqlx::query(
-            "SELECT key, value, last_updated_at_unix_secs, last_attempt_at_unix_secs, last_error, source_url \
-             FROM anthropic_compatibility_kv_v1 ORDER BY key ASC",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-        rows.into_iter().map(row_to_record).collect()
-    }
 }
 
 fn row_to_record(row: PgRow) -> StorageResult<CompatibilityKvRecord> {

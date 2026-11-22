@@ -17,7 +17,6 @@ const JITTER_DENOMINATOR_PER_MILLE: u64 = 1_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RetryClass {
-    Probe,
     Adaptive,
     Maintenance,
 }
@@ -25,7 +24,6 @@ pub enum RetryClass {
 impl RetryClass {
     pub const fn policy(self) -> RetryPolicy {
         match self {
-            Self::Probe => RetryPolicy::new(3, 1, 5, JitterRatio::from_per_mille(100)),
             Self::Adaptive => RetryPolicy::new(5, 30, 600, JitterRatio::from_per_mille(100)),
             Self::Maintenance => RetryPolicy::new(1, 60, 60, JitterRatio::from_per_mille(100)),
         }

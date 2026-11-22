@@ -239,7 +239,7 @@ async fn backend_codex_catalog_filters_only_restricted_principal_models() {
     let (status, _, _) = openai_oauth_public_compat::admin(
         &client,
         &server,
-        reqwest::Method::PUT,
+        reqwest::Method::PATCH,
         &format!("/admin/v1/principals/{id}"),
         Some(detail),
         etag.as_deref(),
@@ -598,9 +598,9 @@ async fn backend_codex_api_key_only_principal_has_no_eligible_upstream() {
         let _ = openai_oauth_public_compat::admin(
             &client,
             &server,
-            reqwest::Method::POST,
-            &format!("/admin/v1/upstreams/{id}/disable"),
-            None,
+            reqwest::Method::PATCH,
+            &format!("/admin/v1/upstreams/{id}"),
+            Some(json!({ "enabled": false })),
             etag.as_deref(),
         )
         .await;
@@ -902,9 +902,9 @@ async fn disable_all_seeded_upstreams(client: &Client, server: &common::TestServ
         let (status, _, _) = openai_oauth_public_compat::admin(
             client,
             server,
-            reqwest::Method::POST,
-            &format!("/admin/v1/upstreams/{id}/disable"),
-            None,
+            reqwest::Method::PATCH,
+            &format!("/admin/v1/upstreams/{id}"),
+            Some(json!({ "enabled": false })),
             etag.as_deref(),
         )
         .await;
@@ -1096,7 +1096,7 @@ async fn backend_codex_images_generations_and_edits_preserve_native_contract() {
     let (status, _, _) = openai_oauth_public_compat::admin(
         &client,
         &server,
-        reqwest::Method::PUT,
+        reqwest::Method::PATCH,
         &format!("/admin/v1/principals/{principal_id}"),
         Some(detail),
         etag.as_deref(),

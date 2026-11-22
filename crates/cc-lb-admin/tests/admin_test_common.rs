@@ -7,13 +7,8 @@ use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use axum::{Router, body::Body};
 use cc_lb_clock::{ClockHandle, SystemClock};
 use cc_lb_config::Config;
-use cc_lb_control::api_keys::{
-    concurrent_guard::KeyConcurrencyManager, principal_view::PrincipalView,
-};
-use cc_lb_control::{
-    DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
-    api_keys::limit_engine::LimitEngine,
-};
+use cc_lb_control::api_keys::principal_view::PrincipalView;
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot};
 use cc_lb_domain::Upstream;
 use cc_lb_storage_api::MetaStore;
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite, open_sqlite_existing};
@@ -21,14 +16,6 @@ use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use http_body_util::BodyExt;
 use sqlx::Connection as _;
 use tower::ServiceExt;
-
-pub fn limit_engine() -> Arc<LimitEngine> {
-    limit_engine_with_clock(system_clock())
-}
-
-pub fn limit_engine_with_clock(clock: ClockHandle) -> Arc<LimitEngine> {
-    LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock)
-}
 
 fn system_clock() -> ClockHandle {
     Arc::new(SystemClock)
@@ -176,7 +163,6 @@ pub async fn spawn_admin_server_with_clock_and_auth(
         storage: Some(storage.clone()),
         key_store: Some(key_store(storage.clone())),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: limit_engine_with_clock(clock.clone()),
         lifecycle: None,
         lazy_refresher: None,
         runtime: None,

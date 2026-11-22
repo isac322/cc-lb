@@ -50,8 +50,8 @@ sse_storage_tail_lag_ms p95: <value>
 sse_notify_queue_usage_ratio: <value>
 cc_lb_dropped_events_total{reason="lifecycle_assembler_full"} rate5m: <value>
 cc_lb_dropped_events_total{reason="sse_lagged"} rate5m: <value>
+sse_partial_notify_sent_total{outcome=~"sent|trimmed_sent|failed"} rate5m: <values by outcome>
 sse_partial_notify_dropped_total{reason=~".+"} rate5m: <values by reason>
-sse_notify_http_fetches_total{outcome="success|not_found|unauthorized|timeout|network_error"} rate5m: <values>
 ```
 
 Store the snapshot at `docs/live-tail-day1-snapshot-<date>.md` (or your team's operational archive).

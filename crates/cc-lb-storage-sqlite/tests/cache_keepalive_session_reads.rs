@@ -581,18 +581,9 @@ async fn lists_frozen_session_and_decision_projection_rows() {
         .list_cache_keepalive_turns(PRINCIPAL_ID, "renewed-session")
         .await
         .expect("load session turns");
-    let renewal_decision = storage
-        .get_cache_keepalive_decision_for_principal(PRINCIPAL_ID, "renewed-turn")
-        .await
-        .expect("load session decision")
-        .expect("renewed decision exists");
     assert_eq!(session.config_snapshot, Some(snapshot()));
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0].source_ref_id, "renewed-turn");
-    assert_eq!(
-        renewal_decision.reason,
-        "agent-in-turn (tool_use: `bash`) — first renewal in 4m 30s"
-    );
     assert_eq!(
         scheduled.status,
         cc_lb_storage_api::CacheKeepaliveSessionStatus::Active
@@ -1162,60 +1153,6 @@ async fn direct_lookup_is_principal_scoped() {
 }
 
 #[tokio::test]
-async fn summary_input_matches_legacy_full_scan() {
-    let (_temp_dir, storage) = storage().await;
-    for (id, ts) in [("summary-new", 7_000), ("summary-old", 6_000)] {
-        storage
-            .replace_from_real_request(&request(id, ts, "agent-in-turn"))
-            .await
-            .expect("insert summary session");
-    }
-    insert_decision(&storage, PRINCIPAL_ID, "recent-visible", 7_001).await;
-    insert_decision(&storage, PRINCIPAL_ID, "recent-joined", 7_002).await;
-    insert_turn_for_source(&storage, PRINCIPAL_ID, "recent-joined").await;
-    insert_decision(&storage, PRINCIPAL_ID, "old-visible", 5_000).await;
-
-    let summary = storage
-        .read_cache_keepalive_summary_input(PRINCIPAL_ID, 7_000_000)
-        .await
-        .expect("read narrow summary input");
-    let legacy_sessions = storage
-        .list_cache_keepalive_sessions(&all_query(100))
-        .await
-        .expect("read full visible list")
-        .rows
-        .into_iter()
-        .filter(|row| row.source == CacheKeepaliveSessionEntrySource::Session)
-        .collect::<Vec<_>>();
-
-    assert_eq!(summary.sessions, legacy_sessions);
-    assert_eq!(summary.recent_decisions, 1);
-}
-
-#[tokio::test]
-async fn summary_recent_decisions_applies_anti_join() {
-    let (_temp_dir, storage) = storage().await;
-    for id in [
-        "visible-a",
-        "visible-b",
-        "visible-c",
-        "joined-a",
-        "joined-b",
-    ] {
-        insert_decision(&storage, PRINCIPAL_ID, id, 8_000).await;
-    }
-    for id in ["joined-a", "joined-b"] {
-        insert_turn_for_source(&storage, PRINCIPAL_ID, id).await;
-    }
-
-    let summary = storage
-        .read_cache_keepalive_summary_input(PRINCIPAL_ID, 8_000_000)
-        .await
-        .expect("count visible decisions");
-    assert_eq!(summary.recent_decisions, 3);
-}
-
-#[tokio::test]
 async fn pagination_reaches_terminal_with_engine_parity() {
     let (_temp_dir, storage) = storage().await;
     for index in 0..85_u64 {
@@ -1415,10 +1352,6 @@ async fn selected_corruption_is_not_silently_dropped() {
             .list_cache_keepalive_sessions(&all_query(10))
             .await
             .expect_err("list reports corruption"),
-        storage
-            .read_cache_keepalive_summary_input(PRINCIPAL_ID, 0)
-            .await
-            .expect_err("summary reports corruption"),
     ] {
         assert!(matches!(error, StorageError::Corrupted { .. }));
     }
@@ -2197,10 +2130,6 @@ async fn scalar_session_reads_project_current_cycle_and_null_decision_cycle() {
         .list_cache_keepalive_sessions(&all_query(10))
         .await
         .expect("list scalar cycle projections");
-    let summary = storage
-        .read_cache_keepalive_summary_input(PRINCIPAL_ID, 0)
-        .await
-        .expect("read scalar summary projection");
     let session = storage
         .get_cache_keepalive_list_item(PRINCIPAL_ID, "scalar-cycle-session")
         .await
@@ -2211,12 +2140,7 @@ async fn scalar_session_reads_project_current_cycle_and_null_decision_cycle() {
         .await
         .expect("read scalar decision detail")
         .expect("decision exists");
-    for row in page
-        .rows
-        .iter()
-        .chain(&summary.sessions)
-        .chain([&session, &decision])
-    {
+    for row in page.rows.iter().chain([&session, &decision]) {
         let value = serde_json::to_value(row).expect("serialize scalar projection");
         let expected = if row.is_decision() {
             serde_json::Value::Null

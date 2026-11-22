@@ -25,9 +25,9 @@ use crate::probe::probe_hook_dispatch;
 // plugin to recompile on next reconcile even when the wasm bytes are
 // byte-identical — guarantees a policy tightening cannot be silently
 // carried by a stale short-circuited slot.
-pub(crate) const VALIDATION_POLICY_VERSION: u32 = 2;
+pub(crate) const VALIDATION_POLICY_VERSION: u32 = 3;
 
-const WASMTIME_CACHE_COMPATIBILITY_VERSION: &str = "wasmtime-46.0.1";
+const WASMTIME_CACHE_COMPATIBILITY_VERSION: &str = "wasmtime-50.0.2";
 
 pub(crate) fn compute_content_hash(
     engine: &Engine,

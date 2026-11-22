@@ -349,9 +349,7 @@ async fn reconcile_hydrates_committed_quota_without_notification() {
 async fn latest_admin_api_preserves_persisted_credits_source_and_freshness() {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use cc_lb_control::api_keys::{
-        concurrent_guard::KeyConcurrencyManager, key_store::KeyStore, limit_engine::LimitEngine,
-    };
+    use cc_lb_control::api_keys::key_store::KeyStore;
     use http_body_util::BodyExt;
     use serde_json::json;
     use tower::ServiceExt;
@@ -375,7 +373,6 @@ async fn latest_admin_api_preserves_persisted_credits_source_and_freshness() {
         storage: Some(peer.storage.clone()),
         key_store: Some(Arc::new(KeyStore::new(peer.storage.clone()))),
         aead: Arc::new(AeadService::from_master_key(AEAD_KEY)),
-        limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone()),
         lifecycle: None,
         lazy_refresher: None,
         runtime: None,

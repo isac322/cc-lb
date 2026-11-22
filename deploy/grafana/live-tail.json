@@ -374,7 +374,7 @@
           "id": 11,
           "type": "timeseries",
           "title": "PG NOTIFY partial outcomes",
-          "description": "Send outcome (sent/truncated_sent/failed) and drop reason (queue_full/queue_closed/serialize_error/pg_error).",
+          "description": "Send outcome (sent/trimmed_sent/failed) and drop reason (queue_full/queue_closed/serialize_error/payload_too_large/pg_error).",
           "gridPos": { "x": 12, "y": 21, "w": 12, "h": 6 },
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "targets": [
@@ -407,42 +407,11 @@
           }
         },
         {
-          "id": 12,
-          "type": "timeseries",
-          "title": "HTTP partial fallback outcomes",
-          "description": "sse_notify_http_fetches_total{outcome}. Non-zero here means partials exceeded NOTIFY size limit and we fetched over HTTP.",
-          "gridPos": { "x": 0, "y": 27, "w": 12, "h": 6 },
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "sum by (outcome) (rate(sse_notify_http_fetches_total[$rate_window]))",
-              "legendFormat": "{{outcome}}"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "cps",
-              "decimals": 3,
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "fillOpacity": 10
-              },
-              "color": { "mode": "palette-classic" }
-            }
-          },
-          "options": {
-            "tooltip": { "mode": "multi", "sort": "desc" },
-            "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }
-          }
-        },
-        {
           "id": 13,
           "type": "timeseries",
           "title": "Storage tail poll cadence + backlog",
           "description": "sse_storage_tail_polls_total (poll rate) and sse_storage_tail_backlog_rows (rows found per poll). Non-zero backlog steady state indicates the poller is behind the writer.",
-          "gridPos": { "x": 12, "y": 27, "w": 12, "h": 6 },
+          "gridPos": { "x": 0, "y": 27, "w": 24, "h": 6 },
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "targets": [
             {

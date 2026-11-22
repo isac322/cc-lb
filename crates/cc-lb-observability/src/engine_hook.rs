@@ -12,8 +12,6 @@ pub trait EngineMetricsHook: Send + Sync {
 
     fn record_native_cache_prediction(&self, _provider: &str, _mode: &str, _outcome: &str) {}
 
-    fn record_cache_observation_dropped(&self, reason: &str);
-
     fn record_dropped_events_by(&self, reason: &str, count: u64);
 
     fn record_routing_tier_selection(&self, tier: &str, upstream: &str, principal_id: &str);
@@ -26,8 +24,6 @@ impl EngineMetricsHook for NoopMetricsHook {
     fn record_cache_hit(&self, _upstream: &str, _model: &str) {}
 
     fn record_cache_miss(&self, _upstream: &str, _model: &str) {}
-
-    fn record_cache_observation_dropped(&self, _reason: &str) {}
 
     fn record_dropped_events_by(&self, _reason: &str, _count: u64) {}
 
@@ -89,14 +85,6 @@ impl EngineMetricsHook for MetricsCrateHook {
             "provider" => provider.to_owned(),
             "mode" => mode.to_owned(),
             "outcome" => outcome.to_owned()
-        )
-        .increment(1);
-    }
-
-    fn record_cache_observation_dropped(&self, reason: &str) {
-        metrics::counter!(
-            "cc_lb_cache_observation_dropped_total",
-            "reason" => reason.to_owned()
         )
         .increment(1);
     }

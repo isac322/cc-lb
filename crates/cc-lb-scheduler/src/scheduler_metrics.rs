@@ -80,6 +80,7 @@ const JOB_TYPES: &[&str] = &[
     "cron:oauth_usage_poll",
     "cron:api_key_usage_poll",
     "cron:anthropic_compat_refresh",
+    "cron:pool_quota_snapshot",
 ];
 
 const JOB_STATUSES: &[&str] = &["started", "done", "retry", "skip", "panicked", "noop"];
@@ -220,9 +221,4 @@ pub fn record_api_key_usage_poll_outcome_with_labels(
         "status" => status
     )
     .increment(count);
-}
-
-/// Compatibility helper for callers that only have the generic outcome.
-pub fn record_api_key_usage_poll_outcome(outcome: &'static str, count: u64) {
-    record_api_key_usage_poll_outcome_with_labels(outcome, "unknown", "unknown", "unknown", count);
 }

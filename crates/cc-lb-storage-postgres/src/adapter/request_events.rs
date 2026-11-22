@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveEvidenceRow, CacheKeepaliveProjectionStore,
-    CacheKeepaliveTurnRow, RequestEvent, RequestEventExportPage, RequestEventHistogramBucket,
-    RequestEventHistogramQuery, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
-    RequestEventListItem, RequestEventListQuery, RequestEventProjections, RequestEventStore,
-    RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_patterns,
+    CacheKeepaliveTurnRow, RequestEvent, RequestEventHistogramBucket, RequestEventHistogramQuery,
+    RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery, RequestEventListItem,
+    RequestEventListQuery, RequestEventProjections, RequestEventStore, RequestEventStreamFilters,
+    StorageError, StorageResult, model_filter_like_patterns,
 };
 use chrono::{DateTime, Utc};
 use sqlx::{Postgres, QueryBuilder, Row};
@@ -27,12 +27,6 @@ const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
 /// Poll interval while waiting for the snapshot xmin horizon to pass the
 /// stable-ceiling snapshot's xmax.
 const STABLE_SEQ_CEILING_POLL_INTERVAL: Duration = Duration::from_millis(25);
-
-/// Upper bounds clamp to `i64::MAX`: a bound past every storable value means
-/// "no upper limit", never an error.
-fn u64_to_i64_saturating(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
-}
 
 #[async_trait]
 impl CacheKeepaliveProjectionStore for PostgresStorage {
@@ -342,96 +336,6 @@ impl RequestEventStore for PostgresStorage {
                     ),
                 })
             })
-    }
-
-    async fn request_event_seq_bounds(
-        &self,
-        from_ts_ms: u64,
-        to_ts_ms: u64,
-    ) -> StorageResult<Option<(u64, u64)>> {
-        if to_ts_ms <= from_ts_ms {
-            return Ok(None);
-        }
-        let (min_seq, max_seq) = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
-            "SELECT MIN(seq), MAX(seq) FROM request_events_v1 \
-             WHERE list_ts_ms >= $1 AND list_ts_ms < $2",
-        )
-        .bind(u64_to_i64(from_ts_ms, "request event seq bounds from")?)
-        .bind(u64_to_i64_saturating(to_ts_ms))
-        .fetch_one(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-        match (min_seq, max_seq) {
-            (Some(min_seq), Some(max_seq)) => Ok(Some((
-                i64_to_u64(min_seq, "request event seq bounds min")?,
-                i64_to_u64(max_seq, "request event seq bounds max")?,
-            ))),
-            _ => Ok(None),
-        }
-    }
-
-    async fn export_request_events(
-        &self,
-        page: &RequestEventExportPage,
-    ) -> StorageResult<Vec<(u64, RequestEvent)>> {
-        if page.limit == 0 || page.until_seq <= page.after_seq {
-            return Ok(Vec::new());
-        }
-        let rows = sqlx::query(row::EXPORT_SQL)
-            .bind(u64_to_i64(
-                page.after_seq,
-                "request event export after_seq",
-            )?)
-            .bind(u64_to_i64_saturating(page.until_seq))
-            .bind(
-                page.from_ts_ms
-                    .map(|value| u64_to_i64(value, "request event export from_ts_ms"))
-                    .transpose()?,
-            )
-            .bind(page.to_ts_ms.map(u64_to_i64_saturating))
-            .bind(u64_to_i64(page.limit as u64, "request event export limit")?)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?;
-
-        rows.into_iter()
-            .map(|row| {
-                let cursor = i64_to_u64(
-                    row.try_get("seq").map_err(map_sqlx_error)?,
-                    "request event cursor",
-                )?;
-                let event = row::from_row(&row)?;
-                Ok((cursor, event))
-            })
-            .collect()
-    }
-
-    async fn request_event_day_counts(
-        &self,
-        from_ts_ms: u64,
-        to_ts_ms: u64,
-    ) -> StorageResult<Vec<(u64, u64)>> {
-        if to_ts_ms <= from_ts_ms {
-            return Ok(Vec::new());
-        }
-        let rows = sqlx::query_as::<_, (i64, i64)>(
-            "SELECT list_ts_ms / 86400000 AS utc_day, COUNT(*) FROM request_events_v1 \
-             WHERE list_ts_ms >= $1 AND list_ts_ms < $2 \
-             GROUP BY 1 ORDER BY 1",
-        )
-        .bind(u64_to_i64(from_ts_ms, "request event day counts from")?)
-        .bind(u64_to_i64_saturating(to_ts_ms))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-        rows.into_iter()
-            .map(|(day, count)| {
-                Ok((
-                    i64_to_u64(day, "request event day index")?,
-                    i64_to_u64(count, "request event day count")?,
-                ))
-            })
-            .collect()
     }
 }
 

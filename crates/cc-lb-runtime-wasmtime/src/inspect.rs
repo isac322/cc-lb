@@ -8,7 +8,7 @@
 //!    via the declared exports.
 //! 2. **Required exports per declared hook.** Every module requires
 //!    `memory`, `cc_lb_alloc`, `cc_lb_free`. On top of that each hook
-//!    listed in `cc_lb.plugin.v1` or `cc_lb.plugin.v2` requires its matching export.
+//!    listed in `cc_lb.plugin.v2` requires its matching provider-qualified export.
 //!    Signature validation of `cc_lb_alloc` and the hook export is
 //!    deferred to call time via `instance.get_typed_func`.
 //! 3. **Schema fingerprints.** Each declared hook ships a
@@ -32,8 +32,7 @@ use cc_lb_plugin_wire::metadata::PluginMetadata;
 use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily, WireSchema, WireVersion, host_supports};
 use wasmtime::wasmparser::{ExternalKind, Parser, Payload};
 
-const PLUGIN_META_SECTION: &str = "cc_lb.plugin.v1";
-const QUALIFIED_PLUGIN_META_SECTION: &str = "cc_lb.plugin.v2";
+const PLUGIN_META_SECTION: &str = "cc_lb.plugin.v2";
 const REQUIRED_MEMORY_EXPORT: &str = "memory";
 const ALWAYS_REQUIRED_FUNC_EXPORTS: &[&str] = &["cc_lb_alloc", "cc_lb_free"];
 const SHAPE_OWNED_HOOKS: [HookKind; 5] = [
@@ -76,7 +75,6 @@ fn inspect_wasm_with_scope(
 ) -> Result<ModuleInspection, WasmtimeRuntimeError> {
     let mut observed_sections: HashMap<String, [u8; 32]> = HashMap::new();
     let mut plugin_metadata: Option<Vec<u8>> = None;
-    let mut metadata_section_name = PLUGIN_META_SECTION;
     let mut found_func_exports: HashSet<String> = HashSet::new();
     let mut found_memory_export = false;
 
@@ -114,18 +112,14 @@ fn inspect_wasm_with_scope(
             }
             Payload::CustomSection(section) => {
                 let name = section.name();
-                if name == PLUGIN_META_SECTION || name == QUALIFIED_PLUGIN_META_SECTION {
+                if name == PLUGIN_META_SECTION {
                     if plugin_metadata.is_some() {
                         return Err(WasmtimeRuntimeError::ModuleRejected {
-                            reason: "plugin must contain exactly one metadata section (v1 or v2)"
-                                .into(),
+                            reason: format!(
+                                "plugin must contain exactly one `{PLUGIN_META_SECTION}` metadata section"
+                            ),
                         });
                     }
-                    metadata_section_name = if name == QUALIFIED_PLUGIN_META_SECTION {
-                        QUALIFIED_PLUGIN_META_SECTION
-                    } else {
-                        PLUGIN_META_SECTION
-                    };
                     plugin_metadata = Some(section.data().to_vec());
                 }
                 if name.starts_with("cc_lb.schema.") {
@@ -160,7 +154,7 @@ fn inspect_wasm_with_scope(
     })?;
 
     reject_non_response_noop_modes(&metadata)?;
-    validate_export_inventory(&metadata, &found_func_exports, metadata_section_name)?;
+    validate_export_inventory(&metadata, &found_func_exports)?;
     match scope {
         InspectionScope::Slot(kind) => require_hooks_for_slot(kind, &metadata)?,
         InspectionScope::DeclaredHooks => require_declared_hook_contracts(&metadata)?,
@@ -197,7 +191,7 @@ fn inspect_wasm_with_scope(
                 ),
             });
         }
-        if hook == HookKind::ShapeEnvelopeGemini && provider != Some(ProviderFamily::Gemini) {
+        if hook == HookKind::ShapeEnvelopeGemini && provider != ProviderFamily::Gemini {
             return Err(WasmtimeRuntimeError::ModuleRejected {
                 reason: "shape_envelope_gemini is Gemini-only".into(),
             });
@@ -219,18 +213,7 @@ fn inspect_wasm_with_scope(
                 ),
             });
         }
-        if matches!(wire_version, WireVersion::V2 | WireVersion::V3) && provider.is_none() {
-            return Err(WasmtimeRuntimeError::ModuleRejected {
-                reason: format!(
-                    "hook `{hook_name}` wire version {} requires provider-qualified metadata",
-                    wire_version.as_u8()
-                ),
-            });
-        }
-        let needed_export = provider.map_or_else(
-            || hook.export_name(),
-            |provider| hook.qualified_export_name(provider),
-        );
+        let needed_export = hook.qualified_export_name(provider);
         if !found_func_exports.contains(needed_export) {
             return Err(WasmtimeRuntimeError::ModuleRejected {
                 reason: format!(
@@ -296,46 +279,17 @@ fn require_hooks_for_slot(
             HookKind::TransformResponse
             | HookKind::TransformSseEvent
             | HookKind::TransformRealtimeFrame => reject_shape_owned_hook_as_slot(kind),
-            _ => require_declared_hook(metadata, kind, "this slot"),
+            _ => Err(WasmtimeRuntimeError::ModuleRejected {
+                reason: format!(
+                    "metadata does not declare required `{}` hook for this slot",
+                    kind.as_str()
+                ),
+            }),
         }
     }
 }
 
 fn require_declared_hook_contracts(metadata: &PluginMetadata) -> Result<(), WasmtimeRuntimeError> {
-    // Wire v1 shape plugins retain their historical all-hooks contract.
-    if metadata.hooks.contains_key(HookKind::Shape.as_str()) {
-        for hook in [
-            HookKind::Shape,
-            HookKind::TransformResponse,
-            HookKind::TransformSseEvent,
-        ] {
-            require_declared_hook(metadata, hook, "legacy shape plugin")?;
-        }
-    }
-
-    // Legacy bare response hooks remain shape-owned and cannot be admitted
-    // without the legacy bare shape hook. Provider-qualified v2 response
-    // hooks are intentionally independent.
-    for name in metadata.hooks.keys() {
-        let Some((hook, provider)) = HookKind::parse_entrypoint(name) else {
-            continue;
-        };
-        if provider.is_none()
-            && matches!(
-                hook,
-                HookKind::TransformResponse | HookKind::TransformSseEvent
-            )
-            && !metadata.hooks.contains_key(HookKind::Shape.as_str())
-        {
-            return Err(WasmtimeRuntimeError::ModuleRejected {
-                reason: format!(
-                    "shape-owned hook `{}` requires a declared `shape` hook",
-                    hook.as_str()
-                ),
-            });
-        }
-    }
-
     // The Gemini envelope transform is a provider-specific extension of the
     // Gemini shape contract, not an independent shape owner.
     if metadata
@@ -380,50 +334,10 @@ fn reject_non_response_noop_modes(metadata: &PluginMetadata) -> Result<(), Wasmt
     Ok(())
 }
 
-fn require_declared_hook(
-    metadata: &PluginMetadata,
-    hook: HookKind,
-    owner: &str,
-) -> Result<(), WasmtimeRuntimeError> {
-    if metadata.hooks.contains_key(hook.as_str()) {
-        return Ok(());
-    }
-    Err(WasmtimeRuntimeError::ModuleRejected {
-        reason: format!(
-            "metadata does not declare required `{}` hook for {owner}",
-            hook.as_str()
-        ),
-    })
-}
-
 fn validate_export_inventory(
     metadata: &PluginMetadata,
     exports: &HashSet<String>,
-    section_name: &str,
 ) -> Result<(), WasmtimeRuntimeError> {
-    for name in metadata.hooks.keys() {
-        let Some((hook, provider)) = HookKind::parse_entrypoint(name) else {
-            continue;
-        };
-        if provider.is_some() && section_name != QUALIFIED_PLUGIN_META_SECTION {
-            return Err(WasmtimeRuntimeError::ModuleRejected {
-                reason: format!(
-                    "qualified hook `{name}` requires `{QUALIFIED_PLUGIN_META_SECTION}` metadata"
-                ),
-            });
-        }
-        if let Some(provider) = provider {
-            let legacy_overlaps = provider == cc_lb_plugin_wire::schema::ProviderFamily::Anthropic;
-            if legacy_overlaps && metadata.hooks.contains_key(hook.as_str()) {
-                return Err(WasmtimeRuntimeError::ModuleRejected {
-                    reason: format!(
-                        "legacy `{}` overlaps qualified `{name}`; export only one form for this provider",
-                        hook.as_str()
-                    ),
-                });
-            }
-        }
-    }
     for export in exports {
         let Some(name) = export.strip_prefix("cc_lb_") else {
             continue;
@@ -436,6 +350,7 @@ fn validate_export_inventory(
             "shape",
             "transform_response",
             "transform_sse_event",
+            "transform_realtime_frame",
             "shape_envelope_gemini",
         ];
         let reserved = reserved
@@ -458,21 +373,6 @@ pub(crate) fn schema_section_name(hook: HookKind, version: WireVersion) -> Strin
 
 pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> Option<[u8; 32]> {
     match (hook, version) {
-        (HookKind::Filter, WireVersion::V1) => {
-            Some(<cc_lb_plugin_wire::v1::FilterRequest as WireSchema>::FINGERPRINT)
-        }
-        (HookKind::Shape, WireVersion::V1) => {
-            Some(<cc_lb_plugin_wire::v1::ShapeRequest as WireSchema>::FINGERPRINT)
-        }
-        (HookKind::TransformResponse, WireVersion::V1) => {
-            Some(<cc_lb_plugin_wire::v1::TransformResponseRequest as WireSchema>::FINGERPRINT)
-        }
-        (HookKind::TransformSseEvent, WireVersion::V1) => {
-            Some(<cc_lb_plugin_wire::v1::TransformSseEventRequest as WireSchema>::FINGERPRINT)
-        }
-        (HookKind::Filter, WireVersion::V2) => {
-            Some(<cc_lb_plugin_wire::v2::FilterRequest as WireSchema>::FINGERPRINT)
-        }
         (HookKind::Filter, WireVersion::V3) => {
             Some(<cc_lb_plugin_wire::v3::FilterRequest as WireSchema>::FINGERPRINT)
         }
@@ -508,54 +408,56 @@ fn hex32(bytes: &[u8; 32]) -> String {
 mod tests {
     use super::*;
 
-    fn filter_section_bytes() -> Vec<u8> {
-        expected_fingerprint(HookKind::Filter, WireVersion::V1)
-            .expect("filter V1 schema")
+    fn filter_v3_section_bytes() -> Vec<u8> {
+        expected_fingerprint(HookKind::Filter, WireVersion::V3)
+            .expect("filter V3 schema")
             .to_vec()
     }
-    fn shape_section_bytes() -> Vec<u8> {
-        expected_fingerprint(HookKind::Shape, WireVersion::V1)
-            .expect("shape V1 schema")
+    fn shape_v2_section_bytes() -> Vec<u8> {
+        expected_fingerprint(HookKind::Shape, WireVersion::V2)
+            .expect("shape V2 schema")
             .to_vec()
     }
-    fn transform_response_section_bytes() -> Vec<u8> {
-        expected_fingerprint(HookKind::TransformResponse, WireVersion::V1)
-            .expect("transform response V1 schema")
+    fn transform_response_v2_section_bytes() -> Vec<u8> {
+        expected_fingerprint(HookKind::TransformResponse, WireVersion::V2)
+            .expect("transform response V2 schema")
             .to_vec()
     }
-    fn transform_sse_event_section_bytes() -> Vec<u8> {
-        expected_fingerprint(HookKind::TransformSseEvent, WireVersion::V1)
-            .expect("transform SSE V1 schema")
+    fn transform_sse_event_v2_section_bytes() -> Vec<u8> {
+        expected_fingerprint(HookKind::TransformSseEvent, WireVersion::V2)
+            .expect("transform SSE V2 schema")
             .to_vec()
     }
 
-    fn metadata_section(hook: &str) -> Vec<u8> {
+    fn filter_v3_metadata_section(hook: &str) -> Vec<u8> {
         format!(
-            r#"{{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{{"{hook}":{{"wire_version":1,"description":"{hook} hook","usage":"call {hook}","mode":"active"}}}}}}"#
+            r#"{{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{{"{hook}":{{"wire_version":3,"description":"{hook} hook","usage":"call {hook}","mode":"active"}}}}}}"#
         )
         .into_bytes()
     }
 
-    fn qualified_filter_v3_metadata_section() -> Vec<u8> {
-        br#"{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{"filter_openai":{"wire_version":3,"description":"filter hook","usage":"call filter","mode":"active"}}}"#
-            .to_vec()
+    fn shape_v2_metadata_section(hook: &str) -> Vec<u8> {
+        format!(
+            r#"{{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{{"{hook}":{{"wire_version":2,"description":"{hook} hook","usage":"call {hook}","mode":"active"}}}}}}"#
+        )
+        .into_bytes()
     }
 
     fn shape_owned_metadata_section(transform_response_mode: &str, sse_mode: &str) -> Vec<u8> {
         format!(
-            r#"{{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{{"shape":{{"wire_version":1,"description":"shape hook","usage":"call shape","mode":"active"}},"transform_response":{{"wire_version":1,"description":"transform_response hook","usage":"call transform_response","mode":"{transform_response_mode}"}},"transform_sse_event":{{"wire_version":1,"description":"transform_sse_event hook","usage":"call transform_sse_event","mode":"{sse_mode}"}}}}}}"#
+            r#"{{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{{"shape_anthropic":{{"wire_version":2,"description":"shape hook","usage":"call shape","mode":"active"}},"transform_response_anthropic":{{"wire_version":2,"description":"transform_response hook","usage":"call transform_response","mode":"{transform_response_mode}"}},"transform_sse_event_anthropic":{{"wire_version":2,"description":"transform_sse_event hook","usage":"call transform_sse_event","mode":"{sse_mode}"}}}}}}"#
         )
         .into_bytes()
     }
 
     fn shape_owned_metadata_without_response_mode() -> Vec<u8> {
-        r#"{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{"shape":{"wire_version":1,"description":"shape hook","usage":"call shape","mode":"active"},"transform_response":{"wire_version":1,"description":"transform_response hook","usage":"call transform_response"},"transform_sse_event":{"wire_version":1,"description":"transform_sse_event hook","usage":"call transform_sse_event","mode":"noop"}}}"#
+        r#"{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{"shape_anthropic":{"wire_version":2,"description":"shape hook","usage":"call shape","mode":"active"},"transform_response_anthropic":{"wire_version":2,"description":"transform_response hook","usage":"call transform_response"},"transform_sse_event_anthropic":{"wire_version":2,"description":"transform_sse_event hook","usage":"call transform_sse_event","mode":"noop"}}}"#
             .as_bytes()
             .to_vec()
     }
 
     fn shape_noop_metadata_section() -> Vec<u8> {
-        r#"{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{"shape":{"wire_version":1,"description":"shape hook","usage":"call shape","mode":"noop"},"transform_response":{"wire_version":1,"description":"transform_response hook","usage":"call transform_response","mode":"noop"},"transform_sse_event":{"wire_version":1,"description":"transform_sse_event hook","usage":"call transform_sse_event","mode":"noop"}}}"#
+        r#"{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{"shape_anthropic":{"wire_version":2,"description":"shape hook","usage":"call shape","mode":"noop"},"transform_response_anthropic":{"wire_version":2,"description":"transform_response hook","usage":"call transform_response","mode":"noop"},"transform_sse_event_anthropic":{"wire_version":2,"description":"transform_sse_event hook","usage":"call transform_sse_event","mode":"noop"}}}"#
             .as_bytes()
             .to_vec()
     }
@@ -593,7 +495,7 @@ mod tests {
         }
     }
 
-    fn filter_plugin_wat() -> &'static str {
+    fn bare_filter_plugin_wat() -> &'static str {
         r#"
         (module
             (memory (export "memory") 1)
@@ -604,26 +506,17 @@ mod tests {
         "#
     }
 
-    fn qualified_filter_v3_plugin_wat() -> &'static str {
-        r#"
+    fn qualified_filter_v3_plugin_wat(provider: &str) -> String {
+        format!(
+            r#"
         (module
             (memory (export "memory") 1)
             (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 0)
             (func (export "cc_lb_free") (param i32 i32 i32))
-            (func (export "cc_lb_filter_openai") (param i32 i32) (result i64) i64.const 0)
+            (func (export "cc_lb_filter_{provider}") (param i32 i32) (result i64) i64.const 0)
         )
         "#
-    }
-
-    fn shape_plugin_wat() -> &'static str {
-        r#"
-        (module
-            (memory (export "memory") 1)
-            (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 0)
-            (func (export "cc_lb_free") (param i32 i32 i32))
-            (func (export "cc_lb_shape") (param i32 i32) (result i64) i64.const 0)
         )
-        "#
     }
 
     fn shape_owned_plugin_wat() -> &'static str {
@@ -632,64 +525,91 @@ mod tests {
             (memory (export "memory") 1)
             (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 0)
             (func (export "cc_lb_free") (param i32 i32 i32))
-            (func (export "cc_lb_shape") (param i32 i32) (result i64) i64.const 0)
-            (func (export "cc_lb_transform_response") (param i32 i32) (result i64) i64.const 0)
-            (func (export "cc_lb_transform_sse_event") (param i32 i32) (result i64) i64.const 0)
+            (func (export "cc_lb_shape_anthropic") (param i32 i32) (result i64) i64.const 0)
+            (func (export "cc_lb_transform_response_anthropic") (param i32 i32) (result i64) i64.const 0)
+            (func (export "cc_lb_transform_sse_event_anthropic") (param i32 i32) (result i64) i64.const 0)
         )
         "#
     }
 
     #[test]
-    fn accepts_filter_plugin() {
-        let bytes = wat_with_custom_sections(
-            filter_plugin_wat(),
-            &[
-                (
-                    &schema_section_name(HookKind::Filter, WireVersion::V1),
-                    &filter_section_bytes(),
-                ),
-                ("cc_lb.plugin.v1", &metadata_section("filter")),
-            ],
-        );
-        let inspection = inspect_wasm(HookKind::Filter, &bytes).expect("filter plugin OK");
-        assert_eq!(inspection.metadata.name, "x");
-        assert_eq!(inspection.hook_fingerprints.len(), 1);
-        assert_eq!(inspection.hook_versions[&HookKind::Filter], WireVersion::V1);
+    fn accepts_provider_qualified_filter_v3_plugin() {
+        for provider in ["anthropic", "openai", "gemini"] {
+            let wat = qualified_filter_v3_plugin_wat(provider);
+            let hook_name = format!("filter_{provider}");
+            let bytes = wat_with_custom_sections(
+                &wat,
+                &[
+                    (
+                        &schema_section_name(HookKind::Filter, WireVersion::V3),
+                        &filter_v3_section_bytes(),
+                    ),
+                    ("cc_lb.plugin.v2", &filter_v3_metadata_section(&hook_name)),
+                ],
+            );
+            let inspection = inspect_wasm(HookKind::Filter, &bytes).expect("filter V3 plugin OK");
+            assert_eq!(inspection.metadata.name, "x");
+            assert_eq!(inspection.hook_fingerprints.len(), 1);
+            assert_eq!(inspection.hook_versions[&HookKind::Filter], WireVersion::V3);
+        }
     }
 
     #[test]
-    fn accepts_provider_qualified_filter_v3_plugin() {
+    fn rejects_v1_metadata_section() {
+        let wat = qualified_filter_v3_plugin_wat("anthropic");
         let bytes = wat_with_custom_sections(
-            qualified_filter_v3_plugin_wat(),
+            &wat,
             &[
                 (
                     &schema_section_name(HookKind::Filter, WireVersion::V3),
-                    &expected_fingerprint(HookKind::Filter, WireVersion::V3)
-                        .expect("filter V3 schema"),
+                    &filter_v3_section_bytes(),
                 ),
-                ("cc_lb.plugin.v2", &qualified_filter_v3_metadata_section()),
+                (
+                    "cc_lb.plugin.v1",
+                    &filter_v3_metadata_section("filter_anthropic"),
+                ),
             ],
         );
-        let inspection = inspect_wasm(HookKind::Filter, &bytes).expect("filter V3 plugin OK");
-        assert_eq!(inspection.hook_versions[&HookKind::Filter], WireVersion::V3);
+        let err = inspect_wasm(HookKind::Filter, &bytes).expect_err("v1 metadata must reject");
+        assert!(format!("{err}").contains("cc_lb.plugin.v2"), "got: {err}");
     }
 
     #[test]
     fn rejects_bare_filter_v3_plugin_as_unqualified() {
-        let metadata = br#"{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{"filter":{"wire_version":3,"description":"filter hook","usage":"call filter","mode":"active"}}}"#;
         let bytes = wat_with_custom_sections(
-            filter_plugin_wat(),
+            bare_filter_plugin_wat(),
             &[
                 (
                     &schema_section_name(HookKind::Filter, WireVersion::V3),
-                    &expected_fingerprint(HookKind::Filter, WireVersion::V3)
-                        .expect("filter V3 schema"),
+                    &filter_v3_section_bytes(),
                 ),
-                ("cc_lb.plugin.v1", metadata),
+                ("cc_lb.plugin.v2", &filter_v3_metadata_section("filter")),
             ],
         );
         let error = inspect_wasm(HookKind::Filter, &bytes).expect_err("bare V3 must reject");
-        assert!(format!("{error}").contains("requires provider-qualified metadata"));
+        assert!(
+            format!("{error}").contains("unrecognized or undeclared")
+                || format!("{error}").contains("unknown hook"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_legacy_filter_wire_versions() {
+        let wat = qualified_filter_v3_plugin_wat("anthropic");
+        for legacy_version in [1u8, 2u8] {
+            let metadata = format!(
+                r#"{{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{{"filter_anthropic":{{"wire_version":{legacy_version},"description":"filter hook","usage":"call filter","mode":"active"}}}}}}"#
+            );
+            let bytes = wat_with_custom_sections(&wat, &[("cc_lb.plugin.v2", metadata.as_bytes())]);
+            let error = inspect_wasm(HookKind::Filter, &bytes)
+                .expect_err("legacy filter wire version must reject");
+            let msg = format!("{error}");
+            assert!(
+                msg.contains("unsupported wire version") || msg.contains("does not support"),
+                "got: {msg}"
+            );
+        }
     }
 
     #[test]
@@ -698,52 +618,80 @@ mod tests {
             shape_owned_plugin_wat(),
             &[
                 (
-                    &schema_section_name(HookKind::Shape, WireVersion::V1),
-                    &shape_section_bytes(),
+                    &schema_section_name(HookKind::Shape, WireVersion::V2),
+                    &shape_v2_section_bytes(),
                 ),
                 (
-                    &schema_section_name(HookKind::TransformResponse, WireVersion::V1),
-                    &transform_response_section_bytes(),
+                    &schema_section_name(HookKind::TransformResponse, WireVersion::V2),
+                    &transform_response_v2_section_bytes(),
                 ),
                 (
-                    &schema_section_name(HookKind::TransformSseEvent, WireVersion::V1),
-                    &transform_sse_event_section_bytes(),
+                    &schema_section_name(HookKind::TransformSseEvent, WireVersion::V2),
+                    &transform_sse_event_v2_section_bytes(),
                 ),
                 (
-                    "cc_lb.plugin.v1",
+                    "cc_lb.plugin.v2",
                     &shape_owned_metadata_section("noop", "noop"),
                 ),
             ],
         );
-        let inspection = inspect_wasm(HookKind::Shape, &bytes).expect("shape plugin OK");
-        assert_eq!(inspection.hook_versions[&HookKind::Shape], WireVersion::V1);
+        let inspection = inspect_wasm(HookKind::Shape, &bytes).expect("shape V2 plugin OK");
+        assert_eq!(inspection.hook_versions[&HookKind::Shape], WireVersion::V2);
         assert_eq!(
             inspection.hook_versions[&HookKind::TransformResponse],
-            WireVersion::V1
+            WireVersion::V2
         );
         assert_eq!(
             inspection.hook_versions[&HookKind::TransformSseEvent],
-            WireVersion::V1
+            WireVersion::V2
         );
     }
 
     #[test]
-    fn rejects_shape_plugin_without_response_hook_metadata() {
+    fn accepts_independent_shape_without_response_hooks() {
         let bytes = wat_with_custom_sections(
-            shape_plugin_wat(),
+            r#"
+            (module
+                (memory (export "memory") 1)
+                (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 0)
+                (func (export "cc_lb_free") (param i32 i32 i32))
+                (func (export "cc_lb_shape_anthropic") (param i32 i32) (result i64) i64.const 0)
+            )
+            "#,
             &[
                 (
-                    &schema_section_name(HookKind::Shape, WireVersion::V1),
-                    &shape_section_bytes(),
+                    &schema_section_name(HookKind::Shape, WireVersion::V2),
+                    &shape_v2_section_bytes(),
                 ),
-                ("cc_lb.plugin.v1", &metadata_section("shape")),
+                (
+                    "cc_lb.plugin.v2",
+                    &shape_v2_metadata_section("shape_anthropic"),
+                ),
             ],
         );
-        let err = inspect_wasm(HookKind::Shape, &bytes).expect_err("shape response hooks required");
-        let msg = format!("{err}");
+        let inspection =
+            inspect_wasm(HookKind::Shape, &bytes).expect("independent shape V2 plugin OK");
+        assert_eq!(inspection.hook_versions[&HookKind::Shape], WireVersion::V2);
+    }
+
+    #[test]
+    fn rejects_shape_wire_v1() {
+        let metadata = br#"{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{"shape_anthropic":{"wire_version":1,"description":"shape hook","usage":"call shape","mode":"active"}}}"#;
+        let bytes = wat_with_custom_sections(
+            r#"
+            (module
+                (memory (export "memory") 1)
+                (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 0)
+                (func (export "cc_lb_free") (param i32 i32 i32))
+                (func (export "cc_lb_shape_anthropic") (param i32 i32) (result i64) i64.const 0)
+            )
+            "#,
+            &[("cc_lb.plugin.v2", metadata)],
+        );
+        let err = inspect_wasm(HookKind::Shape, &bytes).expect_err("shape v1 must reject");
         assert!(
-            msg.contains("transform_response") && msg.contains("shape plugin"),
-            "got: {msg}"
+            format!("{err}").contains("unsupported wire version"),
+            "got: {err}"
         );
     }
 
@@ -753,19 +701,19 @@ mod tests {
             shape_owned_plugin_wat(),
             &[
                 (
-                    &schema_section_name(HookKind::Shape, WireVersion::V1),
-                    &shape_section_bytes(),
+                    &schema_section_name(HookKind::Shape, WireVersion::V2),
+                    &shape_v2_section_bytes(),
                 ),
                 (
-                    &schema_section_name(HookKind::TransformResponse, WireVersion::V1),
-                    &transform_response_section_bytes(),
+                    &schema_section_name(HookKind::TransformResponse, WireVersion::V2),
+                    &transform_response_v2_section_bytes(),
                 ),
                 (
-                    &schema_section_name(HookKind::TransformSseEvent, WireVersion::V1),
-                    &transform_sse_event_section_bytes(),
+                    &schema_section_name(HookKind::TransformSseEvent, WireVersion::V2),
+                    &transform_sse_event_v2_section_bytes(),
                 ),
                 (
-                    "cc_lb.plugin.v1",
+                    "cc_lb.plugin.v2",
                     &shape_owned_metadata_without_response_mode(),
                 ),
             ],
@@ -781,18 +729,18 @@ mod tests {
             shape_owned_plugin_wat(),
             &[
                 (
-                    &schema_section_name(HookKind::Shape, WireVersion::V1),
-                    &shape_section_bytes(),
+                    &schema_section_name(HookKind::Shape, WireVersion::V2),
+                    &shape_v2_section_bytes(),
                 ),
                 (
-                    &schema_section_name(HookKind::TransformResponse, WireVersion::V1),
-                    &transform_response_section_bytes(),
+                    &schema_section_name(HookKind::TransformResponse, WireVersion::V2),
+                    &transform_response_v2_section_bytes(),
                 ),
                 (
-                    &schema_section_name(HookKind::TransformSseEvent, WireVersion::V1),
-                    &transform_sse_event_section_bytes(),
+                    &schema_section_name(HookKind::TransformSseEvent, WireVersion::V2),
+                    &transform_sse_event_v2_section_bytes(),
                 ),
-                ("cc_lb.plugin.v1", &shape_noop_metadata_section()),
+                ("cc_lb.plugin.v2", &shape_noop_metadata_section()),
             ],
         );
         let err = inspect_wasm(HookKind::Shape, &bytes).expect_err("shape hook cannot be noop");
@@ -802,25 +750,33 @@ mod tests {
 
     #[test]
     fn rejects_filter_without_schema_section() {
+        let wat = qualified_filter_v3_plugin_wat("anthropic");
         let bytes = wat_with_custom_sections(
-            filter_plugin_wat(),
-            &[("cc_lb.plugin.v1", &metadata_section("filter"))],
+            &wat,
+            &[(
+                "cc_lb.plugin.v2",
+                &filter_v3_metadata_section("filter_anthropic"),
+            )],
         );
         let err = inspect_wasm(HookKind::Filter, &bytes).expect_err("missing section");
         let msg = format!("{err}");
-        assert!(msg.contains("cc_lb.schema.filter.v1"), "got: {msg}");
+        assert!(msg.contains("cc_lb.schema.filter.v3"), "got: {msg}");
     }
 
     #[test]
     fn rejects_filter_wrong_hash() {
+        let wat = qualified_filter_v3_plugin_wat("anthropic");
         let bytes = wat_with_custom_sections(
-            filter_plugin_wat(),
+            &wat,
             &[
                 (
-                    &schema_section_name(HookKind::Filter, WireVersion::V1),
+                    &schema_section_name(HookKind::Filter, WireVersion::V3),
                     &[0u8; 32],
                 ),
-                ("cc_lb.plugin.v1", &metadata_section("filter")),
+                (
+                    "cc_lb.plugin.v2",
+                    &filter_v3_metadata_section("filter_anthropic"),
+                ),
             ],
         );
         let err = inspect_wasm(HookKind::Filter, &bytes).expect_err("bad hash");
@@ -837,15 +793,18 @@ mod tests {
                 (memory (export "memory") 1)
                 (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 0)
                 (func (export "cc_lb_free") (param i32 i32 i32))
-                (func (export "cc_lb_filter") (param i32 i32) (result i64) i64.const 0)
+                (func (export "cc_lb_filter_anthropic") (param i32 i32) (result i64) i64.const 0)
             )
             "#,
             &[
                 (
-                    &schema_section_name(HookKind::Filter, WireVersion::V1),
-                    &filter_section_bytes(),
+                    &schema_section_name(HookKind::Filter, WireVersion::V3),
+                    &filter_v3_section_bytes(),
                 ),
-                ("cc_lb.plugin.v1", &metadata_section("filter")),
+                (
+                    "cc_lb.plugin.v2",
+                    &filter_v3_metadata_section("filter_anthropic"),
+                ),
             ],
         );
         let err = inspect_wasm(HookKind::Filter, &bytes).expect_err("import rejected");
@@ -860,15 +819,18 @@ mod tests {
             (module
                 (memory (export "memory") 1)
                 (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 0)
-                (func (export "cc_lb_filter") (param i32 i32) (result i64) i64.const 0)
+                (func (export "cc_lb_filter_anthropic") (param i32 i32) (result i64) i64.const 0)
             )
             "#,
             &[
                 (
-                    &schema_section_name(HookKind::Filter, WireVersion::V1),
-                    &filter_section_bytes(),
+                    &schema_section_name(HookKind::Filter, WireVersion::V3),
+                    &filter_v3_section_bytes(),
                 ),
-                ("cc_lb.plugin.v1", &metadata_section("filter")),
+                (
+                    "cc_lb.plugin.v2",
+                    &filter_v3_metadata_section("filter_anthropic"),
+                ),
             ],
         );
         let err = inspect_wasm(HookKind::Filter, &bytes).expect_err("missing free");
@@ -878,16 +840,18 @@ mod tests {
 
     #[test]
     fn filter_module_rejected_for_shape_slot() {
-        // A filter-only plugin presented to a Shape slot must be
-        // rejected — the shape exports and sections are simply absent.
+        let wat = qualified_filter_v3_plugin_wat("anthropic");
         let bytes = wat_with_custom_sections(
-            filter_plugin_wat(),
+            &wat,
             &[
                 (
-                    &schema_section_name(HookKind::Filter, WireVersion::V1),
-                    &filter_section_bytes(),
+                    &schema_section_name(HookKind::Filter, WireVersion::V3),
+                    &filter_v3_section_bytes(),
                 ),
-                ("cc_lb.plugin.v1", &metadata_section("filter")),
+                (
+                    "cc_lb.plugin.v2",
+                    &filter_v3_metadata_section("filter_anthropic"),
+                ),
             ],
         );
         let err = inspect_wasm(HookKind::Shape, &bytes).expect_err("kind mismatch");
@@ -897,6 +861,7 @@ mod tests {
             "got: {msg}"
         );
     }
+
     #[test]
     fn qualified_v2_shape_contracts_are_checked_per_provider() {
         use cc_lb_plugin_wire::metadata::{HookMetadata, HookMode};

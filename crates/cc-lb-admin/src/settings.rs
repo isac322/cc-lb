@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cc_lb_config::{
-    ADMIN_AUTH_PROVIDERS_JSON_ENV, Config, ConfigEnvOverride, ConfigError, ConfigOverrides,
-    DEFAULT_SQLITE_PATH, STORAGE_URL_REDACTION_SENTINEL, StorageConfig,
+    ADMIN_AUTH_PROVIDERS_JSON_ENV, Config, ConfigEnvOverride, ConfigError, DEFAULT_SQLITE_PATH,
+    STORAGE_URL_REDACTION_SENTINEL, StorageConfig,
 };
 use cc_lb_storage_api::{ConfigDraftState, HistoryEntry, Storage, StorageError};
 use serde::{Deserialize, Serialize};
@@ -126,15 +126,6 @@ pub struct ConfigEditorResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfigDraftResponse {
-    pub draft: Option<Value>,
-    pub revision: u64,
-    pub last_validated_revision: Option<u64>,
-    pub last_validation: Option<Value>,
-    pub saved_at_unix_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PutConfigDraftRequest {
     pub draft: Value,
     pub expected_revision: u64,
@@ -232,13 +223,6 @@ pub async fn editor_response(state: &AdminState) -> Result<ConfigEditorResponse,
         file: snapshot.info,
         overrides,
     })
-}
-
-pub async fn get_draft(
-    storage: &dyn Storage,
-    clock: &dyn cc_lb_clock::Clock,
-) -> Result<ConfigDraftResponse, SettingsError> {
-    draft_response(get_unexpired_draft(storage, clock).await?)
 }
 
 pub async fn put_draft(
@@ -470,19 +454,6 @@ async fn get_unexpired_draft(
     Ok(state)
 }
 
-fn draft_response(mut state: ConfigDraftState) -> Result<ConfigDraftResponse, SettingsError> {
-    if let Some(draft) = &mut state.draft {
-        redact_storage_url(draft);
-    }
-    Ok(ConfigDraftResponse {
-        draft: state.draft,
-        revision: state.revision,
-        last_validated_revision: state.last_validated_revision,
-        last_validation: state.last_validation,
-        saved_at_unix_secs: state.saved_at_unix_secs,
-    })
-}
-
 fn invalid_draft_expired(state: &ConfigDraftState, now_unix_secs: u64) -> bool {
     state.draft.is_some()
         && state
@@ -608,7 +579,7 @@ fn validate_effective_config(
     toml: &str,
     startup: &StartupConfigOverrides,
 ) -> (ConfigValidationResult, Option<Config>) {
-    match Config::from_stored_toml_with_env(toml, ConfigOverrides::default()) {
+    match Config::from_stored_toml_with_env(toml) {
         Ok(mut config) => {
             apply_startup_overrides(&mut config, startup);
             let result = validate_editor_config(&config);

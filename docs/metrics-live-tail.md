@@ -15,10 +15,9 @@ This is the canonical metric inventory for the dashboard live-tail redesign. Lab
 | `sse_storage_tail_polls_total` | Counter | none | Storage tail poll attempts by multi-instance pollers. | Increases every poll interval on the postgres backend, where pg_notify fanout is always on. Absent on sqlite. |
 | `sse_storage_tail_lag_ms` | Histogram | none | Time between request event timestamp and storage-tail broadcast. | p95 should normally stay below 1000 ms. |
 | `sse_storage_tail_backlog_rows` | Gauge | none | Rows found in the latest storage-tail poll. | Usually 0 between bursts; sustained high values mean poll interval or storage is lagging. |
-| `sse_partial_notify_sent_total` | Counter | `outcome=sent|truncated_sent|failed` | PG NOTIFY partial publish outcomes. | `sent` dominates; `truncated_sent` only for large partial payloads; `failed` should be zero. |
-| `sse_partial_notify_dropped_total` | Counter | `reason=queue_full|queue_closed|serialize_error|pg_error` | Partial updates dropped before or during PG NOTIFY publication. | Always zero. |
+| `sse_partial_notify_sent_total` | Counter | `outcome=sent|trimmed_sent|failed` | PG NOTIFY partial publish outcomes. | `sent` dominates; `trimmed_sent` for large partials trimmed to fit inline; `failed` should be zero. |
+| `sse_partial_notify_dropped_total` | Counter | `reason=queue_full|queue_closed|serialize_error|payload_too_large|pg_error` | Partial updates dropped before or during PG NOTIFY publication. | `payload_too_large` may occur for oversized partials after trimming; other drop reasons should stay zero. |
 | `sse_pg_listener_reconnects_total` | Counter | `reason=connect_failed|subscribe_failed|recv_failed` | PG listener reconnect attempts after initial connection, LISTEN subscribe, or receive failures. | Always zero in steady state; sustained growth means the listener is in a reconnect storm or Postgres is unstable. |
-| `sse_notify_http_fetches_total` | Counter | `outcome=success|not_found|unauthorized|timeout|network_error` | HTTP fallback fetch outcomes for truncated NOTIFY partial payloads. | Usually zero; `success` may rise with large partials; all failure outcomes should be zero. |
 | `sse_notify_queue_usage_ratio` | Gauge | none | Value returned by `pg_notification_queue_usage()`. | Below 0.30 warning threshold; below 0.50 critical threshold. |
 | `cc_lb_dropped_events_total` | Counter | `reason=lifecycle_assembler_full|sse_lagged|...` | Shared bounded-queue drop metric used by live-tail overflow alerts. | `reason="lifecycle_assembler_full"` must stay zero. |
 
@@ -26,7 +25,6 @@ This is the canonical metric inventory for the dashboard live-tail redesign. Lab
 
 - Reset reasons are `ResetReason::{BackfillCap, BusLagged, StorageError}`.
 - Partial triggers are `PartialTrigger::{RequestStarted, ParseCompleted, AuthCompleted, RouteCompleted, UpstreamResponseStarted, UsageObserved, StreamCompleted, RequestTerminated}`. All eight partial snapshots are memory-only; only the final request event is durable.
-- Notify drop reasons are `NotifyDropReason::{QueueFull, QueueClosed, SerializeError, PgError}`.
+- Notify drop reasons are `NotifyDropReason::{QueueFull, QueueClosed, SerializeError, PayloadTooLarge, PgError}`.
 - PG listener reconnect reasons are `PgListenerReconnectReason::{ConnectFailed, SubscribeFailed, RecvFailed}`.
-- Notify sent outcomes are `NotifySentOutcome::{Sent, TruncatedSent, Failed}`.
-- Notify HTTP outcomes are `NotifyHttpOutcome::{Success, NotFound, Unauthorized, Timeout, NetworkError}`.
+- Notify sent outcomes are `NotifySentOutcome::{Sent, TrimmedSent, Failed}`.

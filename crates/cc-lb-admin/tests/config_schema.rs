@@ -85,9 +85,7 @@ async fn editor_reports_read_only_parent() {
 async fn editor_redacts_storage_url_as_whole_value() {
     let (dir, storage) = temp_storage().await;
     let secret = "postgres://secret-user:secret-password@localhost/secret-db";
-    let raw = format!(
-        "[storage]\nkind = \"postgres\"\nurl = \"{secret}\"\n\n[cluster]\ninstance_url = \"https://node.example\"\n"
-    );
+    let raw = format!("[storage]\nkind = \"postgres\"\nurl = \"{secret}\"\n");
     let path = dir.path().join("cc-lb.toml");
     fs::write(&path, &raw).unwrap();
     let config = cc_lb_config::Config::from_stored_toml(&raw).unwrap();

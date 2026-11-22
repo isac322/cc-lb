@@ -2,16 +2,12 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
-#[cfg(feature = "postgres")]
-use cc_lb_admin::ports::{RetainedPartialPort, RetainedPartialSnapshot};
 use cc_lb_admin::ports::{
     RoutePreviewError, RoutePreviewInput, RoutePreviewOutcome, RoutePreviewPort,
     RoutePreviewWinner, SubscriptionQuotaIngestionPort, WarmupAttemptInput,
     WarmupAttemptOutcomeSnapshot, WarmupAttemptResult, WarmupPort,
 };
 use cc_lb_engine::Lifecycle;
-#[cfg(feature = "postgres")]
-use cc_lb_engine::PartialRetentionCache;
 use cc_lb_engine::lifecycle::{PreviewRouteError, PreviewRouteInput as EnginePreviewRouteInput};
 use cc_lb_engine::warmup_attempts::{
     WarmupAttemptExecution, WarmupAttemptExecutionResult, execute_warmup_attempt,
@@ -167,26 +163,5 @@ impl SubscriptionQuotaIngestionPort for ServerSubscriptionQuotaIngestionPort {
             upstream_id,
             observed_at,
         );
-    }
-}
-
-#[cfg(feature = "postgres")]
-pub(crate) struct ServerRetainedPartialPort {
-    cache: PartialRetentionCache,
-}
-
-#[cfg(feature = "postgres")]
-impl ServerRetainedPartialPort {
-    pub(crate) const fn new(cache: PartialRetentionCache) -> Self {
-        Self { cache }
-    }
-}
-
-#[cfg(feature = "postgres")]
-impl RetainedPartialPort for ServerRetainedPartialPort {
-    fn retained_partial(&self, event_id: &str) -> Option<RetainedPartialSnapshot> {
-        self.cache
-            .get(event_id)
-            .map(|payload| RetainedPartialSnapshot { payload })
     }
 }

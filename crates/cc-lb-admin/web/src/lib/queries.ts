@@ -24,7 +24,6 @@ import {
   type Upstream as ApiUpstream,
   type AuditQueryResponse,
   appendQueryParams,
-  type ConfigDraftResponse,
   type ConfigDraftSavedResponse,
   type ConfigEditorResponse,
   type ConfigFileSavedResponse,
@@ -366,7 +365,6 @@ export const qk = {
   upstreamSubscriptionMetadata: (id: string) =>
     ['upstream-subscription-metadata', id] as const,
   configEditor: ['config', 'editor'] as const,
-  configDraft: ['config', 'draft'] as const,
   configHistory: ['config', 'history'] as const,
   subscriptionQuotaLatest: (params: Record<string, any>) =>
     ['subscription-quota', 'latest', params] as const,
@@ -890,12 +888,6 @@ export function useConfigEditor() {
   return useQuery({
     queryKey: qk.configEditor,
     queryFn: () => getJson<ConfigEditorResponse>('/admin/v1/config/editor'),
-  });
-}
-export function useConfigDraft() {
-  return useQuery({
-    queryKey: qk.configDraft,
-    queryFn: () => getJson<ConfigDraftResponse>('/admin/v1/config/draft'),
   });
 }
 export function useConfigHistory() {
@@ -1990,10 +1982,7 @@ export function useValidateConfig() {
         storage_url_replacement,
       }),
     onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: qk.configEditor }),
-        qc.invalidateQueries({ queryKey: qk.configDraft }),
-      ]);
+      await qc.invalidateQueries({ queryKey: qk.configEditor });
     },
   });
 }
@@ -2012,10 +2001,7 @@ export function useSaveDraft() {
         { draft: Record<string, unknown>; expected_revision: number }
       >('/admin/v1/config/draft', { draft, expected_revision }),
     onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: qk.configEditor }),
-        qc.invalidateQueries({ queryKey: qk.configDraft }),
-      ]);
+      await qc.invalidateQueries({ queryKey: qk.configEditor });
     },
   });
 }
@@ -2050,7 +2036,6 @@ export function useSaveConfigFile() {
     onSuccess: async () => {
       await Promise.all([
         qc.invalidateQueries({ queryKey: qk.configEditor }),
-        qc.invalidateQueries({ queryKey: qk.configDraft }),
         qc.invalidateQueries({ queryKey: qk.configHistory }),
       ]);
     },

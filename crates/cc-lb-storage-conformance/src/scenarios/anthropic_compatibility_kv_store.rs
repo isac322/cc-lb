@@ -14,7 +14,6 @@ where
     update_replaces_value_and_clears_error(Arc::clone(&backend)).await?;
     failure_preserves_last_good_value(Arc::clone(&backend)).await?;
     failure_on_never_seen_key_is_noop(Arc::clone(&backend)).await?;
-    list_returns_keys_in_some_order(Arc::clone(&backend)).await?;
     older_observation_does_not_replace_newer(backend).await?;
     Ok(())
 }
@@ -117,24 +116,6 @@ scenario!(failure_on_never_seen_key_is_noop, |storage| async move {
         storage.get_compatibility_kv("missing").await?.is_none(),
         "failure on unseen key should not insert"
     );
-    Ok(())
-});
-
-scenario!(list_returns_keys_in_some_order, |storage| async move {
-    storage
-        .put_compatibility_kv_value("b", "2", 20, None)
-        .await?;
-    storage
-        .put_compatibility_kv_value("a", "1", 10, None)
-        .await?;
-    let mut keys = storage
-        .list_compatibility_kv()
-        .await?
-        .into_iter()
-        .map(|record| record.key)
-        .collect::<Vec<_>>();
-    keys.sort();
-    ensure!(keys == ["a", "b"], "list should contain both keys");
     Ok(())
 });
 

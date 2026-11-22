@@ -54,12 +54,11 @@ This is the static gate to run in CI whenever the plugin or host crates change.
 
 ## `run()`
 
-`run()` builds a live wasmtime runtime, registers the plugin, and exercises the
-hook boundary with a canonical sample payload for each declared wire version.
-Legacy `for_filter` / `for_shape` suites retain the Anthropic V1 fixtures;
-their filter plugins receive a V1 request whose `service_tier` is
-`Some("priority")`. Provider-selected suites use provider-native fixtures for
-the selected hook's declared V1 or V2 wire version.
+`run()` builds a live wasmtime runtime, registers the plugin, and exercises each
+provider-qualified hook boundary with a canonical sample payload:
+
+- `filter` uses Filter Wire V3 (`v3::FilterRequest`, with `service_tier = Some("priority")` and `NativeCachePricing`).
+- `shape`, `transform_response`, `transform_sse_event`, `transform_realtime_frame`, and `shape_envelope_gemini` use Shape Wire V2 (`v2::*` with `UpstreamIdentity`).
 
 It verifies allocator exports, hook exports, and rkyv encode/decode round-trips.
 It does not verify plugin business semantics such
@@ -97,11 +96,11 @@ fn plugin_passes_boundary_smoke() {
 
 ## Provider-qualified workflow
 
-The harness supports provider-qualified hooks without changing the legacy
-Anthropic path. Select `ProviderFamily::Anthropic`, `ProviderFamily::Openai`,
-or `ProviderFamily::Gemini` on the suite builder before running the admission
-check and boundary smoke. The selected provider resolves only its qualified
-exports; Anthropic also falls back to the bare legacy exports.
+All hooks in `cc_lb.plugin.v2` are provider-qualified. Select
+`ProviderFamily::Anthropic` (the default for `for_filter`/`for_shape`),
+`ProviderFamily::Openai`, or `ProviderFamily::Gemini` on the suite builder
+before running the admission check and boundary smoke. The selected provider
+resolves only its qualified exports.
 
 For a shape slot, the explicit constructor is:
 
@@ -121,15 +120,12 @@ available for semantic tests, including
 `sample_gemini_stream_generate_content_shape_request`. The corresponding
 response and SSE builders use the same provider-qualified names.
 
-Provider selection and wire version are independent. For every selected hook,
-the harness reads the declared wire version and encodes and decodes the
-matching contract:
+Each hook uses its single active wire contract:
 
-- V1 keeps the existing request and response layout.
+- V3 filter requests (`v3::FilterRequest`) carry provider-appropriate candidates,
+  subscription quotas, and `NativeCachePricing`.
 - V2 shape, buffered-response, and SSE requests include a synthetic principal,
   `Upstream`, and matching `UpstreamIdentity`.
-- V2 filter requests use provider-appropriate candidates and do not include
-  upstream identity, because the V2 filter schema has no such field.
 - V2 Realtime/Live frame requests include the provider's WebSocket path,
   principal, upstream identity, direction, payload kind, and payload bytes.
 
@@ -143,6 +139,7 @@ exercise each behavior your plugin implements.
 
 Provider fixtures are network-free and use synthetic identities:
 
+- Anthropic covers native `/v1/messages` request, response, and SSE shapes.
 - OpenAI covers Responses and Chat Completions HTTP request/response/SSE
   shapes, including a representative `response.created` event.
 - Gemini covers native `generateContent` and `streamGenerateContent` request,
@@ -154,14 +151,12 @@ fixture only when present. An absent envelope export is skipped; the required
 Gemini shape boundary is still exercised. Unsupported hooks should be omitted,
 not implemented as placeholder handlers.
 
-Keep `ConformanceSuite::for_filter` and `ConformanceSuite::for_shape` for
-source-compatible legacy Anthropic V1 coverage. Use the provider-selected
-workflow for each OpenAI or Gemini hook you implement. Conformance proves
-admission, registration, wire round-trips, and trap-free boundary calls; it
-does not make provider API calls or assert plugin business semantics.
+Conformance proves admission, registration, wire round-trips, and trap-free
+boundary calls; it does not make provider API calls or assert plugin business
+semantics.
 
 The fixture builders and provider selectors are re-exported from
-`cc_lb_plugin_conformance::prelude` together with the V1/V2 request and result
+`cc_lb_plugin_conformance::prelude` together with the V2/V3 request and result
 types used by semantic tests.
 
 ## Links

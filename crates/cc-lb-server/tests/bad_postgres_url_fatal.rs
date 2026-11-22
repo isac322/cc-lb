@@ -18,9 +18,6 @@ proxy_addr = "127.0.0.1:0"
 admin_addr = "127.0.0.1:0"
 metrics_addr = "127.0.0.1:0"
 
-[cluster]
-instance_url = "http://127.0.0.1:9090"
-
 [storage.pool]
 acquire_timeout_secs = 1
 
@@ -33,7 +30,6 @@ key_env = "CC_LB_AEAD_KEY"
     let output = Command::new(env!("CARGO_BIN_EXE_cc-lb"))
         .args(["serve", "--config"])
         .arg(&config_path)
-        .env("CC_LB_CLUSTER_TOKEN", "test-cluster-token")
         .env(
             "CC_LB_AEAD_KEY",
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",

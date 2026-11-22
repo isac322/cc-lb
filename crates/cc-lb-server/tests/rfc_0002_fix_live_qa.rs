@@ -457,10 +457,10 @@ async fn live_qa_3_unknown_route_and_method_not_allowed_do_not_write_row() {
 // ============================================================================
 /// Regression for the assembler-ordering issue documented in the RFC-0002
 /// synthesis analysis: the row written by LifecycleEventAssembler
-/// must carry cost, cache, and usage fields. If `Priced` / `CacheObserved`
-/// are consumed by their subscribers on separate async tasks, they can
+/// must carry cost and usage fields. If `Priced`
+/// events are consumed on a separate async task, they can
 /// arrive at the assembler AFTER `RequestTerminated` and be dropped,
-/// leaving the row with NULL cost/cache and only partial usage.
+/// leaving the row with NULL cost and only partial usage.
 #[tokio::test]
 async fn live_qa_6b_assembler_populates_cost_cache_usage_fields() {
     let server = common::spawn_inprocess_server().await;
@@ -649,7 +649,6 @@ async fn lqa_2b_lifecycle_metrics_increment_for_happy_non_stream() {
         "usage_observed",
         "request_terminated",
         "priced",
-        "cache_observed",
     ] {
         let prefix = format!(r#"cc_lb_lifecycle_events_total{{kind="{kind}"}}"#);
         assert_eq!(diff_counter(&pre, &post, &prefix), 1, "metric {kind}");
@@ -685,7 +684,6 @@ async fn lqa_3a_bus_drop_counters_do_not_increment_under_burst() {
         "lifecycle_assembler_full",
         "lifecycle_pricing_full",
         "lifecycle_limit_reconcile_full",
-        "lifecycle_cache_obs_full",
         "lifecycle_rate_limit_header_full",
         "lifecycle_subscription_quota_full",
         "lifecycle_limit_rejection_audit_full",

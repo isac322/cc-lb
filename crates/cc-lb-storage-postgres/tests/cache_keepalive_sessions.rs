@@ -1196,7 +1196,6 @@ async fn run_conformance(url: &str) -> Result<()> {
     cache_hit_reschedule_preserves_duration_anchor_and_rejects_stale_generation(&storage).await?;
     conditional_enqueue_terminal_and_purge_are_generation_safe(&storage).await?;
     terminal_error_is_truncated_and_resets_running_enqueue_state(&storage).await?;
-    mark_latest_terminal_only_mutates_active_latest_session(&storage).await?;
     recover_stale_running_requires_active_running_strictly_old_lease_and_scrubs_payload(&storage)
         .await?;
     purge_stale_pending_keeps_enqueued_work(&storage).await?;
@@ -1447,12 +1446,17 @@ async fn replace_roundtrips_optional_accounting_key_id(storage: &PostgresStorage
     // This conformance suite shares one schema across steps. Terminalize these
     // sessions so they do not linger as active+pending rows and inflate the
     // global count asserted by purge_stale_pending_keeps_enqueued_work.
-    for session_key_hash in ["keyed-session", "unkeyed-session"] {
+    for (session_key_hash, generation) in [
+        ("keyed-session", with_key.generation),
+        ("unkeyed-session", without_key.generation),
+    ] {
         assert!(
             storage
-                .mark_latest_cache_keepalive_terminal(
+                .mark_cache_keepalive_terminal(
                     session_key_hash,
+                    generation,
                     CacheKeepaliveTerminalReason::Cancelled,
+                    None,
                     120,
                 )
                 .await?
@@ -1605,12 +1609,6 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe(
         .expect("terminal row exists");
     assert!(terminal.encrypted_payload.is_empty());
     assert_eq!(terminal.expires_at_unix_secs, 102 + 7 * 24 * 60 * 60);
-    let check = storage
-        .check_cache_keepalive_generation("terminal-session")
-        .await?
-        .expect("row exists");
-    assert_eq!(check.status, CacheKeepaliveSessionStatus::Terminal);
-    assert_eq!(check.enqueue_state, CacheKeepaliveEnqueueState::Pending);
 
     let removed = storage.purge_cache_keepalive_expired(351).await?;
     assert_eq!(removed, 0);
@@ -1707,9 +1705,11 @@ async fn terminal_error_is_truncated_and_resets_running_enqueue_state(
         .claim_cache_keepalive_turn(&latest.session_key_hash, latest.generation, 422)
         .await?;
     storage
-        .mark_latest_cache_keepalive_terminal(
+        .mark_cache_keepalive_terminal(
             &latest.session_key_hash,
+            latest.generation,
             CacheKeepaliveTerminalReason::Cancelled,
+            None,
             423,
         )
         .await?;
@@ -1736,52 +1736,6 @@ async fn terminal_error_is_truncated_and_resets_running_enqueue_state(
         .await?
         .expect("rescheduled session exists");
     assert_eq!(refreshed.error, None);
-    Ok(())
-}
-
-async fn mark_latest_terminal_only_mutates_active_latest_session(
-    storage: &PostgresStorage,
-) -> Result<()> {
-    let session_key_hash = "latest-terminal";
-    let first = storage
-        .replace_from_real_request(&replace_request(session_key_hash, b"ciphertext-one", 100))
-        .await?;
-    let second = storage
-        .replace_from_real_request(&replace_request(session_key_hash, b"ciphertext-two", 110))
-        .await?;
-
-    assert_eq!(first.generation, 1);
-    assert_eq!(second.generation, 2);
-    assert!(
-        storage
-            .mark_latest_cache_keepalive_terminal(
-                session_key_hash,
-                CacheKeepaliveTerminalReason::Cancelled,
-                120,
-            )
-            .await?
-    );
-    assert!(
-        !storage
-            .mark_latest_cache_keepalive_terminal(
-                session_key_hash,
-                CacheKeepaliveTerminalReason::CacheMiss,
-                121,
-            )
-            .await?
-    );
-
-    let record = storage
-        .get_cache_keepalive_session(session_key_hash)
-        .await?
-        .expect("row exists");
-    assert_eq!(record.generation, 2);
-    assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
-    assert_eq!(
-        record.terminal_reason,
-        Some(CacheKeepaliveTerminalReason::Cancelled)
-    );
-    assert!(record.encrypted_payload.is_empty());
     Ok(())
 }
 

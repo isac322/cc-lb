@@ -125,7 +125,6 @@ pub async fn spawn_api_key_harness() -> ApiKeyHarness {
         storage: Some(storage.clone()),
         key_store: Some(admin_test_common::key_store(storage.clone())),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([7; 32])),
-        limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
         dynamic_view_rebinder: None,

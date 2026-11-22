@@ -60,14 +60,6 @@ function pluginSupportsWarmup(
   provider: ProviderFamily,
 ): boolean {
   if (!p.supported_slots?.includes('shape')) return false;
-  if (provider === 'anthropic') {
-    // Keep legacy Anthropic registry entries selectable.
-    return (
-      !Object.keys(p.hook_metadata).length ||
-      'shape' in p.hook_metadata ||
-      'shape_anthropic' in p.hook_metadata
-    );
-  }
   return `shape_${provider}` in p.hook_metadata;
 }
 

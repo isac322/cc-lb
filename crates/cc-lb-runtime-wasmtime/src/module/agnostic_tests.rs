@@ -1,5 +1,5 @@
 use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily, WireVersion};
-use cc_lb_plugin_wire::v1::{FilterResponse, ShapeResponse};
+use cc_lb_plugin_wire::v2::{FilterResponse, ShapeResponse};
 
 use crate::inspect::{expected_fingerprint, schema_section_name};
 use crate::{WasmtimeRuntime, WasmtimeRuntimeError, inspect_wasm_agnostic};
@@ -7,7 +7,7 @@ use crate::{WasmtimeRuntime, WasmtimeRuntimeError, inspect_wasm_agnostic};
 const FILTER_RESPONSE_OFFSET: u64 = 4096;
 const SHAPE_RESPONSE_OFFSET: u64 = 8192;
 
-fn plugin_wasm(declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
+fn plugin_wasm(declared_hooks: &[(HookKind, ProviderFamily, &str)]) -> Vec<u8> {
     let filter_response = rkyv::to_bytes::<rkyv::rancor::Error>(&FilterResponse {
         results: Box::new([]),
     })
@@ -25,7 +25,7 @@ fn plugin_wasm(declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
     let shape_packed = (SHAPE_RESPONSE_OFFSET << 32) | shape_response.len() as u64;
     let hook_exports = declared_hooks
         .iter()
-        .map(|(hook, _)| hook_export(*hook, filter_packed, shape_packed))
+        .map(|(hook, provider, _)| hook_export(*hook, *provider, filter_packed, shape_packed))
         .collect::<String>();
     let wat = format!(
         r#"
@@ -40,12 +40,8 @@ fn plugin_wasm(declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
         "#
     );
     let mut wasm = wat::parse_str(wat).expect("valid WAT");
-    for (hook, _) in declared_hooks {
-        let wire_version = if *hook == HookKind::TransformRealtimeFrame {
-            WireVersion::V2
-        } else {
-            WireVersion::V1
-        };
+    for (hook, _, _) in declared_hooks {
+        let wire_version = wire_version_for(*hook);
         let fingerprint = expected_fingerprint(*hook, wire_version).expect("test hook fingerprint");
         append_custom_section(
             &mut wasm,
@@ -53,16 +49,15 @@ fn plugin_wasm(declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
             &fingerprint,
         );
     }
-    let metadata_section = if declared_hooks
-        .iter()
-        .any(|(hook, _)| *hook == HookKind::TransformRealtimeFrame)
-    {
-        "cc_lb.plugin.v2"
-    } else {
-        "cc_lb.plugin.v1"
-    };
-    append_custom_section(&mut wasm, metadata_section, &metadata(declared_hooks));
+    append_custom_section(&mut wasm, "cc_lb.plugin.v2", &metadata(declared_hooks));
     wasm
+}
+
+fn wire_version_for(hook: HookKind) -> WireVersion {
+    match hook {
+        HookKind::Filter => WireVersion::V3,
+        _ => WireVersion::V2,
+    }
 }
 
 fn wat_data(bytes: &[u8]) -> String {
@@ -72,56 +67,36 @@ fn wat_data(bytes: &[u8]) -> String {
         .collect::<String>()
 }
 
-fn hook_export(hook: HookKind, filter_packed: u64, shape_packed: u64) -> String {
-    match hook {
-        HookKind::Filter => format!(
-            r#"(func (export "cc_lb_filter") (param i32 i32) (result i64) i64.const {filter_packed})"#
-        ),
-        HookKind::Shape => format!(
-            r#"(func (export "cc_lb_shape") (param i32 i32) (result i64) i64.const {shape_packed})"#
-        ),
-        HookKind::TransformResponse => {
-            r#"(func (export "cc_lb_transform_response") (param i32 i32) (result i64) i64.const 0)"#
-                .to_owned()
-        }
-        HookKind::TransformSseEvent => {
-            r#"(func (export "cc_lb_transform_sse_event") (param i32 i32) (result i64) i64.const 0)"#
-                .to_owned()
-        }
-        HookKind::TransformRealtimeFrame => format!(
-            r#"(func (export "{}") (param i32 i32) (result i64) i64.const 0)"#,
-            HookKind::TransformRealtimeFrame.qualified_export_name(ProviderFamily::Openai)
-        ),
-        HookKind::ShapeEnvelopeGemini => {
-            r#"(func (export "cc_lb_shape_envelope_gemini") (param i32 i32) (result i64) i64.const 0)"#
-                .to_owned()
-        }
-    }
+fn hook_export(
+    hook: HookKind,
+    provider: ProviderFamily,
+    filter_packed: u64,
+    shape_packed: u64,
+) -> String {
+    let export = hook.qualified_export_name(provider);
+    let ret = match hook {
+        HookKind::Filter => filter_packed,
+        HookKind::Shape => shape_packed,
+        _ => 0,
+    };
+    format!(r#"(func (export "{export}") (param i32 i32) (result i64) i64.const {ret})"#)
 }
 
-fn metadata(declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
+fn metadata(declared_hooks: &[(HookKind, ProviderFamily, &str)]) -> Vec<u8> {
     let hooks = declared_hooks
         .iter()
-        .map(|(hook, mode)| {
-            let wire_version = if *hook == HookKind::TransformRealtimeFrame {
-                2
-            } else {
-                1
-            };
+        .map(|(hook, provider, mode)| {
+            let wire_version = wire_version_for(*hook).as_u8();
             let hook_metadata = serde_json::json!({
                 "wire_version": wire_version,
                 "description": format!("{} hook", hook.as_str()),
                 "usage": format!("call {}", hook.as_str()),
                 "mode": mode,
             });
-            let hook_name = if *hook == HookKind::TransformRealtimeFrame {
-                HookKind::TransformRealtimeFrame
-                    .qualified_export_name(ProviderFamily::Openai)
-                    .strip_prefix("cc_lb_")
-                    .expect("qualified hook export has cc_lb prefix")
-            } else {
-                hook.as_str()
-            };
+            let hook_name = hook
+                .qualified_export_name(*provider)
+                .strip_prefix("cc_lb_")
+                .expect("qualified hook export has cc_lb prefix");
             (hook_name.to_owned(), hook_metadata)
         })
         .collect::<serde_json::Map<_, _>>();
@@ -161,40 +136,57 @@ fn encode_leb128(buffer: &mut Vec<u8>, mut value: u64) {
 
 #[test]
 fn agnostic_admission_accepts_filter_and_shape_hooks() {
-    // Given: one artifact declaring both independent slot hooks.
     let wasm = plugin_wasm(&[
-        (HookKind::Filter, "active"),
-        (HookKind::Shape, "active"),
-        (HookKind::TransformResponse, "noop"),
-        (HookKind::TransformSseEvent, "noop"),
-        (HookKind::TransformRealtimeFrame, "noop"),
+        (HookKind::Filter, ProviderFamily::Anthropic, "active"),
+        (HookKind::Shape, ProviderFamily::Anthropic, "active"),
+        (
+            HookKind::TransformResponse,
+            ProviderFamily::Anthropic,
+            "noop",
+        ),
+        (
+            HookKind::TransformSseEvent,
+            ProviderFamily::Anthropic,
+            "noop",
+        ),
+        (
+            HookKind::TransformRealtimeFrame,
+            ProviderFamily::Openai,
+            "noop",
+        ),
     ]);
     let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
 
-    // When: admission is requested without selecting a slot.
     let inspection = runtime
         .admit_wasm_agnostic(&wasm)
         .expect("multi-hook artifact admitted");
 
-    // Then: every declared contract is retained by the inspection.
     assert_eq!(inspection.hook_versions.len(), 5);
     assert_eq!(
         inspection.hook_versions.get(&HookKind::Filter),
-        Some(&WireVersion::V1)
+        Some(&WireVersion::V3)
     );
     assert_eq!(
         inspection.hook_versions.get(&HookKind::Shape),
-        Some(&WireVersion::V1)
+        Some(&WireVersion::V2)
     );
 }
 
 #[test]
 fn same_module_registers_both_slot_roles_in_either_order() {
     let wasm = plugin_wasm(&[
-        (HookKind::Filter, "active"),
-        (HookKind::Shape, "active"),
-        (HookKind::TransformResponse, "noop"),
-        (HookKind::TransformSseEvent, "noop"),
+        (HookKind::Filter, ProviderFamily::Anthropic, "active"),
+        (HookKind::Shape, ProviderFamily::Anthropic, "active"),
+        (
+            HookKind::TransformResponse,
+            ProviderFamily::Anthropic,
+            "noop",
+        ),
+        (
+            HookKind::TransformSseEvent,
+            ProviderFamily::Anthropic,
+            "noop",
+        ),
     ]);
     for shape_first in [true, false] {
         let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
@@ -223,7 +215,6 @@ fn same_module_registers_both_slot_roles_in_either_order() {
         let filter = runtime.get_slot(&filter_key).expect("filter slot");
         let shape = runtime.get_slot(&shape_key).expect("shape slot");
         assert!(!std::sync::Arc::ptr_eq(&filter, &shape));
-        assert_eq!(runtime.slot_count(), 2);
         assert!(std::sync::Arc::ptr_eq(
             &filter.current.load().instance_pre,
             &shape.current.load().instance_pre,
@@ -261,9 +252,10 @@ fn same_module_registers_both_slot_roles_in_either_order() {
         runtime
             .register_shape(shape_key.clone(), "agnostic-test", &wasm)
             .expect("reattach shape");
-        assert!(runtime.evict_slot(&filter_key));
+        let evicted = runtime.retain_slots(&std::collections::HashSet::from([shape_key.clone()]));
+        assert_eq!(evicted, vec![filter_key.clone()]);
+        assert!(runtime.get_slot(&filter_key).is_none());
         assert!(runtime.get_slot(&shape_key).is_some());
-        assert_eq!(runtime.slot_count(), 1);
     }
 }
 
@@ -276,76 +268,62 @@ fn registration_rejects_wrong_role_before_loading_module() {
     ] {
         let key = crate::RuntimeSlotKey::global("wrong-role", role);
         let result = if filter {
-            runtime.register_filter(key, "wrong-role", &[])
+            runtime.register_filter(key.clone(), "wrong-role", &[])
         } else {
-            runtime.register_shape(key, "wrong-role", &[])
+            runtime.register_shape(key.clone(), "wrong-role", &[])
         };
         assert!(matches!(
             result,
             Err(WasmtimeRuntimeError::ModuleRejected { reason })
                 if reason.contains("cannot be registered")
         ));
-        assert_eq!(runtime.slot_count(), 0);
+        assert!(runtime.get_slot(&key).is_none());
     }
 }
 
 #[test]
-fn agnostic_inspection_rejects_shape_without_owned_response_hooks() {
-    // Given: Shape is declared without either Shape-owned response hook.
-    let wasm = plugin_wasm(&[(HookKind::Shape, "active")]);
-
-    // When: the artifact is inspected without selecting a slot.
-    let error = inspect_wasm_agnostic(&wasm).expect_err("incomplete Shape ownership rejected");
-
-    // Then: the missing owned hook is identified as a module contract failure.
-    assert!(matches!(
-        error,
-        WasmtimeRuntimeError::ModuleRejected { reason }
-            if reason.contains("transform_response") && reason.contains("shape plugin")
-    ));
+fn agnostic_inspection_accepts_independent_shape_and_response_hooks() {
+    for hooks in [
+        vec![(HookKind::Shape, ProviderFamily::Openai, "active")],
+        vec![(
+            HookKind::TransformResponse,
+            ProviderFamily::Openai,
+            "active",
+        )],
+        vec![(
+            HookKind::TransformSseEvent,
+            ProviderFamily::Openai,
+            "active",
+        )],
+    ] {
+        let wasm = plugin_wasm(&hooks);
+        let inspection = inspect_wasm_agnostic(&wasm)
+            .expect("provider-qualified V2 shape-family hooks are independent");
+        assert_eq!(inspection.hook_versions.len(), 1);
+    }
 }
 
 #[test]
-fn agnostic_inspection_rejects_orphan_transform_response() {
-    // Given: a response transform is declared without Shape ownership.
-    let wasm = plugin_wasm(&[(HookKind::TransformResponse, "active")]);
-
-    // When: the artifact is inspected without selecting a slot.
-    let error = inspect_wasm_agnostic(&wasm).expect_err("orphan response hook rejected");
-
-    // Then: the orphaned hook is identified as a module contract failure.
+fn agnostic_inspection_rejects_envelope_without_gemini_shape() {
+    let wasm = plugin_wasm(&[(
+        HookKind::ShapeEnvelopeGemini,
+        ProviderFamily::Gemini,
+        "active",
+    )]);
+    let error = inspect_wasm_agnostic(&wasm).expect_err("envelope without shape_gemini rejected");
     assert!(matches!(
         error,
         WasmtimeRuntimeError::ModuleRejected { reason }
-            if reason.contains("transform_response") && reason.contains("shape")
-    ));
-}
-
-#[test]
-fn agnostic_inspection_rejects_orphan_transform_sse_event() {
-    // Given: an SSE transform is declared without Shape ownership.
-    let wasm = plugin_wasm(&[(HookKind::TransformSseEvent, "active")]);
-
-    // When: the artifact is inspected without selecting a slot.
-    let error = inspect_wasm_agnostic(&wasm).expect_err("orphan SSE hook rejected");
-
-    // Then: the orphaned hook is identified as a module contract failure.
-    assert!(matches!(
-        error,
-        WasmtimeRuntimeError::ModuleRejected { reason }
-            if reason.contains("transform_sse_event") && reason.contains("shape")
+            if reason.contains("shape_envelope_gemini") && reason.contains("shape")
     ));
 }
 
 #[test]
 fn agnostic_inspection_rejects_noop_primary_hook() {
-    // Given: a primary slot hook declares the response-only noop mode.
-    let wasm = plugin_wasm(&[(HookKind::Filter, "noop")]);
+    let wasm = plugin_wasm(&[(HookKind::Filter, ProviderFamily::Anthropic, "noop")]);
 
-    // When: the artifact is inspected without selecting a slot.
     let error = inspect_wasm_agnostic(&wasm).expect_err("primary noop rejected");
 
-    // Then: the invalid mode is rejected by the shared contract gate.
     assert!(matches!(
         error,
         WasmtimeRuntimeError::ModuleRejected { reason }
@@ -355,22 +333,26 @@ fn agnostic_inspection_rejects_noop_primary_hook() {
 
 #[test]
 fn agnostic_admission_probes_each_declared_hook() {
-    // Given: Filter and Shape are valid but the active response transform
-    // returns the invalid `(0, 0)` output.
     let wasm = plugin_wasm(&[
-        (HookKind::Filter, "active"),
-        (HookKind::Shape, "active"),
-        (HookKind::TransformResponse, "active"),
-        (HookKind::TransformSseEvent, "noop"),
+        (HookKind::Filter, ProviderFamily::Anthropic, "active"),
+        (HookKind::Shape, ProviderFamily::Anthropic, "active"),
+        (
+            HookKind::TransformResponse,
+            ProviderFamily::Anthropic,
+            "active",
+        ),
+        (
+            HookKind::TransformSseEvent,
+            ProviderFamily::Anthropic,
+            "noop",
+        ),
     ]);
     let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
 
-    // When: the structurally valid artifact reaches agnostic admission.
     let error = runtime
         .admit_wasm_agnostic(&wasm)
         .expect_err("secondary hook probe must run");
 
-    // Then: probing reaches and rejects the malformed response transform.
     assert!(matches!(
         error,
         WasmtimeRuntimeError::ProbeFailed {

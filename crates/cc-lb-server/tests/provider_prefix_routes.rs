@@ -243,9 +243,9 @@ async fn disable_seeded_anthropic(client: &reqwest::Client, server: &common::InP
         let (status, body, _) = admin_request(
             client,
             server,
-            Method::POST,
-            &format!("/admin/v1/upstreams/{id}/disable"),
-            None,
+            Method::PATCH,
+            &format!("/admin/v1/upstreams/{id}"),
+            Some(json!({ "enabled": false })),
             Some(&etag),
         )
         .await;
@@ -524,9 +524,9 @@ async fn provider_prefixed_routes_dispatch_and_filter_by_provider() {
     let (status, disabled, _) = admin_request(
         &admin,
         &server,
-        Method::POST,
-        &format!("/admin/v1/upstreams/{openai_id}/disable"),
-        None,
+        Method::PATCH,
+        &format!("/admin/v1/upstreams/{openai_id}"),
+        Some(json!({ "enabled": false })),
         Some(&etag.expect("OpenAI upstream etag")),
     )
     .await;

@@ -40,6 +40,7 @@ impl OpenedScheduler {
         ctx: cc_lb_scheduler::worker::SchedulerCtx,
         cancel: CancellationToken,
     ) -> Result<Vec<JoinHandle<()>>, SchedulerFactoryError> {
+        cc_lb_scheduler::scheduler_metrics::touch_scheduler_metric_handles();
         self.backend.spawn(ctx, cancel).await.map_err(|error| {
             SchedulerFactoryError::StartupFailed {
                 message: error.to_string(),

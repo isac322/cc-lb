@@ -719,7 +719,6 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-oauth-protocol",
  "cc-lb-workspace-hack",
- "clap",
  "figment",
  "http",
  "insta",
@@ -765,7 +764,6 @@ dependencies = [
  "metrics",
  "parking_lot 0.13.0",
  "rand 0.10.3",
- "secrecy",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -848,9 +846,7 @@ dependencies = [
  "parking_lot 0.13.0",
  "proptest",
  "rand 0.10.3",
- "reqwest",
  "rustls",
- "secrecy",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -1064,7 +1060,6 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "blake3",
- "bytes",
  "cc-lb-plugin-wire",
  "metrics",
  "metrics-exporter-prometheus",
@@ -1074,7 +1069,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tracing",
- "url",
  "wasmtime",
  "wat",
 ]
@@ -1255,13 +1249,7 @@ dependencies = [
  "cc-lb-workspace-hack",
  "dashmap",
  "http",
- "http-body-util",
- "hyper-rustls",
- "hyper-util",
- "oauth2",
  "secrecy",
- "serde",
- "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -6073,13 +6061,6 @@ dependencies = [
  "wasmprinter",
  "wasmtime-internal-component-util",
  "wasmtime-internal-core",
-]
-
-[[package]]
-name = "wasmtime-filter-openai"
-version = "0.1.0"
-dependencies = [
- "cc-lb-pdk-wasmtime",
 ]
 
 [[package]]

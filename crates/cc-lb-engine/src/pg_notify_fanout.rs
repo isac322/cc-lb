@@ -1,19 +1,15 @@
-mod cache;
 mod fanout;
 mod listener;
 mod metrics;
 mod notifier;
 mod protocol;
 
-pub use cache::PartialRetentionCache;
 pub use fanout::PgNotifyFanout;
 pub use listener::PgListener;
 pub use notifier::{DEFAULT_PG_NOTIFY_CHANNEL, PARTIAL_NOTIFY_MPSC_CAPACITY, PgNotifier};
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use cc_lb_storage_api::RequestEventPartial;
     use tokio::sync::mpsc;
 
@@ -39,13 +35,6 @@ mod tests {
             queued += 1;
         }
         assert_eq!(queued, 1024);
-    }
-
-    #[test]
-    fn partial_retention_cache_expires_entries() {
-        let cache = PartialRetentionCache::new(Duration::ZERO, 10);
-        cache.insert("event-1".to_owned(), br#"{"phase":"partial"}"#.to_vec());
-        assert!(cache.get("event-1").is_none());
     }
 
     #[test]

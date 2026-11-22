@@ -1,19 +1,13 @@
 [package]
 name = "cc-lb-signer-anthropic-oauth"
-autotests = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
 
-[[test]]
-name = "integration"
-path = "tests/all.rs"
-
 [dependencies]
 async-trait.workspace = true
-bytes.workspace = true
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-domain.workspace = true
@@ -22,19 +16,14 @@ cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-upstream.workspace = true
 dashmap.workspace = true
 http.workspace = true
-http-body-util.workspace = true
-hyper-rustls.workspace = true
-hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "tokio"] }
-oauth2.workspace = true
 secrecy.workspace = true
-serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "rt"] }
 tracing.workspace = true
-url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+bytes.workspace = true
 cc-lb-workspace-hack.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+url.workspace = true

@@ -293,8 +293,6 @@ pub fn router() -> Router<AdminState> {
             "/admin/v1/upstreams/{id}/warmup-dialect-plugin",
             delete(delete_upstream_warmup_dialect_plugin),
         )
-        .route("/admin/v1/upstreams/{id}/enable", post(enable_upstream))
-        .route("/admin/v1/upstreams/{id}/disable", post(disable_upstream))
         .route(
             "/admin/v1/upstreams/{id}/preflight",
             post(super::api_key::recheck::recheck_upstream_api_key),
@@ -3353,24 +3351,6 @@ fn warmup_bootstrap_tasks(
         .collect()
 }
 
-async fn enable_upstream(
-    State(state): State<AdminState>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    Extension(identity): Extension<AdminIdentity>,
-) -> Result<Response, UpstreamError> {
-    set_enabled(state, id, headers, true, identity).await
-}
-
-async fn disable_upstream(
-    State(state): State<AdminState>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    Extension(identity): Extension<AdminIdentity>,
-) -> Result<Response, UpstreamError> {
-    set_enabled(state, id, headers, false, identity).await
-}
-
 async fn delete_upstream(
     State(state): State<AdminState>,
     Path(id): Path<String>,
@@ -3497,76 +3477,6 @@ async fn delete_upstream_warmup_dialect_plugin(
             .await
         }
     }
-}
-
-async fn set_enabled(
-    state: AdminState,
-    id: String,
-    headers: HeaderMap,
-    enabled: bool,
-    identity: AdminIdentity,
-) -> Result<Response, UpstreamError> {
-    let storage = storage(&state)?;
-    let expected_revision = parse_if_match(&headers)?;
-    let Ok(id) = id.parse() else {
-        return Err(UpstreamError::BadRequest {
-            error: "invalid_upstream_id",
-            detail: "invalid uuid".to_owned(),
-        });
-    };
-
-    let updated = match UpstreamStore::set_enabled(storage, id, expected_revision, enabled).await {
-        Ok(updated) => updated,
-        Err(StorageError::Conflict { message }) => {
-            return stale_or_conflict(&state, &id.to_string(), expected_revision, message).await;
-        }
-        Err(error) => return Err(error.into()),
-    };
-
-    let payload = if enabled {
-        AuditPayload::UpstreamEnable {
-            upstream_id: updated.id.to_string(),
-        }
-    } else {
-        AuditPayload::UpstreamDisable {
-            upstream_id: updated.id.to_string(),
-        }
-    };
-    let action = payload.to_string();
-    let route = if enabled {
-        format!("/admin/v1/upstreams/{}/enable", updated.id)
-    } else {
-        format!("/admin/v1/upstreams/{}/disable", updated.id)
-    };
-    let storage = storage_arc(&state)?;
-    complete_after_commit(async move {
-        if let Err(error) = record_admin_audit(
-            &state,
-            AdminAuditEvent {
-                identity: Some(&identity),
-                system_component: None,
-                action: &action,
-                route: &route,
-                target_principal_id: None,
-                target_upstream: Some(&updated.name),
-                api_key_id: None,
-                status: StatusCode::OK.as_u16(),
-                payload: None,
-            },
-        )
-        .await
-        {
-            tracing::error!(error = %error, action = %action, "admin audit write failed");
-            rebuild_after_audit_failure(&state).await;
-            return Err(UpstreamError::AuditWriteFailed);
-        }
-
-        let details = api_key_details_after_commit(storage.as_ref(), &updated).await;
-        let mut response = respond_with_etag(&updated, details.as_ref());
-        crate::v1::add_dynamic_rebind_headers(&mut response, &state).await;
-        Ok(response)
-    })
-    .await?
 }
 
 async fn stale_or_conflict(
@@ -3955,8 +3865,6 @@ mod tests {
     use axum::http::{Method, Request};
     use cc_lb_aead::{AeadEncryptedField, AeadService};
     use cc_lb_config::Config;
-    use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
-    use cc_lb_control::api_keys::limit_engine::LimitEngine;
     use cc_lb_control::api_keys::principal_view::PrincipalView;
     use cc_lb_control::{
         DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
@@ -4939,10 +4847,6 @@ mod tests {
             storage: Some(storage.clone()),
             key_store: None,
             aead: aead.clone(),
-            limit_engine: LimitEngine::new(
-                Arc::new(KeyConcurrencyManager::new()),
-                Arc::new(cc_lb_clock::SystemClock),
-            ),
             lifecycle: Some(crate::AdminPorts {
                 warmup: Some(Arc::new(warmup_port)),
                 ..crate::AdminPorts::default()

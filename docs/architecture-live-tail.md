@@ -13,9 +13,7 @@ graph TB
         BusA["InMemoryBus A<br/>(event_bus.rs:219)"]
         SSEHandlerA["Admin SSE Handler A<br/>(events_routes.rs:82)"]
         PollerA["StorageTailPoller A<br/>(storage_tail_poller.rs:17)"]
-        NotifierA["PgNotifier A<br/>(notifier.rs:16)"]
-        CacheA["PartialRetentionCache A<br/>(cache.rs:6)"]
-        InternalAPI_A["internal_partials HTTP A<br/>(internal_partials.rs:17)"]
+        NotifierA["PgNotifier A<br/>(notifier.rs)"]
     end
 
     subgraph DB["Postgres Cluster"]
@@ -26,7 +24,7 @@ graph TB
         BusB["InMemoryBus B<br/>(event_bus.rs:219)"]
         SSEHandlerB["Admin SSE Handler B<br/>(events_routes.rs:82)"]
         PollerB["StorageTailPoller B<br/>(storage_tail_poller.rs:17)"]
-        ListenerB["PgListener B<br/>(listener.rs:17)"]
+        ListenerB["PgListener B<br/>(listener.rs)"]
     end
 
     ClientA["Client Browser A<br/>(useLiveEventStream)"]
@@ -39,14 +37,10 @@ graph TB
     Postgres -.->|"query_request_events_between_cursors(...)"| PollerA
     PollerA -->|"StorageTailUpdate { cursor, event }"| SSEHandlerA
     BusA -->|"RequestEventUpdate::Partial"| NotifierA
-    NotifierA -->|"pg_notify(channel, json) or marker"| Postgres
-    NotifierA -.->|"insert(event_id, payload)"| CacheA
+    NotifierA -->|"pg_notify(channel, bounded inline json)"| Postgres
 
     %% Cross-Instance Flows
-    Postgres -.->|"LISTEN payload"| ListenerB
-    ListenerB -->|"GET /internal/v1/partials/:event_id (truncated)"| InternalAPI_A
-    InternalAPI_A -.->|"get(event_id)"| CacheA
-    InternalAPI_A -->|"full RequestEventUpdate"| ListenerB
+    Postgres -.->|"LISTEN inline payload"| ListenerB
     ListenerB -->|"RequestEventUpdate::Partial"| BusB
 
     %% Consumer Instance B Flows
@@ -108,17 +102,14 @@ sequenceDiagram
         Bus->>Admin: RequestEventUpdate::Partial
         Admin->>Client: SSE frame (event: message, id: last_finalized_cursor)
         Bus->>Notifier: RequestEventUpdate::Partial
-        alt Fits inline (< 7500 bytes)
-            Notifier->>Listener: pg_notify(channel, json)
-        else Truncated (>= 7500 bytes)
-            Notifier->>Notifier: retention.insert(event_id, payload)
-            Notifier->>Listener: pg_notify(channel, marker)
-            Listener->>Admin: GET /internal/v1/partials/<event_id> (X-Cluster-Token)
-            Admin-->>Listener: full RequestEventUpdate
+        alt Fits inline or trims below 7500 bytes
+            Notifier->>Listener: pg_notify(channel, inline json)
+            Listener->>CBus: RequestEventUpdate::Partial
+            CBus->>CAdmin: RequestEventUpdate::Partial
+            CAdmin->>CClient: SSE frame (event: message, id: last_finalized_cursor)
+        else Still exceeds limit after trimming
+            Note over Notifier: Dropped (payload_too_large); peer receives Final via storage-tail
         end
-        Listener->>CBus: RequestEventUpdate::Partial
-        CBus->>CAdmin: RequestEventUpdate::Partial
-        CAdmin->>CClient: SSE frame (event: message, id: last_finalized_cursor)
     end
 
     Note over Assembler,Bus: Triggers are request_started, parse_completed, auth_completed, route_completed, upstream_response_started, usage_observed, stream_completed, and request_terminated; partial snapshots are never persisted

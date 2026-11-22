@@ -27,7 +27,8 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler};
-use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse, PerCandidateReason};
+use cc_lb_plugin_wire::v2::{FilterResponse, PerCandidateReason};
+use cc_lb_plugin_wire::v3::FilterRequest;
 
 #[cc_lb_plugin(
     name = "accept-all",
@@ -40,7 +41,8 @@ mod accept_all {
 
     #[handler(
         filter,
-        wire = 1,
+        provider = "anthropic",
+        wire = 3,
         description = "Accepts all candidates without modification.",
         usage = "Attach to a router filter chain for baseline validation.",
     )]
@@ -63,9 +65,7 @@ mod accept_all {
 
 Required top-level metadata is `name`, `version`, `description`, `usage`, and `hooks`. Each hook declares its wire version and operator-facing description.
 
-Legacy-only artifacts use the `cc_lb.plugin.v1` metadata section. Artifacts
-with provider-qualified handlers use `cc_lb.plugin.v2`; bare hook keys remain
-Anthropic-only.
+All plugins use the `cc_lb.plugin.v2` metadata section with provider-qualified hook keys.
 
 ## Choose a slot
 
@@ -74,31 +74,22 @@ a candidate only when its `decision` is `"accept"`; every candidate absent from
 `results` is rejected, so an empty `results` rejects the whole set. A `shape`
 hook changes the outgoing request. Provider-qualified response, SSE, and
 Realtime/Live transformations are independent optional hooks; omit those
-hooks when the plugin does not need them. A legacy bare `shape` handler must
-also declare `transform_response` and `transform_sse_event`, using explicit
-no-op handlers when it does not transform responses.
+hooks when the plugin does not need them.
 
 ## Choose a wire version
 
-Wire versions are independent per hook. The example above uses the legacy V1
-filter contract. `cc_lb_plugin_wire::schema::host_supported_versions` defines
-the host admission matrix:
+Wire versions are independent per hook slot. `cc_lb_plugin_wire::schema::host_supported_versions` defines the host admission matrix:
 
 | Hook | Host-supported wire versions |
 | --- | --- |
-| `filter` | `v1`, `v2`, `v3` |
-| `shape` | `v1`, `v2` |
-| `transform_response` | `v1`, `v2` |
-| `transform_sse_event` | `v1`, `v2` |
+| `filter` | `v3` |
+| `shape` | `v2` |
+| `transform_response` | `v2` |
+| `transform_sse_event` | `v2` |
 | `transform_realtime_frame` | `v2` |
 | `shape_envelope_gemini` | `v2` |
 
-V2 and V3 require provider-qualified metadata. Add
-`provider = "anthropic"`, `provider = "openai"`, or `provider = "gemini"` to
-the handler attribute. `shape_envelope_gemini` is Gemini-only and requires a
-declared Gemini `shape` hook. The PDK's `#[handler]` macro currently supports
-V1 and V2 only: `#[handler(..., wire = 3)]` does not compile, even though the
-host admits filter V3.
+Every handler requires `provider = "anthropic"`, `provider = "openai"`, or `provider = "gemini"`. `filter` uses `wire = 3`; all shape-family hooks use `wire = 2`. `shape_envelope_gemini` is Gemini-only (`provider = "gemini"`) and requires a declared Gemini `shape` hook.
 
 ## Build and upload
 

@@ -14,7 +14,7 @@ mod storage_tail;
 
 pub use cache::{
     RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheEvidence,
-    RequestCacheLookbackPrefix, RequestCacheState, RequestNativeCacheObservation,
+    RequestCacheLookbackPrefix, RequestNativeCacheObservation,
 };
 pub use event_kind::{ParseRequestEventKindError, RequestEventKind};
 pub use funding::{ParseRequestFundingError, RequestFunding};

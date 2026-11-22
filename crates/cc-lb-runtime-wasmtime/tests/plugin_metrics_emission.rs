@@ -1,32 +1,13 @@
 //! RFC-0001 gap-analysis item #5 — plugin call / trap metrics.
-//!
-//! Before this test lands, `execute_call` emitted no metrics at all;
-//! the three metric families the RFC mandates
-//! (`docs/rfc/0001-plugin-runtime-vnext.md:317-319`) did not exist:
-//!
-//!   * `cc_lb_plugin_call_duration_seconds{plugin, hook}` histogram
-//!   * `cc_lb_plugin_trap_total{plugin, hook, phase}` counter
-//!
-//! `cc_lb_plugin_call_duration_seconds` had bucket boundaries reserved
-//! in `cc-lb-observability/src/init.rs::install_prometheus` (see
-//! `PLUGIN_CALL_DURATION_BUCKETS`) but was never emitted. This test
-//! pins the emission contract:
-//!
-//!   * A single successful call emits ≥ 1 duration sample with
-//!     `plugin=<name>` + `hook=<kind>` labels.
-//!   * A hook that traps increments `cc_lb_plugin_trap_total` with the
-//!     matching `phase=<hook>` label.
-//!
-//! We assert against the Prometheus text render because it is the
-//! actual production surface (scraped by whatever monitoring stack the
-//! operator wires up).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cc_lb_plugin_wire::{CachePricingSummary, FilterRequest, Principal, UpstreamCandidate};
-use cc_lb_runtime_wasmtime::WasmtimeRuntime;
-use cc_lb_runtime_wasmtime::{RuntimeSlotKey, RuntimeSlotRole};
+use cc_lb_plugin_wire::v2::{CachePricingSummary, Claim, Principal, UpstreamCandidate};
+use cc_lb_plugin_wire::v3::{FilterRequest, NativeCachePricing, NativeCachePricingProvider};
+use cc_lb_runtime_wasmtime::{
+    RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch, WasmtimeRuntime,
+};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use rkyv::rancor::Error;
 
@@ -41,7 +22,6 @@ fn cache_aware_wasm() -> Option<Vec<u8>> {
 }
 
 fn tiny_filter_request() -> FilterRequest {
-    use cc_lb_plugin_wire::Claim;
     FilterRequest {
         request_id: Box::from("metrics-probe"),
         thread_id: None,
@@ -53,6 +33,11 @@ fn tiny_filter_request() -> FilterRequest {
             cache_creation_5m_micros_per_million: None,
             cache_creation_1h_micros_per_million: None,
             cache_read_micros_per_million: None,
+        },
+        native_pricing: NativeCachePricing {
+            version: 1,
+            provider: NativeCachePricingProvider::Anthropic,
+            rates: Box::new([]),
         },
         method: Box::from("POST"),
         path: Box::from("/v1/messages"),
@@ -71,6 +56,7 @@ fn tiny_filter_request() -> FilterRequest {
             upstream_id: Box::from("a"),
             name: Box::from("upstream-a"),
             kind: Box::from("anthropic_api_key"),
+            base_url: None,
             observed_at_unix_secs: 0,
             predicted_cache_read_tokens: 10,
             predicted_cache_creation_tokens_5m: 0,
@@ -80,6 +66,7 @@ fn tiny_filter_request() -> FilterRequest {
             organization_type: Box::from(""),
             rate_limit_tier: Box::from(""),
             seat_tier: Box::from(""),
+            subscription_quotas: Box::new([]),
         }]),
     }
 }
@@ -97,11 +84,15 @@ fn successful_filter_call_emits_three_metric_families() {
 
     metrics::with_local_recorder(&recorder, || {
         let rt = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-        rt.register_filter(key.clone(), plugin_name, &wasm)
+        let slot = rt
+            .register_filter(key.clone(), plugin_name, &wasm)
             .expect("register");
+        let dispatch = WasmPluginWireDispatch::from_slot(slot, rt.config_arc());
         let req = tiny_filter_request();
         let in_bytes = rkyv::to_bytes::<Error>(&req).expect("encode");
-        let _out = rt.call_filter(&key, in_bytes.as_slice()).expect("call");
+        let _out = dispatch
+            .call_filter_scoped(in_bytes.as_slice(), <[u8]>::to_vec)
+            .expect("call");
     });
 
     let rendered = handle.render();
@@ -118,8 +109,4 @@ fn successful_filter_call_emits_three_metric_families() {
         rendered.contains("hook=\"filter\""),
         "labels must include hook=\"filter\"; rendered=\n{rendered}",
     );
-    // Counter is defined even when zero; we accept absence of the sample
-    // as long as the family is declared. describe/register elsewhere;
-    // here we just confirm the counter name is a known symbol in the
-    // rendered dump when the trap path fires (see next test).
 }

@@ -61,16 +61,6 @@ impl AnthropicCompatibilityKvStore for SqliteStorage {
 
         row.map(row_to_record).transpose()
     }
-
-    async fn list_compatibility_kv(&self) -> StorageResult<Vec<CompatibilityKvRecord>> {
-        let rows =
-            sqlx::query("SELECT key, value FROM anthropic_compatibility_kv_v1 ORDER BY key ASC")
-                .fetch_all(self.pool())
-                .await
-                .map_err(map_sqlx_error)?;
-
-        rows.into_iter().map(row_to_record).collect()
-    }
 }
 
 async fn put_record(storage: &SqliteStorage, record: &CompatibilityKvRecord) -> StorageResult<()> {

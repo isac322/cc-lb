@@ -1,4 +1,4 @@
-//! Upstream CRUD admin endpoint smoke tests (list, create, get, update, delete, enable/disable).
+//! Upstream CRUD admin endpoint smoke tests (list, create, get, update, delete).
 
 use crate::admin_test_common;
 
@@ -87,7 +87,6 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         storage: Some(storage.clone()),
         key_store: Some(admin_test_common::key_store(storage)),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
         dynamic_view_rebinder: None,
@@ -579,9 +578,9 @@ async fn enable_disable_emits_audit_and_persists_state() {
 
     let disabled = request(
         app.clone(),
-        "POST",
-        &format!("/admin/v1/upstreams/{id}/disable"),
-        None,
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({ "enabled": false })),
         Some("W/\"1\""),
     )
     .await;
@@ -591,9 +590,9 @@ async fn enable_disable_emits_audit_and_persists_state() {
 
     let enabled = request(
         app,
-        "POST",
-        &format!("/admin/v1/upstreams/{id}/enable"),
-        None,
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({ "enabled": true })),
         Some("W/\"2\""),
     )
     .await;
@@ -605,22 +604,18 @@ async fn enable_disable_emits_audit_and_persists_state() {
         .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 10, false)
         .await
         .unwrap();
-    let disable_route = format!("/admin/v1/upstreams/{id}/disable");
-    let enable_route = format!("/admin/v1/upstreams/{id}/enable");
-    assert!(entries.iter().any(|entry| {
-        entry.route == disable_route
-            && entry
-                .admin_action
-                .as_deref()
-                .is_some_and(|action| action.starts_with("upstream_disable"))
-    }));
-    assert!(entries.iter().any(|entry| {
-        entry.route == enable_route
-            && entry
-                .admin_action
-                .as_deref()
-                .is_some_and(|action| action.starts_with("upstream_enable"))
-    }));
+    let route = format!("/admin/v1/upstreams/{id}");
+    let update_count = entries
+        .iter()
+        .filter(|entry| {
+            entry.route == route
+                && entry
+                    .admin_action
+                    .as_deref()
+                    .is_some_and(|action| action.starts_with("upstream_update"))
+        })
+        .count();
+    assert_eq!(update_count, 2);
 }
 
 async fn delete_soft_deletes_upstream() {
@@ -1553,7 +1548,7 @@ async fn provider_warmup_plugins_require_the_upstreams_qualified_shape_export() 
         let app = router(test_state(storage.clone()));
         let mut entries = Vec::new();
         for (index, hook) in [
-            "shape".to_owned(),
+            "shape_unknown".to_owned(),
             format!("transform_response_{provider}"),
             format!("shape_{provider}"),
         ]
@@ -1561,7 +1556,7 @@ async fn provider_warmup_plugins_require_the_upstreams_qualified_shape_export() 
         .enumerate()
         {
             let hooks = serde_json::from_value(json!({
-                (hook): {"wire_version": 1, "description": "fixture", "usage": "fixture", "mode": "active"}
+                (hook): {"wire_version": 2, "description": "fixture", "usage": "fixture", "mode": "active"}
             })).unwrap();
             let (entry, _) = storage
                 .persist_wasm_upload(

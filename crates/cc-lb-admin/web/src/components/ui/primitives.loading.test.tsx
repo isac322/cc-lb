@@ -6,14 +6,7 @@ import {
   waitFor,
 } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  Button,
-  CardHeader,
-  ConfirmDialog,
-  Modal,
-  Section,
-  Skeleton,
-} from './primitives';
+import { Button, ConfirmDialog, Modal, Section, Skeleton } from './primitives';
 
 afterEach(cleanup);
 
@@ -39,23 +32,6 @@ describe('Skeleton element semantics', () => {
 });
 
 describe('Subtitle slot semantics', () => {
-  it('keeps block CardHeader subtitles in a block-safe slot', () => {
-    const { container } = render(
-      <CardHeader
-        title="Card title"
-        subtitle={<div data-testid="card-subtitle-content">Details</div>}
-      />,
-    );
-
-    const subtitle = container.querySelector('[data-slot="card-subtitle"]');
-    expect(subtitle?.tagName).toBe('DIV');
-    expect(subtitle?.className).toContain('min-h-4');
-    expect(
-      subtitle?.querySelector('[data-testid="card-subtitle-content"]'),
-    ).not.toBeNull();
-    expect(container.querySelector('p')).toBeNull();
-  });
-
   it('keeps block Section subtitles in a block-safe slot', () => {
     const { container } = render(
       <Section
@@ -77,17 +53,11 @@ describe('Subtitle slot semantics', () => {
 
   it('reserves a minimum line for plain text subtitle slots', () => {
     const { container } = render(
-      <>
-        <CardHeader title="Card title" subtitle="Card details" />
-        <Section title="Section title" subtitle="Section details">
-          <div>Body</div>
-        </Section>
-      </>,
+      <Section title="Section title" subtitle="Section details">
+        <div>Body</div>
+      </Section>,
     );
 
-    expect(
-      container.querySelector('[data-slot="card-subtitle"]')?.className,
-    ).toContain('min-h-4');
     expect(
       container.querySelector('[data-slot="section-subtitle"]')?.className,
     ).toContain('min-h-4');

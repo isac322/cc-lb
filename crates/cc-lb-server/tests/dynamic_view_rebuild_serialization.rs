@@ -485,10 +485,6 @@ async fn fixture() -> Fixture {
         storage: Some(storage.clone() as Arc<dyn StorageTrait>),
         key_store: None,
         aead,
-        limit_engine: cc_lb_control::api_keys::limit_engine::LimitEngine::new(
-            Arc::new(cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
-            clock.clone(),
-        ),
         lifecycle: None,
         lazy_refresher: None,
         runtime: Some(runtime),
@@ -525,13 +521,16 @@ async fn fixture() -> Fixture {
     }
 }
 
-fn post(path: String, revision: u64) -> Request<Body> {
+fn patch_enable(id: uuid::Uuid, revision: u64, enabled: bool) -> Request<Body> {
     Request::builder()
-        .method("POST")
-        .uri(path)
+        .method("PATCH")
+        .uri(format!("/admin/v1/upstreams/{id}"))
         .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
         .header(header::IF_MATCH, format!("W/\"{revision}\""))
-        .body(Body::empty())
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({ "enabled": enabled })).expect("body"),
+        ))
         .expect("request")
 }
 
@@ -610,9 +609,10 @@ async fn concurrent_admin_upstream_disable_is_resident_when_response_returns() {
     assert!(candidate_names(&fx.holder.load()).contains(&"u-target".to_owned()));
 
     let gate_a = arm(&fx.rate_limit_gate.slots);
-    let request_a = tokio::spawn(fx.app.clone().oneshot(post(
-        format!("/admin/v1/upstreams/{}/enable", fx.other.id),
+    let request_a = tokio::spawn(fx.app.clone().oneshot(patch_enable(
+        fx.other.id,
         fx.other.revision,
+        true,
     )));
     gate_a
         .reached
@@ -685,9 +685,10 @@ async fn concurrent_admin_principal_disable_rejects_authentication_when_response
         .expect("principal authenticates before the disable");
 
     let gate_a = arm(&fx.chain_gate.slots);
-    let request_a = tokio::spawn(fx.app.clone().oneshot(post(
-        format!("/admin/v1/upstreams/{}/enable", fx.other.id),
+    let request_a = tokio::spawn(fx.app.clone().oneshot(patch_enable(
+        fx.other.id,
         fx.other.revision,
+        true,
     )));
     gate_a
         .reached

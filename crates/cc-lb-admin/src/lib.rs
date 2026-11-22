@@ -6,12 +6,10 @@ pub mod dashboard_routes;
 pub mod events;
 pub mod events_detail_route;
 pub mod events_routes;
-pub mod internal_partials;
 mod oauth_pkce;
 pub mod ports;
 mod response_cache;
 pub mod routes;
-pub mod scheduler;
 pub mod settings;
 mod static_assets;
 pub mod subscription_quotas;
@@ -30,10 +28,7 @@ use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_clock::ClockHandle;
 use cc_lb_control::RequestEventBus;
 use cc_lb_control::anthropic_api_key::AnthropicOrgApi;
-use cc_lb_control::{
-    DynamicView, DynamicViewHolder,
-    api_keys::{key_store::KeyStore, limit_engine::LimitEngine},
-};
+use cc_lb_control::{DynamicView, DynamicViewHolder, api_keys::key_store::KeyStore};
 use cc_lb_domain::ReplicaIdentity;
 use cc_lb_quota::UnifiedQuotaObservation;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
@@ -198,7 +193,6 @@ pub struct AdminState {
     pub storage: Option<Arc<dyn Storage>>,
     pub key_store: Option<Arc<KeyStore>>,
     pub aead: Arc<AeadService>,
-    pub limit_engine: Arc<LimitEngine>,
     pub lifecycle: Option<AdminPorts>,
     pub lazy_refresher: Option<Arc<dyn LazyRefreshHandle>>,
     pub runtime: Option<Arc<WasmtimeRuntime>>,

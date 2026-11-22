@@ -49,17 +49,8 @@
 //! #[test]
 //! fn shape_semantics() {
 //!     let session = ConformanceSuite::for_shape(&wasm()).session();
-//!     let response = session.call_shape(ShapeRequest {
-//!         request_id: "t-1".into(),
-//!         method: "POST".into(),
-//!         path: "/v1/messages".into(),
-//!         query: None,
-//!         headers: vec![hdr("content-type", "application/json")],
-//!         body: br#"{"model":"claude-3"}"#.to_vec(),
-//!         principal: synth_principal(),
-//!         upstream: Upstream::AnthropicDirect { base_url: None },
-//!     });
-//!     assert_eq!(response.method, "POST");
+//!     let response = session.call_shape(fixtures::sample_shape_request());
+//!     assert_eq!(response.method.as_ref(), "POST");
 //! }
 //! ```
 
@@ -71,9 +62,8 @@ pub mod prelude;
 mod tests;
 
 use cc_lb_plugin_wire::{
-    FilterRequest, FilterResponse, ShapeRequest, ShapeResponse,
     schema::{ProviderFamily, WireVersion},
-    v1, v2, v3,
+    v2, v3,
 };
 use cc_lb_runtime_wasmtime::{
     HookKind, HotEngineConfig, ModuleInspection, RuntimeSlotKey, RuntimeSlotRole,
@@ -146,31 +136,10 @@ macro_rules! impl_wire_request {
 
 impl_wire_request!(
     FilterWireRequest,
-    v1::FilterRequest,
-    v1::FilterResponse,
-    v1::ArchivedFilterResponse,
-    WireVersion::V1
-);
-impl_wire_request!(
-    FilterWireRequest,
-    v2::FilterRequest,
-    v2::FilterResponse,
-    v2::ArchivedFilterResponse,
-    WireVersion::V2
-);
-impl_wire_request!(
-    FilterWireRequest,
     v3::FilterRequest,
     v2::FilterResponse,
     v2::ArchivedFilterResponse,
     WireVersion::V3
-);
-impl_wire_request!(
-    ShapeWireRequest,
-    v1::ShapeRequest,
-    v1::ShapeResponse,
-    v1::ArchivedShapeResponse,
-    WireVersion::V1
 );
 impl_wire_request!(
     ShapeWireRequest,
@@ -181,24 +150,10 @@ impl_wire_request!(
 );
 impl_wire_request!(
     TransformResponseWireRequest,
-    v1::TransformResponseRequest,
-    v1::TransformResponseResult,
-    v1::ArchivedTransformResponseResult,
-    WireVersion::V1
-);
-impl_wire_request!(
-    TransformResponseWireRequest,
     v2::TransformResponseRequest,
     v2::TransformResponseResult,
     v2::ArchivedTransformResponseResult,
     WireVersion::V2
-);
-impl_wire_request!(
-    TransformSseWireRequest,
-    v1::TransformSseEventRequest,
-    v1::TransformSseEventResult,
-    v1::ArchivedTransformSseEventResult,
-    WireVersion::V1
 );
 impl_wire_request!(
     TransformSseWireRequest,
@@ -223,9 +178,6 @@ pub struct ConformanceSuite<'a> {
     wasm: &'a [u8],
     kind: ConformanceKind,
     provider: ProviderFamily,
-    // Explicit Anthropic selection uses provider-native fixtures; legacy
-    // constructors preserve the original no-base-url fixture.
-    provider_selected: bool,
     plugin_name: String,
     engine_config: HotEngineConfig,
 }
@@ -295,7 +247,6 @@ impl<'a> ConformanceSuite<'a> {
             wasm,
             kind,
             provider: ProviderFamily::Anthropic,
-            provider_selected: false,
             plugin_name: format!("conformance-{label}"),
             engine_config: HotEngineConfig::default(),
         }
@@ -304,7 +255,6 @@ impl<'a> ConformanceSuite<'a> {
     /// Select the provider-qualified exports and fixture family.
     pub fn with_provider(mut self, provider: ProviderFamily) -> Self {
         self.provider = provider;
-        self.provider_selected = true;
         self
     }
 
@@ -392,8 +342,8 @@ impl<'a> ConformanceSuite<'a> {
     /// have missed it.
     ///
     /// Coverage:
-    /// - `Filter` → canonical V1 request
-    /// - `Shape` → selected request, response, SSE, and V2 realtime-frame hooks,
+    /// - `Filter` → canonical V3 request (`service_tier = Some("priority")`)
+    /// - `Shape` → V2 request, buffered-response, SSE, and realtime-frame hooks,
     ///   plus the optional Gemini envelope hook.
     ///
     /// Assertions are boundary-only: hooks must not trap and responses
@@ -404,35 +354,20 @@ impl<'a> ConformanceSuite<'a> {
         let session = self.session();
         match self.kind {
             ConformanceKind::Filter => match session.dispatch.filter_wire_version() {
-                Some(WireVersion::V1) => {
-                    let _ = session.call_filter(fixtures::sample_filter_request());
-                }
-                Some(WireVersion::V2) => {
-                    let _ =
-                        session.call_filter_wire(fixtures::sample_filter_request_v2(self.provider));
-                }
                 Some(WireVersion::V3) => {
                     let _ =
                         session.call_filter_wire(fixtures::sample_filter_request_v3(self.provider));
                 }
-                None => unreachable!(),
+                other => unreachable!("unsupported filter wire version: {other:?}"),
             },
             ConformanceKind::Shape => {
                 if let Some(version) = session.dispatch.shape_wire_version() {
                     match version {
-                        WireVersion::V1 => {
-                            let request = if self.provider_selected {
-                                fixtures::sample_shape_request_for(self.provider)
-                            } else {
-                                fixtures::sample_shape_request()
-                            };
-                            let _ = session.call_shape_wire(request);
-                        }
                         WireVersion::V2 => {
                             let _ = session
                                 .call_shape_wire(fixtures::sample_shape_request_v2(self.provider));
                         }
-                        WireVersion::V3 => unreachable!("shape V3 is not host-supported"),
+                        other => unreachable!("unsupported shape wire version: {other:?}"),
                     }
                 }
                 if session.dispatch.has_realtime_frame_transform() {
@@ -442,55 +377,29 @@ impl<'a> ConformanceSuite<'a> {
                                 fixtures::sample_transform_realtime_frame_request_v2(self.provider),
                             );
                         }
-                        Some(WireVersion::V1) => {
-                            unreachable!("realtime frame transform V1 is not host-supported")
-                        }
-                        Some(WireVersion::V3) => {
-                            unreachable!("realtime frame transform V3 is not host-supported")
-                        }
-                        None => unreachable!(),
+                        other => unreachable!("unsupported realtime frame wire version: {other:?}"),
                     }
                 }
                 if session.dispatch.has_response_transform() {
                     match session.dispatch.response_wire_version() {
-                        Some(WireVersion::V1) => {
-                            let request = if self.provider_selected {
-                                fixtures::sample_transform_response_request_for(self.provider)
-                            } else {
-                                fixtures::sample_transform_response_request()
-                            };
-                            let _ = session.call_transform_response(request);
-                        }
                         Some(WireVersion::V2) => {
                             let _ = session.call_transform_response(
                                 fixtures::sample_transform_response_request_v2(self.provider),
                             );
                         }
-                        Some(WireVersion::V3) => {
-                            unreachable!("response transform V3 is not host-supported")
+                        other => {
+                            unreachable!("unsupported response transform wire version: {other:?}")
                         }
-                        None => unreachable!(),
                     }
                 }
                 if session.dispatch.has_sse_event_transform() {
                     match session.dispatch.sse_wire_version() {
-                        Some(WireVersion::V1) => {
-                            let request = if self.provider_selected {
-                                fixtures::sample_transform_sse_event_request_for(self.provider)
-                            } else {
-                                fixtures::sample_transform_sse_event_request()
-                            };
-                            let _ = session.call_transform_sse_event(request);
-                        }
                         Some(WireVersion::V2) => {
                             let _ = session.call_transform_sse_event(
                                 fixtures::sample_transform_sse_event_request_v2(self.provider),
                             );
                         }
-                        Some(WireVersion::V3) => {
-                            unreachable!("SSE transform V3 is not host-supported")
-                        }
-                        None => unreachable!(),
+                        other => unreachable!("unsupported SSE transform wire version: {other:?}"),
                     }
                 }
                 if self.provider == ProviderFamily::Gemini
@@ -557,9 +466,9 @@ impl PluginSession {
         self.dispatch.has_realtime_frame_transform()
     }
 
-    /// Round-trip a [`FilterRequest`] through the V1 guest boundary.
-    /// Panics if this session is not Filter-kind or does not select wire V1.
-    pub fn call_filter(&self, request: FilterRequest) -> FilterResponse {
+    /// Round-trip a [`v3::FilterRequest`] through the guest boundary.
+    /// Panics if this session is not Filter-kind or does not select wire V3.
+    pub fn call_filter(&self, request: v3::FilterRequest) -> v2::FilterResponse {
         assert!(
             matches!(self.kind, ConformanceKind::Filter),
             "call_filter requires HookKind::Filter, got {:?}",
@@ -567,8 +476,8 @@ impl PluginSession {
         );
         assert_eq!(
             self.dispatch.filter_wire_version(),
-            Some(WireVersion::V1),
-            "legacy call_filter requires a V1 filter hook"
+            Some(WireVersion::V3),
+            "call_filter requires a V3 filter hook"
         );
         self.call_filter_wire(request)
     }
@@ -594,9 +503,9 @@ impl PluginSession {
             .expect("guest filter hook must complete without trap")
     }
 
-    /// Round-trip a [`ShapeRequest`] through the V1 guest boundary.
-    /// Panics if this session is not Shape-kind or does not select wire V1.
-    pub fn call_shape(&self, request: ShapeRequest) -> ShapeResponse {
+    /// Round-trip a [`v2::ShapeRequest`] through the guest boundary.
+    /// Panics if this session is not Shape-kind or does not select wire V2.
+    pub fn call_shape(&self, request: v2::ShapeRequest) -> v2::ShapeResponse {
         assert!(
             matches!(self.kind, ConformanceKind::Shape),
             "call_shape requires HookKind::Shape, got {:?}",
@@ -604,8 +513,8 @@ impl PluginSession {
         );
         assert_eq!(
             self.dispatch.shape_wire_version(),
-            Some(WireVersion::V1),
-            "legacy call_shape requires a V1 shape hook"
+            Some(WireVersion::V2),
+            "call_shape requires a V2 shape hook"
         );
         self.call_shape_wire(request)
     }
@@ -702,10 +611,9 @@ impl PluginSession {
             ProviderFamily::Gemini,
             "Gemini envelope calls require a Gemini-selected session"
         );
-        assert_eq!(
-            self.dispatch.envelope_wire_version(),
-            Some(WireVersion::V2),
-            "Gemini envelope must declare wire V2"
+        assert!(
+            self.dispatch.has_shape_envelope_gemini(),
+            "Gemini envelope hook must be present and active"
         );
         let in_bytes =
             rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode ShapeEnvelopeGeminiRequest");

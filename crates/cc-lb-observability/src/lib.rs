@@ -17,14 +17,13 @@ pub use dropped_events::increment_dropped_events_by;
 pub use engine_hook::{EngineMetricsHook, MetricsCrateHook, NoopMetricsHook};
 pub use init::{
     InitError, MetricDefinition, MetricKind, ObservabilityConfig, TracingGuard,
-    UNRESOLVED_ATTRIBUTION_LABEL, init, metric_definitions, panic_total, register_metrics,
+    UNRESOLVED_ATTRIBUTION_LABEL, init, metric_definitions, register_metrics,
 };
 pub use panic_hook::install_panic_hook;
 pub use propagation::{inject_current_trace_context, parent_context_from_headers};
 pub use redaction::{
-    REDACTED, ROUTING_REASON_MAX_BYTES, ROUTING_TRACE_SIZE_CAP_BYTES, RedactingMakeWriter,
-    RedactionLayer, RedactionPolicy, enforce_routing_trace_caps, redact_internal_errors,
-    redact_routing_trace, sanitize_url_for_log, truncate_reason,
+    REDACTED, ROUTING_REASON_MAX_BYTES, RedactingMakeWriter, RedactionPolicy,
+    redact_internal_errors, sanitize_url_for_log, truncate_reason,
 };
 pub use trace_layer::{
     ObservabilityTraceLayer, ProxyMakeSpan, ProxyOnBodyChunk, ProxyOnRequest, ProxyOnResponse,
@@ -43,25 +42,6 @@ pub mod cache_observation_store_kind {
     pub const POSTGRES: &str = "postgres";
 }
 
-/// Increment cache hit counter by upstream and model.
-pub fn inc_cache_hit(upstream: &str, model: &str) {
-    metrics::counter!(
-        "cc_lb_cache_hit_total",
-        "upstream" => upstream.to_owned(),
-        "model" => model.to_owned()
-    )
-    .increment(1);
-}
-
-/// Increment cache miss counter by upstream and model.
-pub fn inc_cache_miss(upstream: &str, model: &str) {
-    metrics::counter!(
-        "cc_lb_cache_miss_total",
-        "upstream" => upstream.to_owned(),
-        "model" => model.to_owned()
-    )
-    .increment(1);
-}
 pub fn inc_cache_observation_dropped(reason: &str) {
     metrics::counter!(
         "cc_lb_cache_observation_dropped_total",

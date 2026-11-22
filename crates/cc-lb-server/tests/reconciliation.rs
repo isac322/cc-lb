@@ -675,37 +675,12 @@ struct EmptyPlanTierStore;
 
 #[async_trait]
 impl PlanTierStore for EmptyPlanTierStore {
-    async fn upsert_plan_tier_ratio(&self, _record: &PlanTierRatioRecord) -> StorageResult<()> {
-        Ok(())
-    }
-
     async fn list_current_plan_tier_ratios(&self) -> StorageResult<Vec<PlanTierRatioRecord>> {
         Ok(Vec::new())
     }
 
-    async fn list_plan_tier_ratios_as_of(
-        &self,
-        _as_of_unix_millis: i64,
-    ) -> StorageResult<Vec<PlanTierRatioRecord>> {
-        Ok(Vec::new())
-    }
-
-    async fn upsert_metadata_tier_override(
-        &self,
-        _record: &MetadataTierMappingOverrideRecord,
-    ) -> StorageResult<()> {
-        Ok(())
-    }
-
     async fn list_current_metadata_tier_overrides(
         &self,
-    ) -> StorageResult<Vec<MetadataTierMappingOverrideRecord>> {
-        Ok(Vec::new())
-    }
-
-    async fn list_metadata_tier_overrides_as_of(
-        &self,
-        _as_of_unix_millis: i64,
     ) -> StorageResult<Vec<MetadataTierMappingOverrideRecord>> {
         Ok(Vec::new())
     }
@@ -718,13 +693,6 @@ impl PlanTierStore for EmptyPlanTierStore {
     }
 
     async fn list_current_upstream_plan_tiers(&self) -> StorageResult<Vec<UpstreamPlanTierRecord>> {
-        Ok(Vec::new())
-    }
-
-    async fn list_upstream_plan_tiers_as_of(
-        &self,
-        _as_of_unix_millis: i64,
-    ) -> StorageResult<Vec<UpstreamPlanTierRecord>> {
         Ok(Vec::new())
     }
 }
@@ -814,10 +782,6 @@ impl AnthropicCompatibilityKvStore for EmptyCompatibilityKvStore {
         _key: &str,
     ) -> StorageResult<Option<CompatibilityKvRecord>> {
         Ok(None)
-    }
-
-    async fn list_compatibility_kv(&self) -> StorageResult<Vec<CompatibilityKvRecord>> {
-        Ok(Vec::new())
     }
 }
 

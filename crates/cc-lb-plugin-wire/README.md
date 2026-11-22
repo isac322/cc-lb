@@ -11,9 +11,9 @@ the common PDK path.
 
 ## What This Crate Provides
 
-- Hook wire types under `cc_lb_plugin_wire::v1`, `v2`, and `v3`.
-- `WireVersion::V1`, `V2`, and `V3`.
-- `HookKind` for request, response, streaming, and Gemini envelope hooks.
+- Hook wire types under `cc_lb_plugin_wire::v2` (shape-family & filter response types) and `v3` (`FilterRequest` + native cache pricing context).
+- `WireVersion::V2` and `V3`.
+- `HookKind` for request, response, streaming, realtime frame, and Gemini envelope hooks.
 - `WireSchema`, the layout fingerprint of every hook wire type.
 - `PluginMetadata` and `HookMetadata` behind the `std` feature.
 - `pack_ret` and `unpack_ret` helpers for guest ABI return values.
@@ -25,32 +25,30 @@ hook; `schema::host_supported_versions` defines the host admission matrix:
 
 | Hook | Host-supported wire versions |
 | --- | --- |
-| `filter` | `v1`, `v2`, `v3` |
-| `shape` | `v1`, `v2` |
-| `transform_response` | `v1`, `v2` |
-| `transform_sse_event` | `v1`, `v2` |
+| `filter` | `v3` |
+| `shape` | `v2` |
+| `transform_response` | `v2` |
+| `transform_sse_event` | `v2` |
 | `transform_realtime_frame` | `v2` |
 | `shape_envelope_gemini` | `v2` |
 
-V2 and V3 require provider-qualified metadata. `shape_envelope_gemini` is
-Gemini-only and requires a declared Gemini `shape` hook. The PDK's `#[handler]`
-macro currently supports V1 and V2 only: `#[handler(..., wire = 3)]` does not
-compile, even though the host admits filter V3.
+All hooks require provider-qualified metadata in `cc_lb.plugin.v2` (`filter` uses `wire = 3`; shape-family hooks use `wire = 2`). `shape_envelope_gemini` is Gemini-only and requires a declared Gemini `shape` hook.
 
-`HookKind` names the supported plugin hooks, including:
+`HookKind` names the supported plugin hooks, which map via `ProviderFamily` to provider-qualified exports:
 
-- `Filter` maps to the `cc_lb_filter` export.
-- `Shape` maps to the `cc_lb_shape` export.
-- `TransformResponse` maps to `cc_lb_transform_response`.
-- `TransformSseEvent` maps to `cc_lb_transform_sse_event`.
-- `TransformRealtimeFrame` maps to `cc_lb_transform_realtime_frame`.
-- `ShapeEnvelopeGemini` maps to `cc_lb_shape_envelope_gemini`.
+- `Filter` -> `cc_lb_filter_{anthropic,openai,gemini}`
+- `Shape` -> `cc_lb_shape_{anthropic,openai,gemini}`
+- `TransformResponse` -> `cc_lb_transform_response_{anthropic,openai,gemini}`
+- `TransformSseEvent` -> `cc_lb_transform_sse_event_{anthropic,openai,gemini}`
+- `TransformRealtimeFrame` -> `cc_lb_transform_realtime_frame_{anthropic,openai,gemini}`
+- `ShapeEnvelopeGemini` -> `cc_lb_shape_envelope_gemini`
 
 `ProviderFamily` names the supported provider selectors:
 `anthropic`, `openai`, and `gemini`. `HookKind::qualified_export_name` maps a
 hook and provider to exports such as `cc_lb_shape_openai`.
-`HookKind::parse_entrypoint` parses bare legacy metadata keys and qualified
-keys such as `shape_openai`; bare keys are Anthropic-only.
+`HookKind::parse_entrypoint` parses qualified metadata keys such as
+`shape_openai` and the Gemini-only `shape_envelope_gemini`; unqualified keys
+such as `filter` or `shape` are rejected.
 
 `WireSchema` exposes a canonical descriptor and BLAKE3 fingerprint for a hook
 wire type. This crate's build script generates the impl for every wire type
@@ -61,11 +59,10 @@ not manage hashes manually.
 
 ## PluginMetadata Schema
 
-The host accepts one metadata section in each upload:
-`cc_lb.plugin.v1` for legacy-only artifacts or `cc_lb.plugin.v2` when any
-provider-qualified handler is present. PDK macros generate that section from
-plugin and handler attributes. V2 hook keys use the form `shape_openai`; bare
-keys remain valid for mixed legacy artifacts and map to Anthropic only.
+The host accepts the `cc_lb.plugin.v2` metadata section in each upload. PDK
+macros generate that section from plugin and handler attributes, with
+provider-qualified hook keys such as `filter_anthropic` or `shape_openai`
+(plus `shape_envelope_gemini`).
 
 Top-level metadata contains:
 

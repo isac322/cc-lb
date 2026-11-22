@@ -233,7 +233,6 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
                 model: Some("claude-3-5-sonnet-20241022".to_owned()),
                 stream: true,
                 body_bytes: profile.token_base(),
-                cache_control_block_count: Some(profile.token_base()),
                 cache_prefix_hash: Some(profile.cache_prefix_hash().to_owned()),
                 ..ParseInfo::default()
             }),

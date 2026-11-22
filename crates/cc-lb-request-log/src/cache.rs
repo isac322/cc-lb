@@ -1,15 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RequestCacheState {
-    Hit,
-    Write,
-    Refresh,
-    Miss,
-    None,
-    Unknown,
-}
 /// Provider-native cache evidence. `unreported` is distinct from a provider
 /// reporting zero cached tokens; callers must not infer a miss from absence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -73,19 +63,6 @@ impl Default for RequestNativeCacheObservation {
             retention_secs: None,
             expires_at_unix_secs: None,
             analysis_ms: None,
-        }
-    }
-}
-
-impl RequestCacheState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Hit => "hit",
-            Self::Write => "write",
-            Self::Refresh => "refresh",
-            Self::Miss => "miss",
-            Self::None => "none",
-            Self::Unknown => "unknown",
         }
     }
 }

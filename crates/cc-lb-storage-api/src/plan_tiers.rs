@@ -111,38 +111,13 @@ pub struct UpstreamPlanTierRecord {
 pub trait PlanTierStore: Send + Sync {
     // --- Ratio catalog (plan_tier_ratio_history_v1) ---
 
-    /// SCD2 upsert of a tier's Pro-relative ratio. In one transaction: no-op if
-    /// the open row already has this ratio; otherwise close the open row at
-    /// `record.effective_from_unix_millis` and insert the new open row.
-    /// Rejects non-finite / non-positive ratios.
-    async fn upsert_plan_tier_ratio(&self, record: &PlanTierRatioRecord) -> StorageResult<()>;
-
     /// The currently-effective (open) ratio row per tier.
     async fn list_current_plan_tier_ratios(&self) -> StorageResult<Vec<PlanTierRatioRecord>>;
 
-    /// The ratio rows effective at `as_of_unix_millis` (for faithful recompute).
-    async fn list_plan_tier_ratios_as_of(
-        &self,
-        as_of_unix_millis: i64,
-    ) -> StorageResult<Vec<PlanTierRatioRecord>>;
-
     // --- Exact-match overrides (metadata_tier_mapping_override_v1) ---
-
-    /// SCD2 upsert of an exact `(organization_type, rate_limit_tier, seat_tier)`
-    /// -> `tier_key` override. Idempotent no-op when the open row already maps to
-    /// the same tier.
-    async fn upsert_metadata_tier_override(
-        &self,
-        record: &MetadataTierMappingOverrideRecord,
-    ) -> StorageResult<()>;
 
     async fn list_current_metadata_tier_overrides(
         &self,
-    ) -> StorageResult<Vec<MetadataTierMappingOverrideRecord>>;
-
-    async fn list_metadata_tier_overrides_as_of(
-        &self,
-        as_of_unix_millis: i64,
     ) -> StorageResult<Vec<MetadataTierMappingOverrideRecord>>;
 
     // --- Per-upstream resolved-tier history (upstream_plan_tier_history_v1) ---
@@ -154,9 +129,4 @@ pub trait PlanTierStore: Send + Sync {
     -> StorageResult<()>;
 
     async fn list_current_upstream_plan_tiers(&self) -> StorageResult<Vec<UpstreamPlanTierRecord>>;
-
-    async fn list_upstream_plan_tiers_as_of(
-        &self,
-        as_of_unix_millis: i64,
-    ) -> StorageResult<Vec<UpstreamPlanTierRecord>>;
 }

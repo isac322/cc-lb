@@ -10,10 +10,7 @@ use bytes::Bytes;
 use cc_lb_admin::{AdminState, router};
 use cc_lb_clock::{ClockHandle, SystemClock};
 use cc_lb_config::Config;
-use cc_lb_control::api_keys::{
-    concurrent_guard::KeyConcurrencyManager, key_store::KeyStore, limit_engine::LimitEngine,
-    principal_view::PrincipalView,
-};
+use cc_lb_control::api_keys::{key_store::KeyStore, principal_view::PrincipalView};
 use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot};
 use cc_lb_domain::Upstream;
 use cc_lb_storage_sqlite::SqliteStorage;
@@ -112,7 +109,6 @@ pub fn test_state_with_clock(
         storage: storage.map(|s| s as Arc<dyn cc_lb_storage_api::Storage>),
         key_store,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone()),
         lifecycle: None,
         dynamic_view,
         config: Arc::new(config),

@@ -39,18 +39,10 @@
         "window_secs": 10
       }
     },
-    "cluster": {
-      "$ref": "#/$defs/ClusterConfig",
-      "default": {
-        "token_env": "CC_LB_CLUSTER_TOKEN"
-      }
-    },
     "event_bus": {
       "$ref": "#/$defs/EventBusConfig",
       "default": {
         "broadcast_capacity": 4096,
-        "partial_retention_max_entries": 10000,
-        "partial_retention_ttl_secs": 300,
         "pg_notify_channel": "cc_lb_events_partial",
         "storage_tail_poll_interval_ms": 250
       }
@@ -503,22 +495,6 @@
         }
       }
     },
-    "ClusterConfig": {
-      "type": "object",
-      "properties": {
-        "instance_url": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "token_env": {
-          "type": "string",
-          "default": "CC_LB_CLUSTER_TOKEN"
-        }
-      },
-      "additionalProperties": false
-    },
     "CoerceOrReject": {
       "description": "A value the backend does not accept: send the nearest supported value, or\nreject the request.",
       "oneOf": [
@@ -606,18 +582,6 @@
           "type": "integer",
           "format": "uint",
           "default": 4096,
-          "minimum": 0
-        },
-        "partial_retention_max_entries": {
-          "type": "integer",
-          "format": "uint",
-          "default": 10000,
-          "minimum": 0
-        },
-        "partial_retention_ttl_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 300,
           "minimum": 0
         },
         "pg_notify_channel": {

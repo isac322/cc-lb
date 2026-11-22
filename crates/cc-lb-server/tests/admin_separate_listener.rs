@@ -37,15 +37,10 @@ async fn server_and_admin_build_metadata_agree() {
     let admin_status = common::admin_get(server.admin_addr, "/admin/v1/status", "admin-token")
         .await
         .expect("admin status");
-    let scheduler_status =
-        common::admin_get(server.admin_addr, "/admin/scheduler/status", "admin-token")
-            .await
-            .expect("scheduler status");
 
     assert_eq!(proxy_health.status, 200);
     assert_eq!(admin_health.status, 200);
     assert_eq!(admin_status.status, 200);
-    assert_eq!(scheduler_status.status, 200);
 
     let proxy_json: serde_json::Value =
         serde_json::from_str(&proxy_health.body).expect("proxy health JSON");
@@ -53,8 +48,6 @@ async fn server_and_admin_build_metadata_agree() {
         serde_json::from_str(&admin_health.body).expect("admin health JSON");
     let status_json: serde_json::Value =
         serde_json::from_str(&admin_status.body).expect("admin status JSON");
-    let scheduler_json: serde_json::Value =
-        serde_json::from_str(&scheduler_status.body).expect("scheduler status JSON");
     assert_eq!(
         proxy_json["build"]["git_sha"], status_json["git_sha"],
         "git_sha differs between proxy health and admin status"
@@ -96,10 +89,6 @@ async fn server_and_admin_build_metadata_agree() {
     assert_eq!(health_json["git_sha"], proxy_json["build"]["git_sha"]);
     assert_eq!(status_json["version"], proxy_json["build"]["version"]);
     assert_eq!(health_json["version"], proxy_json["build"]["version"]);
-    assert_eq!(
-        scheduler_json["schedule_version"],
-        proxy_json["build"]["git_sha"]
-    );
 
     let cli = Command::new(env!("CARGO_BIN_EXE_cc-lb"))
         .arg("--version")
@@ -119,7 +108,7 @@ async fn server_and_admin_build_metadata_agree() {
         )
     );
 
-    for route in ["/admin/v1/status", "/admin/scheduler/status"] {
+    for route in ["/admin/v1/status", "/admin/v1/upstreams"] {
         let response = common::http_get(server.admin_addr, route)
             .await
             .expect("unauthenticated admin request");

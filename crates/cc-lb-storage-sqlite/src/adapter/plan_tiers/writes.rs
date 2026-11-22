@@ -1,46 +1,9 @@
-use cc_lb_storage_api::{
-    MetadataTierMappingOverrideRecord, PlanTierRatioRecord, StorageResult, TierResolutionSource,
-    UpstreamPlanTierRecord,
-};
+use cc_lb_storage_api::{StorageResult, TierResolutionSource, UpstreamPlanTierRecord};
 use sqlx::Row;
 
 use crate::map_sqlx_error;
 
-use super::codec::{conflict, encode_absent, invalid_input, parse_resolution_source};
-
-pub(super) async fn insert_ratio(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    record: &PlanTierRatioRecord,
-) -> StorageResult<()> {
-    sqlx::query("INSERT INTO plan_tier_ratio_history_v1 (tier_key, pro_relative_ratio, effective_from_unix_millis, effective_to_unix_millis, provenance, created_at_unix_millis) VALUES (?, ?, ?, NULL, ?, ?)")
-        .bind(&record.tier_key)
-        .bind(record.pro_relative_ratio)
-        .bind(record.effective_from_unix_millis)
-        .bind(&record.provenance)
-        .bind(record.created_at_unix_millis)
-        .execute(&mut **tx)
-        .await
-        .map_err(map_sqlx_error)?;
-    Ok(())
-}
-
-pub(super) async fn insert_override(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    record: &MetadataTierMappingOverrideRecord,
-) -> StorageResult<()> {
-    sqlx::query("INSERT INTO metadata_tier_mapping_override_v1 (organization_type, rate_limit_tier, seat_tier, tier_key, effective_from_unix_millis, effective_to_unix_millis, provenance, created_at_unix_millis) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)")
-        .bind(encode_absent(&record.organization_type))
-        .bind(encode_absent(&record.rate_limit_tier))
-        .bind(encode_absent(&record.seat_tier))
-        .bind(&record.tier_key)
-        .bind(record.effective_from_unix_millis)
-        .bind(&record.provenance)
-        .bind(record.created_at_unix_millis)
-        .execute(&mut **tx)
-        .await
-        .map_err(map_sqlx_error)?;
-    Ok(())
-}
+use super::codec::{conflict, invalid_input, parse_resolution_source};
 
 pub(super) async fn insert_upstream(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,

@@ -21,7 +21,6 @@ use serde::de::DeserializeOwned;
 use url::Url;
 
 const PRODUCTION_ORIGIN: &str = "https://api.openai.com/";
-const PROJECTS_PATH: &str = "v1/organization/projects";
 const USAGE_PATH: &str = "v1/organization/usage/completions";
 const COSTS_PATH: &str = "v1/organization/costs";
 const DEFAULT_LIMIT: u32 = 100;
@@ -36,15 +35,12 @@ pub struct OpenAiOrgLimits {
     pub per_request: Duration,
     /// Maximum response body accepted from OpenAI.
     pub max_body_bytes: usize,
-    /// Maximum project pages fetched by [`OpenAiOrgApi::list_projects`].
-    pub max_project_pages: u32,
 }
 
 impl OpenAiOrgLimits {
     pub const PRODUCTION: Self = Self {
         per_request: Duration::from_secs(10),
         max_body_bytes: 1024 * 1024,
-        max_project_pages: 3,
     };
 }
 
@@ -72,26 +68,6 @@ pub enum OpenAiOrgApiError {
     /// A successful response was not valid JSON or did not have the documented shape.
     #[error("OpenAI organization API answered malformed JSON")]
     MalformedJson,
-}
-
-/// OpenAI's organization project, retaining archive and provider metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenAiOrganizationProject {
-    pub id: String,
-    pub name: String,
-    pub created_at: u64,
-    pub archived_at: Option<u64>,
-    pub status: Option<String>,
-    pub external_key_id: Option<String>,
-    pub residency: Option<String>,
-}
-
-/// Projects fetched before the bounded page cap was reached.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenAiProjectListing {
-    pub projects: Vec<OpenAiOrganizationProject>,
-    /// False when OpenAI reported another page that was not fetched.
-    pub complete: bool,
 }
 
 /// A bounded query for text-generation usage.
@@ -251,61 +227,6 @@ impl OpenAiOrgApi {
         &self.limits
     }
 
-    /// Fetch active projects, following `after` cursors for at most the project page cap.
-    ///
-    /// OpenAI defaults to excluding archived projects; callers that need the
-    /// full authorized project set can use [`Self::list_projects_with_archived`].
-    pub async fn list_projects(
-        &self,
-        credential: &str,
-    ) -> Result<OpenAiProjectListing, OpenAiOrgApiError> {
-        self.list_projects_inner(credential, false).await
-    }
-
-    /// Fetch projects including archived projects, following `after` cursors
-    /// for at most the project page cap.
-    pub async fn list_projects_with_archived(
-        &self,
-        credential: &str,
-    ) -> Result<OpenAiProjectListing, OpenAiOrgApiError> {
-        self.list_projects_inner(credential, true).await
-    }
-
-    async fn list_projects_inner(
-        &self,
-        credential: &str,
-        include_archived: bool,
-    ) -> Result<OpenAiProjectListing, OpenAiOrgApiError> {
-        let mut projects = Vec::new();
-        let mut after: Option<String> = None;
-        for _ in 0..self.limits.max_project_pages {
-            let mut query = vec![
-                ("limit".to_owned(), DEFAULT_LIMIT.to_string()),
-                ("include_archived".to_owned(), include_archived.to_string()),
-            ];
-            if let Some(cursor) = after.as_deref() {
-                query.push(("after".to_owned(), cursor.to_owned()));
-            }
-            let body = self.get(credential, PROJECTS_PATH, &query).await?;
-            let page: RawProjectPage = parse_json(&body)?;
-            projects.extend(page.data.into_iter().map(project));
-            if !page.has_more {
-                return Ok(OpenAiProjectListing {
-                    projects,
-                    complete: true,
-                });
-            }
-            match page.last_id {
-                Some(last_id) if !last_id.is_empty() => after = Some(last_id),
-                _ => break,
-            }
-        }
-        Ok(OpenAiProjectListing {
-            projects,
-            complete: false,
-        })
-    }
-
     /// Fetch one text-generation usage page, grouped by project, API key, and
     /// model. Rows without a model remain explicit aggregate rows.
     pub async fn text_usage(
@@ -427,44 +348,6 @@ fn classify(
 
 fn parse_json<T: DeserializeOwned>(body: &[u8]) -> Result<T, OpenAiOrgApiError> {
     serde_json::from_slice(body).map_err(|_| OpenAiOrgApiError::MalformedJson)
-}
-
-#[derive(Deserialize)]
-struct RawProjectPage {
-    #[serde(default)]
-    data: Vec<RawProject>,
-    #[serde(default)]
-    has_more: bool,
-    #[serde(default)]
-    last_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct RawProject {
-    id: String,
-    name: String,
-    #[serde(default)]
-    created_at: u64,
-    #[serde(default)]
-    archived_at: Option<u64>,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    external_key_id: Option<String>,
-    #[serde(default)]
-    residency: Option<String>,
-}
-
-fn project(raw: RawProject) -> OpenAiOrganizationProject {
-    OpenAiOrganizationProject {
-        id: raw.id,
-        name: raw.name,
-        created_at: raw.created_at,
-        archived_at: raw.archived_at,
-        status: raw.status,
-        external_key_id: raw.external_key_id,
-        residency: raw.residency,
-    }
 }
 
 fn usage_query(query: &OpenAiUsageQuery) -> Vec<(String, String)> {
@@ -639,23 +522,6 @@ mod tests {
         let api = OpenAiOrgApi::production().expect("official origin parses");
         assert_eq!(api.origin().as_str(), PRODUCTION_ORIGIN);
         assert!(!api.origin().as_str().contains("proxy"));
-    }
-
-    #[test]
-    fn project_and_archive_fields_are_preserved() {
-        let page = br#"{"data":[{"id":"proj_1","name":"billing","created_at":10,"archived_at":20,"status":"archived","external_key_id":"ext_1","residency":"us"}],"has_more":false}"#;
-        let parsed: RawProjectPage = parse_json(page).expect("project page");
-        let listing = OpenAiProjectListing {
-            projects: parsed.data.into_iter().map(project).collect(),
-            complete: !parsed.has_more,
-        };
-        assert_eq!(listing.projects[0].archived_at, Some(20));
-        assert_eq!(listing.projects[0].status.as_deref(), Some("archived"));
-        assert_eq!(
-            listing.projects[0].external_key_id.as_deref(),
-            Some("ext_1")
-        );
-        assert_eq!(listing.projects[0].residency.as_deref(), Some("us"));
     }
 
     #[test]

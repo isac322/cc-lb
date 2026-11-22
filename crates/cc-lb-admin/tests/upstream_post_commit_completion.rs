@@ -202,7 +202,6 @@ async fn harness_with(
         storage: Some(storage.clone()),
         key_store: Some(admin_test_common::key_store(storage.clone())),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: admin_test_common::limit_engine(),
         lifecycle,
         dynamic_view: holder.clone(),
         config: Arc::new(config),
@@ -392,11 +391,6 @@ async fn assert_disable_with_failed_audit_rebuilds_view(
 }
 
 #[tokio::test]
-async fn upstream_disable_audit_failure_still_rebuilds_view() {
-    assert_disable_with_failed_audit_rebuilds_view("POST", "/disable", None).await;
-}
-
-#[tokio::test]
 async fn upstream_patch_disable_audit_failure_still_rebuilds_view() {
     assert_disable_with_failed_audit_rebuilds_view("PATCH", "", Some(json!({ "enabled": false })))
         .await;
@@ -468,11 +462,6 @@ async fn assert_disable_with_failed_details_read_rebuilds_view(
 }
 
 #[tokio::test]
-async fn upstream_disable_details_read_failure_still_rebuilds_view() {
-    assert_disable_with_failed_details_read_rebuilds_view("POST", "/disable", None).await;
-}
-
-#[tokio::test]
 async fn upstream_patch_disable_details_read_failure_still_rebuilds_view() {
     assert_disable_with_failed_details_read_rebuilds_view(
         "PATCH",
@@ -497,9 +486,9 @@ async fn upstream_disable_completes_audit_and_rebuild_after_request_is_dropped()
 
     clock.arm();
     let request = tokio::spawn(harness.app.clone().oneshot(admin_request(
-        "POST",
-        &format!("/admin/v1/upstreams/{id}/disable"),
-        None,
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({ "enabled": false })),
         Some("W/\"1\""),
     )));
     tokio::time::timeout(HANG_GUARD, reached.recv())
@@ -536,7 +525,7 @@ async fn upstream_disable_completes_audit_and_rebuild_after_request_is_dropped()
         "the serving view must stop offering the committed-disabled upstream"
     );
 
-    let disable_route = format!("/admin/v1/upstreams/{id}/disable");
+    let disable_route = format!("/admin/v1/upstreams/{id}");
     let entries = harness
         .storage
         .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 10, false)
@@ -548,7 +537,7 @@ async fn upstream_disable_completes_audit_and_rebuild_after_request_is_dropped()
                 && entry
                     .admin_action
                     .as_deref()
-                    .is_some_and(|action| action.starts_with("upstream_disable"))
+                    .is_some_and(|action| action.starts_with("upstream_update"))
         }),
         "the dropped mutation still writes its audit row"
     );

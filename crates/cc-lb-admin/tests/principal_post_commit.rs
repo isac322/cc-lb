@@ -126,7 +126,6 @@ impl Harness {
             storage: Some(storage.clone()),
             key_store: key_store.clone(),
             aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-            limit_engine: admin_test_common::limit_engine(),
             lifecycle: None,
             lazy_refresher: None,
             runtime: None,

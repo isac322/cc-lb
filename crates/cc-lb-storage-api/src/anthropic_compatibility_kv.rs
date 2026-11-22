@@ -32,6 +32,4 @@ pub trait AnthropicCompatibilityKvStore: Send + Sync {
 
     async fn get_compatibility_kv(&self, key: &str)
     -> StorageResult<Option<CompatibilityKvRecord>>;
-
-    async fn list_compatibility_kv(&self) -> StorageResult<Vec<CompatibilityKvRecord>>;
 }

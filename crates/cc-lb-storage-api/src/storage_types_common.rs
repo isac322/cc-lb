@@ -42,19 +42,6 @@ pub struct RequestEventStreamFilters {
     pub exclude_renewal: bool,
 }
 
-/// One page of the operator diagnostics export: rows with
-/// `after_seq < seq <= until_seq`, optionally narrowed to the half-open
-/// `[from_ts_ms, to_ts_ms)` window on the stored list timestamp, in ascending
-/// storage-cursor order and at most `limit` rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RequestEventExportPage {
-    pub after_seq: u64,
-    pub until_seq: u64,
-    pub from_ts_ms: Option<u64>,
-    pub to_ts_ms: Option<u64>,
-    pub limit: usize,
-}
-
 /// Shared body of `MetaStore::verify_schema_current`.
 ///
 /// `expected` is every migration embedded in the binary as
@@ -213,59 +200,6 @@ impl StatusClass {
             Self::FiveXx => (500..=599).contains(&status),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PrincipalLimitKind {
-    Requests,
-    Tokens,
-    InputTokens,
-    OutputTokens,
-}
-
-impl PrincipalLimitKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Requests => "requests",
-            Self::Tokens => "tokens",
-            Self::InputTokens => "input_tokens",
-            Self::OutputTokens => "output_tokens",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PrincipalLimitIdentityKind {
-    Account,
-    Credential,
-    Unobserved,
-}
-
-impl PrincipalLimitIdentityKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Account => "account",
-            Self::Credential => "credential",
-            Self::Unobserved => "unobserved",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PrincipalLimitState {
-    pub principal_id: String,
-    pub identity_kind: PrincipalLimitIdentityKind,
-    pub identity_value: Option<String>,
-    pub account_observed: bool,
-    pub window: String,
-    pub kind: PrincipalLimitKind,
-    pub limit: Option<u64>,
-    pub remaining: Option<u64>,
-    pub reset: Option<String>,
-    pub observed_at_unix_secs: u64,
-    pub stored_at_unix_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

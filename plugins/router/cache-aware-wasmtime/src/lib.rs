@@ -11,9 +11,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::str;
 
-use cc_lb_pdk_wasmtime::types::{
-    ArchivedFilterRequest, ArchivedUpstreamCandidate, FilterResponse, PerCandidateReason,
+use cc_lb_pdk_wasmtime::types::v2::{
+    ArchivedUpstreamCandidate, FilterResponse, PerCandidateReason,
 };
+use cc_lb_pdk_wasmtime::types::v3::ArchivedFilterRequest;
 
 const DEFAULT_KEEP_K: usize = 1;
 const ACCEPT_DECISION: &str = "accept";
@@ -33,7 +34,8 @@ mod cache_aware {
 
     #[cc_lb_pdk_wasmtime::handler(
         filter,
-        wire = 1,
+        provider = "anthropic",
+        wire = 3,
         description = "Filters upstream candidates by cache affinity",
         usage = "Reads the optional keep_k principal claim as a usize and keeps the top candidates by predicted_cache_read_tokens.",
         view

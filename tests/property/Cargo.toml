@@ -18,11 +18,11 @@ test = false
 cc-lb-domain.workspace = true
 bytes.workspace = true
 cc-lb-control.workspace = true
-cc-lb-engine = { path = "../../crates/cc-lb-engine" }
 cc-lb-routing.workspace = true
 http.workspace = true
 proptest.workspace = true
 
 
 [dev-dependencies]
+cc-lb-engine = { path = "../../crates/cc-lb-engine" }
 cc-lb-workspace-hack.workspace = true

@@ -40,7 +40,7 @@ const sources = [
     target: 'src/content/docs/reference/source/scheduler.md',
     title: 'Scheduler source notes',
     description: 'Curated scheduler topology, retry classes, metrics, and runbook sections.',
-    sections: ['Topology Overview', 'Retry Classes', 'Scheduler Failures and Admin Endpoint', 'Metrics List', 'Local vs Durable Rule', 'Operator Runbook'],
+    sections: ['Topology Overview', 'Retry Classes', 'Scheduler Failures and Storage State', 'Metrics List', 'Local vs Durable Rule', 'Operator Runbook'],
   },
   {
     source: 'docs/plugin-author-guide.md',

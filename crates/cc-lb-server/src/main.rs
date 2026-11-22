@@ -5,10 +5,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use cc_lb_server::app::{BuildError, ServeError};
-use cc_lb_server::cli::{
-    AdminCommand, AdminUpstreamsCommand, Cli, Command, ConfigCommand, DoctorCommand,
-};
-use cc_lb_server::doctor::{self, DoctorError};
+use cc_lb_server::cli::{AdminCommand, AdminUpstreamsCommand, Cli, Command, ConfigCommand};
 use cc_lb_server::{run_serve, validate};
 use clap::FromArgMatches;
 use reqwest::{Method, StatusCode};
@@ -50,7 +47,6 @@ enum RunError {
     Serve(cc_lb_server::app::ServeError),
     Cli(clap::Error),
     Admin(AdminCliError),
-    Doctor(DoctorError),
     Runtime(std::io::Error),
     Help(std::io::Error),
 }
@@ -173,17 +169,6 @@ fn main() -> ExitCode {
             eprintln!("admin: failed: {error}");
             ExitCode::FAILURE
         }
-        Err(RunError::Doctor(DoctorError::StorageNotFound { path })) => {
-            eprintln!(
-                "{}",
-                serde_json::json!({ "error": "storage not found", "path": path })
-            );
-            ExitCode::from(2)
-        }
-        Err(RunError::Doctor(error)) => {
-            eprintln!("doctor: failed: {error}");
-            ExitCode::FAILURE
-        }
         Err(RunError::Runtime(error)) => {
             eprintln!("failed to build tokio runtime: {error}");
             ExitCode::FAILURE
@@ -235,17 +220,6 @@ fn run() -> Result<(), RunError> {
         Some(Command::Config {
             command: ConfigCommand::Validate { config },
         }) => validate::run(&config, clock.clone()).map_err(RunError::Validation),
-        Some(Command::Doctor {
-            command: DoctorCommand::ListAbandonedChainEntries,
-        }) => {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(RunError::Runtime)?;
-            runtime
-                .block_on(doctor::run_list_abandoned_chain_entries(clock))
-                .map_err(RunError::Doctor)
-        }
         Some(Command::Admin { base_url, command }) => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()

@@ -36,7 +36,6 @@ pub fn router() -> Router<AdminState> {
         .route(
             "/admin/v1/principals/{id}",
             get(get_principal)
-                .put(update_principal)
                 .patch(update_principal)
                 .delete(delete_principal),
         )

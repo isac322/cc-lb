@@ -4,7 +4,6 @@ use core::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum WireVersion {
-    V1 = 1,
     V2 = 2,
     V3 = 3,
 }
@@ -15,7 +14,6 @@ impl WireVersion {
     }
     pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
-            1 => Some(Self::V1),
             2 => Some(Self::V2),
             3 => Some(Self::V3),
             _ => None,
@@ -23,7 +21,6 @@ impl WireVersion {
     }
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::V1 => "v1",
             Self::V2 => "v2",
             Self::V3 => "v3",
         }
@@ -79,16 +76,6 @@ impl HookKind {
             Self::ShapeEnvelopeGemini => "shape_envelope_gemini",
         }
     }
-    pub const fn export_name(self) -> &'static str {
-        match self {
-            Self::Filter => "cc_lb_filter",
-            Self::Shape => "cc_lb_shape",
-            Self::TransformResponse => "cc_lb_transform_response",
-            Self::TransformSseEvent => "cc_lb_transform_sse_event",
-            Self::TransformRealtimeFrame => "cc_lb_transform_realtime_frame",
-            Self::ShapeEnvelopeGemini => "cc_lb_shape_envelope_gemini",
-        }
-    }
     pub const fn qualified_export_name(self, provider: ProviderFamily) -> &'static str {
         match (self, provider) {
             (Self::Filter, ProviderFamily::Anthropic) => "cc_lb_filter_anthropic",
@@ -119,16 +106,17 @@ impl HookKind {
             (Self::ShapeEnvelopeGemini, _) => "cc_lb_shape_envelope_gemini",
         }
     }
-    /// Legacy bare hooks are Anthropic-only. The envelope hook is Gemini-only.
-    pub fn parse_entrypoint(value: &str) -> Option<(Self, Option<ProviderFamily>)> {
+    /// Entrypoints must be provider-qualified; `shape_envelope_gemini` is Gemini-only.
+    pub fn parse_entrypoint(value: &str) -> Option<(Self, ProviderFamily)> {
         if value == "shape_envelope_gemini" {
-            return Some((Self::ShapeEnvelopeGemini, Some(ProviderFamily::Gemini)));
-        }
-        if let Some(hook) = Self::parse(value) {
-            return Some((hook, None));
+            return Some((Self::ShapeEnvelopeGemini, ProviderFamily::Gemini));
         }
         let (hook, provider) = value.rsplit_once('_')?;
-        Some((Self::parse(hook)?, Some(ProviderFamily::parse(provider)?)))
+        let hook = Self::parse(hook)?;
+        if hook == Self::ShapeEnvelopeGemini {
+            return None;
+        }
+        Some((hook, ProviderFamily::parse(provider)?))
     }
     pub const fn section_prefix(self) -> &'static str {
         match self {
@@ -146,6 +134,7 @@ impl HookKind {
         Self::TransformResponse,
         Self::TransformSseEvent,
         Self::TransformRealtimeFrame,
+        Self::ShapeEnvelopeGemini,
     ];
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -164,13 +153,10 @@ impl fmt::Display for HookKind {
         f.write_str(self.as_str())
     }
 }
-pub const HOST_SUPPORTED_FILTER_VERSIONS: &[WireVersion] =
-    &[WireVersion::V1, WireVersion::V2, WireVersion::V3];
-pub const HOST_SUPPORTED_SHAPE_VERSIONS: &[WireVersion] = &[WireVersion::V1, WireVersion::V2];
-pub const HOST_SUPPORTED_TRANSFORM_RESPONSE_VERSIONS: &[WireVersion] =
-    &[WireVersion::V1, WireVersion::V2];
-pub const HOST_SUPPORTED_TRANSFORM_SSE_EVENT_VERSIONS: &[WireVersion] =
-    &[WireVersion::V1, WireVersion::V2];
+pub const HOST_SUPPORTED_FILTER_VERSIONS: &[WireVersion] = &[WireVersion::V3];
+pub const HOST_SUPPORTED_SHAPE_VERSIONS: &[WireVersion] = &[WireVersion::V2];
+pub const HOST_SUPPORTED_TRANSFORM_RESPONSE_VERSIONS: &[WireVersion] = &[WireVersion::V2];
+pub const HOST_SUPPORTED_TRANSFORM_SSE_EVENT_VERSIONS: &[WireVersion] = &[WireVersion::V2];
 pub const HOST_SUPPORTED_TRANSFORM_REALTIME_FRAME_VERSIONS: &[WireVersion] = &[WireVersion::V2];
 pub const HOST_SUPPORTED_SHAPE_ENVELOPE_GEMINI_VERSIONS: &[WireVersion] = &[WireVersion::V2];
 pub fn host_supported_versions(hook: HookKind) -> &'static [WireVersion] {

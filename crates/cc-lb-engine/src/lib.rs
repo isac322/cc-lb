@@ -37,8 +37,6 @@ pub mod instrumented_connector;
 pub mod lifecycle;
 pub mod lifecycle_api_key_metrics_subscriber;
 pub mod lifecycle_cache_hit_miss_subscriber;
-#[cfg(not(loom))]
-pub mod lifecycle_cache_observation_subscriber;
 pub mod lifecycle_event_assembler;
 pub mod lifecycle_event_logger;
 pub mod lifecycle_limit_reconcile_subscriber;
@@ -50,8 +48,6 @@ pub mod lifecycle_routing_tier_subscriber;
 pub mod lifecycle_subscription_quota_subscriber;
 #[cfg(not(loom))]
 mod limit_input_estimate;
-#[cfg(not(loom))]
-pub mod limit_state_writer;
 pub mod metrics_labels;
 #[cfg(not(loom))]
 pub mod model_resolution;
@@ -147,10 +143,6 @@ pub use lifecycle_api_key_metrics_subscriber::{
 pub use lifecycle_cache_hit_miss_subscriber::{
     CacheHitMissSubscriberHandle, spawn_lifecycle_cache_hit_miss_subscriber,
 };
-#[cfg(not(loom))]
-pub use lifecycle_cache_observation_subscriber::{
-    CacheObservationSubscriberHandle, spawn_lifecycle_cache_observation_subscriber,
-};
 pub use lifecycle_event_assembler::{
     RequestEventAssemblerHandle, spawn_request_event_assembler,
     spawn_request_event_assembler_with_diagnostics,
@@ -173,18 +165,12 @@ pub use lifecycle_routing_tier_subscriber::{
 pub use lifecycle_subscription_quota_subscriber::{
     SubscriptionQuotaSubscriberHandle, spawn_lifecycle_subscription_quota_subscriber,
 };
-#[cfg(not(loom))]
-pub use limit_state_writer::{
-    PrincipalLimitStateEnqueueError, PrincipalLimitStateSink, start_principal_limit_state_writer,
-};
 pub use metrics_labels::{
-    NotifyDropReason, NotifyHttpOutcome, NotifySentOutcome, PartialTrigger,
-    PgListenerReconnectReason, ResetReason,
+    NotifyDropReason, NotifySentOutcome, PartialTrigger, PgListenerReconnectReason, ResetReason,
 };
 #[cfg(not(loom))]
 pub use pg_notify_fanout::{
-    DEFAULT_PG_NOTIFY_CHANNEL, PARTIAL_NOTIFY_MPSC_CAPACITY, PartialRetentionCache, PgListener,
-    PgNotifier, PgNotifyFanout,
+    DEFAULT_PG_NOTIFY_CHANNEL, PARTIAL_NOTIFY_MPSC_CAPACITY, PgListener, PgNotifier, PgNotifyFanout,
 };
 #[cfg(not(loom))]
 pub use provider_capability::is_unscoped_gemini_http_route;

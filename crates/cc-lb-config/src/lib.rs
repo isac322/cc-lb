@@ -10,21 +10,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use figment::Figment;
-use figment::providers::{Env, Format, Serialized, Toml};
+use figment::providers::{Env, Format, Toml};
 use thiserror::Error;
 
 pub use types::{
     ADMIN_AUTH_PROVIDERS_JSON_ENV, AdminAuthConfig, AdminAuthProviderConfig, AdminConfig,
     AnthropicOAuthConfig, AntigravityOAuthConfig, BodyConfig, BulkheadConfig, CircuitBreakerConfig,
-    ClusterConfig, Config, ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_CLUSTER_TOKEN_ENV,
-    DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV,
-    DEFAULT_SQLITE_PATH, DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS, EventBusConfig, GeminiOAuthConfig,
-    LONG_LIVED_ACCESS_TOKEN_EXPIRES_IN_SECS, LONG_LIVED_MIN_GRANT_SECS, ListenerConfig,
-    ListenerOverrides, ObservabilityConfig, OpenAiOAuthConfig, PluginWireBounds,
-    PostgresPoolConfig, PriceCatalogConfig, PromptCacheShadowConfig, RecurringJobConfig,
-    RuntimeConfig, SchedulerConfig, SchedulerPoolConfig, ShapeOriginPolicy, StorageConfig,
-    SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig, UnknownOpenaiReasoningPolicy,
-    UpstreamAffinityConfig, WarmupConfig, WasmtimeAllocationStrategy, WasmtimeConfig,
+    Config, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES,
+    DEFAULT_OAUTH_AEAD_KEY_ENV, DEFAULT_SQLITE_PATH, DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS,
+    EventBusConfig, GeminiOAuthConfig, LONG_LIVED_ACCESS_TOKEN_EXPIRES_IN_SECS,
+    LONG_LIVED_MIN_GRANT_SECS, ListenerConfig, ObservabilityConfig, OpenAiOAuthConfig,
+    PluginWireBounds, PostgresPoolConfig, PriceCatalogConfig, PromptCacheShadowConfig,
+    RecurringJobConfig, RuntimeConfig, SchedulerConfig, SchedulerPoolConfig, ShapeOriginPolicy,
+    StorageConfig, SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig,
+    UnknownOpenaiReasoningPolicy, UpstreamAffinityConfig, WarmupConfig, WasmtimeAllocationStrategy,
+    WasmtimeConfig,
 };
 pub use validation::{ValidationError, validate_postgres_url};
 
@@ -63,17 +63,9 @@ impl From<figment::Error> for ConfigError {
 
 impl Config {
     pub fn load(toml_path: &Path) -> Result<Self, ConfigError> {
-        Self::load_with_overrides(toml_path, ConfigOverrides::default())
-    }
-
-    pub fn load_with_overrides(
-        toml_path: &Path,
-        cli_overrides: ConfigOverrides,
-    ) -> Result<Self, ConfigError> {
         let mut config: Config = Figment::new()
             .merge(Toml::file_exact(toml_path))
             .merge(Self::config_env())
-            .merge(Serialized::defaults(cli_overrides))
             .extract()?;
 
         config.apply_admin_auth_env_override()?;
@@ -85,14 +77,10 @@ impl Config {
         Ok(Figment::from(Toml::string(raw_toml)).extract()?)
     }
 
-    pub fn from_stored_toml_with_env(
-        raw_toml: &str,
-        cli_overrides: ConfigOverrides,
-    ) -> Result<Self, ConfigError> {
+    pub fn from_stored_toml_with_env(raw_toml: &str) -> Result<Self, ConfigError> {
         let mut config: Config = Figment::new()
             .merge(Toml::string(raw_toml))
             .merge(Self::config_env())
-            .merge(Serialized::defaults(cli_overrides))
             .extract()?;
         config.apply_admin_auth_env_override()?;
         Ok(config)
@@ -118,7 +106,6 @@ impl Config {
                     ADMIN_AUTH_PROVIDERS_JSON_ENV
                         | DEFAULT_ADMIN_TOKEN_ENV
                         | DEFAULT_OAUTH_AEAD_KEY_ENV
-                        | DEFAULT_CLUSTER_TOKEN_ENV
                 ) {
                     return None;
                 }
@@ -263,4 +250,58 @@ fn schema_has_path(root: &Value, schema: &Value, segments: &[String]) -> bool {
     schema
         .get("items")
         .is_some_and(|items| schema_has_path(root, items, remaining))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    use super::*;
+
+    const LEGACY_CLUSTER_ENV_CHILD: &str = "CC_LB_TEST_LEGACY_CLUSTER_ENV_CHILD";
+
+    #[test]
+    fn legacy_cluster_env_vars_are_safely_ignored() {
+        if std::env::var_os(LEGACY_CLUSTER_ENV_CHILD).is_some() {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let config_path = dir.path().join("config.toml");
+            std::fs::write(&config_path, "[listener]\n").expect("write config");
+
+            let loaded = Config::load(&config_path).expect("legacy cluster envs must be ignored");
+            assert_eq!(loaded, Config::default());
+
+            let stored = Config::from_stored_toml_with_env("[listener]\n")
+                .expect("stored load ignores legacy cluster envs");
+            assert_eq!(stored, Config::default());
+
+            let overrides = Config::environment_overrides();
+            for legacy_env in [
+                "CC_LB_CLUSTER__INSTANCE_URL",
+                "CC_LB_CLUSTER__TOKEN_ENV",
+                "CC_LB_CLUSTER_TOKEN",
+            ] {
+                assert!(
+                    !overrides.iter().any(|entry| entry.name == legacy_env),
+                    "{legacy_env} must not appear in environment_overrides"
+                );
+            }
+            return;
+        }
+
+        let output = Command::new(std::env::current_exe().expect("current test exe"))
+            .arg("--exact")
+            .arg("tests::legacy_cluster_env_vars_are_safely_ignored")
+            .env(LEGACY_CLUSTER_ENV_CHILD, "1")
+            .env("CC_LB_CLUSTER__INSTANCE_URL", "http://cc-lb.example:9091")
+            .env("CC_LB_CLUSTER__TOKEN_ENV", "CC_LB_CLUSTER_TOKEN")
+            .env("CC_LB_CLUSTER_TOKEN", "legacy-cluster-secret")
+            .output()
+            .expect("spawn child test");
+        assert!(
+            output.status.success(),
+            "child failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

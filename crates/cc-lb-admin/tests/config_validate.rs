@@ -54,7 +54,7 @@ async fn invalid_draft_returns_structured_dual_validation_and_persists_report() 
         ));
     }
 
-    let (_, _, draft, _) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
+    let (_, _, draft, _) = authed_json(app, "GET", "/admin/v1/config/editor", None).await;
     assert_eq!(draft["last_validated_revision"], serde_json::Value::Null);
     assert_eq!(draft["last_validation"], report);
 }
@@ -78,7 +78,7 @@ async fn valid_draft_marks_exact_revision_valid() {
         Some(json!({ "expected_revision": 1 })),
     )
     .await;
-    let (_, _, draft, _) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
+    let (_, _, draft, _) = authed_json(app, "GET", "/admin/v1/config/editor", None).await;
 
     assert_eq!(report["file"]["valid"], true);
     assert_eq!(report["effective"]["valid"], true);
@@ -150,7 +150,7 @@ async fn unknown_recurring_scheduler_job_is_rejected_at_its_dynamic_path() {
     );
     assert_eq!(file_issues[0]["code"], "unknown_recurring_job");
 
-    let (_, _, persisted, _) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
+    let (_, _, persisted, _) = authed_json(app, "GET", "/admin/v1/config/editor", None).await;
     assert_eq!(
         persisted["draft"]["scheduler"]["recurring_jobs"]["not_a_runtime_job"],
         json!({
@@ -167,7 +167,6 @@ async fn storage_url_sentinel_requires_file_source_or_transient_replacement() {
     let app = app_with_file(&dir, storage);
     let draft = json!({
         "storage": { "kind": "postgres", "url": "replacement is transient" },
-        "cluster": { "instance_url": "https://node.example" },
     });
     let _ = authed_json(
         app.clone(),
@@ -211,7 +210,6 @@ async fn transient_storage_url_replacement_populates_an_absent_file_field() {
     let app = app_with_file(&dir, storage);
     let draft = json!({
         "storage": { "kind": "postgres" },
-        "cluster": { "instance_url": "https://node.example" },
     });
     let _ = authed_json(
         app.clone(),
@@ -284,7 +282,6 @@ async fn env_only_required_value_is_a_file_warning_and_valid_effective_value() {
         let app = app_with_file(&dir, storage);
         let draft = json!({
             "storage": { "kind": "postgres" },
-            "cluster": { "instance_url": "https://node.example" },
         });
         let _ = authed_json(
             app.clone(),

@@ -316,9 +316,6 @@ where
         ensure!(legacy.status == Some(CacheKeepaliveSessionStatus::Terminal));
         ensure!(legacy.terminal_reason == Some(CacheKeepaliveTerminalReason::Cancelled));
         ensure!(!legacy.request_incomplete && legacy.cancel_reason.as_deref() == Some("new_request"));
-        let summary_input = storage.read_cache_keepalive_summary_input(TARGET_PRINCIPAL, 0).await?;
-        ensure!(summary_input.sessions.iter().filter(|row| row.status == Some(CacheKeepaliveSessionStatus::InRequest)).count() == 2);
-        ensure!(summary_input.sessions.iter().filter(|row| row.request_incomplete).count() == 1);
 
         // The projections and every filter must agree, including pagination and
         // the cancellation-without-turns visibility rule.

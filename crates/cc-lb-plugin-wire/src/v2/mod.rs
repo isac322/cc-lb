@@ -1,8 +1,4 @@
-//! Provider-qualified wire schema version 2.
-//!
-//! V2 adds provider/upstream identity to shape and response hooks and exposes
-//! subscription quota samples to filters. Legacy V1 remains byte-for-byte
-//! unchanged and is selected from the guest's declared metadata.
+//! Provider-qualified wire schema version 2 (shape-family and response types).
 
 use alloc::boxed::Box;
 use rkyv::{Archive, Deserialize, Serialize, with::InlineAsBox};
@@ -176,46 +172,6 @@ pub struct HeaderRef<'a> {
     pub name: &'a str,
     #[rkyv(with = InlineAsBox)]
     pub value: &'a [u8],
-}
-
-#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
-#[rkyv(derive(Debug))]
-pub struct FilterRequest {
-    pub request_id: Box<str>,
-    pub thread_id: Option<Box<str>>,
-    pub service_tier: Option<Box<str>>,
-    pub canonical_model_id: Box<str>,
-    pub cache_pricing: CachePricingSummary,
-    pub method: Box<str>,
-    pub path: Box<str>,
-    pub query: Option<Box<str>>,
-    pub headers: Box<[Header]>,
-    pub body: Box<[u8]>,
-    pub principal: Principal,
-    pub candidates: Box<[UpstreamCandidate]>,
-}
-
-#[derive(Archive, Serialize)]
-pub struct FilterRequestRef<'a> {
-    #[rkyv(with = InlineAsBox)]
-    pub request_id: &'a str,
-    pub thread_id: Option<OptionalStrRef<'a>>,
-    pub service_tier: Option<OptionalStrRef<'a>>,
-    #[rkyv(with = InlineAsBox)]
-    pub canonical_model_id: &'a str,
-    pub cache_pricing: CachePricingSummaryRef<'a>,
-    #[rkyv(with = InlineAsBox)]
-    pub method: &'a str,
-    #[rkyv(with = InlineAsBox)]
-    pub path: &'a str,
-    pub query: Option<OptionalStrRef<'a>>,
-    #[rkyv(with = InlineAsBox)]
-    pub headers: &'a [HeaderRef<'a>],
-    #[rkyv(with = InlineAsBox)]
-    pub body: &'a [u8],
-    pub principal: PrincipalRef<'a>,
-    #[rkyv(with = InlineAsBox)]
-    pub candidates: &'a [UpstreamCandidateRef<'a>],
 }
 
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]

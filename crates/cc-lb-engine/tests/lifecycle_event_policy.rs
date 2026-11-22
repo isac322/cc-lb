@@ -183,7 +183,6 @@ fn lifecycle_event_assembler_matches_are_explicit_and_documented() {
             "UpstreamQuotaFrameObserved",
             "RequestFundingObserved",
             "RequestActivity",
-            "CacheObserved",
         ],
     );
     assert_policy(

@@ -52,8 +52,6 @@ mod events_stream;
 mod export_supported_slots;
 #[path = "insert_chain_validates_wire_version.rs"]
 mod insert_chain_validates_wire_version;
-#[path = "internal_partials.rs"]
-mod internal_partials;
 #[path = "new_admin_modules_smoke.rs"]
 mod new_admin_modules_smoke;
 #[path = "oauth_post_commit_completion.rs"]
@@ -72,8 +70,6 @@ mod principals_cache_keepalive_roundtrip;
 mod principals_openai_oauth_compat_roundtrip;
 #[path = "reorder_rebalance_revalidates_slot.rs"]
 mod reorder_rebalance_revalidates_slot;
-#[path = "scheduler_admin.rs"]
-mod scheduler_admin;
 #[path = "snapshot_audit_query.rs"]
 mod snapshot_audit_query;
 #[path = "static_assets_cache.rs"]

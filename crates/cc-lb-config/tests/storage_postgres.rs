@@ -110,9 +110,6 @@ fn test_tagged_postgres_parses() {
         r#"[storage]
 kind = "postgres"
 url = "postgres://localhost/db"
-
-[cluster]
-instance_url = "http://127.0.0.1:9090"
 "#,
     )
     .unwrap();

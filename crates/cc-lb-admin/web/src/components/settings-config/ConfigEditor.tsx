@@ -67,7 +67,6 @@ import {
   unsetConfigValue,
 } from '../../lib/configEditorModel';
 import {
-  useConfigDraft,
   useConfigEditor,
   useSaveConfigFile,
   useSaveDraft,
@@ -747,7 +746,6 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
   onNavigate,
 }: ConfigEditorSectionProps) {
   const editorQuery = useConfigEditor();
-  const draftQuery = useConfigDraft();
   const saveDraft = useSaveDraft();
   const validate = useValidateConfig();
   const saveFile = useSaveConfigFile();
@@ -781,13 +779,12 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
   const handledFieldRef = useRef<string | null>(null);
 
   const editorData = editorQuery.data;
-  const draftData = draftQuery.data ?? editorData;
 
   useEffect(() => {
-    if (!editorData || !draftData) return;
-    const source = draftData.draft ?? editorData.file_config ?? {};
+    if (!editorData) return;
+    const source = editorData.draft ?? editorData.file_config ?? {};
     if (!isJsonObject(source)) return;
-    const revision = draftData.revision;
+    const revision = editorData.revision;
     setState((current) => {
       if (current && !isSameJson(current.value, current.saved)) return current;
       if (current && current.revision > revision) return current;
@@ -795,8 +792,8 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
       if (
         current &&
         current.revision === revision &&
-        current.hasSavedDraft === (draftData.draft !== null) &&
-        current.savedAtUnixSecs === draftData.saved_at_unix_secs &&
+        current.hasSavedDraft === (editorData.draft !== null) &&
+        current.savedAtUnixSecs === editorData.saved_at_unix_secs &&
         isSameJson(current.value, nextSaved) &&
         isSameJson(current.saved, nextSaved)
       ) {
@@ -806,11 +803,11 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
         value: nextSaved,
         saved: cloneJson(nextSaved),
         revision,
-        savedAtUnixSecs: draftData.saved_at_unix_secs,
-        hasSavedDraft: draftData.draft !== null,
+        savedAtUnixSecs: editorData.saved_at_unix_secs,
+        hasSavedDraft: editorData.draft !== null,
       };
     });
-  }, [draftData, editorData]);
+  }, [editorData]);
 
   // URL → local state sync (tolerant: unknown categories fall back, deep-link
   // fields open their category and Advanced disclosure before focusing).
@@ -844,7 +841,7 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
   }, [searchOpen]);
 
   const dirty = state ? !isSameJson(state.value, state.saved) : false;
-  const serverRevision = draftData?.revision ?? null;
+  const serverRevision = editorData?.revision ?? null;
   const stale =
     state !== null &&
     serverRevision !== null &&
@@ -854,8 +851,8 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
     state !== null &&
     localValidation.revision === state.revision &&
     localValidation.storageUrlReplacement === storageUrlReplacement;
-  const storedValidation = draftData?.last_validation ?? null;
-  const storedValidatedRevision = draftData?.last_validated_revision ?? null;
+  const storedValidation = editorData?.last_validation ?? null;
+  const storedValidatedRevision = editorData?.last_validated_revision ?? null;
   const serverReportMatches =
     storageUrlReplacement === null &&
     state !== null &&
@@ -1234,9 +1231,8 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
     }
   };
 
-  const loading = !editorData || !draftData || !state;
-  const loadError =
-    (!editorData && editorQuery.isError) || (!draftData && draftQuery.isError);
+  const loading = !editorData || !state;
+  const loadError = !editorData && editorQuery.isError;
 
   return (
     <Section
@@ -1260,10 +1256,9 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
               <Button
                 size="sm"
                 className={PHONE_TARGET_CLASS}
-                loading={editorQuery.isFetching || draftQuery.isFetching}
+                loading={editorQuery.isFetching}
                 onClick={() => {
-                  if (!editorData) void editorQuery.refetch();
-                  if (!draftData) void draftQuery.refetch();
+                  void editorQuery.refetch();
                 }}
               >
                 Retry
@@ -1985,7 +1980,7 @@ function CategoryTabs({
 }
 
 /**
- * Compact header search: the input lives in the CardHeader action row and the
+ * Compact header search: the input lives in the header action row and the
  * result list is an absolute overlay anchored to the wrapper, so opening or
  * closing it never changes the panel's document flow or height. Escape,
  * outside pointerdown, and focus leaving the wrapper close the overlay but

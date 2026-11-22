@@ -12,38 +12,60 @@ fn realtime_frame_handler_parses() {
     .expect("realtime frame handler parses");
 
     assert_eq!(args.kind, super::HandlerKind::TransformRealtimeFrame);
-    assert_eq!(args.provider, Some(super::ProviderFamily::Openai));
+    assert_eq!(args.provider, super::ProviderFamily::Openai);
 }
 
 #[test]
-fn provider_qualified_handler_accepts_wire_two() {
+fn filter_handler_accepts_wire_three() {
     let args = syn::parse2::<HandlerArgs>(quote::quote!(
         filter,
         provider = "openai",
-        wire = 2,
-        description = "OpenAI V2 filter",
+        wire = 3,
+        description = "OpenAI V3 filter",
         usage = "Test only"
     ))
-    .expect("provider-qualified wire 2 filter parses");
+    .expect("provider-qualified wire 3 filter parses");
 
-    assert_eq!(args.provider, Some(super::ProviderFamily::Openai));
-    assert_eq!(args.wire_version, 2);
+    assert_eq!(args.provider, super::ProviderFamily::Openai);
+    assert_eq!(args.wire_version, 3);
+    assert_eq!(
+        args.kind.dispatch_helper(args.wire_version, false),
+        Some("run_filter_v3")
+    );
+    assert_eq!(
+        args.kind.dispatch_helper(args.wire_version, true),
+        Some("run_filter_v3_view")
+    );
 }
 
 #[test]
-fn legacy_handler_rejects_wire_two() {
+fn filter_handler_rejects_wire_one_and_two() {
+    for wire in [1u8, 2] {
+        let result = syn::parse2::<HandlerArgs>(quote::quote!(
+            filter,
+            provider = "openai",
+            wire = #wire,
+            description = "Legacy filter wire",
+            usage = "Test only"
+        ));
+        assert!(result.is_err(), "filter wire {wire} must be rejected");
+    }
+}
+
+#[test]
+fn handler_requires_provider() {
     let result = syn::parse2::<HandlerArgs>(quote::quote!(
         filter,
-        wire = 2,
-        description = "Unsupported legacy filter wire",
+        wire = 3,
+        description = "Bare handler",
         usage = "Test only"
     ));
     let Err(error) = result else {
-        panic!("legacy wire 2 must remain unsupported")
+        panic!("bare handler without provider must be rejected")
     };
-
-    assert!(error.to_string().contains("provider-qualified"));
+    assert!(error.to_string().contains("provider"));
 }
+
 #[test]
 fn shape_envelope_gemini_requires_gemini_provider_and_wire_two() {
     let args = syn::parse2::<HandlerArgs>(quote::quote!(
@@ -79,30 +101,26 @@ fn shape_envelope_gemini_rejects_non_gemini_provider() {
 }
 
 #[test]
-fn provider_qualified_handler_parses() {
-    let args = syn::parse2::<HandlerArgs>(quote::quote!(
+fn provider_qualified_shape_handler_rejects_wire_one_and_accepts_wire_two() {
+    let err = syn::parse2::<HandlerArgs>(quote::quote!(
         shape,
         provider = "openai",
         wire = 1,
-        description = "OpenAI shape",
+        description = "OpenAI shape V1",
         usage = "Test only"
-    ))
-    .expect("provider-qualified handler parses");
+    ));
+    assert!(err.is_err());
 
-    assert_eq!(args.provider, Some(super::ProviderFamily::Openai));
-}
-
-#[test]
-fn legacy_handler_has_no_provider_suffix() {
     let args = syn::parse2::<HandlerArgs>(quote::quote!(
-        filter,
-        wire = 1,
-        description = "Legacy filter",
+        shape,
+        provider = "openai",
+        wire = 2,
+        description = "OpenAI shape V2",
         usage = "Test only"
     ))
-    .expect("legacy handler parses");
-    assert_eq!(args.provider, None);
-    assert_eq!(args.kind.export_name(args.provider), "cc_lb_filter");
+    .expect("provider-qualified wire 2 shape parses");
+    assert_eq!(args.provider, super::ProviderFamily::Openai);
+    assert_eq!(args.wire_version, 2);
 }
 
 #[test]
@@ -113,6 +131,7 @@ fn all_handler_exports_match_the_provider_contract() {
         HandlerKind::Shape,
         HandlerKind::TransformResponse,
         HandlerKind::TransformSseEvent,
+        HandlerKind::TransformRealtimeFrame,
     ] {
         for provider in [
             ProviderFamily::Anthropic,
@@ -120,7 +139,7 @@ fn all_handler_exports_match_the_provider_contract() {
             ProviderFamily::Gemini,
         ] {
             assert_eq!(
-                kind.export_name(Some(provider)),
+                kind.export_name(provider),
                 format!("cc_lb_{}_{}", kind.wire_name(), provider.as_str())
             );
         }
@@ -132,7 +151,7 @@ fn unknown_provider_is_rejected() {
     let result = syn::parse2::<HandlerArgs>(quote::quote!(
         shape,
         provider = "other",
-        wire = 1,
+        wire = 2,
         description = "Unsupported provider",
         usage = "Test only"
     ));

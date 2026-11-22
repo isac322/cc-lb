@@ -909,22 +909,10 @@ mod sqlite {
         let adaptive = Workers::start(&backend, fixed(retry.clone()), ADAPTIVE_QUEUE, 1).await?;
         let cron = Workers::start(&backend, fixed(retry), CRON_QUEUE, 1).await?;
         let warmup = settled(&pool, &warmup_key, "Pending", 1).await?;
-        let recurring = settled(&pool, "admin-cron", "Pending", 1).await?;
-        assert!(admin.list_failures(None, 100, 0).await?.is_empty());
+        settled(&pool, "admin-cron", "Pending", 1).await?;
         assert_eq!(
             admin.next_run_for_upstream(upstream_id, "warmup").await?,
             Some(warmup.run_at)
-        );
-        let config = SchedulerConfig::default();
-        let snapshot = admin.status(&config).await?;
-        assert_eq!(
-            snapshot
-                .recurring_jobs
-                .iter()
-                .find(|job| job.name == "apalis_housekeeping")
-                .context("housekeeping configured")?
-                .next_run_at,
-            Some(u64::try_from(recurring.run_at)?)
         );
         adaptive.stop().await?;
         cron.stop().await?;
@@ -937,48 +925,8 @@ mod sqlite {
         settled(&pool, "admin-cron", "Killed", 2).await?;
         adaptive.stop().await?;
         cron.stop().await?;
-        enqueue(&backend, ADAPTIVE_QUEUE, "admin-zero", Uuid::new_v4(), None).await?;
-        let workers = Workers::start(
-            &backend,
-            fixed(JobOutcome::Retry {
-                delay: Some(Duration::ZERO),
-            }),
-            ADAPTIVE_QUEUE,
-            1,
-        )
-        .await?;
-        settled(&pool, "admin-zero", "Killed", 1).await?;
-        workers.stop().await?;
-        // Verify the admin's existing secret redaction on a terminal result.
-        sqlx::query("UPDATE Jobs SET last_result = ?1 WHERE idempotency_key = 'admin-zero'")
-            .bind(r#"{"Err":"Bearer secret-lifecycle-token"}"#)
-            .execute(&pool)
-            .await?;
-        let failures = admin.list_failures(None, 100, 0).await?;
-        assert_eq!(failures.len(), 3);
-        assert!(
-            failures
-                .iter()
-                .all(|failure| !failure.last_error.contains("secret-lifecycle-token"))
-        );
-        assert!(
-            failures
-                .iter()
-                .any(|failure| failure.last_error == "<redacted>")
-        );
         assert_eq!(
             admin.next_run_for_upstream(upstream_id, "warmup").await?,
-            None
-        );
-        assert_eq!(
-            admin
-                .status(&config)
-                .await?
-                .recurring_jobs
-                .iter()
-                .find(|job| job.name == "apalis_housekeeping")
-                .context("housekeeping status")?
-                .next_run_at,
             None
         );
         Ok(())

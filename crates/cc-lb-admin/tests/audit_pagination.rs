@@ -22,7 +22,6 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         storage: Some(storage.clone()),
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(config),

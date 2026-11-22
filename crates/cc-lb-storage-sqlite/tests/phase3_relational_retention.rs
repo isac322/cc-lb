@@ -2,9 +2,9 @@ use std::{path::Path, str::FromStr, sync::Arc};
 
 use cc_lb_storage_api::{
     CacheKeepaliveEvidenceRow, CacheKeepaliveReplaceRequest, CacheKeepaliveSessionStore, CacheTtl,
-    MetaStore, PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, RequestEvent,
-    RequestEventExportPage, RequestEventKind, RequestEventStore, RequestEventStreamFilters,
-    SubscriptionQuotaWindow, UsageRollupResolution, UsageRollupStore,
+    MetaStore, PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, RequestEvent, RequestEventKind,
+    RequestEventStore, RequestEventStreamFilters, SubscriptionQuotaWindow, UsageRollupResolution,
+    UsageRollupStore,
 };
 use sqlx::{Connection, Row, migrate::Migrator, sqlite::SqliteConnectOptions};
 use uuid::Uuid;
@@ -156,17 +156,6 @@ async fn every_relational_scalar_roundtrips_without_persisting_diagnostics() {
         .await
         .expect("read cursor page");
     assert_eq!(page, vec![(cursor, expected.clone())]);
-    let exported = storage
-        .export_request_events(&RequestEventExportPage {
-            after_seq: 0,
-            until_seq: cursor,
-            limit: 10,
-            from_ts_ms: None,
-            to_ts_ms: None,
-        })
-        .await
-        .expect("export relational values");
-    assert_eq!(exported, vec![(cursor, expected)]);
     let columns = sqlx::query("PRAGMA table_info(request_events_v1)")
         .fetch_all(storage.pool())
         .await

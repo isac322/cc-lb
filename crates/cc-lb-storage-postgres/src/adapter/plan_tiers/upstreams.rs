@@ -93,27 +93,6 @@ pub(super) async fn list_current(
     rows.into_iter().map(row_to_record).collect()
 }
 
-pub(super) async fn list_as_of(
-    storage: &PostgresStorage,
-    as_of_unix_millis: i64,
-) -> StorageResult<Vec<UpstreamPlanTierRecord>> {
-    let rows = sqlx::query(
-        "SELECT upstream_id, organization_uuid, organization_type, rate_limit_tier, seat_tier, \
-                tier_key, resolution_source, resolved_ratio_snapshot, observed_at_unix_millis, \
-                effective_from_unix_millis, effective_to_unix_millis, provenance, \
-                created_at_unix_millis \
-         FROM upstream_plan_tier_history_v1 \
-         WHERE effective_from_unix_millis <= $1 \
-           AND (effective_to_unix_millis IS NULL OR effective_to_unix_millis > $1) \
-         ORDER BY upstream_id ASC",
-    )
-    .bind(as_of_unix_millis)
-    .fetch_all(&storage.pool)
-    .await
-    .map_err(map_sqlx_error)?;
-    rows.into_iter().map(row_to_record).collect()
-}
-
 fn row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<UpstreamPlanTierRecord> {
     let source_text = row
         .try_get::<String, _>("resolution_source")

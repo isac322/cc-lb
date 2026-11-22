@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use super::{ConformanceSuite, fixtures};
 use cc_lb_plugin_wire::{
-    ProviderFamily, Upstream,
+    ProviderFamily,
     schema::{HookKind, WireSchema},
+    v2, v3,
 };
 use rkyv::rancor::Error as RkyvError;
 
@@ -123,8 +124,9 @@ fn run_exercises_cache_aware_filter() {
 
 #[test]
 fn dual_slot_artifact_preserves_native_requests_and_independent_roles() {
+    use std::collections::HashSet;
+
     use super::ShapeWireRequest;
-    use cc_lb_plugin_wire::v2;
     use cc_lb_runtime_wasmtime::{RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch};
 
     let wasm = std::fs::read(wasm_fixture_path("wasmtime_dual_slot.wasm"))
@@ -155,13 +157,14 @@ fn dual_slot_artifact_preserves_native_requests_and_independent_roles() {
         let shape_slot = runtime
             .register_shape(shape_key.clone(), "dual-slot-conformance", &wasm)
             .expect("same artifact and principal must register in both roles");
-        assert_eq!(runtime.slot_count(), 2);
+        assert!(runtime.get_slot(session.slot_key()).is_some());
+        assert!(runtime.get_slot(&shape_key).is_some());
         assert_ne!(session.slot_key(), &shape_key);
         let shape_dispatch = WasmPluginWireDispatch::from_slot(shape_slot, runtime.config_arc())
             .for_provider(provider)
             .expect("dual-slot fixture exports the selected shape provider");
 
-        let mut filter_request = fixtures::sample_filter_request_v2(provider);
+        let mut filter_request = fixtures::sample_filter_request_v3(provider);
         filter_request.path = Box::from(path);
         filter_request.body = Box::from(raw_body);
         let accepted = session.call_filter_wire(filter_request.clone());
@@ -173,11 +176,11 @@ fn dual_slot_artifact_preserves_native_requests_and_independent_roles() {
         assert_eq!(accepted.results[0].decision.as_ref(), "accept");
         assert_eq!(
             accepted.results[0].reason.as_ref(),
-            "qa-qualified-filter-v2"
+            "qa-qualified-filter-v3"
         );
 
         let mut reject_headers = filter_request.headers.into_vec();
-        reject_headers.push(v2::Header {
+        reject_headers.push(v3::Header {
             name: Box::from("x-qa-reject"),
             value: Box::from(b"1".as_slice()),
         });
@@ -191,7 +194,7 @@ fn dual_slot_artifact_preserves_native_requests_and_independent_roles() {
         assert_eq!(rejected.results[0].decision.as_ref(), "reject");
         assert_eq!(
             rejected.results[0].reason.as_ref(),
-            "qa-qualified-filter-v2"
+            "qa-qualified-filter-v3"
         );
 
         let mut shape_request = fixtures::sample_shape_request_v2(provider);
@@ -232,10 +235,11 @@ fn dual_slot_artifact_preserves_native_requests_and_independent_roles() {
         };
         assert_shape();
 
-        assert!(runtime.evict_slot(session.slot_key()));
+        let keep = HashSet::from([shape_key.clone()]);
+        let evicted = runtime.retain_slots(&keep);
+        assert_eq!(evicted, vec![session.slot_key().clone()]);
         assert!(runtime.get_slot(session.slot_key()).is_none());
         assert!(runtime.get_slot(&shape_key).is_some());
-        assert_eq!(runtime.slot_count(), 1);
         assert_shape();
     }
 }
@@ -248,17 +252,17 @@ fn provider_fixtures_use_native_upstreams_and_no_credentials() {
         openai.body.as_ref(),
         br#"{"model":"gpt-4.1","input":"probe"}"#
     );
-    assert!(matches!(openai.upstream, Upstream::OpenaiDirect { .. }));
+    assert!(matches!(openai.upstream, v2::Upstream::OpenaiDirect { .. }));
     let chat = fixtures::sample_openai_chat_completions_shape_request();
     assert_eq!(chat.path.as_ref(), "/v1/chat/completions");
-    assert!(matches!(chat.upstream, Upstream::OpenaiDirect { .. }));
+    assert!(matches!(chat.upstream, v2::Upstream::OpenaiDirect { .. }));
 
     let gemini = fixtures::sample_gemini_generate_content_shape_request();
     assert_eq!(
         gemini.path.as_ref(),
         "/v1beta/models/gemini-2.5-flash:generateContent"
     );
-    assert!(matches!(gemini.upstream, Upstream::GeminiDirect { .. }));
+    assert!(matches!(gemini.upstream, v2::Upstream::GeminiDirect { .. }));
     let stream = fixtures::sample_gemini_stream_generate_content_shape_request();
     assert_eq!(
         stream.path.as_ref(),
@@ -275,25 +279,16 @@ fn provider_fixtures_use_native_upstreams_and_no_credentials() {
 }
 
 #[test]
-fn v2_filter_fixture_uses_provider_upstream_kind() {
+fn v3_filter_fixture_uses_provider_upstream_kind_and_service_tier() {
     for (provider, expected_kind) in [
         (ProviderFamily::Anthropic, "anthropic_api_key"),
         (ProviderFamily::Openai, "openai_api_key"),
         (ProviderFamily::Gemini, "gemini_api_key"),
     ] {
-        let request = fixtures::sample_filter_request_v2(provider);
+        let request = fixtures::sample_filter_request_v3(provider);
+        assert_eq!(request.service_tier.as_deref(), Some("priority"));
         assert_eq!(request.candidates[0].kind.as_ref(), expected_kind);
     }
-}
-
-#[test]
-fn v2_filter_fixture_has_no_upstream_identity() {
-    let request = fixtures::sample_filter_request_v2(ProviderFamily::Openai);
-    assert_eq!(request.canonical_model_id.as_ref(), "gpt-4.1");
-    assert!(matches!(
-        request.candidates[0].base_url.as_deref(),
-        Some("https://example.test")
-    ));
 }
 
 #[test]

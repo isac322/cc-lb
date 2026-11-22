@@ -29,7 +29,6 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     validate_tls_filesystem(config)?;
     validate_storage(config)?;
     validate_storage_filesystem(config)?;
-    validate_event_bus(config)?;
     validate_oauth(config)?;
     validate_upstream_affinity(config)?;
     validate_api_key_usage_poll(config)?;
@@ -43,7 +42,6 @@ pub fn validate_config_without_filesystem(config: &Config) -> Result<(), ConfigE
     validate_admin_auth(config)?;
     validate_tls(config)?;
     validate_storage(config)?;
-    validate_event_bus(config)?;
     validate_oauth(config)?;
     validate_upstream_affinity(config)?;
     validate_api_key_usage_poll(config)?;
@@ -205,24 +203,6 @@ fn validate_scheduler_keepalive_dispatch_timeout(config: &Config) -> Result<(), 
             format!(
                 "keep-alive dispatch timeout must be greater than zero and less than the scheduler job timeout of {SCHEDULER_JOB_TIMEOUT_SECS} seconds"
             ),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_event_bus(config: &Config) -> Result<(), ValidationError> {
-    if matches!(config.storage, StorageConfig::Sqlite { .. }) {
-        return Ok(());
-    }
-    if config
-        .cluster
-        .instance_url
-        .as_deref()
-        .is_none_or(str::is_empty)
-    {
-        return Err(ValidationError::new(
-            "cluster.instance_url",
-            "cluster.instance_url is required when storage.kind=postgres (pg_notify fanout is always enabled)",
         ));
     }
     Ok(())

@@ -5,27 +5,10 @@ use serde::{Deserialize, Serialize};
 pub struct InlinePartialNotify<'a> {
     #[serde(flatten)]
     pub update: &'a RequestEventUpdate,
-    pub producer_url: &'a str,
+    pub producer_id: &'a str,
 }
 
 #[derive(Deserialize)]
 pub struct NotifyOrigin {
-    pub producer_url: String,
-}
-
-#[derive(Serialize)]
-pub struct TruncatedPartialNotify<'a> {
-    pub event_id: String,
-    pub phase: &'a str,
-    pub producer_url: &'a str,
-    pub truncated: bool,
-}
-
-#[derive(Deserialize)]
-pub struct TruncatedPartialNotifyOwned {
-    pub event_id: String,
-    pub phase: String,
-    pub producer_url: String,
-    #[allow(dead_code)]
-    pub truncated: bool,
+    pub producer_id: String,
 }

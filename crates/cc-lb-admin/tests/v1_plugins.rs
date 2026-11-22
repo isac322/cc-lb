@@ -4,9 +4,8 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use cc_lb_config::Config;
 use cc_lb_storage_api::{
-    AuditQueryScope, AuditStore, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginChainEntryInput,
-    PluginRegistryStore, PluginSlotKind, PrincipalCreate, PrincipalKind, PrincipalStore, WasmBlob,
-    WasmRegistryEntryInput, sparse_order,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind,
+    PrincipalCreate, PrincipalKind, PrincipalStore, WasmBlob, WasmRegistryEntryInput, sparse_order,
 };
 use config_admin_common::{TOKEN, app, authed_json, temp_storage, test_state};
 use http_body_util::BodyExt;
@@ -64,11 +63,10 @@ async fn registry_list_exposes_builtin_subscription_preference() {
     assert!(uploaded_entry.get("metadata").is_none_or(Value::is_null));
 }
 
-async fn legacy_plugin_warning_is_nonblocking_and_scoped_to_enabled_non_anthropic_upstreams() {
+async fn qualified_plugin_reports_supported_providers_without_legacy_warnings() {
     use cc_lb_plugin_wire::metadata::{HookMetadata, HookMode};
-    use cc_lb_storage_api::{UpstreamCreate, UpstreamStore};
     let (_dir, storage) = temp_storage().await;
-    let principal_id = seed_principal(&storage, "legacy-plugin-warning").await;
+    let principal_id = seed_principal(&storage, "qualified-plugin-principal").await;
     let (registry, _) = storage
         .persist_wasm_upload(
             WasmBlob {
@@ -77,19 +75,19 @@ async fn legacy_plugin_warning_is_nonblocking_and_scoped_to_enabled_non_anthropi
                 size_bytes: 1,
             },
             WasmRegistryEntryInput {
-                name: "legacy-warning-filter".to_owned(),
+                name: "anthropic-only-filter".to_owned(),
                 version: Some("1".to_owned()),
-                original_filename: "legacy-warning-filter.wasm".to_owned(),
+                original_filename: "anthropic-only-filter.wasm".to_owned(),
                 label: None,
                 uploaded_at_unix_secs: 1,
                 uploaded_by_admin_id: Uuid::nil(),
-                description: "legacy filter".to_owned(),
+                description: "anthropic filter".to_owned(),
                 usage: "test".to_owned(),
                 hook_metadata: std::collections::BTreeMap::from([(
-                    "filter".to_owned(),
+                    "filter_anthropic".to_owned(),
                     HookMetadata {
-                        wire_version: 1,
-                        description: "legacy".to_owned(),
+                        wire_version: 3,
+                        description: "anthropic filter".to_owned(),
                         usage: "test".to_owned(),
                         mode: HookMode::Active,
                     },
@@ -100,44 +98,11 @@ async fn legacy_plugin_warning_is_nonblocking_and_scoped_to_enabled_non_anthropi
         .await
         .expect("registry");
     let chain_entry = seed_chain(&storage, principal_id, registry.id, 2000).await;
-    let upstream = UpstreamStore::create(
-        storage.as_ref(),
-        UpstreamCreate {
-            vertex: None,
-            vertex_credential_type: None,
-            vertex_quota_project_id: None,
-            id: Uuid::new_v4(),
-            name: "warning-openai".to_owned(),
-            kind: cc_lb_storage_api::upstream::UpstreamKind::OpenaiApiKey,
-            base_url: None,
-            api_key_ciphertext: None,
-            oauth_tokens: None,
-            warmup_enabled: false,
-            warmup_dialect_plugin: None,
-            workspace_id: None,
-            api_key_access: None,
-        },
-    )
-    .await
-    .expect("OpenAI upstream");
-    let upstream =
-        UpstreamStore::set_enabled(storage.as_ref(), upstream.id, upstream.revision, true)
-            .await
-            .expect("enabled OpenAI");
     let app = app(test_state(Config::default(), Some(storage.clone())));
     let uri = format!("/admin/v1/principals/{principal_id}/plugin-chain?slot=router");
     let (status, _, body) = request_json(app.clone(), "GET", &uri, None, None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["warnings"].as_array().expect("warnings").len(), 1);
-    assert_eq!(body["warnings"][0]["code"], "legacy_plugin_anthropic_only");
-    assert_eq!(
-        body["warnings"][0]["chain_entry_id"],
-        chain_entry.id.to_string()
-    );
-    assert_eq!(
-        body["warnings"][0]["unsupported_providers"],
-        json!(["openai"])
-    );
+    assert!(body.get("warnings").is_none());
     assert!(
         body["entries"]
             .as_array()
@@ -145,22 +110,16 @@ async fn legacy_plugin_warning_is_nonblocking_and_scoped_to_enabled_non_anthropi
             .iter()
             .any(|entry| entry["id"] == chain_entry.id.to_string())
     );
-    let (status, _, registry_view) = request_json(
-        app.clone(),
-        "GET",
-        &format!("/admin/v1/plugins/registry/{}", registry.id),
-        None,
-        None,
-    )
-    .await;
+    let (status, _, registry_list) =
+        request_json(app, "GET", "/admin/v1/plugins/registry", None, None).await;
     assert_eq!(status, StatusCode::OK);
+    let registry_view = registry_list["entries"]
+        .as_array()
+        .expect("registry list")
+        .iter()
+        .find(|item| item["id"] == registry.id.to_string())
+        .expect("uploaded registry entry");
     assert_eq!(registry_view["supported_providers"], json!(["anthropic"]));
-    UpstreamStore::set_enabled(storage.as_ref(), upstream.id, upstream.revision, false)
-        .await
-        .expect("disabled OpenAI");
-    let (status, _, body) = request_json(app, "GET", &uri, None, None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(body["warnings"].as_array().expect("warnings").is_empty());
 }
 
 async fn builtin_registry_update_and_delete_return_409() {
@@ -731,46 +690,6 @@ async fn insert_chain_duplicate_shape_returns_409_slot_singleton() {
     assert_eq!(body["existing_entry_id"], first.id.to_string());
 }
 
-async fn chain_update_empty_body_rejected_400() {
-    let (_dir, storage) = temp_storage().await;
-    let principal_id = seed_principal(&storage, "principal-empty-update").await;
-    let entry = seed_registry(&storage, 11, "plugin-empty-update").await;
-    let chain = seed_chain(&storage, principal_id, entry.id, 1000).await;
-    let app = app(test_state(Config::default(), Some(storage)));
-
-    let (status, _, body) = request_json(
-        app,
-        "PUT",
-        &format!("/admin/v1/plugin-chain-entries/{}", chain.id),
-        Some(json!({})),
-        Some("W/\"0\""),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"], "empty_update");
-}
-
-async fn chain_update_stale_if_match_returns_412_with_current_revision() {
-    let (_dir, storage) = temp_storage().await;
-    let principal_id = seed_principal(&storage, "principal-update-stale").await;
-    let entry = seed_registry(&storage, 18, "plugin-update-stale").await;
-    let chain = seed_chain(&storage, principal_id, entry.id, 1000).await;
-    let app = app(test_state(Config::default(), Some(storage)));
-
-    let (status, _, body) = request_json(
-        app,
-        "PUT",
-        &format!("/admin/v1/plugin-chain-entries/{}", chain.id),
-        Some(json!({ "config": { "enabled": true } })),
-        Some("W/\"99\""),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
-    assert_eq!(body, json!({ "error": "stale_revision", "current": 0 }));
-}
-
 async fn chain_delete_forwards_if_match_to_storage_and_returns_204() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-delete-chain").await;
@@ -885,63 +804,6 @@ async fn reorder_invalid_order_after_stage_returns_409() {
 
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"], "invalid_order");
-}
-
-async fn chain_rebalance_evens_spacing_and_returns_new_orders() {
-    let (_dir, storage) = temp_storage().await;
-    let principal_id = seed_principal(&storage, "principal-rebalance").await;
-    let entry = seed_registry(&storage, 13, "plugin-rebalance").await;
-    seed_chain(&storage, principal_id, entry.id, 1000).await;
-    seed_chain(&storage, principal_id, entry.id, 1001).await;
-    let app = app(test_state(Config::default(), Some(storage)));
-
-    let (status, _, body, _) = authed_json(
-        app,
-        "POST",
-        &format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=router"),
-        None,
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["entries"][0]["order"], 1000);
-    assert_eq!(body["entries"][1]["order"], 2000);
-}
-
-async fn chain_rebalance_emits_chain_audit() {
-    let (_dir, storage) = temp_storage().await;
-    let principal_id = seed_principal(&storage, "principal-rebalance-audit").await;
-    let entry = seed_registry(&storage, 20, "plugin-rebalance-audit").await;
-    seed_chain(&storage, principal_id, entry.id, 1000).await;
-    seed_chain(&storage, principal_id, entry.id, 1001).await;
-    let app = app(test_state(Config::default(), Some(storage.clone())));
-
-    let (status, _, _, _) = authed_json(
-        app,
-        "POST",
-        &format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=router"),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
-    let expected_route = format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance");
-    assert!(
-        storage
-            .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 20, false)
-            .await
-            .unwrap()
-            .iter()
-            .any(|entry| {
-                entry.route == expected_route
-                    && entry.admin_action.as_deref().is_some_and(|action| {
-                        action
-                            == format!(
-                                "plugin_chain_update(principal={principal_id}, slots=router)"
-                            )
-                    })
-            })
-    );
 }
 
 async fn request_json(
@@ -1117,7 +979,7 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
 async fn v1_plugins_suite_part_1() {
     registry_list_paginates().await;
     registry_list_exposes_builtin_subscription_preference().await;
-    legacy_plugin_warning_is_nonblocking_and_scoped_to_enabled_non_anthropic_upstreams().await;
+    qualified_plugin_reports_supported_providers_without_legacy_warnings().await;
     builtin_registry_update_and_delete_return_409().await;
     registry_get_returns_etag_with_revision().await;
     registry_patch_label_with_if_match_bumps_revision().await;
@@ -1146,17 +1008,13 @@ async fn v1_plugins_suite_part_3() {
     chain_insert_rejects_builtin_subscription_preference_in_shape_slot().await;
     insert_chain_duplicate_router_returns_201_and_lists_both_entries().await;
     insert_chain_duplicate_shape_returns_409_slot_singleton().await;
-    chain_update_empty_body_rejected_400().await;
 }
 
 #[tokio::test]
 async fn v1_plugins_suite_part_4() {
-    chain_update_stale_if_match_returns_412_with_current_revision().await;
     chain_delete_forwards_if_match_to_storage_and_returns_204().await;
     chain_delete_stale_if_match_returns_412_with_current_revision().await;
     chain_delete_malformed_if_match_returns_400().await;
     chain_reorder_then_needs_rebalance_returns_409().await;
     reorder_invalid_order_after_stage_returns_409().await;
-    chain_rebalance_evens_spacing_and_returns_new_orders().await;
-    chain_rebalance_emits_chain_audit().await;
 }

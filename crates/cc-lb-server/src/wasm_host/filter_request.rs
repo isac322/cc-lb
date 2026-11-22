@@ -1,21 +1,13 @@
 use std::borrow::Cow;
 
 use cc_lb_domain::{Principal, PrincipalKind, UpstreamCandidate};
-use cc_lb_plugin_wire::{
-    schema::WireVersion,
-    v1::{
-        CachePricingSummaryRef, FilterRequestRef, HeaderRef, PrincipalRef, QueryRef,
-        UpstreamCandidateRef,
-    },
-    v2, v3,
-};
+use cc_lb_plugin_wire::{v2, v3};
 use cc_lb_routing::RoutingContext;
 use rkyv::rancor::Error as RkyvError;
 
 use super::serialize_with_input_scratch;
 
 pub(super) struct FilterWireRequest<'a> {
-    pub wire_version: WireVersion,
     pub ctx: &'a RoutingContext,
     pub principal: &'a Principal,
     pub candidates: &'a [UpstreamCandidate],
@@ -28,33 +20,71 @@ impl FilterWireRequest<'_> {
         with_bytes: impl for<'a> FnOnce(&'a [u8]) -> R,
     ) -> Result<R, RkyvError> {
         let principal_kind = principal_kind_to_wire(self.principal);
-        let headers: Vec<HeaderRef<'_>> = self
-            .ctx
-            .downstream_headers
-            .iter()
-            .filter(|(name, _)| {
-                !is_stripped_downstream_header(name.as_str(), self.cookie_redaction)
-            })
-            .map(|(name, value)| HeaderRef {
-                name: name.as_str(),
-                value: value.as_bytes(),
-            })
-            .collect();
         let candidate_ids: Vec<String> = self
             .candidates
             .iter()
             .map(|candidate| candidate.upstream_id.to_string())
             .collect();
-        let candidates: Vec<UpstreamCandidateRef<'_>> = self
+        let scrubbed_query = self.ctx.query.as_deref().map(scrub_query_api_key);
+        let thread_id = self
+            .ctx
+            .thread_id
+            .as_deref()
+            .map(|value| v3::OptionalStrRef { value });
+        let service_tier = self
+            .ctx
+            .requested_service_tier
+            .as_deref()
+            .map(|value| v3::OptionalStrRef { value });
+        let query = scrubbed_query
+            .as_deref()
+            .map(|value| v3::OptionalStrRef { value });
+        let principal = v3::PrincipalRef {
+            id: self.principal.id.as_str(),
+            kind: principal_kind,
+            claims: &[],
+        };
+        let quota_refs: Vec<Vec<v2::SubscriptionQuotaSampleRef<'_>>> = self
+            .candidates
+            .iter()
+            .map(|candidate| {
+                candidate
+                    .subscription_quotas
+                    .iter()
+                    .map(|quota| v2::SubscriptionQuotaSampleRef {
+                        window: quota.window.as_str(),
+                        utilization: quota.utilization,
+                        resets_at_unix_secs: quota.resets_at_unix_secs,
+                        status: quota
+                            .status
+                            .as_deref()
+                            .map(|value| v3::OptionalStrRef { value }),
+                        sample_kind: match quota.state {
+                            cc_lb_domain::SubscriptionQuotaDataState::Fresh
+                            | cc_lb_domain::SubscriptionQuotaDataState::Stale => "sample",
+                            cc_lb_domain::SubscriptionQuotaDataState::Absent => "absent",
+                            cc_lb_domain::SubscriptionQuotaDataState::Unobserved => "unobserved",
+                        },
+                        observed_at_unix_millis: quota.observed_at_unix_millis,
+                    })
+                    .collect()
+            })
+            .collect();
+        let candidates: Vec<v3::UpstreamCandidateRef<'_>> = self
             .candidates
             .iter()
             .zip(candidate_ids.iter())
-            .map(|(candidate, upstream_id)| {
+            .zip(quota_refs.iter())
+            .map(|((candidate, upstream_id), quotas)| {
                 let cache_score = candidate.cache_score.as_ref();
-                UpstreamCandidateRef {
+                v3::UpstreamCandidateRef {
                     upstream_id,
                     name: candidate.name.as_str(),
                     kind: candidate.kind.as_str(),
+                    base_url: candidate
+                        .base_url
+                        .as_deref()
+                        .map(|value| v3::OptionalStrRef { value }),
                     observed_at_unix_secs: candidate.observed_at_unix_secs,
                     predicted_cache_read_tokens: cache_score
                         .map(|score| score.predicted_cache_read_tokens)
@@ -72,329 +102,62 @@ impl FilterWireRequest<'_> {
                     organization_type: candidate.organization_type.as_deref().unwrap_or(""),
                     rate_limit_tier: candidate.rate_limit_tier.as_deref().unwrap_or(""),
                     seat_tier: candidate.seat_tier.as_deref().unwrap_or(""),
+                    subscription_quotas: quotas,
                 }
             })
             .collect();
-        let scrubbed_query = self.ctx.query.as_deref().map(scrub_query_api_key);
-        let query = scrubbed_query.as_deref().map(|value| QueryRef { value });
-        let thread_id = self
+        let headers: Vec<v3::HeaderRef<'_>> = self
             .ctx
-            .thread_id
-            .as_deref()
-            .map(|value| QueryRef { value });
-        let principal = || PrincipalRef {
-            id: self.principal.id.as_str(),
-            kind: principal_kind,
-            claims: &[],
-        };
-        let cache_pricing = || CachePricingSummaryRef {
-            status: self.ctx.cache_pricing.status.as_str(),
-            input_micros_per_million: self.ctx.cache_pricing.input_micros_per_million,
-            cache_creation_5m_micros_per_million: self
-                .ctx
-                .cache_pricing
-                .cache_creation_5m_micros_per_million,
-            cache_creation_1h_micros_per_million: self
-                .ctx
-                .cache_pricing
-                .cache_creation_1h_micros_per_million,
-            cache_read_micros_per_million: self.ctx.cache_pricing.cache_read_micros_per_million,
-        };
-
-        let service_tier = self
-            .ctx
-            .requested_service_tier
-            .as_deref()
-            .map(|value| QueryRef { value });
-        match self.wire_version {
-            WireVersion::V1 => serialize_with_input_scratch(
-                &FilterRequestRef {
-                    request_id: self.ctx.request_id.as_str(),
-                    thread_id,
-                    service_tier,
-                    canonical_model_id: self.ctx.canonical_model_id.as_str(),
-                    cache_pricing: cache_pricing(),
-                    method: self.ctx.method.as_str(),
-                    path: self.ctx.path.as_str(),
-                    query,
-                    headers: &headers,
-                    body: self.ctx.body_bytes.as_ref(),
-                    principal: principal(),
-                    candidates: &candidates,
+            .downstream_headers
+            .iter()
+            .filter(|(name, _)| {
+                !is_stripped_downstream_header(name.as_str(), self.cookie_redaction)
+            })
+            .map(|(name, value)| v3::HeaderRef {
+                name: name.as_str(),
+                value: value.as_bytes(),
+            })
+            .collect();
+        let native_pricing = self.ctx.cache_pricing.native.as_ref();
+        let (native_version, native_provider, native_rate_refs) =
+            native_pricing_refs(native_pricing);
+        serialize_with_input_scratch(
+            &v3::FilterRequestRef {
+                request_id: self.ctx.request_id.as_str(),
+                thread_id,
+                service_tier,
+                canonical_model_id: self.ctx.canonical_model_id.as_str(),
+                cache_pricing: v2::CachePricingSummaryRef {
+                    status: self.ctx.cache_pricing.status.as_str(),
+                    input_micros_per_million: self.ctx.cache_pricing.input_micros_per_million,
+                    cache_creation_5m_micros_per_million: self
+                        .ctx
+                        .cache_pricing
+                        .cache_creation_5m_micros_per_million,
+                    cache_creation_1h_micros_per_million: self
+                        .ctx
+                        .cache_pricing
+                        .cache_creation_1h_micros_per_million,
+                    cache_read_micros_per_million: self
+                        .ctx
+                        .cache_pricing
+                        .cache_read_micros_per_million,
                 },
-                with_bytes,
-            ),
-            WireVersion::V2 => {
-                let thread_id = self
-                    .ctx
-                    .thread_id
-                    .as_deref()
-                    .map(|value| v2::OptionalStrRef { value });
-                let service_tier = self
-                    .ctx
-                    .requested_service_tier
-                    .as_deref()
-                    .map(|value| v2::OptionalStrRef { value });
-                let query = scrubbed_query
-                    .as_deref()
-                    .map(|value| v2::OptionalStrRef { value });
-                let principal = v2::PrincipalRef {
-                    id: self.principal.id.as_str(),
-                    kind: principal_kind,
-                    claims: &[],
-                };
-                let quota_refs: Vec<Vec<v2::SubscriptionQuotaSampleRef<'_>>> = self
-                    .candidates
-                    .iter()
-                    .map(|candidate| {
-                        candidate
-                            .subscription_quotas
-                            .iter()
-                            .map(|quota| v2::SubscriptionQuotaSampleRef {
-                                window: quota.window.as_str(),
-                                utilization: quota.utilization,
-                                resets_at_unix_secs: quota.resets_at_unix_secs,
-                                status: quota
-                                    .status
-                                    .as_deref()
-                                    .map(|value| v2::OptionalStrRef { value }),
-                                sample_kind: match quota.state {
-                                    cc_lb_domain::SubscriptionQuotaDataState::Fresh
-                                    | cc_lb_domain::SubscriptionQuotaDataState::Stale => "sample",
-                                    cc_lb_domain::SubscriptionQuotaDataState::Absent => "absent",
-                                    cc_lb_domain::SubscriptionQuotaDataState::Unobserved => {
-                                        "unobserved"
-                                    }
-                                },
-                                observed_at_unix_millis: quota.observed_at_unix_millis,
-                            })
-                            .collect()
-                    })
-                    .collect();
-                let candidates: Vec<v2::UpstreamCandidateRef<'_>> = self
-                    .candidates
-                    .iter()
-                    .zip(candidate_ids.iter())
-                    .zip(quota_refs.iter())
-                    .map(|((candidate, upstream_id), quotas)| {
-                        let cache_score = candidate.cache_score.as_ref();
-                        v2::UpstreamCandidateRef {
-                            upstream_id,
-                            name: candidate.name.as_str(),
-                            kind: candidate.kind.as_str(),
-                            base_url: candidate
-                                .base_url
-                                .as_deref()
-                                .map(|value| v2::OptionalStrRef { value }),
-                            observed_at_unix_secs: candidate.observed_at_unix_secs,
-                            predicted_cache_read_tokens: cache_score
-                                .map(|score| score.predicted_cache_read_tokens)
-                                .unwrap_or(0),
-                            predicted_cache_creation_tokens_5m: cache_score
-                                .map(|score| score.predicted_cache_creation_tokens_5m)
-                                .unwrap_or(0),
-                            predicted_cache_creation_tokens_1h: cache_score
-                                .map(|score| score.predicted_cache_creation_tokens_1h)
-                                .unwrap_or(0),
-                            predicted_uncached_input_tokens: cache_score
-                                .map(|score| score.predicted_uncached_input_tokens)
-                                .unwrap_or(0),
-                            plan_capacity_ratio: candidate.plan_capacity_ratio.unwrap_or(1.0),
-                            organization_type: candidate.organization_type.as_deref().unwrap_or(""),
-                            rate_limit_tier: candidate.rate_limit_tier.as_deref().unwrap_or(""),
-                            seat_tier: candidate.seat_tier.as_deref().unwrap_or(""),
-                            subscription_quotas: quotas,
-                        }
-                    })
-                    .collect();
-                let v2_headers: Vec<v2::HeaderRef<'_>> = self
-                    .ctx
-                    .downstream_headers
-                    .iter()
-                    .filter(|(name, _)| {
-                        !is_stripped_downstream_header(name.as_str(), self.cookie_redaction)
-                    })
-                    .map(|(name, value)| v2::HeaderRef {
-                        name: name.as_str(),
-                        value: value.as_bytes(),
-                    })
-                    .collect();
-                serialize_with_input_scratch(
-                    &v2::FilterRequestRef {
-                        request_id: self.ctx.request_id.as_str(),
-                        thread_id,
-                        service_tier,
-                        canonical_model_id: self.ctx.canonical_model_id.as_str(),
-                        cache_pricing: v2::CachePricingSummaryRef {
-                            status: self.ctx.cache_pricing.status.as_str(),
-                            input_micros_per_million: self
-                                .ctx
-                                .cache_pricing
-                                .input_micros_per_million,
-                            cache_creation_5m_micros_per_million: self
-                                .ctx
-                                .cache_pricing
-                                .cache_creation_5m_micros_per_million,
-                            cache_creation_1h_micros_per_million: self
-                                .ctx
-                                .cache_pricing
-                                .cache_creation_1h_micros_per_million,
-                            cache_read_micros_per_million: self
-                                .ctx
-                                .cache_pricing
-                                .cache_read_micros_per_million,
-                        },
-                        method: self.ctx.method.as_str(),
-                        path: self.ctx.path.as_str(),
-                        query,
-                        headers: &v2_headers,
-                        body: self.ctx.body_bytes.as_ref(),
-                        principal,
-                        candidates: &candidates,
-                    },
-                    with_bytes,
-                )
-            }
-            WireVersion::V3 => {
-                let thread_id = self
-                    .ctx
-                    .thread_id
-                    .as_deref()
-                    .map(|value| v3::OptionalStrRef { value });
-                let service_tier = self
-                    .ctx
-                    .requested_service_tier
-                    .as_deref()
-                    .map(|value| v3::OptionalStrRef { value });
-                let query = scrubbed_query
-                    .as_deref()
-                    .map(|value| v3::OptionalStrRef { value });
-                let principal = v3::PrincipalRef {
-                    id: self.principal.id.as_str(),
-                    kind: principal_kind,
-                    claims: &[],
-                };
-                let quota_refs: Vec<Vec<v2::SubscriptionQuotaSampleRef<'_>>> = self
-                    .candidates
-                    .iter()
-                    .map(|candidate| {
-                        candidate
-                            .subscription_quotas
-                            .iter()
-                            .map(|quota| v2::SubscriptionQuotaSampleRef {
-                                window: quota.window.as_str(),
-                                utilization: quota.utilization,
-                                resets_at_unix_secs: quota.resets_at_unix_secs,
-                                status: quota
-                                    .status
-                                    .as_deref()
-                                    .map(|value| v3::OptionalStrRef { value }),
-                                sample_kind: match quota.state {
-                                    cc_lb_domain::SubscriptionQuotaDataState::Fresh
-                                    | cc_lb_domain::SubscriptionQuotaDataState::Stale => "sample",
-                                    cc_lb_domain::SubscriptionQuotaDataState::Absent => "absent",
-                                    cc_lb_domain::SubscriptionQuotaDataState::Unobserved => {
-                                        "unobserved"
-                                    }
-                                },
-                                observed_at_unix_millis: quota.observed_at_unix_millis,
-                            })
-                            .collect()
-                    })
-                    .collect();
-                let candidates: Vec<v3::UpstreamCandidateRef<'_>> = self
-                    .candidates
-                    .iter()
-                    .zip(candidate_ids.iter())
-                    .zip(quota_refs.iter())
-                    .map(|((candidate, upstream_id), quotas)| {
-                        let cache_score = candidate.cache_score.as_ref();
-                        v3::UpstreamCandidateRef {
-                            upstream_id,
-                            name: candidate.name.as_str(),
-                            kind: candidate.kind.as_str(),
-                            base_url: candidate
-                                .base_url
-                                .as_deref()
-                                .map(|value| v3::OptionalStrRef { value }),
-                            observed_at_unix_secs: candidate.observed_at_unix_secs,
-                            predicted_cache_read_tokens: cache_score
-                                .map(|score| score.predicted_cache_read_tokens)
-                                .unwrap_or(0),
-                            predicted_cache_creation_tokens_5m: cache_score
-                                .map(|score| score.predicted_cache_creation_tokens_5m)
-                                .unwrap_or(0),
-                            predicted_cache_creation_tokens_1h: cache_score
-                                .map(|score| score.predicted_cache_creation_tokens_1h)
-                                .unwrap_or(0),
-                            predicted_uncached_input_tokens: cache_score
-                                .map(|score| score.predicted_uncached_input_tokens)
-                                .unwrap_or(0),
-                            plan_capacity_ratio: candidate.plan_capacity_ratio.unwrap_or(1.0),
-                            organization_type: candidate.organization_type.as_deref().unwrap_or(""),
-                            rate_limit_tier: candidate.rate_limit_tier.as_deref().unwrap_or(""),
-                            seat_tier: candidate.seat_tier.as_deref().unwrap_or(""),
-                            subscription_quotas: quotas,
-                        }
-                    })
-                    .collect();
-                let headers: Vec<v3::HeaderRef<'_>> = self
-                    .ctx
-                    .downstream_headers
-                    .iter()
-                    .filter(|(name, _)| {
-                        !is_stripped_downstream_header(name.as_str(), self.cookie_redaction)
-                    })
-                    .map(|(name, value)| v3::HeaderRef {
-                        name: name.as_str(),
-                        value: value.as_bytes(),
-                    })
-                    .collect();
-                let native_pricing = self.ctx.cache_pricing.native.as_ref();
-                let (native_version, native_provider, native_rate_refs) =
-                    native_pricing_refs(native_pricing);
-                serialize_with_input_scratch(
-                    &v3::FilterRequestRef {
-                        request_id: self.ctx.request_id.as_str(),
-                        thread_id,
-                        service_tier,
-                        canonical_model_id: self.ctx.canonical_model_id.as_str(),
-                        cache_pricing: v2::CachePricingSummaryRef {
-                            status: self.ctx.cache_pricing.status.as_str(),
-                            input_micros_per_million: self
-                                .ctx
-                                .cache_pricing
-                                .input_micros_per_million,
-                            cache_creation_5m_micros_per_million: self
-                                .ctx
-                                .cache_pricing
-                                .cache_creation_5m_micros_per_million,
-                            cache_creation_1h_micros_per_million: self
-                                .ctx
-                                .cache_pricing
-                                .cache_creation_1h_micros_per_million,
-                            cache_read_micros_per_million: self
-                                .ctx
-                                .cache_pricing
-                                .cache_read_micros_per_million,
-                        },
-                        native_pricing: v3::NativeCachePricingRef {
-                            version: native_version,
-                            provider: native_provider,
-                            rates: &native_rate_refs,
-                        },
-                        method: self.ctx.method.as_str(),
-                        path: self.ctx.path.as_str(),
-                        query,
-                        headers: &headers,
-                        body: self.ctx.body_bytes.as_ref(),
-                        principal,
-                        candidates: &candidates,
-                    },
-                    with_bytes,
-                )
-            }
-        }
+                native_pricing: v3::NativeCachePricingRef {
+                    version: native_version,
+                    provider: native_provider,
+                    rates: &native_rate_refs,
+                },
+                method: self.ctx.method.as_str(),
+                path: self.ctx.path.as_str(),
+                query,
+                headers: &headers,
+                body: self.ctx.body_bytes.as_ref(),
+                principal,
+                candidates: &candidates,
+            },
+            with_bytes,
+        )
     }
 }
 
@@ -561,90 +324,45 @@ mod security_tests {
             kind: PrincipalKind::ApiKey,
         };
 
-        for wire_version in [WireVersion::V1, WireVersion::V2, WireVersion::V3] {
-            FilterWireRequest {
-                wire_version,
-                ctx: &context,
-                principal: &principal,
-                candidates: &[],
-                cookie_redaction: false,
-            }
-            .encode(|bytes| {
-                for secret in [
-                    b"raw-secret".as_slice(),
-                    b"other".as_slice(),
-                    b"gemini-secret".as_slice(),
-                    b"provider-secret".as_slice(),
-                ] {
-                    assert!(
-                        !bytes.windows(secret.len()).any(|window| window == secret),
-                        "secret bytes found in {wire_version:?} request"
-                    );
-                }
-
-                match wire_version {
-                    WireVersion::V1 => {
-                        let archived = rkyv::access::<
-                            cc_lb_plugin_wire::v1::ArchivedFilterRequest,
-                            RkyvError,
-                        >(bytes)
-                        .expect("filter request");
-                        let query: Option<&str> = archived.query.as_ref().map(|value| &**value);
-                        assert_eq!(query, Some("foo=bar"));
-                        let header_names: Vec<&str> = archived
-                            .headers
-                            .iter()
-                            .map(|header| {
-                                let name: &str = &header.name;
-                                name
-                            })
-                            .collect();
-                        assert_eq!(header_names, vec!["x-request-id"]);
-                    }
-                    WireVersion::V2 => {
-                        let archived = rkyv::access::<
-                            cc_lb_plugin_wire::v2::ArchivedFilterRequest,
-                            RkyvError,
-                        >(bytes)
-                        .expect("filter request");
-                        let query: Option<&str> = archived.query.as_ref().map(|value| &**value);
-                        assert_eq!(query, Some("foo=bar"));
-                        let header_names: Vec<&str> = archived
-                            .headers
-                            .iter()
-                            .map(|header| {
-                                let name: &str = &header.name;
-                                name
-                            })
-                            .collect();
-                        assert_eq!(header_names, vec!["x-request-id"]);
-                    }
-                    WireVersion::V3 => {
-                        let archived = rkyv::access::<
-                            cc_lb_plugin_wire::v3::ArchivedFilterRequest,
-                            RkyvError,
-                        >(bytes)
-                        .expect("filter request");
-                        let query: Option<&str> = archived.query.as_ref().map(|value| &**value);
-                        assert_eq!(query, Some("foo=bar"));
-                        let header_names: Vec<&str> = archived
-                            .headers
-                            .iter()
-                            .map(|header| {
-                                let name: &str = &header.name;
-                                name
-                            })
-                            .collect();
-                        assert_eq!(header_names, vec!["x-request-id"]);
-                    }
-                }
-            })
-            .expect("encode filter request");
+        FilterWireRequest {
+            ctx: &context,
+            principal: &principal,
+            candidates: &[],
+            cookie_redaction: false,
         }
+        .encode(|bytes| {
+            for secret in [
+                b"raw-secret".as_slice(),
+                b"other".as_slice(),
+                b"gemini-secret".as_slice(),
+                b"provider-secret".as_slice(),
+            ] {
+                assert!(
+                    !bytes.windows(secret.len()).any(|window| window == secret),
+                    "secret bytes found in V3 filter request"
+                );
+            }
+
+            let archived =
+                rkyv::access::<cc_lb_plugin_wire::v3::ArchivedFilterRequest, RkyvError>(bytes)
+                    .expect("filter request");
+            let query: Option<&str> = archived.query.as_ref().map(|value| &**value);
+            assert_eq!(query, Some("foo=bar"));
+            let header_names: Vec<&str> = archived
+                .headers
+                .iter()
+                .map(|header| {
+                    let name: &str = &header.name;
+                    name
+                })
+                .collect();
+            assert_eq!(header_names, vec!["x-request-id"]);
+        })
+        .expect("encode filter request");
     }
 
     #[test]
-    fn filter_wire_preserves_query_shapes_across_versions() {
+    fn filter_wire_preserves_query_shapes() {
         let principal = Principal {
             id: "principal-filter".to_owned(),
             kind: PrincipalKind::ApiKey,
@@ -671,50 +389,21 @@ mod security_tests {
                 cache_pricing: cc_lb_domain::CachePricingSummary::default(),
             };
 
-            for wire_version in [WireVersion::V1, WireVersion::V2, WireVersion::V3] {
-                FilterWireRequest {
-                    wire_version,
-                    ctx: &context,
-                    principal: &principal,
-                    candidates: &[],
-                    cookie_redaction: false,
-                }
-                .encode(|bytes| {
-                    let archived_query = match wire_version {
-                        WireVersion::V1 => {
-                            let archived = rkyv::access::<
-                                cc_lb_plugin_wire::v1::ArchivedFilterRequest,
-                                RkyvError,
-                            >(bytes)
-                            .expect("filter request");
-                            archived.query.as_ref().map(|value| (**value).to_owned())
-                        }
-                        WireVersion::V2 => {
-                            let archived = rkyv::access::<
-                                cc_lb_plugin_wire::v2::ArchivedFilterRequest,
-                                RkyvError,
-                            >(bytes)
-                            .expect("filter request");
-                            archived.query.as_ref().map(|value| (**value).to_owned())
-                        }
-                        WireVersion::V3 => {
-                            let archived = rkyv::access::<
-                                cc_lb_plugin_wire::v3::ArchivedFilterRequest,
-                                RkyvError,
-                            >(bytes)
-                            .expect("filter request");
-                            archived.query.as_ref().map(|value| (**value).to_owned())
-                        }
-                    };
-
-                    assert_eq!(
-                        archived_query.as_deref(),
-                        expected,
-                        "query shape for {wire_version:?}"
-                    );
-                })
-                .expect("encode filter request");
+            FilterWireRequest {
+                ctx: &context,
+                principal: &principal,
+                candidates: &[],
+                cookie_redaction: false,
             }
+            .encode(|bytes| {
+                let archived =
+                    rkyv::access::<cc_lb_plugin_wire::v3::ArchivedFilterRequest, RkyvError>(bytes)
+                        .expect("filter request");
+                let archived_query = archived.query.as_ref().map(|value| (**value).to_owned());
+
+                assert_eq!(archived_query.as_deref(), expected);
+            })
+            .expect("encode filter request");
         }
     }
 }

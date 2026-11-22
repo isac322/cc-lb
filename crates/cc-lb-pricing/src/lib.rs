@@ -14,9 +14,7 @@ use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 
 pub use cost::{
-    NativeCostBreakdown, cache_creation_1h_micros_from_input, native_cost_micros,
-    virtual_cost_micros_full, virtual_cost_micros_full_with_context,
-    virtual_cost_micros_full_with_context_and_images,
+    cache_creation_1h_micros_from_input, virtual_cost_micros_full,
     virtual_cost_micros_full_with_context_and_provider_writes,
 };
 use cost::{record_missing_price_field, resolved_cache_creation_1h_price};

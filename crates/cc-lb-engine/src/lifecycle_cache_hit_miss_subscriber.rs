@@ -455,7 +455,6 @@ mod tests {
                 .unwrap()
                 .push(format!("prediction:{provider}:{mode}:{outcome}"));
         }
-        fn record_cache_observation_dropped(&self, _reason: &str) {}
         fn record_dropped_events_by(&self, _reason: &str, _count: u64) {}
         fn record_routing_tier_selection(&self, _tier: &str, _upstream: &str, _principal_id: &str) {
         }

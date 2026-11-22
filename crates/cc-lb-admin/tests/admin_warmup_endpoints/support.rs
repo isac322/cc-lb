@@ -251,7 +251,6 @@ fn test_state(
         storage: Some(storage.clone()),
         key_store: Some(crate::admin_test_common::key_store(storage)),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key(TEST_MASTER_KEY)),
-        limit_engine: crate::admin_test_common::limit_engine_with_clock(clock.clone()),
         lifecycle: None,
         lazy_refresher: None,
         runtime: None,

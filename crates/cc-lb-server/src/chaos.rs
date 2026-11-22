@@ -59,6 +59,10 @@ impl ChaosLayer {
             config: ChaosConfig::from_env(),
         }
     }
+
+    pub fn is_enabled(&self) -> bool {
+        !self.config.disabled()
+    }
 }
 
 impl<S> Layer<S> for ChaosLayer {

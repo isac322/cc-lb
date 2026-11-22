@@ -30,9 +30,7 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::{AdminAuthProviderConfig, Config, StorageConfig};
 use cc_lb_control::DynamicViewHolder;
 use cc_lb_control::anthropic_api_key::AnthropicOrgApi;
-use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
-use cc_lb_control::api_keys::limit_engine::LimitEngine;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_scheduler::admin::SchedulerAdminHandle;
 use cc_lb_scheduler::jobs::api_key_usage_poll::{
@@ -317,17 +315,13 @@ impl Stage {
         ));
         let storage = Arc::new(PostgresStorage::new(pool, clock));
         storage.initialize().await.expect("postgres initializes");
-        let mut config = app_config(
+        let config = app_config(
             StorageConfig::Postgres {
                 url: database_url.to_owned(),
                 pool: cc_lb_config::PostgresPoolConfig::default(),
             },
             dir.path(),
         );
-        // Postgres always runs pg_notify fanout; borrow the always-set CI env
-        // as the shared cluster token so the app can build.
-        config.cluster.instance_url = Some("http://127.0.0.1:0".to_owned());
-        config.cluster.token_env = "CI_POSTGRES_URL".to_owned();
         Self {
             dir,
             storage,
@@ -870,7 +864,6 @@ async fn admin_with_fake_org(stack: &Stack) -> Router {
         storage: Some(storage),
         key_store: Some(Arc::new(KeyStore::new(stage.managed.clone()))),
         aead: stage.aead.clone(),
-        limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone()),
         lifecycle: None,
         lazy_refresher: None,
         runtime: None,

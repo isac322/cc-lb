@@ -89,9 +89,6 @@ url = {url:?}
 cache_path = {cache_path:?}
 [aead]
 key_env = "CC_LB_MASTER_KEY"
-[cluster]
-instance_url = "http://127.0.0.1:0"
-token_env = "CC_LB_RETRY_TEST_TOKEN"
 [[admin.auth.providers]]
 kind = "static_token"
 id = "test"
@@ -142,8 +139,6 @@ fn server_config(
         id: "test".to_owned(),
         token_env: "CC_LB_RETRY_TEST_TOKEN".to_owned(),
     }];
-    config.cluster.instance_url = Some("http://127.0.0.1:0".to_owned());
-    config.cluster.token_env = "CC_LB_RETRY_TEST_TOKEN".to_owned();
     for job in config.scheduler.recurring_jobs.values_mut() {
         job.enabled = false;
     }

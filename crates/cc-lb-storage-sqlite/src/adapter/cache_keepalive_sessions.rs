@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    CacheKeepaliveCompletionTicket, CacheKeepaliveEnqueueState, CacheKeepaliveGenerationCheck,
-    CacheKeepaliveHitRefreshRequest, CacheKeepaliveOrderLease, CacheKeepaliveReplaceRequest,
-    CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore,
-    CacheKeepaliveTerminalReason, CacheTtl, StorageError, StorageResult, cache_keepalive_job_key,
+    CacheKeepaliveCompletionTicket, CacheKeepaliveEnqueueState, CacheKeepaliveHitRefreshRequest,
+    CacheKeepaliveOrderLease, CacheKeepaliveReplaceRequest, CacheKeepaliveSessionRecord,
+    CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
+    CacheTtl, StorageError, StorageResult, cache_keepalive_job_key,
     cache_keepalive_legacy_order_meta_key, cache_keepalive_legacy_request_anchor_fence,
     cache_keepalive_order_meta_key, format_keepalive_order_meta, parse_keepalive_order_meta,
 };
@@ -449,18 +449,6 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         Ok(result.rows_affected() == 1)
     }
 
-    async fn check_cache_keepalive_generation(
-        &self,
-        session_key_hash: &str,
-    ) -> StorageResult<Option<CacheKeepaliveGenerationCheck>> {
-        let row = sqlx::query("SELECT generation, status, enqueue_state FROM cache_keepalive_sessions WHERE session_key_hash = ?")
-            .bind(session_key_hash)
-            .fetch_optional(self.pool())
-            .await
-            .map_err(map_sqlx_error)?;
-        row.map(row_to_check).transpose()
-    }
-
     async fn reschedule_after_cache_hit(
         &self,
         request: &CacheKeepaliveHitRefreshRequest,
@@ -597,33 +585,6 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             },
         )
         .await
-    }
-
-    async fn mark_latest_cache_keepalive_terminal(
-        &self,
-        session_key_hash: &str,
-        reason: CacheKeepaliveTerminalReason,
-        now_unix_secs: u64,
-    ) -> StorageResult<bool> {
-        let retained_expires_at = u64_to_i64(
-            now_unix_secs.saturating_add(TERMINAL_SESSION_RETENTION_SECS),
-            "cache keepalive terminal expires_at",
-        )?;
-        let result = sqlx::query(
-            "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = ?, error = NULL, running_since_unix_secs = NULL,
-             encrypted_payload = X'',
-             expires_at = CASE WHEN refresh_count > 0 OR EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash) THEN MAX(expires_at, ?) ELSE expires_at END,
-             updated_at = ?
-             WHERE session_key_hash = ? AND status = 'active'",
-        )
-        .bind(reason.as_str())
-        .bind(retained_expires_at)
-        .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
-        .bind(session_key_hash)
-        .execute(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-        Ok(result.rows_affected() == 1)
     }
 
     async fn recover_cache_keepalive_stale_running(
@@ -929,25 +890,6 @@ impl SqliteStorage {
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(true)
     }
-}
-
-fn row_to_check(row: sqlx::sqlite::SqliteRow) -> StorageResult<CacheKeepaliveGenerationCheck> {
-    Ok(CacheKeepaliveGenerationCheck {
-        generation: i64_to_u64(
-            row.try_get("generation").map_err(map_sqlx_error)?,
-            "cache keepalive generation",
-        )?,
-        status: status_from_db(
-            row.try_get::<String, _>("status")
-                .map_err(map_sqlx_error)?
-                .as_str(),
-        )?,
-        enqueue_state: enqueue_state_from_db(
-            row.try_get::<String, _>("enqueue_state")
-                .map_err(map_sqlx_error)?
-                .as_str(),
-        )?,
-    })
 }
 
 pub(crate) fn row_to_record(

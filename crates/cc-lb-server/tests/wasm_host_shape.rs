@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use cc_lb_domain::{Principal, PrincipalKind, Upstream};
+use cc_lb_domain::{Principal, PrincipalKind, Provider, Upstream, UpstreamIdentity};
+use cc_lb_plugin_wire::schema::ProviderFamily;
 use cc_lb_runtime_wasmtime::{
     RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch, WasmtimeRuntime,
 };
@@ -48,11 +49,20 @@ fn shape_adapter_when_wasm_passthrough_then_shapes_and_strips_auth_header() {
             &wasm_bytes,
         )
         .expect("register_shape OK");
-    let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
-        slot,
-        runtime.config_arc(),
-    ));
-    let dialect = WasmtimeUpstreamDialect::new(dispatch);
+    let dispatch = Arc::new(
+        WasmPluginWireDispatch::from_slot(slot, runtime.config_arc())
+            .for_provider(ProviderFamily::Anthropic)
+            .expect("anthropic shape hook"),
+    );
+    let dialect = WasmtimeUpstreamDialect::new(dispatch).with_upstream_identity(UpstreamIdentity {
+        provider: Provider::Anthropic,
+        credential_kind: "anthropic_api_key".to_owned(),
+        upstream_id: "test-shape".to_owned(),
+        name: "test-shape".to_owned(),
+        base_url: Some("https://example.test".to_owned()),
+        gemini_oauth_profile: None,
+        code_assist_project_id: None,
+    });
     let mut headers = HeaderMap::new();
     headers.insert(
         http::header::CONTENT_TYPE,
@@ -107,10 +117,10 @@ fn openai_response_header_plugin() -> Vec<u8> {
     use cc_lb_plugin_wire::schema::WireSchema;
 
     let output = rkyv::to_bytes::<rkyv::rancor::Error>(
-        &cc_lb_plugin_wire::TransformResponseResult::Replace {
+        &cc_lb_plugin_wire::v2::TransformResponseResult::Replace {
             status: None,
             headers: Some(
-                vec![cc_lb_plugin_wire::Header {
+                vec![cc_lb_plugin_wire::v2::Header {
                     name: "x-wasm-transformed".into(),
                     value: Box::from(*b"1"),
                 }]
@@ -155,8 +165,8 @@ fn openai_response_header_plugin() -> Vec<u8> {
     }
     section(
         &mut wasm,
-        "cc_lb.schema.transform_response.v1",
-        &<cc_lb_plugin_wire::TransformResponseRequest as WireSchema>::FINGERPRINT,
+        "cc_lb.schema.transform_response.v2",
+        &<cc_lb_plugin_wire::v2::TransformResponseRequest as WireSchema>::FINGERPRINT,
     );
     section(
         &mut wasm,
@@ -165,7 +175,7 @@ fn openai_response_header_plugin() -> Vec<u8> {
             "name":"openai-response-header","version":"1.0.0",
             "description":"OpenAI response header transform","usage":"test",
             "hooks":{"transform_response_openai":{
-                "wire_version":1,"description":"response","usage":"test","mode":"active"
+                "wire_version":2,"description":"response","usage":"test","mode":"active"
             }}
         }"#,
     );

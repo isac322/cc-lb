@@ -1573,7 +1573,6 @@ fn refresh_test_router(
         storage: Some(server.storage.clone()),
         key_store: Some(admin_test_common::key_store(server.storage.clone())),
         aead: std::sync::Arc::new(AeadService::from_master_key([0; 32])),
-        limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
         lazy_refresher: None,
         runtime: None,

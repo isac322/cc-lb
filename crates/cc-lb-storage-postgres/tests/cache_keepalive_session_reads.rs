@@ -100,20 +100,6 @@ fn direct_lookup_is_principal_scoped() {
 }
 
 #[test]
-fn summary_input_matches_legacy_full_scan() {
-    run_postgres_case("ST-07 summary oracle", |url| async move {
-        summary_input_matches_legacy_full_scan_case(&url).await
-    });
-}
-
-#[test]
-fn summary_recent_decisions_applies_anti_join() {
-    run_postgres_case("ST-08 summary anti-join", |url| async move {
-        summary_recent_decisions_applies_anti_join_case(&url).await
-    });
-}
-
-#[test]
 fn pagination_reaches_terminal_with_engine_parity() {
     run_postgres_case("ST-09 terminal pagination", |url| async move {
         pagination_reaches_terminal_with_engine_parity_case(&url).await
@@ -578,17 +564,9 @@ async fn read_model_contract(url: &str) -> Result<()> {
     let turns = storage
         .list_cache_keepalive_turns(PRINCIPAL_ID, "renewed-session")
         .await?;
-    let decision = storage
-        .get_cache_keepalive_decision_for_principal(PRINCIPAL_ID, "renewed-turn")
-        .await?
-        .expect("renewed decision exists");
     assert_eq!(session.config_snapshot, Some(snapshot()));
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0].source_ref_id, "renewed-turn");
-    assert_eq!(
-        decision.reason,
-        "agent-in-turn (tool_use: `bash`) — first renewal in 4m 30s"
-    );
 
     for (filter, expected_ids) in [
         (
@@ -1189,96 +1167,6 @@ async fn direct_lookup_is_principal_scoped_case(url: &str) -> Result<()> {
     fixture.drop_schema().await
 }
 
-async fn summary_input_matches_legacy_full_scan_case(url: &str) -> Result<()> {
-    let (fixture, storage) = initialized_storage(url).await?;
-    for index in 0..50 {
-        storage
-            .replace_from_real_request(&request(
-                &format!("summary-session-{index:02}"),
-                2_000_000 + index,
-                "summary",
-            ))
-            .await?;
-    }
-    insert_decision_series(&storage, PRINCIPAL_ID, "old-", 10_000, 1_000_000).await?;
-    for index in 0..5 {
-        let id = format!("recent-{index}");
-        insert_decision_raw(
-            &storage,
-            DecisionFixture {
-                principal: PRINCIPAL_ID,
-                id: &id,
-                last_message_ms: 2_000_000_000 + index,
-                ts: 2_000_000,
-                decision: "not_tracked",
-                error: None,
-                config_snapshot: None,
-            },
-        )
-        .await?;
-        if index >= 3 {
-            insert_turn(
-                &storage,
-                &turn_record("joined", &id, PRINCIPAL_ID, 2_000_001, index as u32),
-            )
-            .await?;
-        }
-    }
-    let summary = storage
-        .read_cache_keepalive_summary_input(PRINCIPAL_ID, 1_999_999_999)
-        .await?;
-    assert_eq!(summary.recent_decisions, 3);
-    let expected_sessions = (0..50_u64)
-        .rev()
-        .map(|index| {
-            (
-                format!("session:summary-session-{index:02}"),
-                (2_000_000 + index) * 1_000,
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        summary.sessions.iter().map(item_key).collect::<Vec<_>>(),
-        expected_sessions
-    );
-    fixture.drop_schema().await
-}
-
-async fn summary_recent_decisions_applies_anti_join_case(url: &str) -> Result<()> {
-    let (fixture, storage) = initialized_storage(url).await?;
-    for index in 0..15 {
-        let id = format!("anti-join-{index}");
-        insert_decision_raw(
-            &storage,
-            DecisionFixture {
-                principal: PRINCIPAL_ID,
-                id: &id,
-                last_message_ms: 5_000 + index,
-                ts: 5,
-                decision: "not_tracked",
-                error: None,
-                config_snapshot: None,
-            },
-        )
-        .await?;
-        if index < 10 {
-            insert_turn(
-                &storage,
-                &turn_record("joined", &id, PRINCIPAL_ID, 6, index as u32),
-            )
-            .await?;
-        }
-    }
-    assert_eq!(
-        storage
-            .read_cache_keepalive_summary_input(PRINCIPAL_ID, 5_000)
-            .await?
-            .recent_decisions,
-        5
-    );
-    fixture.drop_schema().await
-}
-
 async fn pagination_reaches_terminal_with_engine_parity_case(url: &str) -> Result<()> {
     let (fixture, storage) = initialized_storage(url).await?;
     sqlx::query(
@@ -1459,13 +1347,6 @@ async fn list_boundaries_preserve_error_contract_case(url: &str) -> Result<()> {
         StorageError::Fatal { ref message }
             if message == "cache keepalive cursor timestamp cannot be represented as bigint"
     ));
-    assert!(matches!(
-        storage
-            .read_cache_keepalive_summary_input(PRINCIPAL_ID, u64::MAX)
-            .await
-            .expect_err("summary cutoff range"),
-        StorageError::InvalidInput { .. }
-    ));
     fixture.drop_schema().await
 }
 
@@ -1484,13 +1365,6 @@ async fn selected_corruption_is_not_silently_dropped_case(url: &str) -> Result<(
         },
     )
     .await?;
-    assert_eq!(
-        storage
-            .read_cache_keepalive_summary_input(PRINCIPAL_ID, 2_000)
-            .await?
-            .recent_decisions,
-        0
-    );
     assert!(matches!(
         storage
             .get_cache_keepalive_list_item(PRINCIPAL_ID, "old-corrupt")
@@ -1507,13 +1381,6 @@ async fn selected_corruption_is_not_silently_dropped_case(url: &str) -> Result<(
     .bind("corrupt-summary-session")
     .execute(storage.pool())
     .await?;
-    assert!(matches!(
-        storage
-            .read_cache_keepalive_summary_input(PRINCIPAL_ID, 2_000)
-            .await
-            .expect_err("selected session corruption"),
-        StorageError::Corrupted { .. }
-    ));
     assert!(matches!(
         storage
             .list_cache_keepalive_sessions(&query(PRINCIPAL_ID, 10))
@@ -2474,9 +2341,6 @@ async fn scalar_session_reads_project_current_cycle_and_null_decision_cycle_case
     let page = storage
         .list_cache_keepalive_sessions(&query(PRINCIPAL_ID, 10))
         .await?;
-    let summary = storage
-        .read_cache_keepalive_summary_input(PRINCIPAL_ID, 0)
-        .await?;
     let session = storage
         .get_cache_keepalive_list_item(PRINCIPAL_ID, "scalar-cycle-session")
         .await?
@@ -2485,12 +2349,7 @@ async fn scalar_session_reads_project_current_cycle_and_null_decision_cycle_case
         .get_cache_keepalive_list_item(PRINCIPAL_ID, "scalar-cycle-decision")
         .await?
         .expect("decision exists");
-    for row in page
-        .rows
-        .iter()
-        .chain(&summary.sessions)
-        .chain([&session, &decision])
-    {
+    for row in page.rows.iter().chain([&session, &decision]) {
         let value = serde_json::to_value(row)?;
         let expected = if row.is_decision() {
             serde_json::Value::Null

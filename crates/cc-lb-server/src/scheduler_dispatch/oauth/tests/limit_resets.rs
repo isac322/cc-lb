@@ -500,7 +500,6 @@ fn admin_router(
         storage: Some(fixture.storage.clone()),
         key_store: Some(fixture.dispatch.key_store.clone()),
         aead: fixture.aead.clone(),
-        limit_engine: fixture.dispatch.limit_engine.clone(),
         lifecycle: None,
         lazy_refresher: None,
         runtime: Some(fixture.dispatch.runtime.clone()),

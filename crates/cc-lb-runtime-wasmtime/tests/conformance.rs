@@ -1,41 +1,28 @@
 //! Phase 1 W8 conformance scenarios.
-//!
-//! Builds on the W7 happy-path round-trip and exercises the
-//! host-side invariants the review consensus pinned in the RFC:
-//!
-//! * **Multi-slot independence**: two registered plugins do not
-//!   collide in the runtime slot map or leak state through the
-//!   per-call fresh-`Store` dispatcher.
-//! * **Concurrent calls**: dispatching from multiple threads against
-//!   the same slot returns consistent results — each call gets its
-//!   own instantiate + `Store`.
-//! * **Large payload**: rkyv encode/decode + `Memory::write` /
-//!   `Memory::data` cope with payloads larger than a single wasm
-//!   page.
-//!
-//! All scenarios reuse the `cache-aware-wasmtime` artifact produced
-//! for the W7 e2e test; no extra wasm fixtures are needed.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 
-use cc_lb_plugin_wire::{
-    ArchivedFilterResponse, CachePricingSummary, FilterRequest, FilterResponse, Principal,
+use cc_lb_plugin_wire::v2::{
+    ArchivedFilterResponse, CachePricingSummary, Claim, FilterResponse, Principal,
     UpstreamCandidate,
 };
-use cc_lb_runtime_wasmtime::WasmtimeRuntime;
-use cc_lb_runtime_wasmtime::{RuntimeSlotKey, RuntimeSlotRole};
+use cc_lb_plugin_wire::v3::{FilterRequest, NativeCachePricing, NativeCachePricingProvider};
+use cc_lb_runtime_wasmtime::{
+    RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch, WasmtimeRuntime,
+};
 use rkyv::rancor::Error;
 use rkyv::util::AlignedVec;
 
 fn wasm_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("crates/")
         .parent()
         .expect("workspace root")
-        .join("target/wasm32-unknown-unknown/release/cache_aware_wasmtime.wasm")
+        .to_path_buf();
+    workspace_root.join("target/wasm32-unknown-unknown/release/cache_aware_wasmtime.wasm")
 }
 
 fn load_wasm_or_skip() -> Option<Vec<u8>> {
@@ -54,7 +41,6 @@ fn load_wasm_or_skip() -> Option<Vec<u8>> {
 }
 
 fn request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRequest {
-    use cc_lb_plugin_wire::Claim;
     let claims: Box<[Claim]> = match keep_k {
         Some(k) => Box::new([Claim {
             key: Box::from("keep_k"),
@@ -68,6 +54,7 @@ fn request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRequest {
             upstream_id: Box::from(*id),
             name: format!("upstream-{id}").into_boxed_str(),
             kind: Box::from("anthropic_api_key"),
+            base_url: None,
             observed_at_unix_secs: 0,
             predicted_cache_read_tokens: *p,
             predicted_cache_creation_tokens_5m: 0,
@@ -77,6 +64,7 @@ fn request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRequest {
             organization_type: Box::from(""),
             rate_limit_tier: Box::from(""),
             seat_tier: Box::from(""),
+            subscription_quotas: Box::new([]),
         })
         .collect::<Vec<_>>()
         .into_boxed_slice();
@@ -92,6 +80,11 @@ fn request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRequest {
             cache_creation_1h_micros_per_million: None,
             cache_read_micros_per_million: None,
         },
+        native_pricing: NativeCachePricing {
+            version: 1,
+            provider: NativeCachePricingProvider::Anthropic,
+            rates: Box::new([]),
+        },
         method: Box::from("POST"),
         path: Box::from("/v1/messages"),
         query: None,
@@ -106,9 +99,11 @@ fn request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRequest {
     }
 }
 
-fn call(runtime: &WasmtimeRuntime, slot: &RuntimeSlotKey, req: &FilterRequest) -> FilterResponse {
+fn call(dispatch: &WasmPluginWireDispatch, req: &FilterRequest) -> FilterResponse {
     let bytes = rkyv::to_bytes::<Error>(req).expect("encode");
-    let out = runtime.call_filter(slot, bytes.as_slice()).expect("call");
+    let out = dispatch
+        .call_filter_scoped(bytes.as_slice(), <[u8]>::to_vec)
+        .expect("call");
     let mut aligned = AlignedVec::<16>::with_capacity(out.len());
     aligned.extend_from_slice(&out);
     let archived = rkyv::access::<ArchivedFilterResponse, Error>(&aligned).expect("access");
@@ -135,22 +130,20 @@ fn multi_slot_independent() {
 
     let slot_a = RuntimeSlotKey::new("tenant-a", "cache-aware-wasmtime", RuntimeSlotRole::Filter);
     let slot_b = RuntimeSlotKey::new("tenant-b", "cache-aware-wasmtime", RuntimeSlotRole::Filter);
-    runtime
+    let loaded_a = runtime
         .register_filter(slot_a.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register a");
-    runtime
+    let loaded_b = runtime
         .register_filter(slot_b.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register b");
-    assert_eq!(runtime.slot_count(), 2);
+    assert!(runtime.get_slot(&slot_a).is_some());
+    assert!(runtime.get_slot(&slot_b).is_some());
+    let dispatch_a = WasmPluginWireDispatch::from_slot(loaded_a, runtime.config_arc());
+    let dispatch_b = WasmPluginWireDispatch::from_slot(loaded_b, runtime.config_arc());
 
-    let resp_a = call(
-        &runtime,
-        &slot_a,
-        &request(Some(1), &[("x", 50), ("y", 200)]),
-    );
+    let resp_a = call(&dispatch_a, &request(Some(1), &[("x", 50), ("y", 200)]));
     let resp_b = call(
-        &runtime,
-        &slot_b,
+        &dispatch_b,
         &request(Some(2), &[("p", 10), ("q", 20), ("r", 30)]),
     );
 
@@ -164,19 +157,22 @@ fn concurrent_callers_each_build_their_own_worker() {
         return;
     };
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-    let slot = RuntimeSlotKey::global("concurrent", RuntimeSlotRole::Filter);
-    runtime
-        .register_filter(slot.clone(), "cache-aware-wasmtime", &wasm)
+    let slot_key = RuntimeSlotKey::global("concurrent", RuntimeSlotRole::Filter);
+    let slot = runtime
+        .register_filter(slot_key, "cache-aware-wasmtime", &wasm)
         .expect("register");
+    let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
+        slot,
+        runtime.config_arc(),
+    ));
 
     let handles: Vec<_> = (0..8)
         .map(|i| {
-            let runtime = Arc::clone(&runtime);
-            let slot = slot.clone();
+            let dispatch = Arc::clone(&dispatch);
             thread::spawn(move || {
                 for _ in 0..16 {
                     let req = request(Some(1), &[("a", 10 + i), ("b", 200 + i), ("c", 50 + i)]);
-                    let resp = call(&runtime, &slot, &req);
+                    let resp = call(&dispatch, &req);
                     assert_eq!(accepted_ids(&resp), vec!["b".to_owned()]);
                 }
             })
@@ -194,13 +190,12 @@ fn large_payload_round_trips() {
         return;
     };
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-    let slot = RuntimeSlotKey::global("large-payload", RuntimeSlotRole::Filter);
-    runtime
-        .register_filter(slot.clone(), "cache-aware-wasmtime", &wasm)
+    let slot_key = RuntimeSlotKey::global("large-payload", RuntimeSlotRole::Filter);
+    let slot = runtime
+        .register_filter(slot_key, "cache-aware-wasmtime", &wasm)
         .expect("register");
+    let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
 
-    // 256 candidates, each with a long upstream_id — well over one
-    // 64 KiB wasm page once rkyv-serialised.
     let candidates: Vec<(String, u32)> = (0..256u32)
         .map(|i| (format!("upstream-{:0>32}-{i}", "x"), i))
         .collect();
@@ -208,12 +203,10 @@ fn large_payload_round_trips() {
         candidates.iter().map(|(s, p)| (s.as_str(), *p)).collect();
     let req = request(Some(3), &candidate_refs);
 
-    let resp = call(&runtime, &slot, &req);
+    let resp = call(&dispatch, &req);
     assert_eq!(resp.results.len(), 256);
 
-    // Top 3 by predicted_cache_read_tokens — indices 253, 254, 255.
-    let mut accepted = accepted_ids(&resp);
-    accepted.sort();
+    let accepted = accepted_ids(&resp);
     let expected: Vec<String> = (253..256u32)
         .map(|i| format!("upstream-{:0>32}-{i}", "x"))
         .collect();

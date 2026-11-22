@@ -13,7 +13,7 @@ The [consistency contract](/docs/reference/source/consistency-contract/) lists w
 | Resource | Common endpoints |
 | --- | --- |
 | Upstreams | `POST /admin/v1/upstreams`, `GET /admin/v1/upstreams`, `PUT /admin/v1/upstreams/{id}`, `DELETE /admin/v1/upstreams/{id}` |
-| Principals | `POST /admin/v1/principals`, `GET /admin/v1/principals`, `PUT /admin/v1/principals/{id}` |
+| Principals | `POST /admin/v1/principals`, `GET /admin/v1/principals`, `PATCH /admin/v1/principals/{id}` |
 | Keys | `POST /admin/v1/principals/{id}/keys`, revoke through the key lifecycle endpoint |
 | Plugins | `GET /admin/v1/plugins/registry`, `POST /admin/v1/plugins/wasm` |
 | Status | `GET /admin/v1/status`, `GET /admin/v1/export` |

@@ -79,8 +79,6 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tracing::Instrument as _;
 
-#[cfg(feature = "postgres")]
-use crate::admin_ports::ServerRetainedPartialPort;
 use crate::admin_ports::{
     ServerRoutePreviewPort, ServerSubscriptionQuotaIngestionPort, ServerWarmupPort,
 };
@@ -411,12 +409,8 @@ pub enum BuildError {
     StorageKeyMissing { env: String },
     #[error("storage master key must be 32 bytes encoded as 64 hex characters")]
     InvalidStorageKey,
-    #[error("cluster token env {env} is missing")]
-    ClusterTokenMissing { env: String },
     #[error("postgres storage pool unavailable for pg_notify fanout")]
     PgNotifyPoolUnavailable,
-    #[error("cluster.instance_url is required when storage.kind=postgres")]
-    ClusterInstanceUrlMissing,
     #[error("anthropic org api origin is invalid: {0}")]
     AnthropicOrgOrigin(#[source] url::ParseError),
     #[error("request diagnostics sink failed to start: {0}")]
@@ -877,12 +871,6 @@ fn build_app_for_testing_postgres_config(database_url: &str) -> Config {
         ..Config::default()
     };
     config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
-    // The postgres backend always runs pg_notify fanout, which needs a peer
-    // identity and a shared cluster token. Postgres tests only run with
-    // CI_POSTGRES_URL set, so borrow it as the token env instead of mutating
-    // process-wide state from a library helper.
-    config.cluster.instance_url = Some("http://127.0.0.1:0".to_owned());
-    config.cluster.token_env = "CI_POSTGRES_URL".to_owned();
     config
 }
 
@@ -909,7 +897,6 @@ async fn build_app_with_path_inner(
     clock: ClockHandle,
 ) -> Result<App, BuildError> {
     config.validate()?;
-    validate_cluster_token_before_storage(&config)?;
 
     let (managed_store, storage, aead, lazy_refresh_claim_guard, opened_scheduler) =
         open_storage(&config, clock.clone()).await?;
@@ -964,8 +951,6 @@ pub async fn build_app_with_storage(
     aead: Arc<AeadService>,
     clock: ClockHandle,
 ) -> Result<App, BuildError> {
-    validate_cluster_token_before_storage(&config)?;
-
     let opened_scheduler = crate::scheduler_factory::open_scheduler_storage(
         &config.storage,
         &config.scheduler,
@@ -1266,9 +1251,6 @@ async fn build_app_with_storage_inner(
     let lifecycle_limit_reconcile_rx = in_memory_bus.attach_lifecycle_limit_reconcile(
         cc_lb_control::event_bus::DEFAULT_LIFECYCLE_LIMIT_RECONCILE_CAPACITY,
     );
-    let lifecycle_cache_obs_rx = in_memory_bus.attach_lifecycle_cache_observation(
-        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_CACHE_OBS_CAPACITY,
-    );
     let lifecycle_rate_limit_header_rx = in_memory_bus.attach_lifecycle_rate_limit_header(
         cc_lb_control::event_bus::DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY,
     );
@@ -1289,7 +1271,6 @@ async fn build_app_with_storage_inner(
     );
     let (event_fanout_shutdown_tx, event_fanout_shutdown_rx) = watch::channel(false);
     let mut event_fanout_tasks = Vec::new();
-    let mut internal_partials_state = None;
     // Shared with AdminState so the SSE handler subscribes to the same broadcast
     // the StorageTailPoller feeds. Kept live for the InMemory transport too —
     // AdminState holds one Sender clone so the channel never closes, and no
@@ -1300,7 +1281,6 @@ async fn build_app_with_storage_inner(
     {
         let _ = &event_fanout_shutdown_rx;
         let _ = &mut event_fanout_tasks;
-        let _ = &mut internal_partials_state;
     }
     let event_bus: Arc<dyn cc_lb_control::RequestEventBus> = match &config.storage {
         cc_lb_config::StorageConfig::Sqlite { .. } => Arc::new(in_memory_bus.clone()),
@@ -1318,42 +1298,25 @@ async fn build_app_with_storage_inner(
                 let pg_pool = storage_factory::open_pg_fanout_pool(&config.storage)
                     .await?
                     .ok_or(BuildError::PgNotifyPoolUnavailable)?;
-                let cluster_token = load_cluster_token(&config)?;
-                let retention = cc_lb_engine::PartialRetentionCache::new(
-                    Duration::from_secs(config.event_bus.partial_retention_ttl_secs.max(1)),
-                    config.event_bus.partial_retention_max_entries,
-                );
                 let (notify_tx, notify_rx) =
                     tokio::sync::mpsc::channel(cc_lb_engine::PARTIAL_NOTIFY_MPSC_CAPACITY);
-                let instance_url = config
-                    .cluster
-                    .instance_url
-                    .clone()
-                    .ok_or(BuildError::ClusterInstanceUrlMissing)?;
+                let notify_producer_id = uuid::Uuid::new_v4().to_string();
 
                 event_fanout_tasks.push(cc_lb_engine::PgNotifier::spawn_with_channel(
                     pg_pool.clone(),
                     notify_rx,
-                    retention.clone(),
-                    instance_url.clone(),
+                    notify_producer_id.clone(),
                     config.event_bus.pg_notify_channel.clone(),
                     event_fanout_shutdown_rx.clone(),
                 ));
 
                 let listener_bus: Arc<dyn cc_lb_control::RequestEventBus> =
                     Arc::new(in_memory_bus.clone());
-                let _ = rustls::crypto::ring::default_provider().install_default();
-                let http_client = reqwest::Client::builder()
-                    .timeout(Duration::from_secs(3))
-                    .build()
-                    .map_err(|error| io::Error::other(error.to_string()))?;
                 event_fanout_tasks.push(cc_lb_engine::PgListener::spawn_with_channel(
                     pg_pool,
                     listener_bus,
-                    http_client,
-                    secrecy::SecretString::from(cluster_token.clone()),
                     config.event_bus.pg_notify_channel.clone(),
-                    instance_url,
+                    notify_producer_id,
                     event_fanout_shutdown_rx.clone(),
                 ));
 
@@ -1365,14 +1328,6 @@ async fn build_app_with_storage_inner(
                     initial_storage_tail_cursor,
                     event_fanout_shutdown_rx.clone(),
                 ));
-
-                let retained_partial_port: Arc<dyn cc_lb_admin::ports::RetainedPartialPort> =
-                    Arc::new(ServerRetainedPartialPort::new(retention.clone()));
-                internal_partials_state =
-                    Some(cc_lb_admin::internal_partials::InternalPartialsState {
-                        retention: retained_partial_port,
-                        cluster_token,
-                    });
 
                 Arc::new(cc_lb_engine::PgNotifyFanout::new(
                     in_memory_bus.clone(),
@@ -1419,14 +1374,6 @@ async fn build_app_with_storage_inner(
             cc_lb_engine::lifecycle_limit_reconcile_subscriber::DEFAULT_LIMIT_RECONCILE_TTL,
             lifecycle_max_ttl,
         );
-    let lifecycle_cache_observation_subscriber_handle =
-        cc_lb_engine::lifecycle_cache_observation_subscriber::spawn_with_ttls(
-            lifecycle_cache_obs_rx,
-            event_bus.clone(),
-            cc_lb_engine::lifecycle_cache_observation_subscriber::DEFAULT_CACHE_OBS_MAP_CAP,
-            cc_lb_engine::lifecycle_cache_observation_subscriber::DEFAULT_CACHE_OBS_TTL,
-            lifecycle_max_ttl,
-        );
     let lifecycle_rate_limit_header_subscriber_handle =
         cc_lb_engine::lifecycle_rate_limit_header_subscriber::spawn_with_ttls(
             lifecycle_rate_limit_header_rx,
@@ -1443,7 +1390,6 @@ async fn build_app_with_storage_inner(
             lifecycle_subscription_quota_rx,
             Some(cache),
             Some(subscription_quota_sink.clone()),
-            Some(event_bus.clone()),
             cc_lb_engine::lifecycle_subscription_quota_subscriber::DEFAULT_SUBSCRIPTION_QUOTA_MAP_CAP,
             cc_lb_engine::lifecycle_subscription_quota_subscriber::DEFAULT_SUBSCRIPTION_QUOTA_TTL,
             lifecycle_max_ttl,
@@ -1493,11 +1439,6 @@ async fn build_app_with_storage_inner(
         tokio::sync::Mutex<Option<cc_lb_engine::LimitReconcileSubscriberHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_limit_reconcile_subscriber_handle,
-    )));
-    let lifecycle_cache_observation_subscriber_slot: Arc<
-        tokio::sync::Mutex<Option<cc_lb_engine::CacheObservationSubscriberHandle>>,
-    > = Arc::new(tokio::sync::Mutex::new(Some(
-        lifecycle_cache_observation_subscriber_handle,
     )));
     let lifecycle_rate_limit_header_subscriber_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::RateLimitHeaderSubscriberHandle>>,
@@ -1657,18 +1598,6 @@ async fn build_app_with_storage_inner(
             let reconcile_slot = reconcile_slot.clone();
             async move {
                 let mut guard = reconcile_slot.lock().await;
-                if let Some(handle) = guard.take() {
-                    handle.shutdown().await;
-                }
-            }
-        });
-    }
-    {
-        let cache_obs_slot = lifecycle_cache_observation_subscriber_slot.clone();
-        signals.add_shutdown_hook(move || {
-            let cache_obs_slot = cache_obs_slot.clone();
-            async move {
-                let mut guard = cache_obs_slot.lock().await;
                 if let Some(handle) = guard.take() {
                     handle.shutdown().await;
                 }
@@ -1840,7 +1769,6 @@ async fn build_app_with_storage_inner(
         storage: Some(storage.clone()),
         key_store: Some(key_store),
         aead: aead.clone(),
-        limit_engine: limit_engine.clone(),
         lifecycle: Some(AdminPorts {
             route_preview: Some(Arc::new(ServerRoutePreviewPort::new(lifecycle.clone()))),
             warmup: Some(Arc::new(ServerWarmupPort)),
@@ -1887,7 +1815,7 @@ async fn build_app_with_storage_inner(
 
     Ok(App {
         router: app_router(state, config.timeouts.upstream_total_secs),
-        admin_router: admin_router(admin_state, server_state.clone(), internal_partials_state),
+        admin_router: admin_router(admin_state),
         proxy_addr: config.listener.proxy_addr,
         admin_addr: config.listener.admin_addr,
         lifecycle,
@@ -2268,7 +2196,6 @@ fn lifecycle_config_from_config(
         messages_body_cap_bytes: body_caps.messages,
         files_body_cap_bytes: body_caps.files,
         replica_identity,
-        prompt_cache_shadow: config.prompt_cache_shadow.clone(),
         upstream_affinity_ttl: std::time::Duration::from_secs(config.upstream_affinity.ttl_secs()),
         unknown_openai_reasoning: config.upstream_affinity.unknown_openai_reasoning,
         openai_oauth_compat: config.openai_oauth_compat,
@@ -2305,29 +2232,6 @@ fn sighup_handler(tls_state: Option<Arc<TlsState>>) -> Option<signal::SighupHand
             }
         }) as signal::SighupHandler
     })
-}
-
-#[cfg(feature = "postgres")]
-fn validate_cluster_token_before_storage(config: &Config) -> Result<(), BuildError> {
-    if matches!(config.storage, cc_lb_config::StorageConfig::Postgres { .. }) {
-        load_cluster_token(config)?;
-    }
-    Ok(())
-}
-
-#[cfg(not(feature = "postgres"))]
-fn validate_cluster_token_before_storage(_config: &Config) -> Result<(), BuildError> {
-    Ok(())
-}
-
-#[cfg(feature = "postgres")]
-fn load_cluster_token(config: &Config) -> Result<String, BuildError> {
-    std::env::var(&config.cluster.token_env)
-        .ok()
-        .filter(|token| !token.trim().is_empty())
-        .ok_or_else(|| BuildError::ClusterTokenMissing {
-            env: config.cluster.token_env.clone(),
-        })
 }
 
 #[derive(Clone)]
@@ -2523,21 +2427,8 @@ struct HealthBody {
     reason: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
-struct AdminServerStateBody {
-    state: ServerState,
-}
-
-fn admin_router(
-    admin_state: AdminState,
-    server_state: Arc<ServerStateHandle>,
-    internal_partials_state: Option<cc_lb_admin::internal_partials::InternalPartialsState>,
-) -> Router {
-    let mut admin_router =
-        cc_lb_admin::router(admin_state).merge(server_state_router(server_state));
-    if let Some(state) = internal_partials_state {
-        admin_router = admin_router.merge(cc_lb_admin::internal_partials::router(state));
-    }
+fn admin_router(admin_state: AdminState) -> Router {
+    let admin_router = cc_lb_admin::router(admin_state);
     let admin_router = cc_lb_admin::routes::with_request_tracing(admin_router)
         // Admin surface only — proxy_router stays uncompressed to keep SSE
         // bodies streaming and skip CPU on the hot data plane. ETagged
@@ -2552,20 +2443,6 @@ fn admin_router(
         ));
 
     crate::admin_security::with_browser_security_headers(admin_router)
-}
-
-fn server_state_router(server_state: Arc<ServerStateHandle>) -> Router {
-    Router::new()
-        .route("/admin/health/state", get(admin_server_state))
-        .with_state(server_state)
-}
-
-async fn admin_server_state(
-    State(server_state): State<Arc<ServerStateHandle>>,
-) -> Json<AdminServerStateBody> {
-    Json(AdminServerStateBody {
-        state: server_state.current(),
-    })
 }
 
 fn app_router(state: ProxyState, timeout_secs: u64) -> Router {
@@ -2893,16 +2770,19 @@ fn wrap_scoped_proxy_routes(
     timeout_secs: u64,
     provider: Option<cc_lb_domain::Provider>,
 ) -> Router {
-    let inner_sb = ServiceBuilder::new()
-        .layer(crate::chaos::ChaosLayer::from_env())
-        .layer(middleware::from_fn_with_state(
-            ProxyTimeoutState {
-                timeout: Duration::from_secs(timeout_secs.max(1)),
-                provider,
-            },
-            proxy_timeout_middleware,
-        ));
-    let routes = routes.layer(inner_sb);
+    let chaos = crate::chaos::ChaosLayer::from_env();
+    let timeout_layer = middleware::from_fn_with_state(
+        ProxyTimeoutState {
+            timeout: Duration::from_secs(timeout_secs.max(1)),
+            provider,
+        },
+        proxy_timeout_middleware,
+    );
+    let routes = if chaos.is_enabled() {
+        routes.layer(ServiceBuilder::new().layer(chaos).layer(timeout_layer))
+    } else {
+        routes.layer(timeout_layer)
+    };
     let outer_sb = ServiceBuilder::new()
         .layer(middleware::from_fn_with_state(
             request_id_state,
@@ -4572,14 +4452,17 @@ async fn await_or_abort<T>(mut task: JoinHandle<T>, timeout: Duration) {
 }
 
 fn init_observability(config: &Config) -> Result<TracingGuard, BuildError> {
-    cc_lb_observability::init(&ObservabilityConfig {
+    let guard = cc_lb_observability::init(&ObservabilityConfig {
         tracing_level: config.observability.tracing_level.clone(),
         otlp_endpoint: config.observability.otlp_endpoint.clone(),
         metrics_addr: config.listener.metrics_addr,
         log_redaction: config.observability.log_redaction,
         user_prompt_redaction: config.observability.user_prompt_redaction,
     })
-    .map_err(BuildError::from)
+    .map_err(BuildError::from)?;
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    cc_lb_scheduler::scheduler_metrics::touch_scheduler_metric_handles();
+    Ok(guard)
 }
 
 type OpenStorageParts = (
@@ -5463,16 +5346,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_health_state_reports_current_state() {
-        let state = Arc::new(ServerStateHandle::new_starting());
-        let router = server_state_router(state.clone());
-
-        assert_admin_state(router.clone(), "starting").await;
-        state.transition_to_ready();
-        assert_admin_state(router, "ready").await;
-    }
-
-    #[tokio::test]
     async fn readiness_reports_undecryptable_openai_and_gemini_oauth_as_degraded_when_api_key_is_ready()
      {
         for kind in [
@@ -5973,64 +5846,6 @@ mod tests {
             hot_engine_cfg.allocation_strategy,
             cc_lb_runtime_wasmtime::HotEngineAllocationStrategy::OnDemand,
         );
-    }
-
-    #[cfg(feature = "postgres")]
-    #[tokio::test]
-    async fn postgres_startup_rejects_missing_cluster_token_before_storage_connect() {
-        let mut config = Config {
-            storage: cc_lb_config::StorageConfig::Postgres {
-                url: "postgres://127.0.0.1:1/cc_lb".to_owned(),
-                pool: cc_lb_config::PostgresPoolConfig::default(),
-            },
-            ..Config::default()
-        };
-        config.cluster.instance_url = Some("http://127.0.0.1:9091".to_owned());
-        config.cluster.token_env = format!(
-            "CC_LB_TEST_MISSING_CLUSTER_TOKEN_{}",
-            uuid::Uuid::now_v7().simple()
-        );
-
-        let preflight_result = preflight::run_offline(
-            &config,
-            preflight::PreflightOptions { skip_bind: true },
-            Arc::new(cc_lb_clock::SystemClock),
-        )
-        .await;
-        assert!(matches!(
-            preflight_result,
-            Err(preflight::PreflightError::ClusterTokenMissing(env))
-                if env == config.cluster.token_env
-        ));
-
-        let result = build_app(config.clone(), Arc::new(cc_lb_clock::SystemClock)).await;
-
-        assert!(matches!(
-            result,
-            Err(BuildError::ClusterTokenMissing { env }) if env == config.cluster.token_env
-        ));
-    }
-
-    async fn assert_admin_state(router: Router, expected: &str) {
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .uri("/admin/health/state")
-                    .body(Body::empty())
-                    .expect("request should build"),
-            )
-            .await
-            .expect("admin health state request should succeed");
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .expect("body should collect")
-            .to_bytes();
-        let payload: Value = serde_json::from_slice(&body).expect("body should be json");
-        assert_eq!(payload.get("state").and_then(Value::as_str), Some(expected));
     }
 
     /// QA-06: timeout responses use the route's provider dialect without

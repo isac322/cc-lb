@@ -11,7 +11,7 @@ pub use shape::WasmtimeUpstreamDialect;
 mod tests {
     use std::mem::align_of;
 
-    use cc_lb_plugin_wire::{ArchivedFilterResponse, FilterResponse, PerCandidateReason};
+    use cc_lb_plugin_wire::v2::{ArchivedFilterResponse, FilterResponse, PerCandidateReason};
     use rkyv::{rancor::Error as RkyvError, util::AlignedVec};
 
     use super::access_archived_scoped_or_copy;
@@ -126,25 +126,25 @@ mod tests {
     ) -> Vec<u8> {
         let mut module = wat::parse_str(wat).expect("valid wat");
         if matches!(hook, cc_lb_plugin_wire::schema::HookKind::Filter) {
-            let fingerprint = <cc_lb_plugin_wire::v1::FilterRequest as cc_lb_plugin_wire::schema::WireSchema>::FINGERPRINT;
-            append_custom_section(&mut module, "cc_lb.schema.filter.v1", &fingerprint);
+            let fingerprint = <cc_lb_plugin_wire::v3::FilterRequest as cc_lb_plugin_wire::schema::WireSchema>::FINGERPRINT;
+            append_custom_section(&mut module, "cc_lb.schema.filter.v3", &fingerprint);
         } else if matches!(hook, cc_lb_plugin_wire::schema::HookKind::Shape) {
-            let fingerprint_shape = <cc_lb_plugin_wire::v1::ShapeRequest as cc_lb_plugin_wire::schema::WireSchema>::FINGERPRINT;
-            let fingerprint_resp = <cc_lb_plugin_wire::v1::TransformResponseRequest as cc_lb_plugin_wire::schema::WireSchema>::FINGERPRINT;
-            let fingerprint_sse = <cc_lb_plugin_wire::v1::TransformSseEventRequest as cc_lb_plugin_wire::schema::WireSchema>::FINGERPRINT;
-            append_custom_section(&mut module, "cc_lb.schema.shape.v1", &fingerprint_shape);
+            let fingerprint_shape = <cc_lb_plugin_wire::v2::ShapeRequest as cc_lb_plugin_wire::schema::WireSchema>::FINGERPRINT;
+            let fingerprint_resp = <cc_lb_plugin_wire::v2::TransformResponseRequest as cc_lb_plugin_wire::schema::WireSchema>::FINGERPRINT;
+            let fingerprint_sse = <cc_lb_plugin_wire::v2::TransformSseEventRequest as cc_lb_plugin_wire::schema::WireSchema>::FINGERPRINT;
+            append_custom_section(&mut module, "cc_lb.schema.shape.v2", &fingerprint_shape);
             append_custom_section(
                 &mut module,
-                "cc_lb.schema.transform_response.v1",
+                "cc_lb.schema.transform_response.v2",
                 &fingerprint_resp,
             );
             append_custom_section(
                 &mut module,
-                "cc_lb.schema.transform_sse_event.v1",
+                "cc_lb.schema.transform_sse_event.v2",
                 &fingerprint_sse,
             );
         }
-        append_custom_section(&mut module, "cc_lb.plugin.v1", metadata_json);
+        append_custom_section(&mut module, "cc_lb.plugin.v2", metadata_json);
         module
     }
 
@@ -214,14 +214,14 @@ mod tests {
                 (data (i32.const 16) "{}")
                 (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 1024)
                 (func (export "cc_lb_free") (param i32 i32 i32))
-                (func (export "cc_lb_filter") (param i32 i32) (result i64)
+                (func (export "cc_lb_filter_anthropic") (param i32 i32) (result i64)
                     i64.const {}
                 )
             )
             "#,
             data_str, packed as i64
         );
-        let metadata = r#"{"name":"malicious-filter","version":"0.0.1","description":"malicious filter plugin","usage":"test usage","hooks":{"filter":{"wire_version":1,"description":"filter hook","usage":"call filter","mode":"active"}}}"#;
+        let metadata = r#"{"name":"malicious-filter","version":"0.0.1","description":"malicious filter plugin","usage":"test usage","hooks":{"filter_anthropic":{"wire_version":3,"description":"filter hook","usage":"call filter","mode":"active"}}}"#;
         let wasm_bytes = wat_with_custom_sections(
             &wat,
             metadata.as_bytes(),
@@ -246,10 +246,11 @@ mod tests {
                 &wasm_bytes,
             )
             .expect("register");
-        let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
-            slot,
-            runtime.config_arc(),
-        ));
+        let dispatch = Arc::new(
+            WasmPluginWireDispatch::from_slot(slot, runtime.config_arc())
+                .for_provider(cc_lb_plugin_wire::schema::ProviderFamily::Anthropic)
+                .expect("anthropic filter hook"),
+        );
         let filter_plugin = WasmtimeFilterPlugin::new(dispatch, Uuid::new_v4(), "oversized");
 
         let ctx = fixture_routing_context();

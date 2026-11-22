@@ -60,14 +60,16 @@ pub enum NotifyDropReason {
     QueueFull,
     QueueClosed,
     SerializeError,
+    PayloadTooLarge,
     PgError,
 }
 
 impl NotifyDropReason {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::QueueFull,
         Self::QueueClosed,
         Self::SerializeError,
+        Self::PayloadTooLarge,
         Self::PgError,
     ];
 
@@ -76,6 +78,7 @@ impl NotifyDropReason {
             Self::QueueFull => "queue_full",
             Self::QueueClosed => "queue_closed",
             Self::SerializeError => "serialize_error",
+            Self::PayloadTooLarge => "payload_too_large",
             Self::PgError => "pg_error",
         }
     }
@@ -103,47 +106,18 @@ impl PgListenerReconnectReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotifySentOutcome {
     Sent,
-    TruncatedSent,
+    TrimmedSent,
     Failed,
 }
 
 impl NotifySentOutcome {
-    pub const ALL: [Self; 3] = [Self::Sent, Self::TruncatedSent, Self::Failed];
+    pub const ALL: [Self; 3] = [Self::Sent, Self::TrimmedSent, Self::Failed];
 
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Sent => "sent",
-            Self::TruncatedSent => "truncated_sent",
+            Self::TrimmedSent => "trimmed_sent",
             Self::Failed => "failed",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NotifyHttpOutcome {
-    Success,
-    NotFound,
-    Unauthorized,
-    Timeout,
-    NetworkError,
-}
-
-impl NotifyHttpOutcome {
-    pub const ALL: [Self; 5] = [
-        Self::Success,
-        Self::NotFound,
-        Self::Unauthorized,
-        Self::Timeout,
-        Self::NetworkError,
-    ];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Success => "success",
-            Self::NotFound => "not_found",
-            Self::Unauthorized => "unauthorized",
-            Self::Timeout => "timeout",
-            Self::NetworkError => "network_error",
         }
     }
 }
@@ -182,7 +156,13 @@ mod tests {
                 .iter()
                 .map(|reason| reason.as_str())
                 .collect::<Vec<_>>(),
-            ["queue_full", "queue_closed", "serialize_error", "pg_error"]
+            [
+                "queue_full",
+                "queue_closed",
+                "serialize_error",
+                "payload_too_large",
+                "pg_error",
+            ]
         );
         assert_eq!(
             PgListenerReconnectReason::ALL
@@ -196,20 +176,7 @@ mod tests {
                 .iter()
                 .map(|outcome| outcome.as_str())
                 .collect::<Vec<_>>(),
-            ["sent", "truncated_sent", "failed"]
-        );
-        assert_eq!(
-            NotifyHttpOutcome::ALL
-                .iter()
-                .map(|outcome| outcome.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "success",
-                "not_found",
-                "unauthorized",
-                "timeout",
-                "network_error",
-            ]
+            ["sent", "trimmed_sent", "failed"]
         );
     }
 }

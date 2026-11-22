@@ -55,7 +55,8 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler};
-use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse, PerCandidateReason};
+use cc_lb_plugin_wire::v2::{FilterResponse, PerCandidateReason};
+use cc_lb_plugin_wire::v3::FilterRequest;
 
 #[cc_lb_plugin(
     name = "accept-all",
@@ -69,7 +70,7 @@ mod accept_all {
     #[handler(
         filter,
         provider = "anthropic",
-        wire = 1,
+        wire = 3,
         description = "Accepts all candidates without modification.",
         usage = "Attach to a router filter chain for baseline validation.",
     )]
@@ -108,16 +109,15 @@ Required plugin metadata:
 - `description`: short operator-facing summary.
 - `usage`: operator-facing deployment guidance.
 
-The macro emits allocator exports, hook exports, one schema custom section per
-distinct hook/wire version, and one metadata section. Plugins with only legacy
-handlers emit `cc_lb.plugin.v1`. Adding any provider-qualified handler selects
-`cc_lb.plugin.v2`, including when the module also contains legacy handlers.
+The macro emits allocator exports, provider-qualified hook exports, one schema
+custom section per distinct hook/wire version, and the `cc_lb.plugin.v2`
+metadata section.
 
 ### Provider-qualified handlers
 
-Split provider-specific behavior into separate functions with
-`provider = "anthropic"`, `provider = "openai"`, or `provider = "gemini"`.
-The attribute selects the export; Rust function names remain author-controlled.
+Every handler requires `provider = "anthropic"`, `provider = "openai"`, or
+`provider = "gemini"`. The attribute selects the export; Rust function names
+remain author-controlled.
 For example, this complete plugin exports request shaping for Anthropic and
 OpenAI without claiming any response-transform or Gemini capability:
 
@@ -139,7 +139,7 @@ mod provider_request_shaper {
     #[handler(
         shape,
         provider = "anthropic",
-        wire = 1,
+        wire = 2,
         description = "Builds Anthropic requests.",
         usage = "Use for Anthropic upstreams.",
     )]
@@ -150,7 +150,7 @@ mod provider_request_shaper {
     #[handler(
         shape,
         provider = "openai",
-        wire = 1,
+        wire = 2,
         description = "Builds OpenAI HTTP requests.",
         usage = "Use for OpenAI upstreams.",
     )]
@@ -182,18 +182,15 @@ mod provider_request_shaper {
 
 The generated exports are `cc_lb_shape_anthropic` and `cc_lb_shape_openai`;
 metadata keys use the matching hook/provider form, such as `shape_anthropic`
-and `shape_openai`. Provider selection and wire version are independent:
-provider-qualified handlers may declare V1 or V2. A selected V1 handler uses
-the unchanged V1 request and response layout; a selected V2 shape,
-buffered-response, or SSE handler receives the V2 upstream and upstream
-identity fields. V2 filter requests use the V2 filter schema and do not carry
-an upstream-identity field. Filter, buffered-response, and SSE handlers use
-the same provider suffix convention.
+and `shape_openai`. Filter handlers use `wire = 3` (`v3::FilterRequest` with
+native cache pricing context and `v2::FilterResponse`); shape,
+buffered-response, SSE, Realtime/Live frame, and Gemini envelope handlers use
+`wire = 2` (`v2::*` request types carrying `Upstream` and `UpstreamIdentity`).
 For Gemini OAuth Code Assist requests, a provider-qualified shape plugin may
-also declare `shape_envelope_gemini` with `wire = 2`. The host invokes this
-optional export after native Code Assist wrapping and before credentials are
-applied. It may replace the envelope body or headers, but never the host;
-missing export means no envelope call.
+also declare `shape_envelope_gemini` with `provider = "gemini"` and `wire = 2`.
+The host invokes this optional export after native Code Assist wrapping and
+before credentials are applied. It may replace the envelope body or headers, but
+never the host; missing export means no envelope call.
 Principal claims are currently empty on this wire boundary because the
 authenticated principal record does not expose a cheap claims projection;
 plugins must not infer claims from the principal id or credential headers.
@@ -217,7 +214,7 @@ failures emit a WebSocket error event and terminate that turn.
 ### Realtime and Live frame transforms
 
 Provider-qualified `transform_realtime_frame` handlers use wire version 2 and
-receive `TransformRealtimeFrameRequest`. The request identifies the provider
+receive `v2::TransformRealtimeFrameRequest`. The request identifies the provider
 upstream, principal, direction (`setup`, `client_to_provider`, or
 `provider_to_client`), payload kind (`json`, `text`, or `binary`), and raw
 payload bytes. A handler returns `Unchanged`, `Replace { kind, payload }`, or
@@ -240,36 +237,16 @@ flag. They relay chunks immediately without buffering or invoking an installed
 `transform_response` hook. JSON audio responses (`application/json` or `+json`)
 retain the ordinary buffered response behavior and invoke the hook when installed.
 
-### Legacy compatibility and migration
-
-Omitting `provider` preserves the unqualified export and V1 metadata. All
-legacy exports, including `cc_lb_filter`, are Anthropic-only. Valid existing
-artifacts need no rebuild for Anthropic; a legacy artifact intentionally used
-for OpenAI or Gemini must add qualified functions to keep handling that traffic.
-
-To migrate, replace each legacy handler's attribute with the corresponding
-`provider = "anthropic"` attribute, then add separate OpenAI or Gemini functions
-only for hooks you support. Reuse ordinary Rust helpers where logic is shared.
-The macro rejects duplicate `(hook, provider)` pairs and legacy/qualified
-Anthropic overlap. A legacy hook may coexist with qualified OpenAI or Gemini
-hooks. V1 wire layouts and fingerprints are unchanged; provider qualification
-does not require a new `wire` version.
-
-Operators receive the non-blocking `legacy_plugin_anthropic_only` chain warning
-when a legacy-only attached artifact coexists with enabled, allowed OpenAI or
-Gemini upstreams. Migrate the artifact rather than relying on cross-provider
-legacy dispatch.
-
 ## Hook Contracts
 
 cc-lb supports two plugin slot kinds. A wasm artifact may implement one or more hooks; upload registers the artifact for every slot whose hook it exports.
 
-| Slot | Legacy export | Provider-qualified exports | Request type | Response type | Use |
-|---|---|---|---|---|---|
-| `filter` | `cc_lb_filter` | `cc_lb_filter_{anthropic,openai,gemini}` | `v1::FilterRequest` | `FilterResponse` | Keep or reject upstream candidates. |
-| `shape` | `cc_lb_shape`<br>`cc_lb_transform_response`<br>`cc_lb_transform_sse_event` | `cc_lb_{shape,transform_response,transform_sse_event}_{anthropic,openai,gemini}` | `ShapeRequest`<br>`TransformResponseRequest`<br>`TransformSseEventRequest` | `ShapeResponse`<br>`TransformResponseResult`<br>`TransformSseEventResult` | Provider-specific request and response processing. Legacy shape is Anthropic-only. |
+| Slot | Exports | Request type | Response type | Use |
+|---|---|---|---|---|
+| `filter` | `cc_lb_filter_{anthropic,openai,gemini}` | `v3::FilterRequest` | `v2::FilterResponse` | Keep or reject upstream candidates. |
+| `shape` | `cc_lb_{shape,transform_response,transform_sse_event,transform_realtime_frame}_{anthropic,openai,gemini}`<br>`cc_lb_shape_envelope_gemini` | `v2::ShapeRequest`<br>`v2::TransformResponseRequest`<br>`v2::TransformSseEventRequest`<br>`v2::TransformRealtimeFrameRequest`<br>`v2::ShapeEnvelopeGeminiRequest` | `v2::ShapeResponse`<br>`v2::TransformResponseResult`<br>`v2::TransformSseEventResult`<br>`v2::TransformRealtimeFrameResult`<br>`v2::ShapeEnvelopeGeminiResponse` | Provider-specific request, response, streaming, and frame processing. |
 
-Before encoding filter requests on V1, V2, or V3, the host removes query
+Before encoding V3 filter requests, the host removes query
 segments whose parameter name is exactly `key`, case-insensitively. Other
 segments retain their order and encoding; names are not percent-decoded.
 An absent query stays absent, and an all-`key` query remains a present empty
@@ -280,11 +257,13 @@ Filter example:
 ```rust
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse, PerCandidateReason};
+use cc_lb_plugin_wire::v2::{FilterResponse, PerCandidateReason};
+use cc_lb_plugin_wire::v3::FilterRequest;
 
 #[handler(
     filter,
-    wire = 1,
+    provider = "anthropic",
+    wire = 3,
     description = "Rejects candidates without observed cache state.",
     usage = "Attach before fallback filters in router chains.",
 )]
@@ -315,13 +294,10 @@ candidate is dropped, whether the plugin rejects it or leaves it out of
 writes each non-empty `reason` to the router audit log as `{upstream_id}:
 {reason}`; pass an empty string when the decision needs no explanation.
 
-Shape example (legacy unified slot):
+Shape example:
 
-The unqualified `shape` handler is a legacy Anthropic-only contract. A legacy
-Shape plugin must implement all three wire hook functions: request shaping,
-buffered response transform, and SSE event transform. Provider-qualified
-handlers are independent: implement only the `(hook, provider)` combinations
-your plugin supports, and omit unused request or response hooks.
+Provider-qualified handlers are independent: implement only the `(hook, provider)`
+combinations your plugin supports, and omit unused request or response hooks.
 
 When a request asks for streaming and the upstream returns a finite non-SSE JSON
 body (`application/json` or `+json`, including chunked JSON without `Content-Length`),
@@ -349,7 +325,7 @@ Here is an example of a complete shape plugin that shapes requests and provides 
 
 ```rust
 use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler};
-use cc_lb_plugin_wire::v1::{
+use cc_lb_plugin_wire::v2::{
     Header, ShapeRequest, ShapeResponse,
     TransformResponseRequest, TransformResponseResult,
     TransformSseEventRequest, TransformSseEventResult,
@@ -366,7 +342,8 @@ mod request_only_shaper {
 
     #[handler(
         shape,
-        wire = 1,
+        provider = "anthropic",
+        wire = 2,
         description = "Builds the upstream request.",
         usage = "Attach to shape slots.",
     )]
@@ -384,9 +361,10 @@ mod request_only_shaper {
 
     #[handler(
         transform_response,
-        wire = 1,
+        provider = "anthropic",
+        wire = 2,
         description = "No-op buffered response transform.",
-        usage = "Required by the unified shape slot.",
+        usage = "Skips buffered response calls at dispatch time.",
     )]
     pub fn transform_response(_req: TransformResponseRequest) -> TransformResponseResult {
         TransformResponseResult::Unchanged
@@ -394,9 +372,10 @@ mod request_only_shaper {
 
     #[handler(
         transform_sse_event,
-        wire = 1,
+        provider = "anthropic",
+        wire = 2,
         description = "No-op SSE event transform.",
-        usage = "Required by the unified shape slot.",
+        usage = "Skips SSE calls at dispatch time.",
     )]
     pub fn transform_sse_event(_req: TransformSseEventRequest) -> TransformSseEventResult {
         TransformSseEventResult::Unchanged
@@ -404,16 +383,12 @@ mod request_only_shaper {
 }
 ```
 
-Each handler declares its own `wire = N`. Legacy handlers use `wire = 1`;
-provider-qualified handlers use `wire = 2` and the V2 request types.
-
 ## Metadata Contract
 
-Plugin and per-hook metadata is required. Legacy-only artifacts emit
-`cc_lb.plugin.v1`; any artifact with provider-qualified handlers emits
-`cc_lb.plugin.v2`. The host rejects uploads when the selected section is
-absent, malformed, incomplete, or contains an unknown hook key. Bare keys in
-V2 remain legacy Anthropic-only entries.
+Plugin and per-hook metadata is required. All modules emit the
+`cc_lb.plugin.v2` custom section with provider-qualified hook keys. The host
+rejects uploads when the section is absent, malformed, incomplete, or contains
+an unknown or unqualified hook key.
 
 Required top-level fields:
 
@@ -428,6 +403,7 @@ Required per-hook fields:
 - `wire_version`
 - `description`
 - `usage`
+- `mode`
 
 Upload rejection names relevant to plugin authors include:
 
@@ -446,11 +422,13 @@ handler:
 ```rust
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse, PerCandidateReason};
+use cc_lb_plugin_wire::v2::{FilterResponse, PerCandidateReason};
+use cc_lb_plugin_wire::v3::FilterRequest;
 
 #[handler(
     filter,
-    wire = 1,
+    provider = "anthropic",
+    wire = 3,
     description = "Filters candidates.",
     usage = "Attach to router filter chains.",
 )]
@@ -480,17 +458,14 @@ The host exposes its supported versions through
 
 | Hook | Host-supported wire versions |
 | --- | --- |
-| `filter` | `v1`, `v2`, `v3` |
-| `shape` | `v1`, `v2` |
-| `transform_response` | `v1`, `v2` |
-| `transform_sse_event` | `v1`, `v2` |
+| `filter` | `v3` |
+| `shape` | `v2` |
+| `transform_response` | `v2` |
+| `transform_sse_event` | `v2` |
 | `transform_realtime_frame` | `v2` |
 | `shape_envelope_gemini` | `v2` |
 
-V2 and V3 require provider-qualified metadata. `shape_envelope_gemini` is
-Gemini-only and requires a declared Gemini `shape` hook. The PDK's `#[handler]`
-macro currently supports V1 and V2 only: `#[handler(..., wire = 3)]` does not
-compile, even though the host admits filter V3.
+All hooks require provider-qualified metadata in `cc_lb.plugin.v2` (`filter` uses `wire = 3`; shape-family hooks use `wire = 2`). `shape_envelope_gemini` is Gemini-only and requires a declared Gemini `shape` hook.
 
 Admission rejects a plugin when the declared hook version is not in the host's
 supported list. This rejection happens before the plugin is persisted into a

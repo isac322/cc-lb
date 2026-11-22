@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use cc_lb_storage_api::{
-    MetaStore, MetadataTierMappingOverrideRecord, PlanTierStore, TierResolutionSource,
-    UpstreamPlanTierRecord,
-};
+use cc_lb_storage_api::{MetaStore, PlanTierStore, TierResolutionSource, UpstreamPlanTierRecord};
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::PgPool;
 use tokio::{runtime::Runtime, sync::Barrier};
@@ -25,11 +22,7 @@ fn plan_tier_first_insert_concurrent_upserts_are_idempotent() {
 
 async fn run_test(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
-    let result = async {
-        concurrent_upstream_first_insert_is_idempotent(&fixture).await?;
-        concurrent_override_first_insert_is_idempotent(&fixture).await
-    }
-    .await;
+    let result = concurrent_upstream_first_insert_is_idempotent(&fixture).await;
     let teardown = fixture.drop_schema().await;
     result?;
     teardown
@@ -80,48 +73,6 @@ async fn concurrent_upstream_first_insert_is_idempotent(fixture: &Fixture) -> Re
     Ok(())
 }
 
-async fn concurrent_override_first_insert_is_idempotent(fixture: &Fixture) -> Result<()> {
-    let record = MetadataTierMappingOverrideRecord {
-        organization_type: Some("concurrent_org".to_owned()),
-        rate_limit_tier: None,
-        seat_tier: Some("concurrent_seat".to_owned()),
-        tier_key: "pro".to_owned(),
-        effective_from_unix_millis: 1_900_000_100,
-        effective_to_unix_millis: None,
-        provenance: "plan-tier-concurrency-test".to_owned(),
-        created_at_unix_millis: 1_900_000_100,
-    };
-
-    let first_storage = fixture.storage().await?;
-    let second_storage = fixture.storage().await?;
-    let barrier = Arc::new(Barrier::new(2));
-    let first = tokio::spawn(upsert_override_after_barrier(
-        first_storage,
-        Arc::clone(&barrier),
-        record.clone(),
-    ));
-    let second = tokio::spawn(upsert_override_after_barrier(
-        second_storage,
-        barrier,
-        record,
-    ));
-    first.await??;
-    second.await??;
-
-    let open_rows: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM metadata_tier_mapping_override_v1 \
-         WHERE organization_type = $1 AND rate_limit_tier = $2 AND seat_tier = $3 \
-           AND effective_to_unix_millis IS NULL",
-    )
-    .bind("concurrent_org")
-    .bind("")
-    .bind("concurrent_seat")
-    .fetch_one(&fixture.pool)
-    .await?;
-    anyhow::ensure!(open_rows == 1, "expected one open metadata override row");
-    Ok(())
-}
-
 async fn append_upstream_after_barrier(
     storage: PostgresStorage,
     barrier: Arc<Barrier>,
@@ -129,17 +80,6 @@ async fn append_upstream_after_barrier(
 ) -> Result<()> {
     barrier.wait().await;
     storage.append_upstream_plan_tier(&record).await?;
-    storage.pool().close().await;
-    Ok(())
-}
-
-async fn upsert_override_after_barrier(
-    storage: PostgresStorage,
-    barrier: Arc<Barrier>,
-    record: MetadataTierMappingOverrideRecord,
-) -> Result<()> {
-    barrier.wait().await;
-    storage.upsert_metadata_tier_override(&record).await?;
     storage.pool().close().await;
     Ok(())
 }

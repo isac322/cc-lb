@@ -101,10 +101,6 @@ pub(super) fn parse_resolution_source(value: &str) -> StorageResult<TierResoluti
     }
 }
 
-pub(super) fn encode_absent(value: &Option<String>) -> &str {
-    value.as_deref().unwrap_or("")
-}
-
 pub(super) fn invalid_input(field: &str, reason: &str) -> StorageError {
     StorageError::InvalidInput {
         field: field.to_owned(),

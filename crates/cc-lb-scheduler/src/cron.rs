@@ -6,10 +6,8 @@
 //! every replica to exactly one queued job per tick, so no external leader
 //! election is required. See `docs/scheduler.md` section 5 for details.
 
-use apalis_core::backend::ext::pipe::{Pipe, PipeError, PipeExt};
 use apalis_core::backend::{TaskSink, TaskSinkError};
 use apalis_core::task::builder::TaskBuilder;
-use futures_util::stream::BoxStream;
 use thiserror::Error;
 
 /// Scheduled firing instant in Unix epoch seconds.
@@ -33,27 +31,6 @@ impl Tick {
 /// Source of monotonically scheduled [`Tick`] instants for the singleton cron producer.
 pub trait Schedule {
     fn next_tick(&mut self) -> Option<Tick>;
-}
-
-pub trait CronStreamPipeToStorageExt<Storage, Args>: Sized {
-    fn pipe_to_storage(
-        self,
-        storage: Storage,
-    ) -> Pipe<Storage, BoxStream<'static, Result<Args, PipeError>>>;
-}
-
-impl<Stream, Storage, Args> CronStreamPipeToStorageExt<Storage, Args> for Stream
-where
-    Storage: apalis_core::backend::Backend + Unpin + Send + 'static,
-    Stream: PipeExt<Storage, Args>,
-    Args: Send + 'static,
-{
-    fn pipe_to_storage(
-        self,
-        storage: Storage,
-    ) -> Pipe<Storage, BoxStream<'static, Result<Args, PipeError>>> {
-        self.pipe_to(storage)
-    }
 }
 
 pub trait CronStorageError: std::fmt::Display {
