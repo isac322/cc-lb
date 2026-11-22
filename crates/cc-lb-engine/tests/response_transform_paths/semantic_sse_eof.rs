@@ -906,7 +906,7 @@ async fn semantic_sse_eof_non_anthropic_and_non_sse_controls() -> TestResult {
         )
         .await?;
         assert_eq!(observed.body, body);
-        observed.assert_success(input, output, false);
+        observed.assert_success(input, output, sse);
     }
     Ok(())
 }
@@ -1182,7 +1182,7 @@ async fn responses_semantic_sse_eof_terminal_controls() -> TestResult {
             )
             .await?;
             assert_eq!(observed.body, prefix, "no extra event after {terminal}");
-            observed.assert_success(13, 7, false);
+            observed.assert_success(13, 7, true);
         }
     }
     Ok(())
