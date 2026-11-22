@@ -360,7 +360,7 @@ interface RequestEventRowProps {
   eventKey: string;
   principalName: string | null;
   upstreamName: string | null;
-  provider: ProviderFamily;
+  provider: ProviderFamily | null;
   showProviderLogo: boolean;
   showPrincipal: boolean;
   showUpstream: boolean;
@@ -370,18 +370,59 @@ interface RequestEventRowProps {
   onAnchorRange?: (tsMs: number, radiusSecs: number) => void;
 }
 
+function inferProviderFromModel(
+  model: string | null | undefined,
+): ProviderFamily | null {
+  if (model == null) return null;
+  let normalized = model.trim().toLowerCase();
+  if (!normalized) return null;
+  const slashIndex = normalized.lastIndexOf('/');
+  if (slashIndex >= 0) {
+    normalized = normalized.slice(slashIndex + 1);
+  }
+  if (normalized.startsWith('claude')) return 'anthropic';
+  if (
+    normalized.startsWith('gpt-') ||
+    normalized.startsWith('gpt4') ||
+    normalized.startsWith('gpt5') ||
+    normalized.startsWith('gpt6') ||
+    normalized.startsWith('o1') ||
+    normalized.startsWith('o3') ||
+    normalized.startsWith('o4') ||
+    normalized.startsWith('chatgpt') ||
+    normalized.startsWith('codex') ||
+    normalized.startsWith('text-embedding') ||
+    normalized.startsWith('whisper') ||
+    normalized.startsWith('tts-') ||
+    normalized.startsWith('dall-e')
+  ) {
+    return 'openai';
+  }
+  if (
+    normalized.startsWith('gemini') ||
+    normalized.startsWith('imagen') ||
+    normalized.startsWith('veo') ||
+    normalized.startsWith('gemma')
+  ) {
+    return 'gemini';
+  }
+  return null;
+}
+
 export function providerForEvent(
   event: RequestEventWithPhase,
   providerByUpstream?: ReadonlyMap<string, ProviderFamily>,
   providerScope?: ProviderFamily,
-): ProviderFamily {
+): ProviderFamily | null {
   const upstreamProvider =
     event.upstream_id == null
       ? undefined
       : providerByUpstream?.get(event.upstream_id);
   if (upstreamProvider != null) return upstreamProvider;
   const inferred = providersForRequestEventKind(event.event_kind);
-  return inferred.length === 1 ? inferred[0] : (providerScope ?? 'anthropic');
+  if (inferred.length === 1) return inferred[0];
+  if (providerScope != null) return providerScope;
+  return inferProviderFromModel(event.model);
 }
 
 const RequestEventRow = memo(function RequestEventRow({
@@ -537,11 +578,13 @@ const RequestEventRow = memo(function RequestEventRow({
           CARD_CELL,
           COMPACT_CELL,
           COLUMNS.model.card,
-          showProviderLogo && '@min-[60rem]/events:max-w-28!',
+          showProviderLogo &&
+            provider != null &&
+            '@min-[60rem]/events:max-w-28!',
         )}
       >
         <span className="flex min-w-0 items-center gap-2">
-          {showProviderLogo ? (
+          {showProviderLogo && provider != null ? (
             <ProviderLogo
               className="shrink-0 text-text-muted"
               provider={provider}

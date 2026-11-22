@@ -232,6 +232,52 @@ where
     }
 }
 
+struct BufferedBodyTimingState {
+    collect_started: Instant,
+    last_activity_heartbeat_at: Instant,
+    activity_heartbeat: tokio::time::Interval,
+    response_body_timing: BodyIoTiming,
+    response_body_timing_guard: BodyIoTimingObserverGuard,
+    first_body_chunk_at: Option<Instant>,
+    body_chunk_count: u64,
+    upstream_chunks_collected: bool,
+}
+
+impl BufferedBodyTimingState {
+    fn start(observer: Option<LifecycleContext>) -> Self {
+        let now = Instant::now();
+        let response_body_timing = BodyIoTiming::default();
+        let response_body_timing_guard =
+            BodyIoTimingObserverGuard::new(observer, response_body_timing.clone());
+        response_body_timing.transition(Some(BodyIoPhase::Process));
+        Self {
+            collect_started: now,
+            last_activity_heartbeat_at: now,
+            activity_heartbeat: new_activity_heartbeat_interval(),
+            response_body_timing,
+            response_body_timing_guard,
+            first_body_chunk_at: None,
+            body_chunk_count: 0,
+            upstream_chunks_collected: false,
+        }
+    }
+
+    fn as_compat_ctx<'a>(
+        &'a mut self,
+        observer: Option<&'a LifecycleContext>,
+    ) -> compat_response::CompatBodyTiming<'a> {
+        compat_response::CompatBodyTiming {
+            collect_started: self.collect_started,
+            timing: &self.response_body_timing,
+            observer,
+            last_activity_heartbeat_at: &mut self.last_activity_heartbeat_at,
+            activity_heartbeat: &mut self.activity_heartbeat,
+            first_body_chunk_at: &mut self.first_body_chunk_at,
+            body_chunk_count: &mut self.body_chunk_count,
+        }
+    }
+}
+
 const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
 const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
@@ -7713,16 +7759,35 @@ impl Lifecycle {
         dispatch_unix_secs: u64,
     ) -> Response<Body> {
         let mut compat_compact_pending = None;
+        let mut compat_body_timing = compat_response_plan
+            .as_ref()
+            .filter(|plan| {
+                matches!(
+                    &plan.kind,
+                    CompatResponseKind::ResponsesAggregate { .. }
+                        | CompatResponseKind::Compact { .. }
+                )
+            })
+            .map(|_| BufferedBodyTimingState::start(observer.clone()));
         if let Some(plan) = compat_response_plan.as_ref() {
             match &plan.kind {
                 CompatResponseKind::ResponsesAggregate { echo_metadata } => {
-                    response = match compat_response::aggregate_response(
-                        response,
-                        echo_metadata.clone(),
-                        decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
-                    )
-                    .await
-                    {
+                    let aggregated = {
+                        let compat_state = compat_body_timing
+                            .as_mut()
+                            .expect("compat timing initialized for ResponsesAggregate");
+                        let mut ctx = compat_state.as_compat_ctx(observer.as_ref());
+                        let result = compat_response::aggregate_response(
+                            response,
+                            echo_metadata.clone(),
+                            decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
+                            Some(&mut ctx),
+                        )
+                        .await;
+                        compat_state.upstream_chunks_collected = true;
+                        result
+                    };
+                    response = match aggregated {
                         Ok(response) => response,
                         Err(error) => provider_error_response(
                             response_affinity_context.capability,
@@ -7734,13 +7799,22 @@ impl Lifecycle {
                     };
                 }
                 CompatResponseKind::Compact { original_request } => {
-                    response = match compat_response::aggregate_response(
-                        response,
-                        None,
-                        decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
-                    )
-                    .await
-                    {
+                    let aggregated = {
+                        let compat_state = compat_body_timing
+                            .as_mut()
+                            .expect("compat timing initialized for Compact");
+                        let mut ctx = compat_state.as_compat_ctx(observer.as_ref());
+                        let result = compat_response::aggregate_response(
+                            response,
+                            None,
+                            decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
+                            Some(&mut ctx),
+                        )
+                        .await;
+                        compat_state.upstream_chunks_collected = true;
+                        result
+                    };
+                    response = match aggregated {
                         Ok(response) => {
                             compat_compact_pending = Some(original_request.clone());
                             response
@@ -7858,16 +7932,19 @@ impl Lifecycle {
             body = Body::empty();
         }
         strip_hop_by_hop(&mut parts.headers);
-        let body_collect_started = Instant::now();
-        let mut last_activity_heartbeat_at = body_collect_started;
-        let mut activity_heartbeat = new_activity_heartbeat_interval();
-        let response_body_timing = BodyIoTiming::default();
-        let mut response_body_timing_guard =
-            BodyIoTimingObserverGuard::new(observer.clone(), response_body_timing.clone());
-        response_body_timing.transition(Some(BodyIoPhase::Process));
-        let mut first_body_chunk_at: Option<Instant> = None;
+        let BufferedBodyTimingState {
+            collect_started: body_collect_started,
+            mut last_activity_heartbeat_at,
+            mut activity_heartbeat,
+            response_body_timing,
+            mut response_body_timing_guard,
+            mut first_body_chunk_at,
+            mut body_chunk_count,
+            upstream_chunks_collected,
+        } = compat_body_timing
+            .take()
+            .unwrap_or_else(|| BufferedBodyTimingState::start(observer.clone()));
         let mut body_buf: Vec<u8> = Vec::new();
-        let mut body_chunk_count: u64 = 0;
         // Ordinary buffered responses remain uncapped. Requested streams
         // requiring JSON/OAuth transforms use the path's cap; non-SSE,
         // non-JSON streaming responses instead relay incrementally above.
@@ -7898,19 +7975,22 @@ impl Lifecycle {
                             &mut activity_heartbeat,
                             observer.as_ref(),
                         );
-                        if first_body_chunk_at.is_none() {
-                            first_body_chunk_at = Some(chunk_now);
-                            if let Some(o) = observer.as_ref() {
-                                o.set_termination_timings(
-                                    None,
-                                    None,
-                                    Some(duration_to_ms(
-                                        chunk_now.saturating_duration_since(body_collect_started),
-                                    )),
-                                );
+                        if !upstream_chunks_collected {
+                            if first_body_chunk_at.is_none() {
+                                first_body_chunk_at = Some(chunk_now);
+                                if let Some(o) = observer.as_ref() {
+                                    o.set_termination_timings(
+                                        None,
+                                        None,
+                                        Some(duration_to_ms(
+                                            chunk_now
+                                                .saturating_duration_since(body_collect_started),
+                                        )),
+                                    );
+                                }
                             }
+                            body_chunk_count = body_chunk_count.saturating_add(1);
                         }
-                        body_chunk_count = body_chunk_count.saturating_add(1);
                         if data.len() > body_cap.saturating_sub(body_buf.len()) {
                             body_collect_failed = true;
                             body_limit_terminal = body.is_end_stream();

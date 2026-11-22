@@ -32,20 +32,79 @@ impl CollectError {
 }
 
 /// Collect an upstream body without allowing an unbounded compatibility buffer.
-pub(crate) async fn collect_body(body: Body, cap: usize) -> Result<Bytes, CollectError> {
+pub(crate) struct CompatBodyTiming<'a> {
+    pub(crate) collect_started: std::time::Instant,
+    pub(crate) timing: &'a crate::body_io_timing::BodyIoTiming,
+    pub(crate) observer: Option<&'a crate::terminal_observer::LifecycleContext>,
+    pub(crate) last_activity_heartbeat_at: &'a mut std::time::Instant,
+    pub(crate) activity_heartbeat: &'a mut tokio::time::Interval,
+    pub(crate) first_body_chunk_at: &'a mut Option<std::time::Instant>,
+    pub(crate) body_chunk_count: &'a mut u64,
+}
+
+async fn next_body_frame(
+    body: &mut Body,
+    timing: Option<&mut CompatBodyTiming<'_>>,
+) -> Option<Result<hyper::body::Frame<Bytes>, axum::Error>> {
+    match timing {
+        Some(ctx) => {
+            super::timed_body_frame_with_heartbeat(
+                body,
+                ctx.timing,
+                ctx.observer,
+                ctx.last_activity_heartbeat_at,
+                ctx.activity_heartbeat,
+            )
+            .await
+        }
+        None => body.frame().await,
+    }
+}
+
+pub(crate) async fn collect_body_with_timing(
+    body: Body,
+    cap: usize,
+    mut timing: Option<&mut CompatBodyTiming<'_>>,
+) -> Result<Bytes, CollectError> {
     let mut body = body;
     let mut bytes = BytesMut::new();
-    while let Some(frame) = body.frame().await {
+    while let Some(frame) = next_body_frame(&mut body, timing.as_deref_mut()).await {
         let frame = frame.map_err(|_| CollectError::BodyRead)?;
         let Ok(data) = frame.into_data() else {
             continue;
         };
+        if let Some(ctx) = timing.as_deref_mut() {
+            let chunk_now = std::time::Instant::now();
+            super::maybe_emit_chunk_heartbeat(
+                chunk_now,
+                ctx.last_activity_heartbeat_at,
+                ctx.activity_heartbeat,
+                ctx.observer,
+            );
+            if ctx.first_body_chunk_at.is_none() {
+                *ctx.first_body_chunk_at = Some(chunk_now);
+                if let Some(o) = ctx.observer {
+                    o.set_termination_timings(
+                        None,
+                        None,
+                        Some(super::duration_to_ms(
+                            chunk_now.saturating_duration_since(ctx.collect_started),
+                        )),
+                    );
+                }
+            }
+            *ctx.body_chunk_count = ctx.body_chunk_count.saturating_add(1);
+        }
         if data.len() > cap.saturating_sub(bytes.len()) {
             return Err(CollectError::BodyTooLarge);
         }
         bytes.extend_from_slice(&data);
     }
     Ok(bytes.freeze())
+}
+
+pub(crate) async fn collect_body(body: Body, cap: usize) -> Result<Bytes, CollectError> {
+    collect_body_with_timing(body, cap, None).await
 }
 
 /// Aggregate a Responses SSE body into one public Response JSON body.
@@ -57,11 +116,12 @@ pub(crate) async fn aggregate_response(
     response: Response<Body>,
     echo_metadata: Option<Value>,
     cap: usize,
+    timing: Option<&mut CompatBodyTiming<'_>>,
 ) -> Result<Response<Body>, CollectError> {
     let (parts, body) = response.into_parts();
     let status = parts.status;
     let headers = parts.headers;
-    let body = collect_body(body, cap).await?;
+    let body = collect_body_with_timing(body, cap, timing).await?;
 
     if !is_sse_content_type(&headers) {
         if !status.is_success()

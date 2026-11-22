@@ -52,4 +52,21 @@ describe('CostBreakdown recorded amounts', () => {
     expect(screen.getByText('$2.5000')).toBeDefined();
     expect(screen.queryByText('Per-category cost not recorded')).toBeNull();
   });
+
+  it('shows <$0.0001 instead of $0.0000 for sub-0.0001 positive components', () => {
+    render(
+      <CostBreakdown
+        event={{
+          ...event,
+          cost_usd_micros: 176_900,
+          cost_cache_read_micros: 155_400,
+          cost_cache_creation_5m_micros: 14_900,
+          cost_input_micros: 6,
+          cost_output_micros: 6_500,
+        }}
+      />,
+    );
+    expect(screen.getByText('<$0.0001')).toBeDefined();
+    expect(screen.queryByText('$0.0000')).toBeNull();
+  });
 });

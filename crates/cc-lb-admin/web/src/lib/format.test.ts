@@ -337,7 +337,12 @@ describe('formatCostMicros', () => {
   it('returns dash for overflow', () => {
     expect(formatCostMicros(2 ** 53)).toBe('—');
   });
-  it('formats positive values as USD', () => {
+  it('formats zero, sub-unit, and positive values as USD', () => {
+    expect(formatCostMicros(0)).toBe('$0.0000');
+    expect(formatCostMicros(1)).toBe('<$0.0001');
+    expect(formatCostMicros(49)).toBe('<$0.0001');
+    expect(formatCostMicros(99)).toBe('<$0.0001');
+    expect(formatCostMicros(100)).toBe('$0.0001');
     expect(formatCostMicros(1234567)).toBe('$1.2346');
     expect(formatCostMicros(1_234_567_800)).toBe('$1,234.5678');
   });
