@@ -2288,9 +2288,13 @@ async fn concurrent_replace_from_real_request_bumps_each_generation(
         let barrier = Arc::clone(&barrier);
         async move {
             barrier.wait().await;
+            // Use the same cache_anchor_at as `first` because unfenced
+            // `replace_from_real_request_fenced(..., None)` enforces
+            // `cache_anchor_at <= EXCLUDED.cache_anchor_at` and rejects
+            // older writes if a newer timestamp commits first.
             storage
                 .replace_from_real_request_fenced(
-                    &replace_request(session_key_hash, b"second", 120),
+                    &replace_request(session_key_hash, b"second", 110),
                     None,
                 )
                 .await
