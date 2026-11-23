@@ -9,16 +9,25 @@ describe('normalizeAdminApiBaseUrl', () => {
     expect(normalizeAdminApiBaseUrl('/')).toBe('');
   });
 
-  it('trims whitespace and trailing slashes from explicit origins', () => {
-    expect(normalizeAdminApiBaseUrl('https://admin.example.com')).toBe(
-      'https://admin.example.com',
+  it('trims whitespace and trailing slashes from same-origin path prefixes', () => {
+    expect(normalizeAdminApiBaseUrl('/control')).toBe('/control');
+    expect(normalizeAdminApiBaseUrl('  /control/  ')).toBe('/control');
+    expect(normalizeAdminApiBaseUrl('/cc-lb/control///')).toBe(
+      '/cc-lb/control',
     );
-    expect(normalizeAdminApiBaseUrl('  https://admin.example.com/  ')).toBe(
-      'https://admin.example.com',
+  });
+
+  it('rejects cross-origin and non-leading-slash base URLs', () => {
+    expect(() => normalizeAdminApiBaseUrl('https://admin.example.com')).toThrow(
+      /cross-origin/i,
     );
-    expect(
-      normalizeAdminApiBaseUrl('https://admin.example.com/control///'),
-    ).toBe('https://admin.example.com/control');
+    expect(() =>
+      normalizeAdminApiBaseUrl('http://admin.example.com/control'),
+    ).toThrow(/cross-origin/i);
+    expect(() => normalizeAdminApiBaseUrl('//admin.example.com')).toThrow(
+      /cross-origin/i,
+    );
+    expect(() => normalizeAdminApiBaseUrl('control')).toThrow(/leading-slash/i);
   });
 });
 
@@ -31,27 +40,21 @@ describe('resolveAdminApiUrl', () => {
     );
   });
 
-  it('prepends explicit baseUrl to API and SSE paths', () => {
+  it('prepends explicit same-origin baseUrl prefix to API and SSE paths', () => {
+    expect(resolveAdminApiUrl('/admin/v1/status', '/control')).toBe(
+      '/control/admin/v1/status',
+    );
+    expect(resolveAdminApiUrl('/admin/health', '/cc-lb/proxy')).toBe(
+      '/cc-lb/proxy/admin/health',
+    );
     expect(
-      resolveAdminApiUrl('/admin/v1/status', 'https://admin.example.com'),
-    ).toBe('https://admin.example.com/admin/v1/status');
-    expect(
-      resolveAdminApiUrl('/admin/health', 'https://admin.example.com/proxy'),
-    ).toBe('https://admin.example.com/proxy/admin/health');
-    expect(
-      resolveAdminApiUrl(
-        'admin/v1/events/stream?limit=25',
-        'https://admin.example.com',
-      ),
-    ).toBe('https://admin.example.com/admin/v1/events/stream?limit=25');
+      resolveAdminApiUrl('admin/v1/events/stream?limit=25', '/control'),
+    ).toBe('/control/admin/v1/events/stream?limit=25');
   });
 
   it('leaves absolute URLs untouched even when baseUrl is configured', () => {
     expect(
-      resolveAdminApiUrl(
-        'https://other.example.com/admin/health',
-        'https://admin.example.com',
-      ),
+      resolveAdminApiUrl('https://other.example.com/admin/health', '/control'),
     ).toBe('https://other.example.com/admin/health');
   });
 });

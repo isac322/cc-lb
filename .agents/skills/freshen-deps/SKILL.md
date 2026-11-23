@@ -103,7 +103,7 @@ Three buckets:
 | Transitive dep behind latest but blocked by an upstream constraint | Try `cargo update -p <name>@<old> --precise <new>`. If it fails, that's a real upstream block — diagnose per Phase 4. |
 
 Web:
-1. Edit `crates/cc-lb-admin/web/package.json` literal version values. Preserve the existing pin style of each entry (`^x.y.z`, `~x.y.z`, exact `x.y.z`).
+1. Edit `web/package.json` literal version values. Preserve the existing pin style of each entry (`^x.y.z`, `~x.y.z`, exact `x.y.z`).
 2. `bun install` from the web dir to refresh `bun.lock`.
 3. Sanity: `bun outdated` should print nothing.
 
@@ -161,7 +161,7 @@ cargo build -p <crate-that-imports-it>
 
 Web (fast, locally meaningful — biome + tsgo + vite all run in seconds):
 ```bash
-cd crates/cc-lb-admin/web
+cd web
 bun install
 bun run lint
 bun run typecheck
@@ -263,8 +263,8 @@ Treat this as a hint, not a contract. Re-discover every run per Phase 1.
 - `deny.toml` — `[advisories] ignore` cross-reference (don't claim a wasmtime/rustls-pemfile/bincode "miss" if it's already documented)
 
 ### Web (bun)
-- `crates/cc-lb-admin/web/package.json` — `dependencies` + `devDependencies`
-- `crates/cc-lb-admin/web/bun.lock` — refreshed by `bun install`
+- `web/package.json` — `dependencies` + `devDependencies`
+- `web/bun.lock` — refreshed by `bun install`
 
 ### CI / Docker
 - `.github/workflows/*.yml` — `uses: <action>@v<major>`, `image:`, `bun-version`, `node-version`, `RUSTUP_TOOLCHAIN`, and any version-shaped string in comments

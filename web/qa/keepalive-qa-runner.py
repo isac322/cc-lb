@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
-ROOT = Path(__file__).resolve().parents[4]
+ROOT = Path(__file__).resolve().parents[2]
 _scratch_env = os.environ.get("KEEPALIVE_SCRATCH_DIR")
 if _scratch_env is not None and not _scratch_env.strip():
     raise RuntimeError("KEEPALIVE_SCRATCH_DIR must not be empty")

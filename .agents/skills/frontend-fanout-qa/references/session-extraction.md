@@ -17,9 +17,9 @@ Key user corrections preserved:
 - Corrected workflow became: extract requirements -> fan out discovery -> compile checklist -> fan out browser QA -> fan out fixes -> rebuild/redeploy -> reverify until green.
 
 Important paths from the source work:
-- `crates/cc-lb-admin/web/`
-- `crates/cc-lb-admin/web/src/routes/`
-- `crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx`
-- `crates/cc-lb-admin/web/src/components/ThemeToggle.tsx`
-- `crates/cc-lb-admin/web/src/components/ConfirmDialog.tsx`
-- `crates/cc-lb-admin/web/src/lib/api.ts`
+- `web/`
+- `web/src/routes/`
+- `web/src/components/AuthRequiredGate.tsx`
+- `web/src/components/ThemeToggle.tsx`
+- `web/src/components/ConfirmDialog.tsx`
+- `web/src/lib/api.ts`

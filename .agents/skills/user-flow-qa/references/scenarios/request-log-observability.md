@@ -268,7 +268,7 @@ wait_port $admin_port "cc-lb admin"
 wait_http_200 "http://127.0.0.1:$admin_port/admin/health" "cc-lb admin health"
 
 (
-  cd "$REPO_ROOT/crates/cc-lb-admin/web"
+  cd "$REPO_ROOT/web"
   exec env CC_LB_ADMIN_URL="http://127.0.0.1:$admin_port" \
     bun run dev --port "$vite_port"
 ) > "$TMP_DIR/vite.log" 2>&1 &

@@ -290,7 +290,7 @@ python3 "$QA_ROOT/response_gate.py" > "$QA_ROOT/gate.log" 2>&1 &
 GATE_PID=$!
 
 (
-  cd crates/cc-lb-admin/web
+  cd web
   CC_LB_ADMIN_URL="$GATE_URL" bun run dev --port "$vite_port"
 ) > "$QA_ROOT/vite.log" 2>&1 &
 VITE_PID=$!
@@ -639,12 +639,12 @@ pending, or leaving the successful dialog/row stale is FAIL.
 
 | Contract | Automated coverage | What it proves | Manual/browser gap retained here |
 |---|---|---|---|
-| Same-render issue submit latch and pending lock | `crates/cc-lb-admin/web/src/routes/-principals.test.tsx` — `API-key issue pending locks actions, ignores dismissal, and submits once` | A synchronous repeated-click burst calls the mutation once; pending Issue/Cancel/X/input states and Escape protection are wired. | Real HTTP request count, real SQLite row count, backdrop pixels, and response-held browser state. |
-| One-time plaintext protection | `crates/cc-lb-admin/web/src/routes/-principals.test.tsx` — `issued API-key plaintext cannot be dismissed until Done` | Issued plaintext renders and X/Escape/backdrop cannot dismiss it before Done. | Real server response, secret/list separation, copy affordance pixels, table invalidation, and non-recoverability after reload. |
-| Revoke pending protection | `crates/cc-lb-admin/web/src/routes/-principals.test.tsx` — `API-key revoke pending preserves confirmation and locks row action` | Revoke modal remains mounted, Cancel/confirm/row action lock, and Escape is ignored during the mutation. | Delayed real response, SQLite zeroization, backdrop pixels, success close/toast, and refreshed active list. |
+| Same-render issue submit latch and pending lock | `web/src/routes/-principals.test.tsx` — `API-key issue pending locks actions, ignores dismissal, and submits once` | A synchronous repeated-click burst calls the mutation once; pending Issue/Cancel/X/input states and Escape protection are wired. | Real HTTP request count, real SQLite row count, backdrop pixels, and response-held browser state. |
+| One-time plaintext protection | `web/src/routes/-principals.test.tsx` — `issued API-key plaintext cannot be dismissed until Done` | Issued plaintext renders and X/Escape/backdrop cannot dismiss it before Done. | Real server response, secret/list separation, copy affordance pixels, table invalidation, and non-recoverability after reload. |
+| Revoke pending protection | `web/src/routes/-principals.test.tsx` — `API-key revoke pending preserves confirmation and locks row action` | Revoke modal remains mounted, Cancel/confirm/row action lock, and Escape is ignored during the mutation. | Delayed real response, SQLite zeroization, backdrop pixels, success close/toast, and refreshed active list. |
 | Issue/revoke API and persisted record shape | `crates/cc-lb-admin/tests/principal_keys.rs` — `revoked_key_list_preserves_key_id_last4_and_audit_rows` | Real admin routes issue and revoke a key, revoked listing preserves key ID/last four, and audit actions persist. | Duplicate browser submission and protected one-time plaintext UX. |
 | Plaintext/key-ID generation boundary | `crates/cc-lb-control/src/api_keys/secret.rs` tests, including `generate_new_parses_same_key_id` and redacted Display/Debug tests | Generated plaintext parses to the issued key ID, has a four-character suffix, and secret wrappers do not print plaintext. | Browser-only one-time presentation and user acknowledgement. |
-| Delayed issue browser regression | `crates/cc-lb-admin/web/e2e/pending-actions.spec.ts` — `API key issuance submits once, locks dismissal, preserves plaintext, and refreshes the key list` | Real Chromium sends two DOM clicks in one task, records exactly one POST, holds an intercepted response on an explicit promise, proves `Issuing...`/input/Cancel/X/Escape/backdrop protection, then releases the response and proves one-time plaintext, Done-only dismissal, and refreshed `key-new` UI. | This scenario adds real isolated SQLite and direct API/storage correlation. |
+| Delayed issue browser regression | `web/e2e/pending-actions.spec.ts` — `API key issuance submits once, locks dismissal, preserves plaintext, and refreshes the key list` | Real Chromium sends two DOM clicks in one task, records exactly one POST, holds an intercepted response on an explicit promise, proves `Issuing...`/input/Cancel/X/Escape/backdrop protection, then releases the response and proves one-time plaintext, Done-only dismissal, and refreshed `key-new` UI. | This scenario adds real isolated SQLite and direct API/storage correlation. |
 
 The automated browser test must delay by retaining the intercepted route response
 and releasing it from an explicit promise/event. A timeout, `sleep`, retry, or

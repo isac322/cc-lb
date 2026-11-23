@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-ROOT = Path(__file__).resolve().parents[4]
+ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = ROOT / "target" / "keepalive-qa" / "admin-web-fixtures"
 DEFAULT_MANIFEST = DEFAULT_ROOT / "fixture-manifest.json"
 FIXTURE_VERSION = 2

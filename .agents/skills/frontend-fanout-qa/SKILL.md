@@ -87,7 +87,7 @@ When the user says not to implement yet, asks for references, or wants to inspec
 Use fan-out when it improves coverage or speed, not as theater. Each worker must own an observable slice.
 
 - UI/UX/design/styling work should prefer `category="visual-engineering"` with `frontend-ui-ux` and `agent-browser` when available.
-- Use the `impeccable` skill for every UI/UX-affecting web change: visual design, layout, information hierarchy, and status presentation. `crates/cc-lb-admin/web/PRODUCT.md` and `DESIGN.md` are its project context.
+- Use the `impeccable` skill for every UI/UX-affecting web change: visual design, layout, information hierarchy, and status presentation. `web/PRODUCT.md` and `DESIGN.md` are its project context.
 - Browser QA workers must run `agent-browser` themselves. Do not centralize all screenshots in the lead agent and hand static images to visual workers unless the worker truly cannot drive a browser.
 - Split large work into independent slices:
   - requirement and legacy inventory;

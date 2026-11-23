@@ -21,6 +21,16 @@ export function normalizeAdminApiBaseUrl(raw: string | undefined): string {
   if (!trimmed || trimmed === '/') {
     return '';
   }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) || trimmed.startsWith('//')) {
+    throw new Error(
+      `Unsupported VITE_ADMIN_API_BASE_URL "${trimmed}": cross-origin Admin API base URLs are rejected because cc-lb-admin does not serve CORS preflight responses. Use an empty string or a same-origin path prefix such as "/control" behind a reverse proxy.`,
+    );
+  }
+  if (!trimmed.startsWith('/')) {
+    throw new Error(
+      `Invalid VITE_ADMIN_API_BASE_URL "${trimmed}": expected an empty string or a leading-slash same-origin path prefix such as "/control".`,
+    );
+  }
   return trimmed.replace(/\/+$/, '');
 }
 
