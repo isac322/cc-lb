@@ -175,12 +175,15 @@ async fn build_status(state: &AdminState) -> Result<StatusResponse, StatusError>
             .into_iter()
             .filter(|record| record.deleted_at_unix_secs.is_none())
             .map(|record| {
-                let status = if record.last_apply_error.is_some() {
-                    "error"
-                } else if record.enabled {
-                    "active"
+                let (status, last_apply_error) = if !record.enabled {
+                    ("disabled", record.last_apply_error)
+                } else if record.last_apply_error.is_some() {
+                    ("error", record.last_apply_error)
+                } else if let Err(message) = cc_lb_control::validate_upstream(&record, &state.aead)
+                {
+                    ("error", Some(message))
                 } else {
-                    "disabled"
+                    ("active", None)
                 };
                 StatusUpstream {
                     id: record.id.to_string(),
@@ -189,7 +192,7 @@ async fn build_status(state: &AdminState) -> Result<StatusResponse, StatusError>
                     last_apply_at_unix_secs: record
                         .last_apply_at_unix_secs
                         .unwrap_or(record.updated_at_unix_secs),
-                    last_apply_error: record.last_apply_error,
+                    last_apply_error,
                 }
             })
             .collect::<Vec<_>>()

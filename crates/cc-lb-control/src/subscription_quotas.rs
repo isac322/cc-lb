@@ -1651,6 +1651,34 @@ async fn build_cc_lb_oauth_extra_usage(
         .collect::<Vec<_>>();
     let now_unix_millis = now_unix_millis(clock);
     let dynamic_view = dynamic_view.load();
+    let mut cached_by_upstream = HashMap::with_capacity(upstreams.len());
+    let mut uncached_ids = Vec::new();
+    for upstream in &upstreams {
+        let snapshots = dynamic_view.subscription_quota_cache.snapshot_for_upstream(
+            upstream.id,
+            now_unix_millis,
+            max_staleness_secs,
+        );
+        if snapshots.is_empty() {
+            uncached_ids.push(upstream.id);
+        } else {
+            cached_by_upstream.insert(upstream.id, snapshots);
+        }
+    }
+    let mut durable_by_upstream = HashMap::<Uuid, Vec<SubscriptionQuotaSample>>::new();
+    if !uncached_ids.is_empty() {
+        for sample in storage
+            .list_latest_subscription_quota_for_upstreams(&uncached_ids)
+            .await?
+        {
+            if sample.window == SubscriptionQuotaWindow::Overage {
+                durable_by_upstream
+                    .entry(sample.upstream_id)
+                    .or_default()
+                    .push(sample);
+            }
+        }
+    }
     let mut enabled = None;
     let mut monthly_limit = 0.0;
     let mut saw_monthly_limit = false;
@@ -1658,11 +1686,18 @@ async fn build_cc_lb_oauth_extra_usage(
     let mut saw_used_credits = false;
 
     for upstream in upstreams {
-        for snapshot in dynamic_view.subscription_quota_cache.snapshot_for_upstream(
-            upstream.id,
-            now_unix_millis,
-            max_staleness_secs,
-        ) {
+        let snapshots = match cached_by_upstream.remove(&upstream.id) {
+            Some(cached) => cached,
+            None => crate::subscription_quota_snapshots::candidate_snapshots_from_samples(
+                durable_by_upstream
+                    .get(&upstream.id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                now_unix_millis,
+                max_staleness_secs,
+            ),
+        };
+        for snapshot in snapshots {
             if SubscriptionQuotaWindow::from_str(&snapshot.window)
                 != Some(SubscriptionQuotaWindow::Overage)
             {

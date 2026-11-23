@@ -4,59 +4,24 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use cc_lb_control::SubscriptionQuotaCacheLike;
-use cc_lb_domain::{
-    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaCredits, SubscriptionQuotaDataState,
+#[cfg(test)]
+use cc_lb_control::subscription_quota_snapshots::MergedSource;
+use cc_lb_control::subscription_quota_snapshots::{
+    MergedQuotaSnapshot, SourceSnapshots, candidate_from_sources, unobserved_candidate,
 };
+use cc_lb_domain::SubscriptionQuotaCandidateSnapshot;
+#[cfg(test)]
+use cc_lb_domain::SubscriptionQuotaDataState;
+#[cfg(test)]
+use cc_lb_storage_api::SubscriptionQuotaStatus;
 use cc_lb_storage_api::{
     StorageResult, SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
-    SubscriptionQuotaStatus, SubscriptionQuotaWindow,
+    SubscriptionQuotaWindow,
 };
 use parking_lot::RwLock;
 use uuid::Uuid;
 
 use crate::dynamic_view_builder::Stores;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MergedSource {
-    Header,
-    Api,
-}
-
-impl MergedSource {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Header => "header",
-            Self::Api => "api",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct MergedQuotaSnapshot {
-    pub source: MergedSource,
-    pub sample_kind: SubscriptionQuotaSampleKind,
-    pub utilization: Option<f64>,
-    pub status: Option<SubscriptionQuotaStatus>,
-    pub resets_at_unix_secs: Option<u64>,
-    pub surpassed_threshold: Option<f64>,
-    pub representative_claim: Option<String>,
-    pub fallback_available: Option<bool>,
-    pub overage_in_use: Option<bool>,
-    pub overage_period_monthly_utilization: Option<f64>,
-    pub upgrade_paths: Option<Vec<String>>,
-    pub disabled_reason: Option<String>,
-    pub extra_usage_enabled: Option<bool>,
-    pub extra_usage_monthly_limit: Option<f64>,
-    pub extra_usage_used_credits: Option<f64>,
-    pub credits: Option<SubscriptionQuotaCredits>,
-    pub observed_at_unix_millis: u64,
-}
-
-#[derive(Clone, Debug, Default)]
-struct SourceSnapshots {
-    header: Option<MergedQuotaSnapshot>,
-    api: Option<MergedQuotaSnapshot>,
-}
 
 /// One `(upstream, window)` entry: the per-source observations plus a
 /// per-slot version that every replacement of that slot bumps, whichever
@@ -328,33 +293,6 @@ impl SubscriptionQuotaCache {
     }
 }
 
-impl MergedQuotaSnapshot {
-    fn from_record(record: &SubscriptionQuotaSample) -> Self {
-        Self {
-            source: match record.source {
-                SubscriptionQuotaSource::Header => MergedSource::Header,
-                SubscriptionQuotaSource::Api => MergedSource::Api,
-            },
-            sample_kind: record.sample_kind,
-            utilization: record.utilization,
-            status: record.status,
-            resets_at_unix_secs: record.resets_at_unix_secs,
-            surpassed_threshold: record.surpassed_threshold,
-            representative_claim: record.representative_claim.clone(),
-            fallback_available: record.fallback_available,
-            overage_in_use: record.overage_in_use,
-            overage_period_monthly_utilization: record.overage_period_monthly_utilization,
-            upgrade_paths: record.upgrade_paths.clone(),
-            disabled_reason: record.disabled_reason.clone(),
-            extra_usage_enabled: record.extra_usage_enabled,
-            extra_usage_monthly_limit: record.extra_usage_monthly_limit,
-            extra_usage_used_credits: record.extra_usage_used_credits,
-            credits: record.credits.clone(),
-            observed_at_unix_millis: record.observed_at_unix_millis,
-        }
-    }
-}
-
 impl SubscriptionQuotaCacheLike for SubscriptionQuotaCache {
     fn upsert_observation(&self, record: &SubscriptionQuotaSample) {
         self.upsert_observation(record.upstream_id, record);
@@ -378,158 +316,10 @@ impl SubscriptionQuotaCacheLike for SubscriptionQuotaCache {
     }
 }
 
-fn candidate_from_sources(
-    window: SubscriptionQuotaWindow,
-    sources: &SourceSnapshots,
-    now_unix_millis: u64,
-    max_staleness_secs: u64,
-) -> SubscriptionQuotaCandidateSnapshot {
-    let header_fresh = sources
-        .header
-        .as_ref()
-        .is_some_and(|snapshot| is_fresh(snapshot, now_unix_millis, max_staleness_secs));
-    let api_fresh = sources
-        .api
-        .as_ref()
-        .is_some_and(|snapshot| is_fresh(snapshot, now_unix_millis, max_staleness_secs));
-    let Some(mut merged) = merge_sources(sources, header_fresh, api_fresh) else {
-        return unobserved_candidate(window, max_staleness_secs);
-    };
-    let mut credits: Option<SubscriptionQuotaCredits> = None;
-    for snapshot in [sources.header.as_ref(), sources.api.as_ref()]
-        .into_iter()
-        .flatten()
-    {
-        if snapshot.sample_kind == SubscriptionQuotaSampleKind::Absent {
-            continue;
-        }
-        if let Some(raw) = snapshot.credits.as_ref() {
-            let mut incoming = raw.clone();
-            incoming.stamp_observations(
-                snapshot.observed_at_unix_millis,
-                match snapshot.source {
-                    MergedSource::Header => cc_lb_domain::CreditSource::Header,
-                    MergedSource::Api => cc_lb_domain::CreditSource::Api,
-                },
-            );
-            if let Some(current) = credits.as_mut() {
-                current.merge_observations(&incoming);
-            } else {
-                credits = Some(incoming);
-            }
-        }
-    }
-    merged.credits = credits;
-    let state = match merged.sample_kind {
-        SubscriptionQuotaSampleKind::Absent => SubscriptionQuotaDataState::Absent,
-        SubscriptionQuotaSampleKind::Sample => {
-            if is_fresh(&merged, now_unix_millis, max_staleness_secs) {
-                SubscriptionQuotaDataState::Fresh
-            } else {
-                SubscriptionQuotaDataState::Stale
-            }
-        }
-    };
-    candidate_from_snapshot(window, state, merged, max_staleness_secs)
-}
-
-fn merge_sources(
-    sources: &SourceSnapshots,
-    header_fresh: bool,
-    api_fresh: bool,
-) -> Option<MergedQuotaSnapshot> {
-    // Pure source selection: return exactly one source snapshot wholesale.
-    // Never blend fields between sources — the returned snapshot's `source`
-    // label, `utilization`, `observed_at_unix_millis`, and every other field
-    // must all come from the same physical observation.
-    //
-    // Selection rules:
-    //   1. Only one source has data → return that one as-is.
-    //   2. Both sources present, exactly one fresh → fresh source wins as-is.
-    //   3. Both fresh or both stale → newer `observed_at_unix_millis` wins
-    //      as-is (api wins on tie since it is the higher-fidelity feed).
-    //   4. Neither source has data → `None`.
-    match (sources.header.as_ref(), sources.api.as_ref()) {
-        (Some(header), Some(api)) => match (header_fresh, api_fresh) {
-            (true, false) => Some(header.clone()),
-            (false, true) => Some(api.clone()),
-            _ => {
-                if api.observed_at_unix_millis >= header.observed_at_unix_millis {
-                    Some(api.clone())
-                } else {
-                    Some(header.clone())
-                }
-            }
-        },
-        (Some(header), None) => Some(header.clone()),
-        (None, Some(api)) => Some(api.clone()),
-        (None, None) => None,
-    }
-}
-
-fn is_fresh(snapshot: &MergedQuotaSnapshot, now_unix_millis: u64, max_staleness_secs: u64) -> bool {
-    now_unix_millis.saturating_sub(snapshot.observed_at_unix_millis)
-        <= max_staleness_secs.saturating_mul(1_000)
-}
-
-fn candidate_from_snapshot(
-    window: SubscriptionQuotaWindow,
-    state: SubscriptionQuotaDataState,
-    snapshot: MergedQuotaSnapshot,
-    max_staleness_secs: u64,
-) -> SubscriptionQuotaCandidateSnapshot {
-    SubscriptionQuotaCandidateSnapshot {
-        window: window.as_str().to_owned(),
-        state,
-        source: Some(snapshot.source.as_str().to_owned()),
-        utilization: snapshot.utilization,
-        status: snapshot.status.map(|status| status.as_str().to_owned()),
-        resets_at_unix_secs: snapshot.resets_at_unix_secs,
-        surpassed_threshold: snapshot.surpassed_threshold,
-        representative_claim: snapshot.representative_claim,
-        disabled_reason: snapshot.disabled_reason,
-        extra_usage_enabled: snapshot.extra_usage_enabled,
-        extra_usage_monthly_limit: snapshot.extra_usage_monthly_limit,
-        extra_usage_used_credits: snapshot.extra_usage_used_credits,
-        credits: snapshot.credits,
-        observed_at_unix_millis: Some(snapshot.observed_at_unix_millis),
-        max_staleness_secs,
-        fallback_available: snapshot.fallback_available,
-        overage_in_use: snapshot.overage_in_use,
-        overage_period_monthly_utilization: snapshot.overage_period_monthly_utilization,
-        upgrade_paths: snapshot.upgrade_paths,
-    }
-}
-
-fn unobserved_candidate(
-    window: SubscriptionQuotaWindow,
-    max_staleness_secs: u64,
-) -> SubscriptionQuotaCandidateSnapshot {
-    SubscriptionQuotaCandidateSnapshot {
-        window: window.as_str().to_owned(),
-        state: SubscriptionQuotaDataState::Unobserved,
-        source: None,
-        utilization: None,
-        status: None,
-        resets_at_unix_secs: None,
-        surpassed_threshold: None,
-        representative_claim: None,
-        disabled_reason: None,
-        extra_usage_enabled: None,
-        extra_usage_monthly_limit: None,
-        extra_usage_used_credits: None,
-        credits: None,
-        observed_at_unix_millis: None,
-        max_staleness_secs,
-        fallback_available: None,
-        overage_in_use: None,
-        overage_period_monthly_utilization: None,
-        upgrade_paths: None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use cc_lb_control::subscription_quota_snapshots::merge_sources;
+
     use super::*;
 
     fn snapshot(

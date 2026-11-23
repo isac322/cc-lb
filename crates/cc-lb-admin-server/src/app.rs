@@ -256,7 +256,19 @@ async fn build_admin_app_with_storage_inner(
     }
 
     let event_bus: Arc<dyn RequestEventBus> = match &config.storage {
-        StorageConfig::Sqlite { .. } => Arc::new(in_memory_bus),
+        StorageConfig::Sqlite { .. } => {
+            let initial_cursor = storage.current_request_event_cursor().await?;
+            event_fanout_tasks.push(
+                cc_lb_runtime_sync::live_tail::storage_tail_poller::StorageTailPoller::spawn(
+                    storage.clone(),
+                    storage_tail_tx.clone(),
+                    Duration::from_millis(config.event_bus.storage_tail_poll_interval_ms.max(1)),
+                    initial_cursor,
+                    event_fanout_shutdown_rx,
+                ),
+            );
+            Arc::new(in_memory_bus)
+        }
         StorageConfig::Postgres { .. } => {
             #[cfg(not(feature = "postgres"))]
             {

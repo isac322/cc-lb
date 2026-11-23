@@ -789,6 +789,7 @@ dependencies = [
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
  "cc-lb-upstream",
+ "cc-lb-vertex-auth",
  "cc-lb-workspace-hack",
  "chrono",
  "dashmap",

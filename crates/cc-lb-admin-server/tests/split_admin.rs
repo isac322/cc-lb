@@ -8,8 +8,13 @@ mod sqlite_tests {
     use cc_lb_aead::AeadService;
     use cc_lb_clock::ClockHandle;
     use cc_lb_config::{AdminAuthProviderConfig, Config, StorageConfig};
-    use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind};
-    use cc_lb_storage_api::{ManagedKeyStore, MetaStore as _, Storage, UpstreamStore};
+    use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind, UpstreamUpdate};
+    use cc_lb_storage_api::{
+        ManagedKeyStore, MetaStore as _, RequestEvent, RequestEventStore, Storage,
+        SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+        SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamStore,
+        UpstreamSubscriptionQuotaStore,
+    };
     use http_body_util::BodyExt as _;
     use serde_json::{Value, json};
     use tower::ServiceExt as _;
@@ -39,11 +44,37 @@ mod sqlite_tests {
         );
         storage_arc.initialize().await.expect("init sqlite");
 
+        let active_id = Uuid::new_v4();
+        let encrypted_key = aead
+            .encrypt(b"sk-ant-split-active", active_id.as_bytes())
+            .expect("encrypt key");
         UpstreamStore::create(
             storage_arc.as_ref(),
             UpstreamCreate {
-                id: Uuid::new_v4(),
-                name: "split-seeded-upstream".to_owned(),
+                id: active_id,
+                name: "split-seeded-active".to_owned(),
+                kind: UpstreamKind::AnthropicApiKey,
+                base_url: None,
+                api_key_ciphertext: Some(encrypted_key),
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
+            },
+        )
+        .await
+        .expect("seed active upstream");
+
+        let unconfigured_id = Uuid::new_v4();
+        UpstreamStore::create(
+            storage_arc.as_ref(),
+            UpstreamCreate {
+                id: unconfigured_id,
+                name: "split-seeded-unconfigured".to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: None,
                 api_key_ciphertext: None,
@@ -58,7 +89,70 @@ mod sqlite_tests {
             },
         )
         .await
-        .expect("seed upstream");
+        .expect("seed unconfigured upstream");
+
+        let oauth_id = Uuid::new_v4();
+        let oauth_rec = UpstreamStore::create(
+            storage_arc.as_ref(),
+            UpstreamCreate {
+                id: oauth_id,
+                name: "split-seeded-oauth".to_owned(),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
+            },
+        )
+        .await
+        .expect("seed oauth upstream");
+        UpstreamStore::update(
+            storage_arc.as_ref(),
+            oauth_rec.id,
+            oauth_rec.revision,
+            UpstreamUpdate {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("disable oauth upstream");
+
+        let now_secs = cc_lb_clock::unix_secs(clock.now());
+        let now_ms = now_secs * 1_000;
+        storage_arc
+            .record_subscription_quota_samples(&[SubscriptionQuotaSample {
+                upstream_id: oauth_id,
+                window: SubscriptionQuotaWindow::FiveHour,
+                source: SubscriptionQuotaSource::Header,
+                sample_kind: SubscriptionQuotaSampleKind::Sample,
+                observed_at_unix_millis: now_ms,
+                sample_id: Uuid::new_v4(),
+                utilization: Some(0.42),
+                status: Some(SubscriptionQuotaStatus::Allowed),
+                resets_at_unix_secs: Some(now_secs + 3_600),
+                surpassed_threshold: None,
+                representative_claim: None,
+                fallback_percentage: None,
+                fallback_available: None,
+                overage_in_use: None,
+                overage_period_monthly_utilization: None,
+                upgrade_paths: None,
+                disabled_reason: None,
+                extra_usage_enabled: None,
+                extra_usage_monthly_limit: None,
+                extra_usage_used_credits: None,
+                credits: None,
+                ingested_at_unix_millis: now_ms,
+            }])
+            .await
+            .expect("seed quota sample");
 
         let mut config = Config {
             storage: StorageConfig::Sqlite {
@@ -68,6 +162,7 @@ mod sqlite_tests {
         };
         config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
         config.runtime.data_dir = Some(dir.path().to_path_buf());
+        config.event_bus.storage_tail_poll_interval_ms = 25;
         config.admin.auth.providers = vec![AdminAuthProviderConfig::StaticToken {
             id: "split-test-token".to_owned(),
             token_env: TEST_TOKEN_ENV.to_owned(),
@@ -78,7 +173,7 @@ mod sqlite_tests {
         std::fs::write(&config_path, &raw_toml).expect("write writable config file");
 
         let managed_store: Arc<dyn ManagedKeyStore> = storage_arc.clone();
-        let storage: Arc<dyn Storage> = storage_arc;
+        let storage: Arc<dyn Storage> = storage_arc.clone();
         let app = build_admin_app_with_storage(
             config.clone(),
             Some(&config_path),
@@ -121,7 +216,7 @@ mod sqlite_tests {
         #[cfg(not(feature = "embed-spa"))]
         assert_eq!(proxy_route.status(), StatusCode::NOT_FOUND);
 
-        // 3. DB-only /admin/v1/status falls back to storage and lists the seeded upstream.
+        // 3. DB-only /admin/v1/status falls back to storage and accurately classifies active/disabled/error.
         let status_resp = app
             .admin_router
             .clone()
@@ -144,11 +239,138 @@ mod sqlite_tests {
         let upstreams = status_json["upstreams"]
             .as_array()
             .expect("upstreams array");
-        assert!(
+        assert_eq!(upstreams.len(), 3, "unexpected status json: {status_json}");
+        let by_name = |name: &str| {
             upstreams
                 .iter()
-                .any(|u| u["name"] == "split-seeded-upstream"),
-            "expected split-seeded-upstream in DB fallback status: {status_json}"
+                .find(|u| u["name"] == name)
+                .unwrap_or_else(|| panic!("missing {name} in {status_json}"))
+        };
+        assert_eq!(by_name("split-seeded-active")["status"], "active");
+        assert_eq!(by_name("split-seeded-unconfigured")["status"], "error");
+        assert_eq!(by_name("split-seeded-oauth")["status"], "disabled");
+
+        // 3b. /admin/v1/subscription-quotas/latest reads durable latest rows in split mode.
+        let latest_resp = app
+            .admin_router
+            .clone()
+            .oneshot(
+                Request::get("/admin/v1/subscription-quotas/latest")
+                    .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
+                    .body(Body::empty())
+                    .expect("latest quota request"),
+            )
+            .await
+            .expect("latest quota response");
+        assert_eq!(latest_resp.status(), StatusCode::OK);
+        let latest_json: Value = serde_json::from_slice(
+            &latest_resp
+                .into_body()
+                .collect()
+                .await
+                .expect("latest quota body")
+                .to_bytes(),
+        )
+        .expect("latest quota json");
+        let oauth_latest = latest_json["upstreams"]
+            .as_array()
+            .expect("latest upstreams")
+            .iter()
+            .find(|u| u["upstream_id"] == oauth_id.to_string())
+            .expect("oauth upstream in latest");
+        let five_h = oauth_latest["windows"]
+            .as_array()
+            .expect("windows array")
+            .iter()
+            .find(|w| w["window"] == "5h")
+            .unwrap_or_else(|| panic!("missing 5h window in {oauth_latest}"));
+        assert_eq!(five_h["state"], "fresh");
+        assert_eq!(five_h["utilization"], 0.42);
+        assert_eq!(five_h["source"], "header");
+
+        let latest_header_resp = app
+            .admin_router
+            .clone()
+            .oneshot(
+                Request::get("/admin/v1/subscription-quotas/latest?source=header")
+                    .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
+                    .body(Body::empty())
+                    .expect("latest header quota request"),
+            )
+            .await
+            .expect("latest header quota response");
+        assert_eq!(latest_header_resp.status(), StatusCode::OK);
+        let latest_header_json: Value = serde_json::from_slice(
+            &latest_header_resp
+                .into_body()
+                .collect()
+                .await
+                .expect("latest header quota body")
+                .to_bytes(),
+        )
+        .expect("latest header quota json");
+        let oauth_latest_header = latest_header_json["upstreams"]
+            .as_array()
+            .expect("latest header upstreams")
+            .iter()
+            .find(|u| u["upstream_id"] == oauth_id.to_string())
+            .expect("oauth upstream in header latest");
+        let five_h_header = oauth_latest_header["windows"]
+            .as_array()
+            .expect("header windows array")
+            .iter()
+            .find(|w| w["window"] == "5h")
+            .unwrap_or_else(|| panic!("missing 5h window in {oauth_latest_header}"));
+        assert_eq!(five_h_header["state"], "fresh");
+        assert_eq!(five_h_header["source"], "header");
+        assert_eq!(five_h_header["utilization"], 0.42);
+
+        // 3c. SQLite split StorageTailPoller streams externally inserted events over SSE.
+        let sse_resp = app
+            .admin_router
+            .clone()
+            .oneshot(
+                Request::get("/admin/v1/events/stream")
+                    .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
+                    .body(Body::empty())
+                    .expect("sse request"),
+            )
+            .await
+            .expect("sse response");
+        assert_eq!(sse_resp.status(), StatusCode::OK);
+        storage_arc
+            .append_request_event(&RequestEvent {
+                ts: now_secs,
+                ts_ms: Some(now_ms),
+                request_id: "split-sqlite-sse-req".to_owned(),
+                event_id: Some("split-sqlite-sse-evt".to_owned()),
+                status: 200,
+                duration_ms: 12,
+                ..Default::default()
+            })
+            .await
+            .expect("append external request event");
+        let mut sse_body = sse_resp.into_body();
+        let mut seen_event = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut buf = String::new();
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout_at(deadline, sse_body.frame()).await {
+                Ok(Some(Ok(frame))) => {
+                    if let Ok(data) = frame.into_data() {
+                        buf.push_str(&String::from_utf8_lossy(&data));
+                        if buf.contains("split-sqlite-sse-evt") {
+                            seen_event = true;
+                            break;
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert!(
+            seen_event,
+            "SQLite StorageTailPoller must deliver external request_events_v1 row; got: {buf}"
         );
 
         // 4. Config editor reports read_only in split mode; draft validate succeeds; save returns 409; download returns 200 TOML.
