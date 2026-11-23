@@ -97,3 +97,44 @@ test('rejects Mutex<Option<mpsc::Sender<LifecycleEvent>>> regression in event_bu
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('enforces Phase-3 provider and domain isolation rules', () => {
+  const cases = [
+    [
+      'crates/cc-lb-domain/Cargo.toml',
+      '[package]\nname = "cc-lb-domain"\n[dependencies]\ncc-lb-routing-trace.workspace = true\n',
+      /cc-lb-routing-trace/,
+    ],
+    [
+      'crates/cc-lb-domain/Cargo.toml',
+      '[package]\nname = "cc-lb-domain"\n[dependencies]\ncc-lb-provider-spi.workspace = true\n',
+      /cc-lb-provider-spi/,
+    ],
+    [
+      'crates/cc-lb-provider-spi/Cargo.toml',
+      '[package]\nname = "cc-lb-provider-spi"\n[dependencies]\ncc-lb-provider-anthropic.workspace = true\n',
+      /cc-lb-provider-anthropic/,
+    ],
+    [
+      'crates/cc-lb-provider-openai/Cargo.toml',
+      '[package]\nname = "cc-lb-provider-openai"\n[dependencies]\ncc-lb-provider-anthropic.workspace = true\ncc-lb-quota.workspace = true\n',
+      /cc-lb-quota/,
+    ],
+    [
+      'crates/cc-lb-providers/Cargo.toml',
+      '[package]\nname = "cc-lb-providers"\n[dependencies]\ncc-lb-storage-api = { path = "../cc-lb-storage-api" }\n',
+      /cc-lb-storage-api/,
+    ],
+  ];
+
+  for (const [file, manifest, expected] of cases) {
+    const dir = makeTempRepo({ [file]: manifest });
+    try {
+      const result = checkHotpathFirewall(dir);
+      assert.equal(result.ok, false, `Expected failure for ${file}`);
+      assert.match(result.violations.join('\n'), expected);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
