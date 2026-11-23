@@ -93,10 +93,7 @@ describe('Cache keepalive canonical wire vocabulary', () => {
 
   it('documents every canonical cancellation reason in the operator reason list', () => {
     const guide = readFileSync(
-      new URL(
-        '../../../../../docs/cache-keepalive-operator.md',
-        import.meta.url,
-      ),
+      new URL('../../../docs/cache-keepalive-operator.md', import.meta.url),
       'utf8',
     );
     const paragraph = guide.match(CANCEL_REASON_PARAGRAPH)?.[1];

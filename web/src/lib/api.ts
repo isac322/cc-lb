@@ -16,6 +16,29 @@ export type AuthRequiredEventDetail = {
 
 export const AUTH_REQUIRED_EVENT = 'cclb:auth-required';
 
+export function normalizeAdminApiBaseUrl(raw: string | undefined): string {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed || trimmed === '/') {
+    return '';
+  }
+  return trimmed.replace(/\/+$/, '');
+}
+
+export const ADMIN_API_BASE_URL = normalizeAdminApiBaseUrl(
+  import.meta.env.VITE_ADMIN_API_BASE_URL,
+);
+
+export function resolveAdminApiUrl(
+  path: string,
+  baseUrl: string = ADMIN_API_BASE_URL,
+): string {
+  if (!baseUrl || /^https?:\/\//i.test(path)) {
+    return path;
+  }
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${baseUrl}${normalizedPath}`;
+}
+
 function notifyAuthRequired(
   authMode: AdminAuthMode | null,
   hadToken: boolean,
@@ -131,7 +154,7 @@ export async function fetchWithAuth(
   const timeoutId = setTimeout(() => controller.abort(), 30000);
 
   try {
-    const res = await fetch(path, {
+    const res = await fetch(resolveAdminApiUrl(path), {
       ...requestOptions,
       headers,
       signal: controller.signal,

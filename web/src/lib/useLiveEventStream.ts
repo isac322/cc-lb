@@ -10,6 +10,7 @@ import {
   type RequestEvent,
   type RequestEventUpdate,
   RequestEventUpdateSchema,
+  resolveAdminApiUrl,
 } from './api';
 import { getAdminToken } from './auth';
 import {
@@ -331,7 +332,9 @@ export function useLiveEventStream(
       return;
     }
 
-    const url = `/admin/v1/events/stream?${params.toString()}`;
+    const url = resolveAdminApiUrl(
+      `/admin/v1/events/stream?${params.toString()}`,
+    );
 
     clientRef.current = createEventSource({
       url,

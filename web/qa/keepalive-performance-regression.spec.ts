@@ -34,7 +34,7 @@ const WEB_URL = loopbackOrigin(
   process.env.KEEPALIVE_WEB_URL ?? 'http://127.0.0.1:5174',
 );
 const QA_DIR = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(QA_DIR, '../../../..');
+const REPO_ROOT = path.resolve(QA_DIR, '../..');
 const SCRATCH_DIR =
   process.env.KEEPALIVE_SCRATCH_DIR ??
   path.join(REPO_ROOT, 'target', 'keepalive-qa');

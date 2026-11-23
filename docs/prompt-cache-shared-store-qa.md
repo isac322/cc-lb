@@ -75,7 +75,7 @@ CC_LB_MULTI_REPLICA_E2E=1 CC_LB_MULTI_REPLICA_POSTGRES_URL="postgres://..." \
   cargo test -p tests-multi-replica --test integration
 
 # Admin Web
-cd crates/cc-lb-admin/web
+cd web
 bun install --frozen-lockfile
 bun run --shell=bun build
 bun run --shell=bun lint

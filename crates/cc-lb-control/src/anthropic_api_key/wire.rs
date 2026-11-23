@@ -1,5 +1,5 @@
 //! Admin wire JSON for API-key upstreams. Must equal the types in
-//! `crates/cc-lb-admin/web/src/lib/api.ts`; the contract fixtures under
+//! `web/src/lib/api.ts`; the contract fixtures under
 //! `web/src/lib/__contract__/` pin both sides.
 
 use std::fmt;
@@ -189,7 +189,7 @@ mod tests {
 
     fn contract_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../cc-lb-admin/web/src/lib/__contract__")
+            .join("../../web/src/lib/__contract__")
             .join(file)
     }
 

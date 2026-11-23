@@ -101,7 +101,7 @@ Use `positioning.yml` as the source of truth for public identity, category, desc
 
 ## Admin web product and design docs
 
-The admin web has two governing documents under `crates/cc-lb-admin/web/`: `PRODUCT.md` (`## Product Principles`) for durable UX and product principles, and `DESIGN.md` for the visual system and component interaction contracts.
+The admin web has two governing documents under `web/`: `PRODUCT.md` (`## Product Principles`) for durable UX and product principles, and `DESIGN.md` for the visual system and component interaction contracts.
 
 Rules:
-- Read both before changing anything under `crates/cc-lb-admin/web/`; they are authoritative and their rules are not restated elsewhere.
+- Read both before changing anything under `web/`; they are authoritative and their rules are not restated elsewhere.
