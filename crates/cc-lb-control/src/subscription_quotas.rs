@@ -670,9 +670,7 @@ pub async fn build_cc_lb_aggregate_response_for_provider(
                 .as_ref()
                 .and_then(|timings| timings.get(&window)),
         );
-        if eligible_count_override_applies(ineligible_upstreams) {
-            response.eligible_upstreams = upstreams.len().saturating_sub(ineligible_upstreams);
-        }
+        response.eligible_upstreams = upstreams.len().saturating_sub(ineligible_upstreams);
         aggregate_windows.push(response);
     }
 
@@ -690,10 +688,6 @@ pub async fn build_cc_lb_aggregate_response_for_provider(
         windows: aggregate_windows,
         caveats,
     })
-}
-
-fn eligible_count_override_applies(ineligible_upstreams: usize) -> bool {
-    ineligible_upstreams > 0
 }
 
 pub fn pool_quota_snapshots_from_aggregate(
@@ -3060,5 +3054,134 @@ mod tests {
 
     fn now_unix_secs_test() -> u64 {
         1_780_000_000
+    }
+
+    #[tokio::test]
+    async fn aggregate_counts_all_eligible_upstreams_when_one_has_no_quota_lot() {
+        use std::sync::Arc;
+
+        use async_trait::async_trait;
+        use cc_lb_domain::Upstream;
+        use cc_lb_storage_api::{MetaStore, UpstreamCreate, UpstreamSubscriptionQuotaStore};
+        use cc_lb_upstream::{
+            ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer,
+            SignerError, SignerFactory, SigningCapability, UpstreamError,
+        };
+
+        struct DummySigner;
+        #[async_trait]
+        impl Signer for DummySigner {
+            async fn sign(
+                &self,
+                shaped: ShapedRequest,
+                capability: &mut SigningCapability,
+            ) -> Result<SignedRequest, SignerError> {
+                Ok(SignedRequest::from_shaped(shaped, capability))
+            }
+
+            async fn on_unauthorized(&self, _error: &UpstreamError) -> RetryDecision {
+                RetryDecision::Fail
+            }
+        }
+
+        struct DummySignerFactory;
+        impl ApiKeyAwareSignerFactory for DummySignerFactory {
+            fn with_router_choice(
+                &self,
+                _router_chosen_upstream_name: String,
+            ) -> Arc<dyn SignerFactory> {
+                Arc::new(DummySignerFactory)
+            }
+        }
+        #[async_trait]
+        impl SignerFactory for DummySignerFactory {
+            async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
+                Ok(Arc::new(DummySigner))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_url = format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("quota.sqlite").display()
+        );
+        let now_secs = now_unix_secs_test();
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(now_secs));
+        let storage = cc_lb_storage_sqlite::open_sqlite(&db_url, clock.clone())
+            .await
+            .expect("open sqlite");
+        storage.initialize().await.expect("initialize sqlite");
+
+        for (id, name) in [
+            (Uuid::from_u128(1), "with-lot"),
+            (Uuid::from_u128(2), "without-lot"),
+        ] {
+            UpstreamStore::create(
+                &storage,
+                UpstreamCreate {
+                    id,
+                    name: name.to_owned(),
+                    kind: UpstreamKind::AnthropicOauth,
+                    base_url: None,
+                    api_key_ciphertext: None,
+                    oauth_tokens: None,
+                    warmup_enabled: false,
+                    warmup_dialect_plugin: None,
+                    workspace_id: None,
+                    vertex: None,
+                    vertex_credential_type: None,
+                    vertex_quota_project_id: None,
+                    api_key_access: None,
+                },
+            )
+            .await
+            .expect("create upstream");
+        }
+
+        let sample: SubscriptionQuotaSample = serde_json::from_value(json!({
+            "upstream_id": Uuid::from_u128(1),
+            "window": "5h",
+            "source": "api",
+            "sample_kind": "sample",
+            "observed_at_unix_millis": now_secs * 1_000,
+            "ingested_at_unix_millis": now_secs * 1_000,
+            "sample_id": Uuid::from_u128(99),
+            "utilization": 0.25,
+            "resets_at_unix_secs": now_secs + 3_600,
+        }))
+        .expect("sample deserializes");
+        storage
+            .record_subscription_quota_samples(&[sample])
+            .await
+            .expect("record sample");
+
+        let view = crate::DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(DummySignerFactory))
+            .principal_view(Arc::new(
+                crate::api_keys::principal_view::PrincipalView::from_db(&[], HashMap::new()),
+            ))
+            .upstream_status_snapshot(Arc::new(crate::UpstreamStatusSnapshot::default()))
+            .build();
+        let holder = DynamicViewHolder::new(view);
+
+        let aggregate = build_cc_lb_aggregate_response_for_provider(
+            &storage,
+            &holder,
+            AggregateBuildParams {
+                upstream_ids: None,
+                windows: vec![SubscriptionQuotaWindow::FiveHour],
+                source: SubscriptionQuotaSourceMerge::Api,
+                max_staleness_secs: 1_800,
+                provider: PoolQuotaProvider::Anthropic,
+            },
+            clock.as_ref(),
+        )
+        .await
+        .expect("aggregate builds");
+
+        assert_eq!(aggregate.upstream_count, 2);
+        assert_eq!(aggregate.windows.len(), 1);
+        assert_eq!(aggregate.windows[0].eligible_upstreams, 2);
+        assert_eq!(aggregate.windows[0].contributing_upstreams, 1);
     }
 }
