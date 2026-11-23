@@ -169,6 +169,7 @@
       "runs": [
         {
           "packages": [
+            "cc-lb-event-pipeline",
             "cc-lb-storage-conformance",
             "cc-lb-storage-sqlite",
             "cc-lb-storage-api",
@@ -177,7 +178,7 @@
           "cargo_args": [],
           "extra_features": [
             "cc-lb-storage-api/dto-roundtrip",
-            "cc-lb-engine/postgres"
+            "cc-lb-event-pipeline/postgres"
           ]
         }
       ]
@@ -228,9 +229,11 @@
             "cc-lb-plugin-conformance",
             "cc-lb-plugin-wire",
             "cc-lb-pricing",
+            "cc-lb-proxy-telemetry",
             "cc-lb-quota",
             "cc-lb-request-log",
             "cc-lb-routing",
+            "cc-lb-routing-eval",
             "cc-lb-runtime-wasmtime",
             "cc-lb-signer-anthropic-key",
             "cc-lb-signer-anthropic-oauth",
