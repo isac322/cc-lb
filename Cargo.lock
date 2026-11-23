@@ -1062,6 +1062,85 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-lb-provider-anthropic"
+version = "2.2.1"
+dependencies = [
+ "bytes",
+ "cc-lb-domain",
+ "cc-lb-provider-spi",
+ "cc-lb-workspace-hack",
+ "http",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "cc-lb-provider-gemini"
+version = "2.2.1"
+dependencies = [
+ "bytes",
+ "cc-lb-domain",
+ "cc-lb-provider-spi",
+ "cc-lb-workspace-hack",
+ "http",
+ "serde_json",
+]
+
+[[package]]
+name = "cc-lb-provider-openai"
+version = "2.2.1"
+dependencies = [
+ "bytes",
+ "cc-lb-domain",
+ "cc-lb-provider-spi",
+ "cc-lb-workspace-hack",
+ "http",
+ "serde_json",
+]
+
+[[package]]
+name = "cc-lb-provider-spi"
+version = "2.2.1"
+dependencies = [
+ "bytes",
+ "cc-lb-domain",
+ "cc-lb-workspace-hack",
+ "http",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "url",
+]
+
+[[package]]
+name = "cc-lb-provider-vertex"
+version = "2.2.1"
+dependencies = [
+ "bytes",
+ "cc-lb-domain",
+ "cc-lb-provider-spi",
+ "cc-lb-workspace-hack",
+ "http",
+ "serde_json",
+]
+
+[[package]]
+name = "cc-lb-providers"
+version = "2.2.1"
+dependencies = [
+ "bytes",
+ "cc-lb-domain",
+ "cc-lb-provider-anthropic",
+ "cc-lb-provider-gemini",
+ "cc-lb-provider-openai",
+ "cc-lb-provider-spi",
+ "cc-lb-provider-vertex",
+ "cc-lb-workspace-hack",
+ "http",
+ "serde_json",
+]
+
+[[package]]
 name = "cc-lb-proxy-telemetry"
 version = "2.2.1"
 dependencies = [
