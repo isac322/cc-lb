@@ -328,21 +328,11 @@ pub(super) fn origin_only(url: &Url) -> Result<Url, url::ParseError> {
 }
 
 pub(super) fn default_base_url(kind: StorageUpstreamKind) -> Url {
-    let value = match kind {
-        StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth => {
-            DEFAULT_ANTHROPIC_BASE_URL
-        }
-        StorageUpstreamKind::OpenaiOauth => DEFAULT_OPENAI_CODEX_BASE_URL,
-        StorageUpstreamKind::OpenaiApiKey => DEFAULT_OPENAI_BASE_URL,
-        StorageUpstreamKind::GeminiApiKey => DEFAULT_GEMINI_BASE_URL,
-        StorageUpstreamKind::GeminiOauth => DEFAULT_GEMINI_CODE_ASSIST_BASE_URL,
-        // Kind-only fallback; Vertex records normally resolve their host from
-        // `VertexUpstreamConfig` via `vertex_origin`.
-        StorageUpstreamKind::VertexApiKey | StorageUpstreamKind::VertexCredential => {
-            DEFAULT_VERTEX_BASE_URL
-        }
-    };
-    Url::parse(value).expect("provider base URL parses")
+    cc_lb_providers::builtin_provider_registry()
+        .auth_kind_for_upstream_kind(kind)
+        .expect("built-in upstream kind registered")
+        .default_base_url_parsed()
+        .expect("provider base URL parses")
 }
 
 pub(super) fn upstream_kind_for_candidate(kind: StorageUpstreamKind) -> CandidateUpstreamKind {
@@ -359,16 +349,11 @@ pub(super) fn upstream_kind_for_candidate(kind: StorageUpstreamKind) -> Candidat
 }
 
 pub(super) fn storage_upstream_kind_label(kind: StorageUpstreamKind) -> &'static str {
-    match kind {
-        StorageUpstreamKind::AnthropicApiKey => "anthropic_key",
-        StorageUpstreamKind::AnthropicOauth => "anthropic_oauth",
-        StorageUpstreamKind::OpenaiOauth => "openai_oauth",
-        StorageUpstreamKind::OpenaiApiKey => "openai_api_key",
-        StorageUpstreamKind::GeminiApiKey => "gemini_api_key",
-        StorageUpstreamKind::GeminiOauth => "gemini_oauth",
-        StorageUpstreamKind::VertexApiKey => "vertex_api_key",
-        StorageUpstreamKind::VertexCredential => "vertex_credential",
-    }
+    cc_lb_providers::builtin_provider_registry()
+        .auth_kind_for_upstream_kind(kind)
+        .expect("built-in upstream kind registered")
+        .metric_label
+        .as_ref()
 }
 /// Distinct upstreams one request may try, counting the first. The
 /// same-upstream 401 refresh retry does not count against it.

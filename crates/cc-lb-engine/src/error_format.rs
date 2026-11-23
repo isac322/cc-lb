@@ -6,16 +6,15 @@ use serde_json::json;
 
 use crate::provider_capability::ProviderCapability;
 pub fn anthropic_error_body(error_type: &str, message: &str) -> Bytes {
-    Bytes::from(
-        json!({
-            "type": "error",
-            "error": {
-                "type": error_type,
-                "message": message,
-            }
+    cc_lb_providers::builtin_provider_registry()
+        .for_wire_provider(cc_lb_domain::Provider::Anthropic)
+        .expect("anthropic provider registered")
+        .format_error_body(cc_lb_provider_spi::ErrorFormatRequest {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            error_type,
+            message,
+            limit_kind: None,
         })
-        .to_string(),
-    )
 }
 
 pub fn anthropic_error_response(
@@ -39,43 +38,15 @@ pub(crate) fn provider_error_body(
     message: &str,
     limit_kind: Option<&str>,
 ) -> Bytes {
-    let error = match capability.provider() {
-        cc_lb_domain::Provider::Anthropic => {
-            let mut error = json!({
-                "type": error_type,
-                "message": message,
-            });
-            if let Some(limit_kind) = limit_kind {
-                error["limit_kind"] = json!(limit_kind);
-            }
-            json!({"type": "error", "error": error})
-        }
-        cc_lb_domain::Provider::Openai => {
-            let mut error = json!({
-                "message": message,
-                "type": error_type,
-                "code": error_type,
-                "param": null,
-            });
-            if let Some(limit_kind) = limit_kind {
-                error["limit_kind"] = json!(limit_kind);
-            }
-            json!({"error": error})
-        }
-        cc_lb_domain::Provider::Gemini => {
-            let mut error = json!({
-                "code": status.as_u16(),
-                "message": message,
-                "status": gemini_status_str(status),
-                "type": error_type,
-            });
-            if let Some(limit_kind) = limit_kind {
-                error["limit_kind"] = json!(limit_kind);
-            }
-            json!({"error": error})
-        }
-    };
-    Bytes::from(error.to_string())
+    cc_lb_providers::builtin_provider_registry()
+        .for_wire_provider(capability.provider())
+        .expect("wire provider registered")
+        .format_error_body(cc_lb_provider_spi::ErrorFormatRequest {
+            status,
+            error_type,
+            message,
+            limit_kind,
+        })
 }
 
 pub(crate) fn compat_reject_body(reject: &crate::openai_compat::CompatReject) -> Bytes {
@@ -165,20 +136,4 @@ pub(crate) fn provider_error_body_with_retry_after(
         body = Bytes::from(value.to_string());
     }
     body
-}
-
-fn gemini_status_str(status: StatusCode) -> &'static str {
-    match status {
-        StatusCode::BAD_REQUEST => "INVALID_ARGUMENT",
-        StatusCode::UNAUTHORIZED => "UNAUTHENTICATED",
-        StatusCode::FORBIDDEN => "PERMISSION_DENIED",
-        StatusCode::NOT_FOUND => "NOT_FOUND",
-        StatusCode::CONFLICT => "ABORTED",
-        StatusCode::TOO_MANY_REQUESTS => "RESOURCE_EXHAUSTED",
-        StatusCode::INTERNAL_SERVER_ERROR => "INTERNAL",
-        StatusCode::NOT_IMPLEMENTED => "UNIMPLEMENTED",
-        StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE => "UNAVAILABLE",
-        StatusCode::GATEWAY_TIMEOUT => "DEADLINE_EXCEEDED",
-        _ => "UNKNOWN",
-    }
 }
