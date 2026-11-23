@@ -271,19 +271,21 @@ token_env = "CC_LB_ADMIN_TOKEN"
         deadline = time.monotonic() + 20
         while pending and time.monotonic() < deadline:
             require(self.proc.poll() is None, "cc-lb exited while waiting for routing readiness")
-            for provider in tuple(pending):
-                path = "/v1/responses" if provider == "openai" else "/v1beta/models/gemini-2.5-flash:generateContent"
-                body = {"model": "gpt-5.2", "input": [], "store": False} if provider == "openai" else {"contents": []}
-                status, data = http_request(self.admin_port, "/admin/v1/router/preview", {
-                    "principal_id": self.principal, "provider": provider, "path": path, "body": body,
-                }, ADMIN_TOKEN)
-                require(status in (200, 404), f"routing readiness returned unexpected status {status}")
-                preview = json.loads(data)
-                if status == 200 and (preview.get("winner") or {}).get("upstream_id") == self.upstreams[provider]:
-                    pending.remove(provider)
+            ready_status, _ = http_request(self.proxy_port, "/readyz", timeout=2)
+            status_code, status_data = http_request(self.admin_port, "/admin/v1/status", None, ADMIN_TOKEN, timeout=2)
+            require(ready_status in (200, 503), f"/readyz returned unexpected status {ready_status}")
+            require(status_code == 200, f"admin status returned unexpected status {status_code}")
+            if ready_status == 200:
+                statuses = {
+                    item.get("id"): item.get("status")
+                    for item in json.loads(status_data).get("upstreams", [])
+                }
+                for provider in tuple(pending):
+                    if statuses.get(self.upstreams[provider]) == "active":
+                        pending.remove(provider)
             if pending:
                 time.sleep(0.05)
-        require(not pending, "routing preview did not observe configured upstreams before deadline")
+        require(not pending, "routing readiness did not observe configured upstreams as active before deadline")
         require(not self.server.calls, "routing readiness unexpectedly dispatched an upstream request")
 
     def capture_client(self):

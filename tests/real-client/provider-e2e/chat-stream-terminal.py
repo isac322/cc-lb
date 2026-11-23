@@ -423,11 +423,14 @@ token_env = "CC_LB_ADMIN_TOKEN"
         self.secrets.append(self.key)
 
         def route_ready():
-            status, data = request(self.admin_port, "/admin/v1/router/preview", {
-                "principal_id": self.principal, "provider": "openai", "path": "/v1/chat/completions",
-                "body": {"model": MODEL, "messages": [], "stream": True}}, ADMIN_TOKEN)
-            require(status in (200, 404), f"unexpected route preview status {status}")
-            return status == 200 and (json.loads(data).get("winner") or {}).get("upstream_id") == self.upstream_id
+            ready_status, _ = request(self.proxy_port, "/readyz")
+            require(ready_status in (200, 503), f"unexpected /readyz status {ready_status}")
+            if ready_status != 200:
+                return False
+            status_code, data = request(self.admin_port, "/admin/v1/status", None, ADMIN_TOKEN)
+            require(status_code == 200, f"unexpected admin status {status_code}")
+            upstreams = json.loads(data).get("upstreams", [])
+            return any(u.get("id") == self.upstream_id and u.get("status") == "active" for u in upstreams)
         self.until("Chat routing readiness", route_ready)
         require(not self.dispatches, "readiness dispatched a provider request")
         self.tap = self.start_server(Tap, "chat-terminal-tap")

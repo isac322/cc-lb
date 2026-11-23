@@ -213,8 +213,9 @@ Authentication now runs **before the request body is touched at all**:
 
 1. `lifecycle_handler` marks the lifecycle context and calls
    `Lifecycle::authenticate(&parts.headers)`.
-2. On failure it returns `reject_unauthenticated(...)` immediately, without
-   reading a single body byte.
+2. On failure it returns `reject_unauthenticated_for_provider(...)` (or
+   `reject_unauthenticated_for_route(...)`) immediately, without reading a
+   single body byte.
 3. Only with the resulting proof does it call `read_request_body(..., &auth)`.
 4. `Lifecycle::handle(req, &auth)` receives the proof instead of
    authenticating for itself.

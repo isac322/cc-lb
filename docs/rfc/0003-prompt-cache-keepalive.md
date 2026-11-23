@@ -190,8 +190,11 @@ mapping table. Key rules:
 - `stop_reason == "max_tokens" | "stop_sequence"` → **Ambiguous**.
 
 `Ambiguous` responses behave like `UserTurn` in this release (fail-safe:
-prefer eviction over paying for a wasted refresh). The `llm_judge` field is
-reserved for a future implementation; the admin API rejects non-null values.
+prefer eviction over paying for a wasted refresh). The admin API explicitly
+rejects non-null `cache_keepalive.classifier.llm_judge` payloads
+(`400 unsupported_cache_keepalive_llm_judge`); the unimplemented
+`llm_judge: Option<LlmJudgeConfig>` field has been removed from the runtime
+`ClassifierConfig` Rust struct (historical design below).
 
 ### Scheduler — `KeepaliveScheduler`
 
@@ -304,8 +307,11 @@ config surface is JSON persisted through the admin API):
 - `classifier: ClassifierConfig`
   - `extra_wait_for_user_tools: Vec<String>` (default `[]`).
   - `treat_end_turn_as_ambiguous: bool` (default `false`).
-  - `llm_judge: Option<LlmJudgeConfig>` (default `None`, reserved for a future
-    implementation; non-null values are rejected by the admin API).
+  - *(Historical RFC field)* `llm_judge: Option<LlmJudgeConfig>` was specified
+    as `None` by default; `LlmJudgeConfig` and the `ClassifierConfig.llm_judge`
+    struct field were removed in cleanup, while the admin API still rejects
+    non-null `cache_keepalive.classifier.llm_judge` payloads
+    (`400 unsupported_cache_keepalive_llm_judge`).
 
 Admin API additions: `POST /admin/v1/principals` and
 `PATCH /admin/v1/principals/{id}` accept `cache_keepalive`;
@@ -343,8 +349,10 @@ reflects success without new event schema.
 3. **Classifier drift.** New Anthropic clients may adopt tool names we do
    not know. Mitigation: `extra_wait_for_user_tools` is per-principal,
    plus `treat_end_turn_as_ambiguous` for future judge-backed principals.
-4. **Unimplemented LLM judge.** Mitigation: the admin API rejects non-null
-   `llm_judge`, and any legacy stored value fails closed as `UserTurn`.
+4. **Unimplemented LLM judge.** Mitigation: the admin API explicitly rejects
+   non-null `cache_keepalive.classifier.llm_judge` JSON payloads, the unused
+   `LlmJudgeConfig` / `ClassifierConfig.llm_judge` Rust fields were removed in
+   cleanup, and any legacy stored value fails closed as `UserTurn`.
 5. **Race between cancel and fire.** Guarded by the generation counter:
    the scheduled task re-locks the entry and returns without dispatching
    if generations no longer match.
@@ -382,5 +390,6 @@ reflects success without new event schema.
   workload is bursty (single-shot completions dominated)? Deferred until
   after production canary data lands.
 - Should the future LLM judge default to Anthropic Haiku for the
-  `same-vendor-cheap-model` argument, or default off? Current release
-  reserves `llm_judge` and rejects non-null values.
+  `same-vendor-cheap-model` argument, or default off? Current release removes the
+  unimplemented `ClassifierConfig.llm_judge` struct field and explicitly rejects
+  non-null `cache_keepalive.classifier.llm_judge` payloads at the admin API.

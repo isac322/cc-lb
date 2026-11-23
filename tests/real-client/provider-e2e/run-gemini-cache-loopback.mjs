@@ -355,11 +355,38 @@ async function awaitSoleOwner(principalId, upstreamId) {
   const deadline = Date.now() + 5_000;
   let last;
   while (Date.now() < deadline) {
-    last = await admin('POST', '/admin/v1/router/preview', { principal_id: principalId, provider: 'gemini', path: GENERATE, body: generationBody() });
-    if (last.status === 200 && last.json?.winner?.upstream_id === upstreamId) return;
+    const [ready, statusRes, upstreamsRes, principalRes] = await Promise.all([
+      request(PORT.proxy, 'GET', '/readyz'),
+      admin('GET', '/admin/v1/status'),
+      admin('GET', '/admin/v1/upstreams'),
+      admin('GET', `/admin/v1/principals/${principalId}`),
+    ]);
+    last = { ready, statusRes, upstreamsRes, principalRes };
+    const statusUpstreams = statusRes.json?.upstreams ?? [];
+    const enabledUpstreams = (upstreamsRes.json?.upstreams ?? []).filter((u) => u.enabled);
+    const activeInStatus = statusUpstreams.find((u) => u.id === upstreamId)?.status === 'active';
+    const soleActiveInStatus = statusUpstreams.every((u) =>
+      u.id === upstreamId ? u.status === 'active' : u.status === 'disabled',
+    );
+    const soleEnabledUpstream =
+      enabledUpstreams.length === 1 && enabledUpstreams[0].id === upstreamId;
+    const principalReady = principalRes.status === 200 && principalRes.json?.enabled === true;
+    if (
+      ready.status === 200 &&
+      statusRes.status === 200 &&
+      upstreamsRes.status === 200 &&
+      activeInStatus &&
+      soleActiveInStatus &&
+      soleEnabledUpstream &&
+      principalReady
+    ) {
+      return;
+    }
     await new Promise((resolve) => setTimeout(resolve, 25)); // Dynamic-view readiness, no provider dispatch.
   }
-  throw new Error(`Dynamic routing view did not expose the sole eligible owner: HTTP ${last?.status}; ${redact(last?.text).slice(0, 900)}`);
+  throw new Error(
+    `Dynamic routing view did not expose the sole eligible owner: ready=${last?.ready?.status} status=${last?.statusRes?.status} upstreams=${last?.upstreamsRes?.status} principal=${last?.principalRes?.status}; ${redact(last?.statusRes?.text).slice(0, 900)}`,
+  );
 }
 async function setEnabled(id, enabled) {
   const current = await admin('GET', `/admin/v1/upstreams/${id}`);
