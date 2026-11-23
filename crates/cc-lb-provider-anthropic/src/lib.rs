@@ -107,7 +107,11 @@ fn canonical_anthropic_model_id(requested: &str) -> &str {
         other => {
             // Only warn if it looks like an alias (doesn't end with -YYYYMMDD)
             if !other.ends_with('-') && !is_dated_model(other) {
-                tracing::warn!(model = %other, "unknown model alias, returning unchanged");
+                tracing::warn!(
+                    target: "cc_lb_routing_eval::model_resolution",
+                    model = %other,
+                    "unknown model alias, returning unchanged"
+                );
             }
             other
         }

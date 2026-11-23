@@ -67,6 +67,7 @@ cc-lb-routing.workspace = true
 cc-lb-routing-eval.workspace = true
 cc-lb-quota.workspace = true
 cc-lb-pricing = { path = "../cc-lb-pricing" }
+cc-lb-providers.workspace = true
 cc-lb-runtime-wasmtime = { workspace = true }
 cc-lb-scheduler = { path = "../cc-lb-scheduler", optional = true, default-features = false }
 cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }

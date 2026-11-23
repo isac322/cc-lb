@@ -43,12 +43,17 @@ pub enum ProviderRegistryError {
     },
 }
 
+struct RegisteredAuthKind {
+    adapter_idx: usize,
+    descriptor: AuthKindDescriptor,
+}
+
 /// In-memory registry mapping [`ProviderId`] and [`AuthKindId`] values to [`ProviderAdapter`] implementations.
 #[derive(Default)]
 pub struct ProviderRegistry {
     adapters: Vec<Arc<dyn ProviderAdapter>>,
     by_provider: HashMap<ProviderId, usize>,
-    by_auth_kind: HashMap<AuthKindId, (usize, usize)>,
+    by_auth_kind: HashMap<AuthKindId, RegisteredAuthKind>,
 }
 
 impl fmt::Debug for ProviderRegistry {
@@ -90,10 +95,10 @@ impl ProviderRegistry {
                     new_provider_id: provider_id,
                 });
             }
-            if let Some(&(existing_idx, _)) = self.by_auth_kind.get(&descriptor.id) {
+            if let Some(existing) = self.by_auth_kind.get(&descriptor.id) {
                 return Err(ProviderRegistryError::DuplicateAuthKind {
                     auth_kind_id: descriptor.id.clone(),
-                    existing_provider_id: self.adapters[existing_idx].provider_id(),
+                    existing_provider_id: self.adapters[existing.adapter_idx].provider_id(),
                     new_provider_id: provider_id,
                 });
             }
@@ -128,9 +133,14 @@ impl ProviderRegistry {
         }
 
         let adapter_idx = self.adapters.len();
-        for (kind_idx, descriptor) in auth_kinds.iter().enumerate() {
-            self.by_auth_kind
-                .insert(descriptor.id.clone(), (adapter_idx, kind_idx));
+        for descriptor in auth_kinds {
+            self.by_auth_kind.insert(
+                descriptor.id.clone(),
+                RegisteredAuthKind {
+                    adapter_idx,
+                    descriptor: descriptor.clone(),
+                },
+            );
         }
         self.by_provider.insert(provider_id, adapter_idx);
         self.adapters.push(adapter);
@@ -165,14 +175,14 @@ impl ProviderRegistry {
     ) -> Option<&Arc<dyn ProviderAdapter>> {
         self.by_auth_kind
             .get(auth_kind_id)
-            .map(|&(adapter_idx, _)| &self.adapters[adapter_idx])
+            .map(|entry| &self.adapters[entry.adapter_idx])
     }
 
     /// Looks up an [`AuthKindDescriptor`] by [`AuthKindId`].
     pub fn auth_kind(&self, auth_kind_id: &AuthKindId) -> Option<&AuthKindDescriptor> {
         self.by_auth_kind
             .get(auth_kind_id)
-            .map(|&(adapter_idx, kind_idx)| &self.adapters[adapter_idx].auth_kinds()[kind_idx])
+            .map(|entry| &entry.descriptor)
     }
 
     /// Looks up an [`AuthKindDescriptor`] by string authentication kind identifier.
@@ -372,5 +382,71 @@ mod tests {
             ProviderRegistryError::InvalidBaseUrl { .. }
         ));
         assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn registry_snapshots_validated_descriptors_against_dynamic_auth_kinds_slice() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DynamicKindsAdapter {
+            mode: Arc<AtomicUsize>,
+            initial: [AuthKindDescriptor; 2],
+            reordered: [AuthKindDescriptor; 2],
+        }
+
+        impl ProviderAdapter for DynamicKindsAdapter {
+            fn provider_id(&self) -> ProviderId {
+                ProviderId::from_static("dynamic")
+            }
+
+            fn display_name(&self) -> &str {
+                "Dynamic"
+            }
+
+            fn wire_provider(&self) -> Option<Provider> {
+                None
+            }
+
+            fn auth_kinds(&self) -> &[AuthKindDescriptor] {
+                match self.mode.load(Ordering::SeqCst) {
+                    0 => &self.initial,
+                    1 => &self.reordered,
+                    _ => &[],
+                }
+            }
+
+            fn format_error_body(&self, _req: ErrorFormatRequest<'_>) -> Bytes {
+                Bytes::from_static(b"{}")
+            }
+        }
+
+        let kind_a = AuthKindId::from_static("dynamic_a");
+        let kind_b = AuthKindId::from_static("dynamic_b");
+        let mode = Arc::new(AtomicUsize::new(0));
+        let mut desc_a = descriptor(kind_a.clone(), "https://a.example.com/");
+        desc_a.metric_label = Cow::Borrowed("metric_a");
+        let mut desc_b = descriptor(kind_b.clone(), "https://b.example.com/");
+        desc_b.metric_label = Cow::Borrowed("metric_b");
+
+        let adapter = DynamicKindsAdapter {
+            mode: Arc::clone(&mode),
+            initial: [desc_a.clone(), desc_b.clone()],
+            reordered: [desc_b, desc_a],
+        };
+
+        let mut registry = ProviderRegistry::new();
+        registry.register(Arc::new(adapter)).expect("register");
+
+        // Switch adapter slice order to reversed, then empty: lookups must still
+        // return the original validated descriptors without swapping or panicking.
+        for next_mode in [1usize, 2usize] {
+            mode.store(next_mode, Ordering::SeqCst);
+            let got_a = registry.auth_kind(&kind_a).expect("kind_a present");
+            assert_eq!(got_a.default_base_url, "https://a.example.com/");
+            assert_eq!(got_a.metric_label, "metric_a");
+            let got_b = registry.auth_kind(&kind_b).expect("kind_b present");
+            assert_eq!(got_b.default_base_url, "https://b.example.com/");
+            assert_eq!(got_b.metric_label, "metric_b");
+        }
     }
 }

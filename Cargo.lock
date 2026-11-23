@@ -1331,6 +1331,7 @@ dependencies = [
  "cc-lb-observability",
  "cc-lb-plugin-wire",
  "cc-lb-pricing",
+ "cc-lb-providers",
  "cc-lb-quota",
  "cc-lb-request-log",
  "cc-lb-routing",

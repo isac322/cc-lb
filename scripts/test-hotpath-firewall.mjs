@@ -138,3 +138,27 @@ test('enforces Phase-3 provider and domain isolation rules', () => {
     }
   }
 });
+
+test('rejects indirect normal dependency into storage-api and quota via cc-lb-control', () => {
+  const dir = makeTempRepo({
+    'crates/cc-lb-control/Cargo.toml':
+      '[package]\nname = "cc-lb-control"\n[dependencies]\ncc-lb-quota.workspace = true\ncc-lb-storage-api = { path = "../cc-lb-storage-api" }\n',
+    'crates/cc-lb-provider-openai/Cargo.toml':
+      '[package]\nname = "cc-lb-provider-openai"\n[dependencies]\ncc-lb-control = { path = "../cc-lb-control" }\n',
+    'crates/cc-lb-providers/Cargo.toml':
+      '[package]\nname = "cc-lb-providers"\n[dependencies]\ncc-lb-provider-openai = { path = "../cc-lb-provider-openai" }\n',
+    'crates/cc-lb-routing-eval/Cargo.toml':
+      '[package]\nname = "cc-lb-routing-eval"\n[dependencies]\ncc-lb-providers = { path = "../cc-lb-providers" }\n',
+  });
+  try {
+    const result = checkHotpathFirewall(dir);
+    assert.equal(result.ok, false, 'Expected indirect control -> quota/storage-api violation');
+    const joined = result.violations.join('\n');
+    assert.match(joined, /cc-lb-provider-openai\/Cargo\.toml.*cc-lb-quota.*cc-lb-control -> cc-lb-quota/);
+    assert.match(joined, /cc-lb-provider-openai\/Cargo\.toml.*cc-lb-storage-api.*cc-lb-control -> cc-lb-storage-api/);
+    assert.match(joined, /cc-lb-routing-eval\/Cargo\.toml.*cc-lb-control/);
+    assert.match(joined, /cc-lb-routing-eval\/Cargo\.toml.*cc-lb-storage-api.*cc-lb-control -> cc-lb-storage-api/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

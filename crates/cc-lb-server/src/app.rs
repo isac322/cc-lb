@@ -993,6 +993,7 @@ async fn build_app_with_storage_inner(
     lazy_refresh_claim_guard: Option<Arc<dyn LazyRefreshClaimGuard>>,
     clock: ClockHandle,
 ) -> Result<App, BuildError> {
+    let _ = cc_lb_providers::builtin_provider_registry();
     let scheduler_lazy_handle = opened_scheduler.lazy_handle();
     let server_state = Arc::new(ServerStateHandle::new_starting());
     let metrics_hook: Arc<dyn cc_lb_observability::EngineMetricsHook> =
@@ -2596,6 +2597,7 @@ fn codex_backend_http_routes(
 }
 
 fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
+    let _ = cc_lb_providers::builtin_provider_registry();
     let request_id_state = RequestIdState::uuid_v7("req_server_");
     let websocket_routes = Router::new()
         .route("/v1/responses", get(responses_websocket_handler))
