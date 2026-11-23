@@ -144,7 +144,7 @@ impl Fixture {
         })
     }
 
-    #[cfg(feature = "postgres")]
+    #[cfg(feature = "storage-postgres")]
     pub(super) async fn seed_keepalive_storage(&self, storage: &dyn Storage) {
         UpstreamStore::create(
             storage,

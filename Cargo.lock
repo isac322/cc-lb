@@ -1238,8 +1238,6 @@ dependencies = [
 name = "cc-lb-runtime-sync"
 version = "2.2.1"
 dependencies = [
- "apalis-postgres",
- "apalis-sqlite",
  "axum",
  "cc-lb-aead",
  "cc-lb-clock",
@@ -1247,7 +1245,6 @@ dependencies = [
  "cc-lb-control",
  "cc-lb-lifecycle",
  "cc-lb-request-log",
- "cc-lb-scheduler",
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
@@ -1260,7 +1257,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "tokio-util",
  "tower",
  "tower-http 0.7.1",
  "tracing",
@@ -1419,7 +1415,6 @@ dependencies = [
  "tokio-tungstenite 0.30.0",
  "tokio-util",
  "tower",
- "tower-http 0.7.1",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",

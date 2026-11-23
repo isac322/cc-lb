@@ -5,6 +5,7 @@
 // 1: generic fatal / unhandled error
 // 2: startup validation/preflight/storage kind fatal errors
 
+#[cfg(feature = "admin")]
 pub(crate) mod admin_ports;
 pub mod app;
 pub mod build_meta;
@@ -22,8 +23,8 @@ pub mod refresh;
 pub use cc_lb_runtime_sync::replica;
 pub(crate) mod revision_hash;
 pub(crate) mod scheduler_dispatch;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
-pub use cc_lb_runtime_sync::scheduler_factory;
+#[cfg(any(feature = "storage-sqlite", feature = "storage-postgres"))]
+pub use cc_lb_scheduler::factory as scheduler_factory;
 pub mod signal;
 pub mod state_machine;
 pub use cc_lb_runtime_sync::storage_factory;
@@ -36,9 +37,14 @@ pub(crate) mod vertex_transport;
 pub mod warmup;
 pub mod wasm_host;
 
-pub use app::{App, BuildError, build_app, build_app_with_path, run_serve};
+#[cfg(feature = "admin")]
+pub use app::{App, build_app, build_app_with_path, run_serve};
+pub use app::{
+    BuildError, ProxyApp, ProxyRole, ProxyServeOptions, ServeError, build_proxy_app,
+    build_proxy_app_with_path, build_proxy_app_with_storage, run_proxy_serve,
+};
 pub(crate) use plugin_manifest::PluginManifest;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "storage-sqlite", feature = "storage-postgres"))]
 pub use scheduler_factory::{
     OpenedScheduler, SchedulerBackend, SchedulerFactoryError, open_scheduler_storage,
 };

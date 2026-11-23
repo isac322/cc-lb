@@ -9,6 +9,8 @@
 pub mod admin;
 pub mod cron;
 pub mod error;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub mod factory;
 pub mod jobs;
 pub mod middleware;
 pub mod migrations;

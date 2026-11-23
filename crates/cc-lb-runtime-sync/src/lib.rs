@@ -8,6 +8,4 @@ pub mod aead_key;
 pub mod build_meta;
 pub mod live_tail;
 pub mod replica;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
-pub mod scheduler_factory;
 pub mod storage_factory;

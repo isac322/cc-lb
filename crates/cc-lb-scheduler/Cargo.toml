@@ -9,8 +9,8 @@ autotests = false
 
 [features]
 default = ["sqlite"]
-sqlite = ["sqlx/sqlite", "apalis-sqlite", "cc-lb-server/sqlite"]
-postgres = ["sqlx/postgres", "apalis-postgres", "cc-lb-server/postgres"]
+sqlite = ["sqlx/sqlite", "apalis-sqlite", "cc-lb-server/storage-sqlite"]
+postgres = ["sqlx/postgres", "apalis-postgres", "cc-lb-server/storage-postgres"]
 
 [dependencies]
 apalis = { version = "1.0.0", features = ["catch-panic", "limit", "prometheus", "timeout"], default-features = false }
@@ -42,6 +42,7 @@ tower = { workspace = true, features = ["util"] }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 ulid = "3"
+url = { workspace = true }
 uuid = { workspace = true }
 
 [[test]]
@@ -65,4 +66,3 @@ proptest = { workspace = true }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "test-util", "time"] }
 tracing-subscriber = { workspace = true }
-url.workspace = true

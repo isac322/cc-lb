@@ -21,6 +21,7 @@ impl BuildMeta {
         Self(cc_lb_runtime_sync::build_meta::BuildMeta::current())
     }
 
+    #[cfg(feature = "admin")]
     pub fn admin_build_info(&self) -> cc_lb_admin::AdminBuildInfo {
         cc_lb_admin::AdminBuildInfo {
             git_sha: self.0.git_sha,

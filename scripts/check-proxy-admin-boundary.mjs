@@ -35,6 +35,8 @@ const SERVER_ADMIN_COMPOSITION_FILES = new Set([
   'crates/cc-lb-server/src/admin_ports.rs',
   'crates/cc-lb-server/src/build_meta.rs',
   'crates/cc-lb-server/src/app.rs',
+  'crates/cc-lb-server/src/app/admin_wiring.rs',
+  'crates/cc-lb-server/src/app/tests.rs',
   'crates/cc-lb-server/src/scheduler_dispatch_tests.rs',
   'crates/cc-lb-server/src/scheduler_dispatch/oauth/tests/limit_resets.rs',
 ]);

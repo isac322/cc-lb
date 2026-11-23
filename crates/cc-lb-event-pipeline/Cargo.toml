@@ -12,7 +12,7 @@ name = "integration"
 path = "tests/all.rs"
 
 [features]
-postgres = ["cc-lb-runtime-sync/postgres"]
+postgres = ["cc-lb-runtime-sync/live-tail-pg"]
 
 [dependencies]
 arc-swap.workspace = true
