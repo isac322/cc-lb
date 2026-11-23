@@ -70,7 +70,7 @@ fn build_candidates_populates_observations_from_dynamic_view_cache() {
 async fn lifecycle_updates_dynamic_view_cache_when_headers_are_observed() {
     let state = TestState::default();
     let shared_cache = Arc::new(RwLock::new(UpstreamRateLimitCache::default()));
-    let (sink, mut receiver) = cc_lb_engine::UpstreamRateLimitSink::with_capacity(16);
+    let (sink, mut receiver) = cc_lb_event_pipeline::UpstreamRateLimitSink::with_capacity(16);
     let test_bus = common::TestLifecycleBus::new()
         .with_rate_limit_header_subscriber_and_cache(sink, Arc::clone(&shared_cache));
     let lifecycle = common::lifecycle_with_cache(

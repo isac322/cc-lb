@@ -18,8 +18,9 @@ use cc_lb_engine::instrumented_connector::InstrumentedHttpsConnector;
 use cc_lb_engine::{
     Body, BulkheadDispatch, BulkheadRegistry, BulkheadRuntimeConfig, CachingDnsConnector,
     DispatchError, DnsResolveFuture, DnsResolver, DnsResolverConfig, Lifecycle, LifecycleConfig,
-    RequestEventAssemblerHandle, UpstreamDispatch, spawn_request_event_assembler,
+    UpstreamDispatch,
 };
+use cc_lb_event_pipeline::{RequestEventAssemblerHandle, spawn_request_event_assembler};
 use cc_lb_observability::NoopMetricsHook;
 use cc_lb_storage_api::Storage as StorageTrait;
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};

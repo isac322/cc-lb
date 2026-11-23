@@ -14,7 +14,8 @@ use cc_lb_config::Config;
 use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_control::{DynamicViewHolder, InMemoryBus, RequestEventBus};
-use cc_lb_engine::{Lifecycle, LifecycleConfig, RequestEventAssemblerHandle};
+use cc_lb_engine::{Lifecycle, LifecycleConfig};
+use cc_lb_event_pipeline::RequestEventAssemblerHandle;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::app::build_app_with_storage;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
@@ -281,7 +282,7 @@ impl Proxy {
             cc_lb_control::event_bus::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY,
         );
         let bus_arc: Arc<dyn RequestEventBus> = bus.clone();
-        let assembler = cc_lb_engine::spawn_request_event_assembler(
+        let assembler = cc_lb_event_pipeline::spawn_request_event_assembler(
             rx,
             storage as Arc<dyn RequestEventStore>,
             Some(bus_arc.clone()),

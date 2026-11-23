@@ -16,7 +16,7 @@ pub mod cache_keepalive;
 #[cfg(not(loom))]
 mod circuit_breaker;
 #[cfg(not(loom))]
-mod codex_quota_observation;
+pub mod codex_quota_observation;
 #[cfg(not(loom))]
 pub use cc_lb_proxy_telemetry::completion_observer;
 #[cfg(not(loom))]
@@ -35,30 +35,16 @@ mod hop_by_hop;
 pub use cc_lb_proxy_telemetry::instrumented_connector;
 #[cfg(not(loom))]
 pub mod lifecycle;
-pub mod lifecycle_api_key_metrics_subscriber;
-pub mod lifecycle_cache_hit_miss_subscriber;
-pub mod lifecycle_event_assembler;
-pub mod lifecycle_event_logger;
-pub mod lifecycle_limit_reconcile_subscriber;
-pub mod lifecycle_limit_rejection_audit_subscriber;
-#[cfg(not(loom))]
-pub mod lifecycle_rate_limit_header_subscriber;
-pub mod lifecycle_routing_tier_subscriber;
-#[cfg(not(loom))]
-pub mod lifecycle_subscription_quota_subscriber;
 #[cfg(not(loom))]
 mod limit_input_estimate;
-pub mod metrics_labels;
 #[cfg(not(loom))]
 pub use cc_lb_routing_eval::model_resolution;
 #[cfg(not(loom))]
 pub mod openai_compat;
 #[cfg(not(loom))]
-pub mod pg_notify_fanout;
-#[cfg(not(loom))]
 pub use cc_lb_routing_eval::prompt_cache_simulator;
 #[cfg(not(loom))]
-mod provider_cache;
+pub mod provider_cache;
 pub(crate) mod provider_capability;
 #[cfg(not(loom))]
 mod provider_image_tokens;
@@ -71,7 +57,6 @@ pub mod request_context;
 pub use request_context::{CodexBackendSurface, ProviderScope, RequestContext};
 #[cfg(not(loom))]
 pub mod realtime_websocket;
-pub mod request_diagnostics_sink;
 #[cfg(not(loom))]
 pub use cc_lb_proxy_telemetry::request_timing;
 #[cfg(not(loom))]
@@ -81,23 +66,17 @@ pub mod responses_websocket;
 #[cfg(not(loom))]
 mod sse_error_frame;
 #[cfg(not(loom))]
-pub mod storage_tail_poller;
-#[cfg(not(loom))]
 pub mod subscription_quota_events;
 #[cfg(not(loom))]
-mod terminal_observer;
+pub mod terminal_observer;
 #[cfg(not(loom))]
 pub use cc_lb_routing_eval::tokenizer;
 #[cfg(not(loom))]
 pub(crate) mod upstream_affinity;
 #[cfg(not(loom))]
-pub mod upstream_rate_limit_events;
-#[cfg(not(loom))]
 pub mod usage_decoder;
 #[cfg(not(loom))]
 mod usage_parser;
-#[cfg(not(loom))]
-pub mod warmup_attempts;
 #[cfg(not(loom))]
 pub use authn_rail::{
     Authenticated, authenticate_first, reject_unauthenticated_for_provider,
@@ -137,57 +116,11 @@ pub use lifecycle::{
     LimitSubjectProvider, ProxyError, RequestKind, UpstreamDispatch, build_candidates,
     live_eligible, observe_rate_limits,
 };
-pub use lifecycle_api_key_metrics_subscriber::{
-    ApiKeyMetricsSubscriberHandle, spawn_lifecycle_api_key_metrics_subscriber,
-};
-pub use lifecycle_cache_hit_miss_subscriber::CacheHitMissSubscriberHandle;
-pub use lifecycle_event_assembler::{
-    RequestEventAssemblerHandle, spawn_request_event_assembler,
-    spawn_request_event_assembler_with_diagnostics,
-};
-pub use lifecycle_event_logger::{LifecycleEventLoggerHandle, spawn_lifecycle_event_logger};
-pub use lifecycle_limit_reconcile_subscriber::{
-    LimitReconcileSubscriberHandle, spawn_lifecycle_limit_reconcile_subscriber,
-};
-pub use lifecycle_limit_rejection_audit_subscriber::{
-    LimitRejectionAuditSubscriberHandle, spawn_lifecycle_limit_rejection_audit_subscriber,
-};
-#[cfg(not(loom))]
-pub use lifecycle_rate_limit_header_subscriber::{
-    RateLimitHeaderSubscriberHandle, spawn_lifecycle_rate_limit_header_subscriber,
-};
-pub use lifecycle_routing_tier_subscriber::RoutingTierSubscriberHandle;
-#[cfg(not(loom))]
-pub use lifecycle_subscription_quota_subscriber::{
-    SubscriptionQuotaSubscriberHandle, spawn_lifecycle_subscription_quota_subscriber,
-};
-pub use metrics_labels::{
-    NotifyDropReason, NotifySentOutcome, PartialTrigger, PgListenerReconnectReason, ResetReason,
-};
-#[cfg(not(loom))]
-pub use pg_notify_fanout::{
-    DEFAULT_PG_NOTIFY_CHANNEL, PARTIAL_NOTIFY_MPSC_CAPACITY, PgListener, PgNotifier, PgNotifyFanout,
-};
 #[cfg(not(loom))]
 pub use provider_capability::is_unscoped_gemini_http_route;
 #[cfg(not(loom))]
-pub use request_diagnostics_sink::{
-    REQUEST_DIAGNOSTICS_QUEUE_CAPACITY, REQUEST_DIAGNOSTICS_SEND_TIMEOUT,
-    RequestDiagnosticsDelivery, RequestDiagnosticsOptions, RequestDiagnosticsSink,
-    StdoutRequestDiagnosticsSink,
-};
-#[cfg(not(loom))]
-pub use storage_tail_poller::StorageTailPoller;
-#[cfg(not(loom))]
-pub use subscription_quota_events::{
-    SubscriptionQuotaEnqueueError, SubscriptionQuotaSink, SubscriptionQuotaWriterConfig,
-    start_subscription_quota_writer,
-};
+pub use subscription_quota_events::{SubscriptionQuotaEnqueueError, SubscriptionQuotaSink};
 #[cfg(not(loom))]
 pub use terminal_observer::{
     InternalFailure, LifecycleContext, TerminalClassification, UpstreamErrorCode,
-};
-#[cfg(not(loom))]
-pub use upstream_rate_limit_events::{
-    UpstreamRateLimitEnqueueError, UpstreamRateLimitSink, start_upstream_rate_limit_writer,
 };

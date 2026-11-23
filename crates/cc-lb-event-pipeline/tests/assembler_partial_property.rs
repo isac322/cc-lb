@@ -328,7 +328,7 @@ fn run_events(events: Vec<LifecycleEvent>) -> (Vec<RequestEvent>, Vec<RequestEve
         let store = Arc::new(PropertyStore::default());
         let bus = Arc::new(InMemoryBus::new());
         let mut bus_rx = bus.subscribe();
-        let handle = cc_lb_engine::spawn_request_event_assembler(
+        let handle = cc_lb_event_pipeline::spawn_request_event_assembler(
             rx,
             store.clone(),
             Some(bus.clone() as Arc<dyn RequestEventBus>),

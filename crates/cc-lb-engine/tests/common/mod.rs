@@ -636,11 +636,11 @@ struct RecordingDiagnosticsSink {
 }
 
 #[async_trait::async_trait]
-impl cc_lb_engine::RequestDiagnosticsSink for RecordingDiagnosticsSink {
+impl cc_lb_event_pipeline::RequestDiagnosticsSink for RecordingDiagnosticsSink {
     async fn offer(
         &self,
         record: cc_lb_request_log::RequestDiagnosticsRecord,
-        _delivery: cc_lb_engine::RequestDiagnosticsDelivery,
+        _delivery: cc_lb_event_pipeline::RequestDiagnosticsDelivery,
     ) {
         self.records
             .lock()
@@ -654,8 +654,8 @@ impl cc_lb_engine::RequestDiagnosticsSink for RecordingDiagnosticsSink {
 pub struct TestLifecycleBus {
     pub bus: Arc<cc_lb_control::InMemoryBus>,
     diagnostics: Arc<RecordingDiagnosticsSink>,
-    _assembler: Option<cc_lb_engine::RequestEventAssemblerHandle>,
-    _rate_limit_header: Option<cc_lb_engine::RateLimitHeaderSubscriberHandle>,
+    _assembler: Option<cc_lb_event_pipeline::RequestEventAssemblerHandle>,
+    _rate_limit_header: Option<cc_lb_event_pipeline::RateLimitHeaderSubscriberHandle>,
 }
 
 impl TestLifecycleBus {
@@ -673,14 +673,14 @@ impl TestLifecycleBus {
             cc_lb_control::event_bus::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY,
         );
         let bus_arc: Arc<dyn cc_lb_control::RequestEventBus> = self.bus.clone();
-        let sink: Arc<dyn cc_lb_engine::RequestDiagnosticsSink> = self.diagnostics.clone();
+        let sink: Arc<dyn cc_lb_event_pipeline::RequestDiagnosticsSink> = self.diagnostics.clone();
         self._assembler = Some(
-            cc_lb_engine::spawn_request_event_assembler_with_diagnostics(
+            cc_lb_event_pipeline::spawn_request_event_assembler_with_diagnostics(
                 rx,
                 storage as Arc<dyn cc_lb_storage_api::RequestEventStore>,
                 Some(bus_arc),
                 Arc::new(cc_lb_observability::NoopMetricsHook),
-                cc_lb_engine::RequestDiagnosticsOptions { sink: Some(sink) },
+                cc_lb_event_pipeline::RequestDiagnosticsOptions { sink: Some(sink) },
             ),
         );
         self
@@ -696,7 +696,7 @@ impl TestLifecycleBus {
 
     pub fn with_rate_limit_header_subscriber(
         mut self,
-        sink: cc_lb_engine::UpstreamRateLimitSink,
+        sink: cc_lb_event_pipeline::UpstreamRateLimitSink,
     ) -> Self {
         let rx = self.bus.attach_lifecycle_rate_limit_header(
             cc_lb_control::event_bus::DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY,
@@ -704,27 +704,31 @@ impl TestLifecycleBus {
         let cache = Arc::new(parking_lot::RwLock::new(
             cc_lb_control::UpstreamRateLimitCache::default(),
         ));
-        self._rate_limit_header = Some(cc_lb_engine::spawn_lifecycle_rate_limit_header_subscriber(
-            rx,
-            cache,
-            Some(sink),
-        ));
+        self._rate_limit_header = Some(
+            cc_lb_event_pipeline::spawn_lifecycle_rate_limit_header_subscriber(
+                rx,
+                cache,
+                Some(sink),
+            ),
+        );
         self
     }
 
     pub fn with_rate_limit_header_subscriber_and_cache(
         mut self,
-        sink: cc_lb_engine::UpstreamRateLimitSink,
+        sink: cc_lb_event_pipeline::UpstreamRateLimitSink,
         cache: Arc<parking_lot::RwLock<cc_lb_control::UpstreamRateLimitCache>>,
     ) -> Self {
         let rx = self.bus.attach_lifecycle_rate_limit_header(
             cc_lb_control::event_bus::DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY,
         );
-        self._rate_limit_header = Some(cc_lb_engine::spawn_lifecycle_rate_limit_header_subscriber(
-            rx,
-            cache,
-            Some(sink),
-        ));
+        self._rate_limit_header = Some(
+            cc_lb_event_pipeline::spawn_lifecycle_rate_limit_header_subscriber(
+                rx,
+                cache,
+                Some(sink),
+            ),
+        );
         self
     }
 

@@ -572,11 +572,11 @@ const CACHE_PREDICTION_OUTCOMES: [&str; 4] = [
 ];
 
 /// Fixed `outcome` vocabulary of `cc_lb_request_diagnostics_lines_total`; must match
-/// `cc_lb_engine::request_diagnostics_sink`.
+/// `cc_lb_event_pipeline::request_diagnostics_sink`.
 const REQUEST_DIAGNOSTICS_LINE_OUTCOMES: [&str; 3] = ["written", "encode_error", "write_error"];
 
 /// `cc_lb_dropped_events_total` reasons emitted by the request diagnostics sink; must match
-/// `cc_lb_engine::request_diagnostics_sink`.
+/// `cc_lb_event_pipeline::request_diagnostics_sink`.
 const REQUEST_DIAGNOSTICS_DROP_REASONS: [&str; 7] = [
     "request_diagnostics_queue_full",
     "request_diagnostics_strip_queue_full",

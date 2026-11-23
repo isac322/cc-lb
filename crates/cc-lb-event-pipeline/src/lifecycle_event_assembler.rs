@@ -1477,9 +1477,9 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             if matched_response_id.is_none() {
                 partial.funding_ambiguous = true;
             } else if let Ok(value) = sonic_rs::from_slice::<serde_json::Value>(&frame)
-                && let Some(headers) = crate::codex_quota_observation::websocket_headers(&value)
+                && let Some(headers) = cc_lb_engine::codex_quota_observation::websocket_headers(&value)
             {
-                partial.funding = crate::codex_quota_observation::funding_from_headers(&headers);
+                partial.funding = cc_lb_engine::codex_quota_observation::funding_from_headers(&headers);
                 partial.funding_response_id = matched_response_id;
             }
         }
@@ -1517,7 +1517,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                     crate::lifecycle_subscription_quota_subscriber::header_map_from_snapshot(
                         &headers,
                     );
-                partial.funding = crate::codex_quota_observation::funding_from_headers(&header_map);
+                partial.funding = cc_lb_engine::codex_quota_observation::funding_from_headers(&header_map);
                 partial.funding_response_id = None;
             }
         }
@@ -1623,7 +1623,7 @@ fn native_cache_with_usage(
         .parse
         .as_ref()
         .and_then(|parse| parse.native_cache.clone())?;
-    let (evidence, cached_tokens, write_tokens) = crate::provider_cache::project_usage(
+    let (evidence, cached_tokens, write_tokens) = cc_lb_engine::provider_cache::project_usage(
         &native,
         partial.usage.cache_read_evidence.unwrap_or_default(),
         partial.usage.cache_read_input_tokens,
@@ -1638,7 +1638,7 @@ fn native_cache_with_usage(
                 .parse
                 .as_ref()
                 .and_then(|parse| parse.model.as_deref());
-            let tokens = crate::provider_cache::normalize_cached_tokens(model, cached_tokens);
+            let tokens = cc_lb_engine::provider_cache::normalize_cached_tokens(model, cached_tokens);
             // Older OpenAI contracts round down, but affirmative reads remain positive.
             if evidence == cc_lb_request_log::RequestCacheEvidence::Positive && cached_tokens > 0 {
                 tokens.max(1)

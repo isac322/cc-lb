@@ -46,10 +46,12 @@ use cc_lb_engine::responses_websocket::{
 use cc_lb_engine::{
     BreakerRegistry, BreakerRuntimeConfig, BulkheadDispatch, BulkheadRegistry,
     BulkheadRuntimeConfig, CircuitBreakerDispatch, DrainController, HopByHopStripLayer, Lifecycle,
-    LifecycleConfig, ProviderScope, SubscriptionQuotaSink, SubscriptionQuotaWriterConfig,
-    UpstreamDispatch, UpstreamRateLimitSink, anthropic_error_response,
-    cache_keepalive::AnthropicKeepaliveDispatcher, make_default_dispatcher,
-    provider_scope_error_response, start_subscription_quota_writer,
+    LifecycleConfig, ProviderScope, SubscriptionQuotaSink, UpstreamDispatch,
+    anthropic_error_response, cache_keepalive::AnthropicKeepaliveDispatcher,
+    make_default_dispatcher, provider_scope_error_response,
+};
+use cc_lb_event_pipeline::{
+    SubscriptionQuotaWriterConfig, UpstreamRateLimitSink, start_subscription_quota_writer,
     start_upstream_rate_limit_writer,
 };
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
@@ -1307,10 +1309,10 @@ async fn build_app_with_storage_inner(
                     .await?
                     .ok_or(BuildError::PgNotifyPoolUnavailable)?;
                 let (notify_tx, notify_rx) =
-                    tokio::sync::mpsc::channel(cc_lb_engine::PARTIAL_NOTIFY_MPSC_CAPACITY);
+                    tokio::sync::mpsc::channel(cc_lb_event_pipeline::PARTIAL_NOTIFY_MPSC_CAPACITY);
                 let notify_producer_id = uuid::Uuid::new_v4().to_string();
 
-                event_fanout_tasks.push(cc_lb_engine::PgNotifier::spawn_with_channel(
+                event_fanout_tasks.push(cc_lb_event_pipeline::PgNotifier::spawn_with_channel(
                     pg_pool.clone(),
                     notify_rx,
                     notify_producer_id.clone(),
@@ -1320,7 +1322,7 @@ async fn build_app_with_storage_inner(
 
                 let listener_bus: Arc<dyn cc_lb_control::RequestEventBus> =
                     Arc::new(in_memory_bus.clone());
-                event_fanout_tasks.push(cc_lb_engine::PgListener::spawn_with_channel(
+                event_fanout_tasks.push(cc_lb_event_pipeline::PgListener::spawn_with_channel(
                     pg_pool,
                     listener_bus,
                     config.event_bus.pg_notify_channel.clone(),
@@ -1329,7 +1331,7 @@ async fn build_app_with_storage_inner(
                 ));
 
                 let initial_storage_tail_cursor = storage.current_request_event_cursor().await?;
-                event_fanout_tasks.push(cc_lb_engine::StorageTailPoller::spawn(
+                event_fanout_tasks.push(cc_lb_event_pipeline::StorageTailPoller::spawn(
                     storage.clone(),
                     storage_tail_tx.clone(),
                     Duration::from_millis(config.event_bus.storage_tail_poll_interval_ms.max(1)),
@@ -1337,7 +1339,7 @@ async fn build_app_with_storage_inner(
                     event_fanout_shutdown_rx.clone(),
                 ));
 
-                Arc::new(cc_lb_engine::PgNotifyFanout::new(
+                Arc::new(cc_lb_event_pipeline::PgNotifyFanout::new(
                     in_memory_bus.clone(),
                     notify_tx,
                 ))
@@ -1345,24 +1347,24 @@ async fn build_app_with_storage_inner(
         }
     };
     let lifecycle_event_logger_handle =
-        cc_lb_engine::spawn_lifecycle_event_logger(lifecycle_event_logger_rx);
+        cc_lb_event_pipeline::spawn_lifecycle_event_logger(lifecycle_event_logger_rx);
     let diagnostics = if config.observability.request_diagnostics_log {
-        cc_lb_engine::RequestDiagnosticsOptions {
+        cc_lb_event_pipeline::RequestDiagnosticsOptions {
             sink: Some(Arc::new(
-                cc_lb_engine::StdoutRequestDiagnosticsSink::new()
+                cc_lb_event_pipeline::StdoutRequestDiagnosticsSink::new()
                     .map_err(BuildError::RequestDiagnosticsSink)?,
             )),
         }
     } else {
-        cc_lb_engine::RequestDiagnosticsOptions::default()
+        cc_lb_event_pipeline::RequestDiagnosticsOptions::default()
     };
-    let lifecycle_event_assembler_handle = cc_lb_engine::lifecycle_event_assembler::spawn_with_ttls(
+    let lifecycle_event_assembler_handle = cc_lb_event_pipeline::lifecycle_event_assembler::spawn_with_ttls(
         lifecycle_assembler_rx,
         storage.clone(),
         Some(event_bus.clone()),
         Arc::clone(&metrics_hook),
-        cc_lb_engine::lifecycle_event_assembler::DEFAULT_ASSEMBLER_MAP_CAP,
-        cc_lb_engine::lifecycle_event_assembler::DEFAULT_ASSEMBLER_TTL,
+        cc_lb_event_pipeline::lifecycle_event_assembler::DEFAULT_ASSEMBLER_MAP_CAP,
+        cc_lb_event_pipeline::lifecycle_event_assembler::DEFAULT_ASSEMBLER_TTL,
         lifecycle_max_ttl,
         diagnostics,
     );
@@ -1375,69 +1377,69 @@ async fn build_app_with_storage_inner(
             lifecycle_max_ttl,
         );
     let lifecycle_limit_reconcile_subscriber_handle =
-        cc_lb_engine::lifecycle_limit_reconcile_subscriber::spawn_with_ttls(
+        cc_lb_event_pipeline::lifecycle_limit_reconcile_subscriber::spawn_with_ttls(
             lifecycle_limit_reconcile_rx,
             limit_engine.clone(),
-            cc_lb_engine::lifecycle_limit_reconcile_subscriber::DEFAULT_LIMIT_RECONCILE_MAP_CAP,
-            cc_lb_engine::lifecycle_limit_reconcile_subscriber::DEFAULT_LIMIT_RECONCILE_TTL,
+            cc_lb_event_pipeline::lifecycle_limit_reconcile_subscriber::DEFAULT_LIMIT_RECONCILE_MAP_CAP,
+            cc_lb_event_pipeline::lifecycle_limit_reconcile_subscriber::DEFAULT_LIMIT_RECONCILE_TTL,
             lifecycle_max_ttl,
         );
     let lifecycle_rate_limit_header_subscriber_handle =
-        cc_lb_engine::lifecycle_rate_limit_header_subscriber::spawn_with_ttls(
+        cc_lb_event_pipeline::lifecycle_rate_limit_header_subscriber::spawn_with_ttls(
             lifecycle_rate_limit_header_rx,
             Arc::clone(&initial_view.upstream_rate_limit_cache),
             Some(upstream_rate_limit_sink.clone()),
-            cc_lb_engine::lifecycle_rate_limit_header_subscriber::DEFAULT_RATE_LIMIT_HEADER_MAP_CAP,
-            cc_lb_engine::lifecycle_rate_limit_header_subscriber::DEFAULT_RATE_LIMIT_HEADER_TTL,
+            cc_lb_event_pipeline::lifecycle_rate_limit_header_subscriber::DEFAULT_RATE_LIMIT_HEADER_MAP_CAP,
+            cc_lb_event_pipeline::lifecycle_rate_limit_header_subscriber::DEFAULT_RATE_LIMIT_HEADER_TTL,
             lifecycle_max_ttl,
         );
     let cache: Arc<dyn cc_lb_control::SubscriptionQuotaCacheLike> =
         subscription_quota_cache.clone();
     let lifecycle_subscription_quota_subscriber_handle =
-        cc_lb_engine::lifecycle_subscription_quota_subscriber::spawn_with_ttls(
+        cc_lb_event_pipeline::lifecycle_subscription_quota_subscriber::spawn_with_ttls(
             lifecycle_subscription_quota_rx,
             Some(cache),
             Some(subscription_quota_sink.clone()),
-            cc_lb_engine::lifecycle_subscription_quota_subscriber::DEFAULT_SUBSCRIPTION_QUOTA_MAP_CAP,
-            cc_lb_engine::lifecycle_subscription_quota_subscriber::DEFAULT_SUBSCRIPTION_QUOTA_TTL,
+            cc_lb_event_pipeline::lifecycle_subscription_quota_subscriber::DEFAULT_SUBSCRIPTION_QUOTA_MAP_CAP,
+            cc_lb_event_pipeline::lifecycle_subscription_quota_subscriber::DEFAULT_SUBSCRIPTION_QUOTA_TTL,
             lifecycle_max_ttl,
         );
     let lifecycle_limit_rejection_audit_subscriber_handle =
-        cc_lb_engine::spawn_lifecycle_limit_rejection_audit_subscriber(
+        cc_lb_event_pipeline::spawn_lifecycle_limit_rejection_audit_subscriber(
             lifecycle_limit_rejection_audit_rx,
             audit_sink.clone(),
         );
     let lifecycle_api_key_metrics_subscriber_handle =
-        cc_lb_engine::lifecycle_api_key_metrics_subscriber::spawn_with_ttls(
+        cc_lb_event_pipeline::lifecycle_api_key_metrics_subscriber::spawn_with_ttls(
             lifecycle_api_key_metrics_rx,
-            cc_lb_engine::lifecycle_api_key_metrics_subscriber::DEFAULT_API_KEY_METRICS_MAP_CAP,
-            cc_lb_engine::lifecycle_api_key_metrics_subscriber::DEFAULT_API_KEY_METRICS_TTL,
+            cc_lb_event_pipeline::lifecycle_api_key_metrics_subscriber::DEFAULT_API_KEY_METRICS_MAP_CAP,
+            cc_lb_event_pipeline::lifecycle_api_key_metrics_subscriber::DEFAULT_API_KEY_METRICS_TTL,
             lifecycle_max_ttl,
         );
     let lifecycle_cache_hit_miss_subscriber_handle =
-        cc_lb_engine::lifecycle_cache_hit_miss_subscriber::spawn_with_ttls(
+        cc_lb_event_pipeline::lifecycle_cache_hit_miss_subscriber::spawn_with_ttls(
             lifecycle_cache_hit_miss_rx,
             Arc::clone(&metrics_hook),
-            cc_lb_engine::lifecycle_cache_hit_miss_subscriber::DEFAULT_CACHE_HIT_MISS_MAP_CAP,
-            cc_lb_engine::lifecycle_cache_hit_miss_subscriber::DEFAULT_CACHE_HIT_MISS_TTL,
+            cc_lb_event_pipeline::lifecycle_cache_hit_miss_subscriber::DEFAULT_CACHE_HIT_MISS_MAP_CAP,
+            cc_lb_event_pipeline::lifecycle_cache_hit_miss_subscriber::DEFAULT_CACHE_HIT_MISS_TTL,
             lifecycle_max_ttl,
         );
     let lifecycle_routing_tier_subscriber_handle =
-        cc_lb_engine::lifecycle_routing_tier_subscriber::spawn_with_ttls(
+        cc_lb_event_pipeline::lifecycle_routing_tier_subscriber::spawn_with_ttls(
             lifecycle_routing_tier_rx,
             Arc::clone(&metrics_hook),
-            cc_lb_engine::lifecycle_routing_tier_subscriber::DEFAULT_ROUTING_TIER_MAP_CAP,
-            cc_lb_engine::lifecycle_routing_tier_subscriber::DEFAULT_ROUTING_TIER_TTL,
+            cc_lb_event_pipeline::lifecycle_routing_tier_subscriber::DEFAULT_ROUTING_TIER_MAP_CAP,
+            cc_lb_event_pipeline::lifecycle_routing_tier_subscriber::DEFAULT_ROUTING_TIER_TTL,
             lifecycle_max_ttl,
         );
     let lifecycle_dispatcher_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_control::LifecycleDispatcherHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(lifecycle_dispatcher_handle)));
     let lifecycle_event_logger_slot: Arc<
-        tokio::sync::Mutex<Option<cc_lb_engine::LifecycleEventLoggerHandle>>,
+        tokio::sync::Mutex<Option<cc_lb_event_pipeline::LifecycleEventLoggerHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(lifecycle_event_logger_handle)));
     let lifecycle_event_assembler_slot: Arc<
-        tokio::sync::Mutex<Option<cc_lb_engine::RequestEventAssemblerHandle>>,
+        tokio::sync::Mutex<Option<cc_lb_event_pipeline::RequestEventAssemblerHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_event_assembler_handle,
     )));
@@ -1447,37 +1449,37 @@ async fn build_app_with_storage_inner(
         lifecycle_pricing_subscriber_handle,
     )));
     let lifecycle_limit_reconcile_subscriber_slot: Arc<
-        tokio::sync::Mutex<Option<cc_lb_engine::LimitReconcileSubscriberHandle>>,
+        tokio::sync::Mutex<Option<cc_lb_event_pipeline::LimitReconcileSubscriberHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_limit_reconcile_subscriber_handle,
     )));
     let lifecycle_rate_limit_header_subscriber_slot: Arc<
-        tokio::sync::Mutex<Option<cc_lb_engine::RateLimitHeaderSubscriberHandle>>,
+        tokio::sync::Mutex<Option<cc_lb_event_pipeline::RateLimitHeaderSubscriberHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_rate_limit_header_subscriber_handle,
     )));
     let lifecycle_subscription_quota_subscriber_slot: Arc<
-        tokio::sync::Mutex<Option<cc_lb_engine::SubscriptionQuotaSubscriberHandle>>,
+        tokio::sync::Mutex<Option<cc_lb_event_pipeline::SubscriptionQuotaSubscriberHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_subscription_quota_subscriber_handle,
     )));
     let lifecycle_limit_rejection_audit_subscriber_slot: Arc<
-        tokio::sync::Mutex<Option<cc_lb_engine::LimitRejectionAuditSubscriberHandle>>,
+        tokio::sync::Mutex<Option<cc_lb_event_pipeline::LimitRejectionAuditSubscriberHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_limit_rejection_audit_subscriber_handle,
     )));
     let lifecycle_api_key_metrics_subscriber_slot: Arc<
-        tokio::sync::Mutex<Option<cc_lb_engine::ApiKeyMetricsSubscriberHandle>>,
+        tokio::sync::Mutex<Option<cc_lb_event_pipeline::ApiKeyMetricsSubscriberHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_api_key_metrics_subscriber_handle,
     )));
     let lifecycle_cache_hit_miss_subscriber_slot: Arc<
-        tokio::sync::Mutex<Option<cc_lb_engine::CacheHitMissSubscriberHandle>>,
+        tokio::sync::Mutex<Option<cc_lb_event_pipeline::CacheHitMissSubscriberHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_cache_hit_miss_subscriber_handle,
     )));
     let lifecycle_routing_tier_subscriber_slot: Arc<
-        tokio::sync::Mutex<Option<cc_lb_engine::RoutingTierSubscriberHandle>>,
+        tokio::sync::Mutex<Option<cc_lb_event_pipeline::RoutingTierSubscriberHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_routing_tier_subscriber_handle,
     )));
@@ -6682,7 +6684,7 @@ mod tests {
             };
             let bus = Arc::new(cc_lb_control::InMemoryBus::new());
             let mut events = bus.subscribe_lifecycle();
-            let reconcile = cc_lb_engine::spawn_lifecycle_limit_reconcile_subscriber(
+            let reconcile = cc_lb_event_pipeline::spawn_lifecycle_limit_reconcile_subscriber(
                 bus.attach_lifecycle_limit_reconcile(128),
                 engine.clone(),
             );

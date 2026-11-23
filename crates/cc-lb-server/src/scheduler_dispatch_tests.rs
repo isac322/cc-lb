@@ -1582,11 +1582,13 @@ struct RenewalDiagnosticsCapture {
 }
 
 #[async_trait]
-impl cc_lb_engine::request_diagnostics_sink::RequestDiagnosticsSink for RenewalDiagnosticsCapture {
+impl cc_lb_event_pipeline::request_diagnostics_sink::RequestDiagnosticsSink
+    for RenewalDiagnosticsCapture
+{
     async fn offer(
         &self,
         record: cc_lb_request_log::RequestDiagnosticsRecord,
-        _delivery: cc_lb_engine::request_diagnostics_sink::RequestDiagnosticsDelivery,
+        _delivery: cc_lb_event_pipeline::request_diagnostics_sink::RequestDiagnosticsDelivery,
     ) {
         self.records
             .lock()
@@ -1758,12 +1760,12 @@ async fn openai_renewal_inline_lifecycle_live_and_diagnostics_usage_agree() {
             bus.clone() as Arc<dyn RequestEventBus>,
         );
         let assembler =
-            cc_lb_engine::lifecycle_event_assembler::spawn_request_event_assembler_with_diagnostics(
+            cc_lb_event_pipeline::lifecycle_event_assembler::spawn_request_event_assembler_with_diagnostics(
                 assembler_rx,
                 fixture.storage.clone(),
                 Some(bus.clone() as Arc<dyn RequestEventBus>),
                 Arc::new(cc_lb_observability::NoopMetricsHook),
-                cc_lb_engine::request_diagnostics_sink::RequestDiagnosticsOptions {
+                cc_lb_event_pipeline::request_diagnostics_sink::RequestDiagnosticsOptions {
                     sink: Some(sink.clone()),
                 },
             );

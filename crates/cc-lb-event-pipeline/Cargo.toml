@@ -1,0 +1,56 @@
+[package]
+name = "cc-lb-event-pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/all.rs"
+
+[features]
+postgres = []
+
+[dependencies]
+arc-swap.workspace = true
+async-trait.workspace = true
+cc-lb-control = { path = "../cc-lb-control" }
+cc-lb-domain.workspace = true
+cc-lb-engine = { path = "../cc-lb-engine" }
+cc-lb-lifecycle.workspace = true
+cc-lb-observability = { path = "../cc-lb-observability" }
+cc-lb-pricing = { path = "../cc-lb-pricing" }
+cc-lb-quota.workspace = true
+cc-lb-request-log.workspace = true
+cc-lb-storage-api = { path = "../cc-lb-storage-api" }
+http.workspace = true
+metrics.workspace = true
+parking_lot = "0.13"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2 = "0.11"
+sonic-rs.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+bytes.workspace = true
+cc-lb-clock = { path = "../cc-lb-clock" }
+cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
+cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
+cc-lb-upstream.workspace = true
+cc-lb-workspace-hack.workspace = true
+metrics-exporter-prometheus.workspace = true
+metrics-util.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+url.workspace = true

@@ -25,7 +25,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::terminal_observer::error_codes;
+use cc_lb_engine::terminal_observer::error_codes;
 use cc_lb_lifecycle::{
     LifecycleEvent, LimitDecisionKind, RequestIoTimings, RouteFailure, TerminationReason,
 };

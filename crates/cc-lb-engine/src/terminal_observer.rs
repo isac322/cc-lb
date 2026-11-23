@@ -239,32 +239,32 @@ fn redacted_error_chain(
     truncate_reason(&messages.join(": "))
 }
 
-pub(crate) mod error_codes {
-    pub(crate) const BODY_TOO_LARGE: &str = "body_too_large";
-    pub(crate) const BODY_READ_FAILED: &str = "body_read_failed";
-    pub(crate) const INVALID_JSON: &str = "invalid_json";
-    pub(crate) const AUTHENTICATION_FAILED: &str = "authentication_failed";
-    pub(crate) const PRINCIPAL_MISSING: &str = "principal_missing";
-    pub(crate) const ROUTER_PIPELINE_UNAVAILABLE: &str = "router_pipeline_unavailable";
-    pub(crate) const ROUTE_NO_UPSTREAM_AFTER_FILTER: &str = "route_no_upstream_after_filter";
-    pub(crate) const ROUTE_NOT_CONFIGURED: &str = "route_not_configured";
-    pub(crate) const ROUTE_NOT_FOUND: &str = "route_not_found";
-    pub(crate) const METHOD_NOT_ALLOWED: &str = "method_not_allowed";
-    pub(crate) const OPERATION_NOT_SUPPORTED: &str = "operation_not_supported";
-    pub(crate) const COMPAT_UNSUPPORTED_PARAMETER: &str = "compat_unsupported_parameter";
-    pub(crate) const DRAIN_REJECTED: &str = "drain_rejected";
-    pub(crate) const UPSTREAM_AFFINITY_UNAVAILABLE: &str = "upstream_affinity_unavailable";
-    pub(crate) const LIMIT_REJECTED: &str = "limit_rejected";
-    pub(crate) const SIGNER_FAILED: &str = "signer_failed";
-    pub(crate) const UPSTREAM_DISPATCH_FAILED: &str = "upstream_dispatch_failed";
-    pub(crate) const UPSTREAM_4XX: &str = "upstream_4xx";
-    pub(crate) const UPSTREAM_5XX: &str = "upstream_5xx";
-    pub(crate) const UPSTREAM_STREAM_ERROR: &str = "upstream_stream_error";
-    pub(crate) const UPSTREAM_REFUSAL: &str = "upstream_refusal";
-    pub(crate) const UPSTREAM_CONTEXT_WINDOW_EXCEEDED: &str = "upstream_context_window_exceeded";
-    pub(crate) const TOWER_TIMEOUT: &str = "tower_timeout";
-    pub(crate) const TERMINAL_DROPPED: &str = "terminal_dropped";
-    pub(crate) const CLIENT_CLOSED_REQUEST: &str = "client_closed_request";
+pub mod error_codes {
+    pub const BODY_TOO_LARGE: &str = "body_too_large";
+    pub const BODY_READ_FAILED: &str = "body_read_failed";
+    pub const INVALID_JSON: &str = "invalid_json";
+    pub const AUTHENTICATION_FAILED: &str = "authentication_failed";
+    pub const PRINCIPAL_MISSING: &str = "principal_missing";
+    pub const ROUTER_PIPELINE_UNAVAILABLE: &str = "router_pipeline_unavailable";
+    pub const ROUTE_NO_UPSTREAM_AFTER_FILTER: &str = "route_no_upstream_after_filter";
+    pub const ROUTE_NOT_CONFIGURED: &str = "route_not_configured";
+    pub const ROUTE_NOT_FOUND: &str = "route_not_found";
+    pub const METHOD_NOT_ALLOWED: &str = "method_not_allowed";
+    pub const OPERATION_NOT_SUPPORTED: &str = "operation_not_supported";
+    pub const COMPAT_UNSUPPORTED_PARAMETER: &str = "compat_unsupported_parameter";
+    pub const DRAIN_REJECTED: &str = "drain_rejected";
+    pub const UPSTREAM_AFFINITY_UNAVAILABLE: &str = "upstream_affinity_unavailable";
+    pub const LIMIT_REJECTED: &str = "limit_rejected";
+    pub const SIGNER_FAILED: &str = "signer_failed";
+    pub const UPSTREAM_DISPATCH_FAILED: &str = "upstream_dispatch_failed";
+    pub const UPSTREAM_4XX: &str = "upstream_4xx";
+    pub const UPSTREAM_5XX: &str = "upstream_5xx";
+    pub const UPSTREAM_STREAM_ERROR: &str = "upstream_stream_error";
+    pub const UPSTREAM_REFUSAL: &str = "upstream_refusal";
+    pub const UPSTREAM_CONTEXT_WINDOW_EXCEEDED: &str = "upstream_context_window_exceeded";
+    pub const TOWER_TIMEOUT: &str = "tower_timeout";
+    pub const TERMINAL_DROPPED: &str = "terminal_dropped";
+    pub const CLIENT_CLOSED_REQUEST: &str = "client_closed_request";
 }
 
 /// Terminal classification carried from a non-handler response producer to

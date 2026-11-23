@@ -15,9 +15,6 @@ path = "tests/all.rs"
 name = "typestate_contracts"
 path = "tests/typestate_contracts/main.rs"
 
-[features]
-postgres = []
-
 [dependencies]
 cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-config = { path = "../cc-lb-config" }
@@ -60,17 +57,14 @@ hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", 
 chrono.workspace = true
 metrics.workspace = true
 multer = "3.1"
-parking_lot = "0.13"
 rand = "0.10"
 rustls.workspace = true
 serde_json.workspace = true
 sonic-rs.workspace = true
 sha2 = "0.11"
 blake3.workspace = true
-sqlx.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
-tokio-util.workspace = true
 tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
@@ -83,9 +77,9 @@ trybuild = "1"
 
 [target.'cfg(not(trybuild))'.dev-dependencies]
 cc-lb-workspace-hack.workspace = true
+cc-lb-event-pipeline.workspace = true
 cc-lb-routing-eval = { path = "../cc-lb-routing-eval", features = ["test-utils"] }
 cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }
-cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }
 insta.workspace = true
@@ -93,7 +87,9 @@ metrics-exporter-prometheus.workspace = true
 metrics-util.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
+parking_lot = "0.13"
 proptest.workspace = true
+sqlx.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tracing-opentelemetry.workspace = true

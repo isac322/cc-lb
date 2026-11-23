@@ -1683,7 +1683,7 @@ async fn responses_semantic_sse_eof_failure_refunds_limits_with_or_without_usage
         let concurrency = Arc::new(KeyConcurrencyManager::new());
         let engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
         let reconcile =
-            cc_lb_engine::spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, engine.clone());
+            cc_lb_event_pipeline::spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, engine.clone());
         let prefix = Bytes::from(format!(
             "{RESPONSES_CREATED}{RESPONSES_DELTA}{}",
             if measured { RESPONSES_USAGE } else { "" }
@@ -2364,7 +2364,7 @@ async fn assert_chat_finish_reason_without_usage_refunds_pending_close(
     let concurrency = Arc::new(KeyConcurrencyManager::new());
     let engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
     let reconcile =
-        cc_lb_engine::spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, engine.clone());
+        cc_lb_event_pipeline::spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, engine.clone());
     struct SplitPendingDispatch {
         chunks: [Bytes; 3],
         finish_ready: Arc<tokio::sync::Notify>,
@@ -2724,7 +2724,7 @@ async fn semantic_client_close_reconciles_limits_and_preterminal_cancel_refunds(
         let concurrency = Arc::new(KeyConcurrencyManager::new());
         let engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
         let reconcile =
-            cc_lb_engine::spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, engine.clone());
+            cc_lb_event_pipeline::spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, engine.clone());
         let upstream = if completed {
             Bytes::from(format!("{START}{DELTA}{STOP}"))
         } else {
@@ -2845,7 +2845,7 @@ async fn openai_responses_incomplete_terminal_close_reconciles_limits() -> TestR
     let concurrency = Arc::new(KeyConcurrencyManager::new());
     let engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
     let reconcile =
-        cc_lb_engine::spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, engine.clone());
+        cc_lb_event_pipeline::spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, engine.clone());
     let upstream = Bytes::from_static(
         b"event: response.created\n\
 data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\",\"usage\":null}}\n\n\

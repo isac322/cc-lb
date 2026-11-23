@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cc_lb_control::{InMemoryBus, RequestEventBus};
 use cc_lb_domain::InternalError;
-use cc_lb_engine::{
+use cc_lb_event_pipeline::{
     RequestDiagnosticsDelivery, RequestDiagnosticsOptions, RequestDiagnosticsSink,
     StorageTailPoller, spawn_request_event_assembler_with_diagnostics,
 };

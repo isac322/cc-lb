@@ -17,7 +17,7 @@ use cc_lb_observability::EngineMetricsHook;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::model_resolution::canonical_model_id;
+use cc_lb_engine::model_resolution::canonical_model_id;
 
 pub const DEFAULT_CACHE_HIT_MISS_MAP_CAP: usize = 4096;
 pub const DEFAULT_CACHE_HIT_MISS_TTL: Duration = cc_lb_lifecycle::DEFAULT_LIFECYCLE_IDLE_TTL;
@@ -241,7 +241,7 @@ fn apply_native_usage(
     let Some(native) = native.as_mut() else {
         return;
     };
-    let (evidence, cached_tokens, write_tokens) = crate::provider_cache::project_usage(
+    let (evidence, cached_tokens, write_tokens) = cc_lb_engine::provider_cache::project_usage(
         native,
         usage.cache_read_evidence.unwrap_or_default(),
         usage.cache_read_input_tokens,

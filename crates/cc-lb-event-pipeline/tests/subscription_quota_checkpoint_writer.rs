@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use cc_lb_clock::SystemClock;
-use cc_lb_engine::{
+use cc_lb_event_pipeline::{
     SubscriptionQuotaSink, SubscriptionQuotaWriterConfig, start_subscription_quota_writer,
 };
 use cc_lb_storage_api::{

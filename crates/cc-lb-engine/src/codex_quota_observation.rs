@@ -5,7 +5,7 @@ use cc_lb_request_log::RequestFunding;
 use http::{HeaderMap, HeaderValue};
 use serde_json::Value;
 
-pub(crate) fn funding_from_headers(headers: &HeaderMap) -> Option<RequestFunding> {
+pub fn funding_from_headers(headers: &HeaderMap) -> Option<RequestFunding> {
     let mut five_hour = None;
     let mut seven_day = None;
     for window in ["primary", "secondary"] {
@@ -49,7 +49,7 @@ pub(crate) fn funding_from_headers(headers: &HeaderMap) -> Option<RequestFunding
 /// Adapt the actual Codex event to the existing header parser. The caller has
 /// already parsed this frame once, on the quota worker. Extra limit families
 /// remain separate and never overwrite the main Codex quota or credit stream.
-pub(crate) fn websocket_headers(value: &Value) -> Option<HeaderMap> {
+pub fn websocket_headers(value: &Value) -> Option<HeaderMap> {
     if value.get("type").and_then(Value::as_str) != Some("codex.rate_limits") {
         return None;
     }

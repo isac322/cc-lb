@@ -58,7 +58,7 @@ pub trait RequestEventBus: Send + Sync + 'static {
 pub const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
 
 /// Default capacity for the durable lifecycle-writer mpsc channel wired by
-/// `cc_lb_engine::spawn_lifecycle_event_logger`.
+/// `cc_lb_event_pipeline::spawn_lifecycle_event_logger`.
 pub const DEFAULT_LIFECYCLE_WRITER_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY: usize = 4096;
 
@@ -201,7 +201,7 @@ impl InMemoryBus {
     }
 
     /// Attach the durable lifecycle-writer consumer (see
-    /// `cc_lb_engine::spawn_lifecycle_event_logger`). Only one may be attached;
+    /// `cc_lb_event_pipeline::spawn_lifecycle_event_logger`). Only one may be attached;
     /// subsequent calls replace the previous sender.
     pub fn attach_lifecycle_writer(&self, capacity: usize) -> mpsc::Receiver<LifecycleEvent> {
         self.update_subscriber(capacity, |subs, tx| subs.writer_tx = Some(tx))

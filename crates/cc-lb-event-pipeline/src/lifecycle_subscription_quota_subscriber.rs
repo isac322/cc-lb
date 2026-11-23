@@ -23,7 +23,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::subscription_quota_events::SubscriptionQuotaSink;
+use cc_lb_engine::subscription_quota_events::SubscriptionQuotaSink;
 use cc_lb_control::SubscriptionQuotaCacheLike;
 
 pub const DEFAULT_SUBSCRIPTION_QUOTA_MAP_CAP: usize = 4096;
@@ -197,7 +197,7 @@ fn handle_event(
             let Ok(value) = sonic_rs::from_slice::<serde_json::Value>(&frame) else {
                 return;
             };
-            let Some(headers) = crate::codex_quota_observation::websocket_headers(&value) else {
+            let Some(headers) = cc_lb_engine::codex_quota_observation::websocket_headers(&value) else {
                 return;
             };
             apply_observations(cache, sink, upstream_id, &headers, observed_at_unix_millis);

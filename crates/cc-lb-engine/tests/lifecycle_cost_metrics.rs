@@ -212,7 +212,7 @@ async fn run_case(
         bus.bus.attach_lifecycle_pricing(128),
         bus.bus_arc(),
     );
-    let metrics = cc_lb_engine::spawn_lifecycle_api_key_metrics_subscriber(
+    let metrics = cc_lb_event_pipeline::spawn_lifecycle_api_key_metrics_subscriber(
         bus.bus.attach_lifecycle_api_key_metrics(128),
         bus.bus_arc(),
     );

@@ -2444,7 +2444,7 @@ async fn local_limit_retryability_held_windows_and_concurrent_slot_release() {
         assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
         // Buffered completion emits RequestTerminated before returning. Drain
         // the real subscriber so its settlement, not a timer, releases the slot.
-        cc_lb_engine::spawn_lifecycle_limit_reconcile_subscriber(
+        cc_lb_event_pipeline::spawn_lifecycle_limit_reconcile_subscriber(
             reconcile_rx,
             limit_engine.clone(),
         )
@@ -2461,7 +2461,10 @@ async fn local_limit_retryability_held_windows_and_concurrent_slot_release() {
                 "released concurrency slot: {body:?}"
             );
             assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 2);
-            cc_lb_engine::spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, limit_engine)
+            cc_lb_event_pipeline::spawn_lifecycle_limit_reconcile_subscriber(
+                reconcile_rx,
+                limit_engine,
+            )
                 .shutdown()
                 .await;
         }
