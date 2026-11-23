@@ -1,0 +1,41 @@
+[package]
+name = "cc-lb-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+build = "build.rs"
+autotests = false
+
+[features]
+default = ["sqlite"]
+sqlite = ["cc-lb-server/storage-sqlite", "cc-lb-runtime-sync/sqlite"]
+postgres = ["cc-lb-server/storage-postgres", "cc-lb-runtime-sync/postgres"]
+
+[[bin]]
+name = "cc-lb-proxy"
+path = "src/main.rs"
+test = false
+
+[[test]]
+name = "integration"
+path = "tests/all.rs"
+
+[dependencies]
+cc-lb-clock = { path = "../cc-lb-clock" }
+cc-lb-runtime-sync = { workspace = true, default-features = false }
+cc-lb-server = { path = "../cc-lb-server", default-features = false }
+clap = { workspace = true, features = ["derive"] }
+tikv-jemallocator = "0.7"
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+
+[dev-dependencies]
+axum.workspace = true
+cc-lb-aead = { path = "../cc-lb-aead" }
+cc-lb-config = { path = "../cc-lb-config" }
+cc-lb-storage-api = { path = "../cc-lb-storage-api" }
+cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
+cc-lb-workspace-hack.workspace = true
+tempfile.workspace = true
+tower = { workspace = true, features = ["util"] }
