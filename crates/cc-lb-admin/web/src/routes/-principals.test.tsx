@@ -446,9 +446,7 @@ function mockProviderScope(providers: readonly ProviderFamily[] | undefined) {
   vi.mocked(previewControls.useProviderScope).mockReturnValue({
     previewProviders: undefined,
     scope: providers?.[0] ?? 'all',
-    explicit: providers !== undefined,
     providers,
-    setScope: vi.fn(),
   });
 }
 

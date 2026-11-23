@@ -60,9 +60,6 @@ const RESET_WORD_GAP_CLASS = 'ml-1';
 const HINT_TRIGGER_CLASS =
   'cursor-help border-b border-dashed border-text-faint/60';
 
-/** Compact quota label; callers use the same helper for all surfaces. */
-export { windowLabel };
-
 function WindowName({
   window,
   label,

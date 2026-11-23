@@ -1712,8 +1712,9 @@ async fn responses_semantic_sse_eof_failure_refunds_limits_with_or_without_usage
                     cap_micros: 2,
                 },
             ],
-        )
-        .with_static_limit_subject(
+        );
+        let lifecycle = common::with_static_limit_subject(
+            lifecycle,
             engine.clone(),
             "principal-test".to_owned(),
             "key-test".to_owned(),
@@ -2465,8 +2466,9 @@ async fn assert_chat_finish_reason_without_usage_refunds_pending_close(
                 cap_micros: 2,
             },
         ],
-    )
-    .with_static_limit_subject(
+    );
+    let lifecycle = common::with_static_limit_subject(
+        lifecycle,
         engine.clone(),
         "principal-test".to_owned(),
         "key-test".to_owned(),
@@ -2755,8 +2757,9 @@ async fn semantic_client_close_reconciles_limits_and_preterminal_cancel_refunds(
                     cap_micros: 2,
                 },
             ],
-        )
-        .with_static_limit_subject(
+        );
+        let lifecycle = common::with_static_limit_subject(
+            lifecycle,
             engine.clone(),
             "principal-test".to_owned(),
             "key-test".to_owned(),
@@ -2886,8 +2889,9 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
                 cap_micros: 2,
             },
         ],
-    )
-    .with_static_limit_subject(
+    );
+    let lifecycle = common::with_static_limit_subject(
+        lifecycle,
         engine.clone(),
         "principal-test".to_owned(),
         "key-test".to_owned(),

@@ -366,10 +366,6 @@ impl UsageRollupStore for SqliteStorage {
                 .join(":"),
         ))
     }
-
-    async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>> {
-        read_checkpoint(self.pool()).await
-    }
 }
 
 #[async_trait]

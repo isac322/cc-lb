@@ -86,9 +86,17 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     let ciphertext = aead
         .encrypt(b"sk-ant-fixture-secret", primary.id.as_bytes())
         .expect("primary api-key ciphertext");
-    UpstreamStore::update_api_key_secret(storage.as_ref(), primary.id, Some(ciphertext))
-        .await
-        .expect("primary api-key secret");
+    UpstreamStore::update(
+        storage.as_ref(),
+        primary.id,
+        primary.revision,
+        UpstreamUpdate {
+            api_key_ciphertext: Some(ciphertext),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await
+    .expect("primary api-key secret");
 
     let target = UpstreamStore::create(
         storage.as_ref(),
@@ -113,10 +121,17 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     let ciphertext = aead
         .encrypt(b"sk-ant-fixture-secret", target.id.as_bytes())
         .expect("target api-key ciphertext");
-    let target =
-        UpstreamStore::update_api_key_secret(storage.as_ref(), target.id, Some(ciphertext))
-            .await
-            .expect("target api-key secret");
+    let target = UpstreamStore::update(
+        storage.as_ref(),
+        target.id,
+        target.revision,
+        UpstreamUpdate {
+            api_key_ciphertext: Some(ciphertext),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await
+    .expect("target api-key secret");
 
     PrincipalStore::create(
         storage.as_ref(),
@@ -348,40 +363,6 @@ impl UpstreamStore for NameSortedUpstreamStore {
         update: UpstreamUpdate,
     ) -> StorageResult<UpstreamRecord> {
         UpstreamStore::update(self.inner.as_ref(), id, expected_revision, update).await
-    }
-
-    async fn set_enabled(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        enabled: bool,
-    ) -> StorageResult<UpstreamRecord> {
-        UpstreamStore::set_enabled(self.inner.as_ref(), id, expected_revision, enabled).await
-    }
-
-    async fn update_spec(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        update: UpstreamUpdate,
-    ) -> StorageResult<UpstreamRecord> {
-        UpstreamStore::update_spec(self.inner.as_ref(), id, expected_revision, update).await
-    }
-
-    async fn update_api_key_secret(
-        &self,
-        id: Uuid,
-        api_key_ciphertext: Option<Vec<u8>>,
-    ) -> StorageResult<UpstreamRecord> {
-        UpstreamStore::update_api_key_secret(self.inner.as_ref(), id, api_key_ciphertext).await
-    }
-
-    async fn update_oauth_token(
-        &self,
-        id: Uuid,
-        tokens: EncryptedOAuthTokens,
-    ) -> StorageResult<UpstreamRecord> {
-        UpstreamStore::update_oauth_token(self.inner.as_ref(), id, tokens).await
     }
 
     async fn set_status(&self, id: Uuid, status: UpstreamStatusUpdate) -> StorageResult<()> {

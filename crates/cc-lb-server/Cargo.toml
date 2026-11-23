@@ -15,7 +15,6 @@ sqlite = [
     "cc-lb-scheduler/sqlite",
     "cc-lb-admin/default",
     "cc-lb-admin/sqlite",
-    "cc-lb-engine/sqlite",
     "dep:apalis-sqlite",
     "dep:cc-lb-scheduler",
     "dep:sqlx",

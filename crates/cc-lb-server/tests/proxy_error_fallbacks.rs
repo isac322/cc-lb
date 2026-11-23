@@ -11,7 +11,7 @@ use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
     ApiKeyMutation, IssueParams, ManagedKeyStore, MetaStore, PrincipalCreate, PrincipalKind,
     PrincipalStore, RequestEventStore, Storage as StorageTrait, StorageError, StorageResult,
-    StoredApiKeyRecord, UpstreamCreate, UpstreamStore,
+    StoredApiKeyRecord, UpstreamCreate, UpstreamStore, UpstreamUpdate,
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
 use http_body_util::BodyExt;
@@ -49,8 +49,16 @@ async fn readyz_uses_declared_runtime_readiness_without_proxy_traffic() -> TestR
     )
     .await?;
     let ciphertext = aead.encrypt(b"sk-ant-fixture-secret", upstream.id.as_bytes())?;
-    UpstreamStore::update_api_key_secret(storage_arc.as_ref(), upstream.id, Some(ciphertext))
-        .await?;
+    UpstreamStore::update(
+        storage_arc.as_ref(),
+        upstream.id,
+        upstream.revision,
+        UpstreamUpdate {
+            api_key_ciphertext: Some(ciphertext),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await?;
     PrincipalStore::create(
         storage_arc.as_ref(),
         PrincipalCreate {
@@ -138,8 +146,16 @@ async fn readyz_with_oauth(
         )
         .await?;
         let ciphertext = aead.encrypt(b"sk-ant-fixture-secret", upstream.id.as_bytes())?;
-        UpstreamStore::update_api_key_secret(storage_arc.as_ref(), upstream.id, Some(ciphertext))
-            .await?;
+        UpstreamStore::update(
+            storage_arc.as_ref(),
+            upstream.id,
+            upstream.revision,
+            UpstreamUpdate {
+                api_key_ciphertext: Some(ciphertext),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await?;
     }
     let oauth_upstream = UpstreamStore::create(
         storage_arc.as_ref(),

@@ -39,7 +39,7 @@ async fn upstream_affinity_gemini_owner_epoch_fences_identity_changes_only() {
         .await
         .expect("bind initial");
     let renamed = storage
-        .update_spec(
+        .update(
             gemini,
             initial.revision,
             UpstreamUpdate {
@@ -50,7 +50,14 @@ async fn upstream_affinity_gemini_owner_epoch_fences_identity_changes_only() {
         .await
         .expect("rename");
     let disabled = storage
-        .set_enabled(gemini, renamed.revision, false)
+        .update(
+            gemini,
+            renamed.revision,
+            UpstreamUpdate {
+                enabled: Some(false),
+                ..UpstreamUpdate::default()
+            },
+        )
         .await
         .expect("disable");
     assert_eq!(
@@ -68,7 +75,7 @@ async fn upstream_affinity_gemini_owner_epoch_fences_identity_changes_only() {
         vec![old.clone()]
     );
     let changed = storage
-        .update_spec(
+        .update(
             gemini,
             disabled.revision,
             UpstreamUpdate {
@@ -93,7 +100,7 @@ async fn upstream_affinity_gemini_owner_epoch_fences_identity_changes_only() {
         Some(1)
     );
     let same_url = storage
-        .update_spec(
+        .update(
             gemini,
             changed.revision,
             UpstreamUpdate {
@@ -202,7 +209,7 @@ async fn upstream_affinity_gemini_owner_epoch_fences_identity_changes_only() {
         .expect("current")
         .expect("current");
     storage
-        .update_spec(
+        .update(
             gemini,
             current.revision,
             UpstreamUpdate {
@@ -231,7 +238,7 @@ async fn upstream_affinity_gemini_owner_epoch_fences_identity_changes_only() {
         .await
         .expect("bind project epoch");
     let current = storage
-        .update_spec(
+        .update(
             gemini,
             current.revision,
             UpstreamUpdate {
@@ -249,7 +256,7 @@ async fn upstream_affinity_gemini_owner_epoch_fences_identity_changes_only() {
         Some(2)
     );
     let changed = storage
-        .update_spec(
+        .update(
             gemini,
             current.revision,
             UpstreamUpdate {
@@ -286,12 +293,24 @@ async fn upstream_affinity_other_provider_credential_mutation_keeps_epoch_zero()
         .bind_upstream_affinities(std::slice::from_ref(&bound), 10, TTL_SECS)
         .await
         .expect("bind");
+    let anthropic_record = storage
+        .get_by_id(anthropic)
+        .await
+        .expect("read anthropic")
+        .expect("anthropic");
     let updated = storage
-        .update_api_key_secret(anthropic, Some(vec![9, 8, 7]))
+        .update(
+            anthropic,
+            anthropic_record.revision,
+            UpstreamUpdate {
+                api_key_ciphertext: Some(vec![9, 8, 7]),
+                ..UpstreamUpdate::default()
+            },
+        )
         .await
         .expect("secret");
     storage
-        .update_spec(
+        .update(
             anthropic,
             updated.revision,
             UpstreamUpdate {

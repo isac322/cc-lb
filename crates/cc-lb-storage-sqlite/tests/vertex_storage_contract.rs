@@ -266,7 +266,7 @@ async fn qa_sto_5_sqlite_vertex_owner_epoch_matrix_and_stale_binding_fence() -> 
     MetaStore::initialize(&storage).await?;
     let created = create_vertex(&storage, "qa-sto-5-epochs").await?;
     let version_only = storage
-        .update_spec(
+        .update(
             created.id,
             created.revision,
             UpstreamUpdate {
@@ -283,7 +283,7 @@ async fn qa_sto_5_sqlite_vertex_owner_epoch_matrix_and_stale_binding_fence() -> 
         .await?;
     assert_eq!(version_only.owner_epoch, 0);
     let project_changed = storage
-        .update_spec(
+        .update(
             version_only.id,
             version_only.revision,
             UpstreamUpdate {
@@ -300,7 +300,7 @@ async fn qa_sto_5_sqlite_vertex_owner_epoch_matrix_and_stale_binding_fence() -> 
         .await?;
     assert_eq!(project_changed.owner_epoch, 1);
     let location_changed = storage
-        .update_spec(
+        .update(
             project_changed.id,
             project_changed.revision,
             UpstreamUpdate {
@@ -317,7 +317,7 @@ async fn qa_sto_5_sqlite_vertex_owner_epoch_matrix_and_stale_binding_fence() -> 
         .await?;
     assert_eq!(location_changed.owner_epoch, 2);
     let base_url_changed = storage
-        .update_spec(
+        .update(
             location_changed.id,
             location_changed.revision,
             UpstreamUpdate {

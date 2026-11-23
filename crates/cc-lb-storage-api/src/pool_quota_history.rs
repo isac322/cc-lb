@@ -83,33 +83,11 @@ pub trait PoolQuotaHistoryStore: Send + Sync {
         records: &[PoolQuotaSnapshotRecord],
     ) -> StorageResult<()>;
 
-    async fn list_latest_pool_quota_snapshots(
-        &self,
-        provider: Provider,
-        windows: &[SubscriptionQuotaWindow],
-    ) -> StorageResult<Vec<PoolQuotaSnapshotRecord>>;
-
-    async fn list_pool_quota_snapshots_in_range(
-        &self,
-        provider: Provider,
-        windows: &[SubscriptionQuotaWindow],
-        since_unix_secs: i64,
-        until_unix_secs: i64,
-    ) -> StorageResult<Vec<PoolQuotaSnapshotRecord>>;
-
     async fn list_latest_pool_quota_snapshot_summaries(
         &self,
         provider: Provider,
         windows: &[SubscriptionQuotaWindow],
-    ) -> StorageResult<Vec<PoolQuotaSnapshotSummaryRecord>> {
-        let records = self
-            .list_latest_pool_quota_snapshots(provider, windows)
-            .await?;
-        Ok(records
-            .iter()
-            .map(PoolQuotaSnapshotSummaryRecord::from)
-            .collect())
-    }
+    ) -> StorageResult<Vec<PoolQuotaSnapshotSummaryRecord>>;
 
     async fn list_pool_quota_snapshot_summaries_in_range(
         &self,
@@ -117,15 +95,7 @@ pub trait PoolQuotaHistoryStore: Send + Sync {
         windows: &[SubscriptionQuotaWindow],
         since_unix_secs: i64,
         until_unix_secs: i64,
-    ) -> StorageResult<Vec<PoolQuotaSnapshotSummaryRecord>> {
-        let records = self
-            .list_pool_quota_snapshots_in_range(provider, windows, since_unix_secs, until_unix_secs)
-            .await?;
-        Ok(records
-            .iter()
-            .map(PoolQuotaSnapshotSummaryRecord::from)
-            .collect())
-    }
+    ) -> StorageResult<Vec<PoolQuotaSnapshotSummaryRecord>>;
 
     async fn list_pool_quota_chart_points_in_range(
         &self,

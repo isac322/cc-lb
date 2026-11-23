@@ -778,12 +778,26 @@ async fn crt_09_ciphertext_is_bound_to_upstream_id() {
 
     harness
         .storage
-        .update_api_key_secret(a, Some(b_ciphertext))
+        .update(
+            a,
+            a_record.revision,
+            cc_lb_storage_api::UpstreamUpdate {
+                api_key_ciphertext: Some(b_ciphertext),
+                ..Default::default()
+            },
+        )
         .await
         .expect("swap a");
     harness
         .storage
-        .update_api_key_secret(b, Some(a_ciphertext))
+        .update(
+            b,
+            b_record.revision,
+            cc_lb_storage_api::UpstreamUpdate {
+                api_key_ciphertext: Some(a_ciphertext),
+                ..Default::default()
+            },
+        )
         .await
         .expect("swap b");
     for id in [a, b] {

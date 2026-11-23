@@ -1,29 +1,7 @@
 use std::collections::BTreeMap;
 
-#[cfg(test)]
-use crate::NativePricingLifetime;
 use crate::{NativePricingRate, NativePricingStatus, ProviderNativePricing};
 use crate::{Pricing, ThresholdBand, TierRate, UsdPerMillion};
-
-#[cfg(test)]
-pub(crate) fn resolve_native_rate(
-    pricing: &ProviderNativePricing,
-    lifetime: NativePricingLifetime,
-) -> NativePricingRate {
-    pricing
-        .total_write
-        .get(&lifetime)
-        .cloned()
-        .unwrap_or_else(|| {
-            if lifetime == NativePricingLifetime::ModelRetention
-                && pricing.cached_input_read.status == NativePricingStatus::NotApplicable
-            {
-                NativePricingRate::not_applicable()
-            } else {
-                NativePricingRate::unknown()
-            }
-        })
-}
 
 pub(crate) fn resolve_native_cached_read_rate(
     pricing: &ProviderNativePricing,

@@ -233,7 +233,11 @@ async fn dashboard_etags_short_circuit_rollup_scans_before_response_building() {
         .to_owned();
     assert!(usage_etag.starts_with("W/\"dashboard:usage:v3:"));
     assert!(summary_etag.starts_with("W/\"dashboard:summary:v4:"));
-    let checkpoint = storage.usage_rollup_checkpoint().await.unwrap().unwrap();
+    let checkpoint: i64 =
+        sqlx::query_scalar("SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'")
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
     let window_end = now.div_ceil(60) * 60;
     for (uri, old_etag) in [
         (
@@ -1398,7 +1402,7 @@ async fn dashboard_semantics_version_invalidates_old_etags_without_new_traffic()
         .await
         .unwrap();
     storage.rollup_usage_once().await.unwrap();
-    let checkpoint = storage.usage_rollup_checkpoint().await.unwrap();
+    let checkpoint = storage.usage_rollup_revision().await.unwrap();
     sqlx::query(
         "UPDATE usage_rollups_v2 SET priced_event_count = 0, \
          unpriced_event_count = 0, unmetered_event_count = 0",
@@ -1440,7 +1444,7 @@ async fn dashboard_semantics_version_invalidates_old_etags_without_new_traffic()
         validators.push((uri, etag));
     }
     storage.rollup_usage_once().await.unwrap();
-    assert_eq!(storage.usage_rollup_checkpoint().await.unwrap(), checkpoint);
+    assert_eq!(storage.usage_rollup_revision().await.unwrap(), checkpoint);
     for (uri, current_etag) in validators {
         let previous_etag = if uri.contains("/summary") {
             current_etag.replacen(":v4:", ":v3:", 1)

@@ -248,53 +248,6 @@ impl PrincipalStore for PostgresStorage {
         tx.commit().await.map_err(map_sqlx_error)?;
         principal_from_row(row).map(Some)
     }
-
-    async fn hard_delete(&self, id: Uuid) -> StorageResult<bool> {
-        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let audit_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM audit_log_v1 WHERE principal_id = $1")
-                .bind(id.to_string())
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(map_sqlx_error)?;
-        if audit_count > 0 {
-            return Err(conflict(format!(
-                "postgres principal {id} is referenced by audit entries"
-            )));
-        }
-        let principal_exists: Option<Uuid> =
-            sqlx::query_scalar("SELECT id FROM principals_v1 WHERE id = $1 FOR UPDATE")
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(map_sqlx_error)?;
-        if principal_exists.is_none() {
-            tx.commit().await.map_err(map_sqlx_error)?;
-            return Ok(false);
-        }
-        sqlx::query("DELETE FROM plugin_chains_v2 WHERE principal_id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-        let result = sqlx::query("DELETE FROM principals_v1 WHERE id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-        let deleted = result.rows_affected() == 1;
-        if deleted {
-            sqlx::query(
-                "SELECT pg_notify('cclb_plugin_chain_changed', $1), pg_notify('cclb_principal_changed', $1)",
-            )
-            .bind(id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-        }
-        tx.commit().await.map_err(map_sqlx_error)?;
-        Ok(deleted)
-    }
 }
 
 impl PostgresStorage {

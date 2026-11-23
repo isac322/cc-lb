@@ -64,48 +64,6 @@ impl UpstreamStore for SqliteStorage {
         update_split(self, id, expected_revision, update).await
     }
 
-    async fn set_enabled(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        enabled: bool,
-    ) -> StorageResult<UpstreamRecord> {
-        self.update_spec(
-            id,
-            expected_revision,
-            UpstreamUpdate {
-                enabled: Some(enabled),
-                ..UpstreamUpdate::default()
-            },
-        )
-        .await
-    }
-
-    async fn update_spec(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        update: UpstreamUpdate,
-    ) -> StorageResult<UpstreamRecord> {
-        update_split_spec(self, id, expected_revision, update).await
-    }
-
-    async fn update_api_key_secret(
-        &self,
-        id: Uuid,
-        api_key_ciphertext: Option<Vec<u8>>,
-    ) -> StorageResult<UpstreamRecord> {
-        update_split_api_key_secret(self, id, api_key_ciphertext).await
-    }
-
-    async fn update_oauth_token(
-        &self,
-        id: Uuid,
-        tokens: EncryptedOAuthTokens,
-    ) -> StorageResult<UpstreamRecord> {
-        update_split_oauth_token(self, id, tokens, false, None).await
-    }
-
     async fn set_status(&self, id: Uuid, status: UpstreamStatusUpdate) -> StorageResult<()> {
         let mut tx = self.begin_immediate().await?;
         ensure_split_spec_active_in_tx(&mut tx, id).await?;
@@ -120,7 +78,7 @@ impl UpstreamStore for SqliteStorage {
         tokens: EncryptedOAuthTokens,
         never_refresh: bool,
     ) -> StorageResult<UpstreamRecord> {
-        update_split_oauth_token(self, id, tokens, never_refresh, Some(expected_revision)).await
+        update_split_oauth_token(self, id, tokens, never_refresh, expected_revision).await
     }
 
     async fn complete_refresh(
@@ -407,36 +365,6 @@ async fn update_split(
     Ok(record)
 }
 
-async fn update_split_spec(
-    storage: &SqliteStorage,
-    id: Uuid,
-    expected_revision: u64,
-    mut update: UpstreamUpdate,
-) -> StorageResult<UpstreamRecord> {
-    if let Some(name) = update.name.as_deref() {
-        validate_identifier("upstream.name", name)?;
-    }
-    let api_key_access = update.api_key_access.take();
-    let reset_api_key_poll_state = std::mem::take(&mut update.reset_api_key_poll_state);
-    let mut tx = storage.begin_immediate().await?;
-    let spec_owner_changed =
-        update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?;
-    let access_identity_changed = write_split_details_in_tx(
-        storage,
-        &mut tx,
-        id,
-        api_key_access.as_ref(),
-        reset_api_key_poll_state,
-    )
-    .await?;
-    if spec_owner_changed || access_identity_changed {
-        bump_split_owner_epoch_in_tx(&mut tx, id).await?;
-    }
-    let record = require_split_in_tx(&mut tx, id).await?;
-    tx.commit().await.map_err(map_sqlx_error)?;
-    Ok(record)
-}
-
 /// Details-row side of a spec update, inside the caller's transaction (which
 /// already validated the spec revision). `None`/`false` leave the row as is.
 async fn write_split_details_in_tx(
@@ -584,20 +512,6 @@ async fn update_split_spec_in_tx(
     Ok(base_url_changed || vertex_identity_changed)
 }
 
-async fn update_split_api_key_secret(
-    storage: &SqliteStorage,
-    id: Uuid,
-    api_key_ciphertext: Option<Vec<u8>>,
-) -> StorageResult<UpstreamRecord> {
-    let mut tx = storage.begin_immediate().await?;
-    update_split_api_key_secret_in_tx(&mut tx, id, api_key_ciphertext).await?;
-    bump_split_spec_revision_in_tx(&mut tx, id).await?;
-    bump_split_owner_epoch_in_tx(&mut tx, id).await?;
-    let record = require_split_in_tx(&mut tx, id).await?;
-    tx.commit().await.map_err(map_sqlx_error)?;
-    Ok(record)
-}
-
 async fn update_split_api_key_secret_in_tx(
     tx: &mut Transaction<'static, Sqlite>,
     id: Uuid,
@@ -632,14 +546,10 @@ async fn update_split_oauth_token(
     id: Uuid,
     tokens: EncryptedOAuthTokens,
     never_refresh: bool,
-    expected_revision: Option<u64>,
+    expected_revision: u64,
 ) -> StorageResult<UpstreamRecord> {
     let mut tx = storage.begin_immediate().await?;
-    if let Some(expected_revision) = expected_revision {
-        ensure_split_spec_revision_in_tx(&mut tx, id, expected_revision).await?;
-    } else {
-        ensure_split_spec_active_in_tx(&mut tx, id).await?;
-    }
+    ensure_split_spec_revision_in_tx(&mut tx, id, expected_revision).await?;
     upsert_split_oauth_token_in_tx(
         &mut tx,
         id,
@@ -761,29 +671,6 @@ async fn clear_split_apply_error_in_tx(
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
-    Ok(())
-}
-
-/// Spec revision bump (same tx) for writes that are not full spec updates
-/// but still change what a replica applies, e.g. an api-key credential
-/// replace. Requires the caller to have verified the row is active first.
-async fn bump_split_spec_revision_in_tx(
-    tx: &mut Transaction<'static, Sqlite>,
-    id: Uuid,
-) -> StorageResult<()> {
-    let row = sqlx::query(
-        "UPDATE upstream_spec_v1
-           SET spec_revision = spec_revision + 1, updated_at = unixepoch()
-         WHERE id = ? AND deleted_at IS NULL
-         RETURNING id",
-    )
-    .bind(id.to_string())
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(map_sqlite_error)?;
-    if row.is_none() {
-        return Err(conflict("upstream not found"));
-    }
     Ok(())
 }
 

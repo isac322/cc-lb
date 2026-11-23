@@ -72,7 +72,7 @@ where
         let (first, concurrent) =
             tokio::join!(storage.rollup_usage_once(), storage.rollup_usage_once(),);
         ensure!(first?.processed_events + concurrent?.processed_events == events.len() as u64);
-        let high_water = storage.usage_rollup_checkpoint().await?;
+        let high_water = storage.usage_rollup_revision().await?;
         for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
             let rows = storage
                 .query_usage_rollups_in_range(resolution, start, start + 3600)
@@ -111,7 +111,7 @@ where
         raw.wait_for_events_visible_for_rollup(storage.as_ref())
             .await?;
         ensure!(storage.rollup_usage_once().await?.processed_events == 0);
-        ensure!(storage.usage_rollup_checkpoint().await? == high_water);
+        ensure!(storage.usage_rollup_revision().await? == high_water);
         for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
             let rows = storage
                 .query_usage_rollups_in_range(resolution, start, start + 3600)
@@ -176,14 +176,14 @@ where
             } else if retention == "pruned" {
                 ensure!(storage.prune_request_events_before((start + 3600) * 1_000_000_000, 100).await? == 4);
             }
-            let checkpoint = storage.usage_rollup_checkpoint().await?;
+            let checkpoint = storage.usage_rollup_revision().await?;
             let before_minutes = storage.query_usage_rollups_in_range(
                 UsageRollupResolution::Minute, start, start + 3600).await?;
             let before_hours = storage.query_usage_rollups_in_range(
                 UsageRollupResolution::Hour, start, start + 3600).await?;
             for _ in 0..3 {
                 ensure!(storage.rollup_usage_once().await?.processed_events == 0);
-                ensure!(storage.usage_rollup_checkpoint().await? == checkpoint);
+                ensure!(storage.usage_rollup_revision().await? == checkpoint);
                 for (resolution, before) in [
                     (UsageRollupResolution::Minute, &before_minutes),
                     (UsageRollupResolution::Hour, &before_hours),

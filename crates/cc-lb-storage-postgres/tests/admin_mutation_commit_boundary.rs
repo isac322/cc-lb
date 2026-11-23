@@ -70,20 +70,14 @@ async fn upstream_mutations_return_committed_row(storage: &PostgresStorage) -> R
         UpstreamUpdate {
             name: Some("committed-api-renamed".to_owned()),
             api_key_ciphertext: Some(b"rotated".to_vec()),
+            enabled: Some(false),
             ..UpstreamUpdate::default()
         },
     )
     .await?;
     ensure!(updated.revision == api.revision + 1);
+    ensure!(!updated.enabled);
     assert_committed_upstream(storage, &updated).await?;
-
-    let disabled = UpstreamStore::set_enabled(storage, api.id, updated.revision, false).await?;
-    ensure!(!disabled.enabled);
-    assert_committed_upstream(storage, &disabled).await?;
-
-    let secret =
-        UpstreamStore::update_api_key_secret(storage, api.id, Some(b"third".to_vec())).await?;
-    assert_committed_upstream(storage, &secret).await?;
 
     let warmup = UpstreamStore::create(storage, warmup_upstream("committed-warmup")).await?;
     let cleared = UpstreamStore::clear_warmup_dialect_plugin(storage, warmup.id, warmup.revision)
@@ -96,7 +90,14 @@ async fn upstream_mutations_return_committed_row(storage: &PostgresStorage) -> R
     ensure!(stale.is_none(), "stale clear keeps its no-row result");
 
     let oauth = UpstreamStore::create(storage, oauth_upstream("committed-oauth")).await?;
-    let stored = UpstreamStore::update_oauth_token(storage, oauth.id, tokens(b"second")).await?;
+    let stored = UpstreamStore::store_oauth_tokens(
+        storage,
+        oauth.id,
+        oauth.revision,
+        tokens(b"second"),
+        false,
+    )
+    .await?;
     ensure!(stored.oauth_token_generation == oauth.oauth_token_generation + 1);
     assert_committed_upstream(storage, &stored).await?;
 
@@ -131,12 +132,8 @@ async fn upstream_record_decode_failure_rolls_back(
         },
     )
     .await;
-    let set_enabled = UpstreamStore::set_enabled(storage, api.id, api.revision, false).await;
-    let secret =
-        UpstreamStore::update_api_key_secret(storage, api.id, Some(b"lost".to_vec())).await;
     let clear =
         UpstreamStore::clear_warmup_dialect_plugin(storage, warmup.id, warmup.revision).await;
-    let token = UpstreamStore::update_oauth_token(storage, oauth.id, tokens(b"lost")).await;
     let store = UpstreamStore::store_oauth_tokens(
         storage,
         oauth.id,
@@ -152,20 +149,8 @@ async fn upstream_record_decode_failure_rolls_back(
     ensure!(create.is_err(), "create must surface the decode failure");
     ensure!(update.is_err(), "update must surface the decode failure");
     ensure!(
-        set_enabled.is_err(),
-        "set_enabled must surface the decode failure"
-    );
-    ensure!(
-        secret.is_err(),
-        "api key update must surface the decode failure"
-    );
-    ensure!(
         clear.is_err(),
         "warmup clear must surface the decode failure"
-    );
-    ensure!(
-        token.is_err(),
-        "token update must surface the decode failure"
     );
     ensure!(
         store.is_err(),

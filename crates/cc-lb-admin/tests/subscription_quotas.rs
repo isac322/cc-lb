@@ -6,9 +6,9 @@ use axum::http::StatusCode;
 use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_storage_api::{
     PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, Provider, RequestEvent, RequestEventStore,
-    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
-    SubscriptionQuotaSource, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
-    UpstreamSubscriptionQuotaAggregateStore, UpstreamSubscriptionQuotaStore, UsageRollupStore,
+    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
+    UpstreamSubscriptionQuotaStore, UsageRollupStore,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -94,7 +94,7 @@ async fn subscription_quota_series_defaults_exclude_stored_fable_window() {
     fable.window = SubscriptionQuotaWindow::SevenDayFable;
     server
         .storage
-        .put_subscription_quota_checkpoints(&[checkpoint_record(fable)])
+        .record_subscription_quota_samples(&[fable])
         .await
         .unwrap();
 
@@ -127,7 +127,7 @@ async fn subscription_quota_series_explicit_fable_window_includes_stored_series(
     fable.window = SubscriptionQuotaWindow::SevenDayFable;
     server
         .storage
-        .put_subscription_quota_checkpoints(&[checkpoint_record(fable)])
+        .record_subscription_quota_samples(&[fable])
         .await
         .unwrap();
 
@@ -384,31 +384,31 @@ async fn subscription_quota_checkpoint_series_returns_steps_without_fabricated_l
     let upstream_id = create_oauth_upstream(&server, "checkpoint-series").await;
     server
         .storage
-        .put_subscription_quota_checkpoints(&[
-            checkpoint_record(quota_observation(
+        .record_subscription_quota_samples(&[
+            quota_observation(
                 upstream_id,
                 30,
                 1,
                 SubscriptionQuotaSource::Header,
                 0.10,
                 Some(SubscriptionQuotaStatus::Allowed),
-            )),
-            checkpoint_record(quota_observation(
+            ),
+            quota_observation(
                 upstream_id,
                 75,
                 2,
                 SubscriptionQuotaSource::Header,
                 0.20,
                 Some(SubscriptionQuotaStatus::Allowed),
-            )),
-            checkpoint_record(quota_observation(
+            ),
+            quota_observation(
                 upstream_id,
                 180,
                 3,
                 SubscriptionQuotaSource::Header,
                 0.60,
                 Some(SubscriptionQuotaStatus::AllowedWarning),
-            )),
+            ),
         ])
         .await
         .unwrap();
@@ -438,14 +438,14 @@ async fn subscription_quota_checkpoint_series_returns_steps_without_fabricated_l
     let no_anchor_upstream_id = create_oauth_upstream(&server, "checkpoint-series-no-anchor").await;
     server
         .storage
-        .put_subscription_quota_checkpoints(&[checkpoint_record(quota_observation(
+        .record_subscription_quota_samples(&[quota_observation(
             no_anchor_upstream_id,
             180,
             4,
             SubscriptionQuotaSource::Header,
             0.80,
             Some(SubscriptionQuotaStatus::Allowed),
-        ))])
+        )])
         .await
         .unwrap();
 
@@ -476,23 +476,23 @@ async fn subscription_quota_checkpoint_aggregate_carries_unaligned_checkpoints_t
     let reset_at = CHECKPOINT_TEST_NOW_UNIX_SECS + 3_600;
     server
         .storage
-        .put_subscription_quota_checkpoints(&[
-            checkpoint_record(quota_observation_with_reset(
+        .record_subscription_quota_samples(&[
+            quota_observation_with_reset(
                 first_upstream_id,
                 first_checkpoint,
                 21,
                 SubscriptionQuotaSource::Header,
                 0.25,
                 reset_at,
-            )),
-            checkpoint_record(quota_observation_with_reset(
+            ),
+            quota_observation_with_reset(
                 second_upstream_id,
                 second_checkpoint,
                 22,
                 SubscriptionQuotaSource::Header,
                 0.50,
                 reset_at,
-            )),
+            ),
         ])
         .await
         .unwrap();
@@ -556,12 +556,12 @@ async fn subscription_quota_aggregate_matches_legacy_golden_for_multiple_windows
     let five_hour_cc_start = now_unix_secs - now_unix_secs % (5 * 3_600);
     let seven_day_cc_start = now_unix_secs - now_unix_secs % (7 * 24 * 3_600);
 
-    let mut checkpoints = Vec::new();
+    let mut samples = Vec::new();
     for (upstream_id, seed, five_hour_utilization, seven_day_utilization) in [
         (first_upstream_id, 100_u128, 0.25, 0.40),
         (second_upstream_id, 200_u128, 0.50, 0.20),
     ] {
-        checkpoints.push(checkpoint_record(quota_observation_with_status_and_reset(
+        samples.push(quota_observation_with_status_and_reset(
             upstream_id,
             now_unix_secs - 1_200,
             seed,
@@ -569,7 +569,7 @@ async fn subscription_quota_aggregate_matches_legacy_golden_for_multiple_windows
             five_hour_utilization,
             Some(SubscriptionQuotaStatus::Allowed),
             five_hour_reset,
-        )));
+        ));
         let mut seven_day = quota_observation_with_status_and_reset(
             upstream_id,
             now_unix_secs - 1_800,
@@ -580,11 +580,11 @@ async fn subscription_quota_aggregate_matches_legacy_golden_for_multiple_windows
             seven_day_reset,
         );
         seven_day.window = SubscriptionQuotaWindow::SevenDay;
-        checkpoints.push(checkpoint_record(seven_day));
+        samples.push(seven_day);
     }
     server
         .storage
-        .put_subscription_quota_checkpoints(&checkpoints)
+        .record_subscription_quota_samples(&samples)
         .await
         .unwrap();
 
@@ -774,14 +774,14 @@ async fn provider_quotas_list_all_oauth_kinds_and_scope_series() {
                 Some(SubscriptionQuotaStatus::Allowed),
             );
             sample.window = window;
-            records.push(checkpoint_record(sample));
+            records.push(sample);
         }
     }
     server
         .storage
-        .put_subscription_quota_checkpoints(&records)
+        .record_subscription_quota_samples(&records)
         .await
-        .expect("seed quota checkpoints");
+        .expect("seed quota samples");
     let (status, _, body) = server.client.get(
         "/admin/v1/subscription-quotas/series?since_unix_secs=60&until_unix_secs=180&bucket_secs=60"
     ).await;
@@ -1431,10 +1431,6 @@ fn quota_absent_observation(
     sample
 }
 
-fn checkpoint_record(record: SubscriptionQuotaSample) -> SubscriptionQuotaCheckpointRecord {
-    SubscriptionQuotaCheckpointRecord::from(&record)
-}
-
 fn quota_observation(
     upstream_id: Uuid,
     observed_at_unix_secs: u64,
@@ -1906,11 +1902,14 @@ async fn provider_pool_history_members_windows_missing_and_absent_are_independen
                 .await
                 .unwrap()
                 .unwrap();
-        cc_lb_storage_api::UpstreamStore::set_enabled(
+        cc_lb_storage_api::UpstreamStore::update(
             server.storage.as_ref(),
             disabled,
             disabled_record.revision,
-            false,
+            cc_lb_storage_api::UpstreamUpdate {
+                enabled: Some(false),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();

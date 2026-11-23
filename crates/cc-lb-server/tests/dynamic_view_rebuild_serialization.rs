@@ -33,11 +33,11 @@ use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::reconcile::Reconciler;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    MetaStore, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
-    PluginRegistryStore, PluginSlotKind, PrincipalCreate, PrincipalKind, PrincipalRecord,
-    PrincipalStore, Storage as StorageTrait, StorageResult, UpstreamCreate,
-    UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
-    WasmBlob, WasmBlobRecord, WasmRegistryCascadeDelete, WasmRegistryEntry, WasmRegistryEntryInput,
+    MetaStore, PluginChainEntry, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind,
+    PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, Storage as StorageTrait,
+    StorageResult, UpstreamCreate, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
+    UpstreamRecord, UpstreamStore, UpstreamUpdate, WasmBlob, WasmBlobRecord,
+    WasmRegistryCascadeDelete, WasmRegistryEntry, WasmRegistryEntryInput,
     WasmRegistryReferenceFingerprint, WasmRegistryReferences,
 };
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
@@ -228,16 +228,6 @@ impl PluginRegistryStore for GatedRegistry {
             .list_chains_for_principals(principal_ids, slots)
             .await
     }
-    async fn update_chain_entry(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        update: PluginChainEntryUpdate,
-    ) -> StorageResult<Option<PluginChainEntry>> {
-        self.inner
-            .update_chain_entry(id, expected_revision, update)
-            .await
-    }
     async fn reorder_chain(
         &self,
         principal_id: Uuid,
@@ -254,13 +244,6 @@ impl PluginRegistryStore for GatedRegistry {
         expected_revision: u64,
     ) -> StorageResult<Option<PluginChainEntry>> {
         self.inner.delete_chain_entry(id, expected_revision).await
-    }
-    async fn rebalance_chain(
-        &self,
-        principal_id: Uuid,
-        slot: PluginSlotKind,
-    ) -> StorageResult<Vec<PluginChainEntry>> {
-        self.inner.rebalance_chain(principal_id, slot).await
     }
 }
 
@@ -380,15 +363,31 @@ async fn create_upstream(storage: &Storage, name: &str, enabled: bool) -> Upstre
     let ciphertext = AeadService::from_master_key(AEAD_KEY)
         .encrypt(b"sk-ant-fixture-secret", created.id.as_bytes())
         .expect("ciphertext");
-    let with_key = UpstreamStore::update_api_key_secret(storage, created.id, Some(ciphertext))
-        .await
-        .expect("api key stored");
+    let with_key = UpstreamStore::update(
+        storage,
+        created.id,
+        created.revision,
+        UpstreamUpdate {
+            api_key_ciphertext: Some(ciphertext),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await
+    .expect("api key stored");
     if with_key.enabled == enabled {
         return with_key;
     }
-    UpstreamStore::set_enabled(storage, with_key.id, with_key.revision, enabled)
-        .await
-        .expect("set enabled")
+    UpstreamStore::update(
+        storage,
+        with_key.id,
+        with_key.revision,
+        UpstreamUpdate {
+            enabled: Some(enabled),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await
+    .expect("set enabled")
 }
 
 async fn fixture() -> Fixture {
@@ -619,9 +618,17 @@ async fn concurrent_admin_upstream_disable_is_resident_when_response_returns() {
         .await
         .expect("rebuild A parked after reading upstream contents");
 
-    UpstreamStore::set_enabled(fx.storage.as_ref(), fx.target.id, fx.target.revision, false)
-        .await
-        .expect("mutation B commits");
+    UpstreamStore::update(
+        fx.storage.as_ref(),
+        fx.target.id,
+        fx.target.revision,
+        UpstreamUpdate {
+            enabled: Some(false),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await
+    .expect("mutation B commits");
     let (response_a, response_b) =
         race_admin_rebind_against_parked_rebuild(&fx, gate_a.release, request_a).await;
     assert_eq!(response_a.status(), StatusCode::OK);
@@ -751,9 +758,17 @@ async fn reconcile_repairs_view_built_from_contents_older_than_its_signature() {
     let fx = fixture().await;
 
     // Out-of-band change so the reconciler rebuilds.
-    UpstreamStore::set_enabled(fx.storage.as_ref(), fx.other.id, fx.other.revision, true)
-        .await
-        .expect("out-of-band enable");
+    UpstreamStore::update(
+        fx.storage.as_ref(),
+        fx.other.id,
+        fx.other.revision,
+        UpstreamUpdate {
+            enabled: Some(true),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await
+    .expect("out-of-band enable");
 
     let gate = arm(&fx.rate_limit_gate.slots);
     let reconciler = fx.reconciler.clone();
@@ -762,9 +777,17 @@ async fn reconcile_repairs_view_built_from_contents_older_than_its_signature() {
         .await
         .expect("reconcile rebuild parked after reading upstream contents");
 
-    UpstreamStore::set_enabled(fx.storage.as_ref(), fx.target.id, fx.target.revision, false)
-        .await
-        .expect("direct disable commits without a rebuild");
+    UpstreamStore::update(
+        fx.storage.as_ref(),
+        fx.target.id,
+        fx.target.revision,
+        UpstreamUpdate {
+            enabled: Some(false),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await
+    .expect("direct disable commits without a rebuild");
 
     gate.release.send(()).expect("release parked rebuild");
     parked

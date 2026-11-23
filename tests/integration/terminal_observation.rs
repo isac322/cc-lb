@@ -2071,7 +2071,16 @@ async fn seed_runtime_state_full_v2(
     // loads via config.aead.key_env.
     let aead = AeadService::from_master_key([0x22; 32]);
     let ciphertext = aead.encrypt(b"sk-ant-fixture-secret", created.id.as_bytes())?;
-    UpstreamStore::update_api_key_secret(storage.as_ref(), created.id, Some(ciphertext)).await?;
+    UpstreamStore::update(
+        storage.as_ref(),
+        created.id,
+        created.revision,
+        cc_lb_storage_api::UpstreamUpdate {
+            api_key_ciphertext: Some(ciphertext),
+            ..cc_lb_storage_api::UpstreamUpdate::default()
+        },
+    )
+    .await?;
     PrincipalStore::create(
         storage.as_ref(),
         PrincipalCreate {

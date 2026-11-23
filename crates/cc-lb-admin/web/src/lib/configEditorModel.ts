@@ -737,7 +737,7 @@ const ADDRESS_FORMAT_MESSAGE =
  * Local check for a `host:port` socket address: IPv4, bracketed IPv6, or a
  * hostname, with a port in 1–65535. Returns an error message, or null.
  */
-export function checkSocketAddress(input: string): string | null {
+function checkSocketAddress(input: string): string | null {
   let host: string;
   let port: string;
   if (input.startsWith('[')) {
@@ -2215,7 +2215,7 @@ export function humanizeConfigValue(
   }
 }
 
-export function isConfigLeafActive(
+function isConfigLeafActive(
   leaf: Pick<ConfigSchemaLeaf, 'variantAlternatives'>,
   source: unknown,
 ): boolean {
@@ -2308,7 +2308,7 @@ export function configKeyLabel(key: string): string {
     : text;
 }
 
-export function configLeafLabel(
+function configLeafLabel(
   leaf: Pick<ConfigSchemaLeaf, 'path' | 'schema'>,
 ): string {
   const title = leaf.schema.title;
@@ -3163,7 +3163,7 @@ function issuesForPath(
   );
 }
 
-export function countConfigValidationIssues(
+function countConfigValidationIssues(
   issues: readonly ConfigValidationIssue[],
 ): Pick<ConfigEditorCounts, 'errors' | 'warnings'> {
   const issueKeys = new Set<string>();

@@ -65,10 +65,8 @@ impl Fixture {
             ..OpenAiOAuthConfig::default()
         });
         config.oauth.gemini = Some(GeminiOAuthConfig {
-            token_url: format!("{base_url}/gemini/token").parse().expect("URL"),
             userinfo_url: format!("{base_url}/userinfo").parse().expect("URL"),
             code_assist_url: format!("{base_url}/v1internal").parse().expect("URL"),
-            ..GeminiOAuthConfig::default()
         });
         config.oauth.antigravity = Some(AntigravityOAuthConfig {
             client_id: ANTIGRAVITY_CLIENT_ID.to_owned(),

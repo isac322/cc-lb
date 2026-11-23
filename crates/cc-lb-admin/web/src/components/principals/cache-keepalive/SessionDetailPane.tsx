@@ -816,12 +816,10 @@ function RenewalTable({
   label,
   turns,
   timeZone,
-  cycleStartMs,
 }: {
   label: string;
   turns: CacheKeepaliveTurn[];
   timeZone: string;
-  cycleStartMs?: number;
 }) {
   const ordered = [...turns].sort((a, b) => a.time_ms - b.time_ms);
   return (
@@ -859,11 +857,7 @@ function RenewalTable({
                   dateTime={new Date(turn.time_ms).toISOString()}
                   title={fullTimestamp(turn.time_ms, timeZone)}
                 >
-                  {railTime(
-                    turn.time_ms,
-                    timeZone,
-                    cycleStartMs ?? ordered[0]?.time_ms,
-                  )}
+                  {railTime(turn.time_ms, timeZone, ordered[0]?.time_ms)}
                 </time>
               </TableCell>
               <TableCell>{followUpLabel(turn)}</TableCell>
@@ -1196,12 +1190,6 @@ export function SessionDetailPane({
                 }
                 turns={cycleTurns.get(cycleId) ?? []}
                 timeZone={timeZone}
-                cycleStartMs={
-                  cycleId === null
-                    ? undefined
-                    : railGaps.find((gap) => gap.cycle_id === cycleId)
-                        ?.pause_at_ms
-                }
               />
             ))}
           </section>

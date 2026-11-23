@@ -353,20 +353,6 @@ impl UsageRollupStore for PostgresStorage {
                 .join(":"),
         ))
     }
-
-    async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>> {
-        let checkpoint = sqlx::query_scalar::<_, i64>(
-            "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = $1",
-        )
-        .bind(CHECKPOINT_ID)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        checkpoint
-            .map(|value| i64_to_u64(value, "usage rollup checkpoint"))
-            .transpose()
-    }
 }
 async fn merge_stale_gemini_rollups(
     tx: &mut Transaction<'_, Postgres>,

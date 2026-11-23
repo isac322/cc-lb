@@ -22,10 +22,9 @@ use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::reconcile::Reconciler;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    MetaStore, StorageError, StorageResult, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
-    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamCreate, UpstreamRecord,
-    UpstreamStore, UpstreamSubscriptionQuotaStore,
+    MetaStore, StorageError, StorageResult, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaSource, SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamCreate,
+    UpstreamRecord, UpstreamStore, UpstreamSubscriptionQuotaStore, UpstreamUpdate,
 };
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use tokio::sync::oneshot;
@@ -146,13 +145,6 @@ impl UpstreamSubscriptionQuotaStore for SwitchableQuotaStore {
         }
         Ok(records)
     }
-
-    async fn put_subscription_quota_checkpoints(
-        &self,
-        records: &[SubscriptionQuotaCheckpointRecord],
-    ) -> StorageResult<usize> {
-        self.inner.put_subscription_quota_checkpoints(records).await
-    }
 }
 
 struct Peer {
@@ -204,9 +196,17 @@ async fn create_upstream(storage: &Storage, name: &str, kind: UpstreamKind) -> U
     let ciphertext = AeadService::from_master_key(AEAD_KEY)
         .encrypt(b"sk-ant-fixture-secret", created.id.as_bytes())
         .expect("api-key ciphertext");
-    UpstreamStore::update_api_key_secret(storage, created.id, Some(ciphertext))
-        .await
-        .expect("upstream api-key secret")
+    UpstreamStore::update(
+        storage,
+        created.id,
+        created.revision,
+        UpstreamUpdate {
+            api_key_ciphertext: Some(ciphertext),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await
+    .expect("upstream api-key secret")
 }
 
 async fn peer(upstream_names: &[&str]) -> (Peer, Vec<UpstreamRecord>) {

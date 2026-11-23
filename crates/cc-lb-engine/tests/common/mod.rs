@@ -744,3 +744,90 @@ impl Default for TestLifecycleBus {
         Self::new()
     }
 }
+
+pub fn with_static_limit_subject(
+    lifecycle: Lifecycle,
+    limit_engine: Arc<cc_lb_control::api_keys::limit_engine::LimitEngine>,
+    principal_id: String,
+    key_id: String,
+    record: StoredApiKeyRecord,
+) -> Lifecycle {
+    struct StaticTestLimitSubjectProvider(cc_lb_engine::AuthLimitSubject);
+    #[async_trait]
+    impl cc_lb_engine::LimitSubjectProvider for StaticTestLimitSubjectProvider {
+        async fn limit_subject(
+            &self,
+            _ctx: &cc_lb_engine::RequestContext,
+            _principal: &Principal,
+            _authn_success: &cc_lb_control::api_keys::builtin_authn::AuthnSuccess,
+        ) -> Option<cc_lb_engine::AuthLimitSubject> {
+            Some(self.0.clone())
+        }
+    }
+    lifecycle.with_limit_engine(
+        limit_engine,
+        Arc::new(StaticTestLimitSubjectProvider(
+            cc_lb_engine::AuthLimitSubject {
+                principal_id,
+                key_id,
+                record,
+            },
+        )),
+    )
+}
+
+pub fn test_parse_cache_breakpoints(body: &[u8]) -> Vec<cc_lb_domain::CacheBreakpoint> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let model = value
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let canonical = cc_lb_engine::model_resolution::canonical_model_id(
+        cc_lb_domain::Provider::Anthropic,
+        model,
+    );
+    let analysis = cc_lb_engine::prompt_cache_simulator::analyze_v3_prompt_cache(&value, canonical);
+    analysis
+        .breakpoints
+        .into_iter()
+        .map(|bp| cc_lb_domain::CacheBreakpoint {
+            block_index: u32::try_from(bp.block_index).unwrap_or(u32::MAX),
+            source: match bp.source {
+                cc_lb_engine::prompt_cache_simulator::V3PromptCacheBlockSource::Tools => {
+                    cc_lb_domain::CacheBreakpointSource::Tools
+                }
+                cc_lb_engine::prompt_cache_simulator::V3PromptCacheBlockSource::System => {
+                    cc_lb_domain::CacheBreakpointSource::System
+                }
+                cc_lb_engine::prompt_cache_simulator::V3PromptCacheBlockSource::Message => {
+                    cc_lb_domain::CacheBreakpointSource::Message
+                }
+            },
+            path: bp.path,
+            message_index: bp
+                .message_index
+                .map(|idx| u32::try_from(idx).unwrap_or(u32::MAX)),
+            prefix_hash: bp.prefix_key,
+            prefix_bytes: bp.prefix_bytes,
+            requested_ttl: match bp.ttl.as_deref() {
+                Some(ttl) if ttl.eq_ignore_ascii_case("1h") => cc_lb_domain::TtlClass::Ephemeral1h,
+                _ => cc_lb_domain::TtlClass::Ephemeral5m,
+            },
+            lookback_prefixes: bp
+                .lookback_prefixes
+                .into_iter()
+                .map(|prefix| cc_lb_domain::CacheLookbackPrefix {
+                    prefix_hash: prefix.prefix_key,
+                    content_block_index: u32::try_from(prefix.content_block_index)
+                        .unwrap_or(u32::MAX),
+                    lookback_distance: u32::try_from(prefix.lookback_distance).unwrap_or(u32::MAX),
+                })
+                .collect(),
+            token_estimate_source: Some(
+                cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
+            ),
+        })
+        .collect()
+}

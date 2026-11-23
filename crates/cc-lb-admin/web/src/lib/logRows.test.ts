@@ -11,7 +11,6 @@ import {
   filterLogRows,
   filterLogRowsByStatusClass,
   isGenerationRequestEvent,
-  isMessagesRequestEvent,
   mergeLogRows,
   REQUEST_EVENT_KIND_LABELS,
 } from './logRows';
@@ -284,17 +283,6 @@ describe('effectiveRequestEventKind', () => {
     expect(effectiveRequestEventKind({ event_kind: 'not-a-kind' })).toBe(
       'unclassified',
     );
-  });
-
-  it('reports only effective messages rows as messages events', () => {
-    expect(isMessagesRequestEvent({ event_kind: 'messages' })).toBe(true);
-    expect(
-      isMessagesRequestEvent({
-        source_kind: 'renewal',
-        event_kind: 'messages',
-      }),
-    ).toBe(false);
-    expect(isMessagesRequestEvent({})).toBe(false);
   });
 });
 

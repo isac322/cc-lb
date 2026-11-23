@@ -90,21 +90,6 @@ impl UpstreamSubscriptionQuotaStore for SqliteStorage {
     ) -> StorageResult<Vec<SubscriptionQuotaSample>> {
         list_latest_records_for_upstreams(self, upstream_ids).await
     }
-
-    async fn put_subscription_quota_checkpoints(
-        &self,
-        records: &[SubscriptionQuotaCheckpointRecord],
-    ) -> StorageResult<usize> {
-        let mut tx = self.begin_immediate().await?;
-        let mut inserted = 0usize;
-        for record in records {
-            if insert_checkpoint_if_changed(&mut tx, record).await? {
-                inserted += 1;
-            }
-        }
-        tx.commit().await.map_err(map_sqlx_error)?;
-        Ok(inserted)
-    }
 }
 
 #[async_trait]

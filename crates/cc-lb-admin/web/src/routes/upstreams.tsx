@@ -2536,8 +2536,7 @@ export function DetailView({
                                 data-testid="oauth-credential-mode"
                                 className="mt-1"
                               >
-                                {upstream.kind === 'anthropic_oauth' &&
-                                principalEntry.mode === 'long_lived_365d' ? (
+                                {principalEntry.mode === 'long_lived_365d' ? (
                                   <>
                                     <span>365-day token</span>
                                     <div className="mt-0.5 text-caption text-text-faint">
@@ -2797,7 +2796,7 @@ export function DetailView({
                 />
               </DetailRows>
             </DetailSection>
-          ) : isApiKey ? (
+          ) : (
             <ApiKeyAccessSection
               upstream={upstream}
               workspaceEditing={activeEditor === 'workspace'}
@@ -2808,31 +2807,11 @@ export function DetailView({
               usageReportsStopped={usageReportsStopped}
               usageAttribution={keyUsage?.attribution}
             />
-          ) : (
-            <DetailSection
-              title="Credential"
-              description={upstreamKindLabel(upstream.kind)}
-            >
-              <DetailRows>
-                <EndpointRow
-                  upstream={upstream}
-                  kind={
-                    isSubscription
-                      ? 'oauth'
-                      : isVertexCredential
-                        ? 'credential'
-                        : 'api_key'
-                  }
-                  editing={activeEditor === 'endpoint'}
-                  onEditingChange={editorToggle('endpoint')}
-                />
-              </DetailRows>
-            </DetailSection>
           )}
         </DetailSectionGrid>
       </DetailPane>
 
-      {isSubscription || (!isApiKey && !isVertexCredential) ? null : (
+      {isSubscription ? null : (
         <UpstreamConnectDialog
           target={replaceOpen ? { mode: 'replace', upstream } : null}
           onClose={() => setReplaceOpen(false)}

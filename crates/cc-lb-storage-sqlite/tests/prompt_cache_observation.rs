@@ -165,13 +165,14 @@ async fn provider_cache_unknown_or_expired_rows_are_not_active_and_only_expired_
     }
 
     let before_purge = storage
-        .list_active_provider_observations(
-            upstream_id,
+        .list_active_provider_observations_for_candidates(
+            &[upstream_id],
             "gemini",
             "gemini-2.5-pro",
             "explicit",
             "scope",
             "sha256:identity",
+            None,
             200,
         )
         .await
@@ -187,13 +188,14 @@ async fn provider_cache_unknown_or_expired_rows_are_not_active_and_only_expired_
         1
     );
     let after_purge = storage
-        .list_active_provider_observations(
-            upstream_id,
+        .list_active_provider_observations_for_candidates(
+            &[upstream_id],
             "gemini",
             "gemini-2.5-pro",
             "explicit",
             "scope",
             "sha256:identity",
+            None,
             200,
         )
         .await
@@ -238,25 +240,6 @@ async fn native_cache_openai_write_observation_roundtrips_and_filters_nulls() {
         .await
         .expect("upsert OpenAI native cache observation");
 
-    let observed = storage
-        .list_active_provider_observations(
-            upstream_id,
-            "openai",
-            "gpt-5",
-            "responses",
-            "account",
-            "sha256:openai-account",
-            2_000,
-        )
-        .await
-        .expect("list OpenAI native cache observation");
-    assert_eq!(observed, vec![record.clone()]);
-    assert_eq!(observed[0].observed_cached_tokens, None);
-    assert_eq!(observed[0].observed_write_tokens, Some(300));
-    assert_eq!(observed[0].retention_secs, Some(1_800));
-    assert_eq!(observed[0].expires_at_unix_secs, Some(2_800));
-    assert_eq!(observed[0].evidence_source, "responses_usage");
-
     let matching_retention = storage
         .list_active_provider_observations_for_candidates(
             &[upstream_id],
@@ -271,6 +254,11 @@ async fn native_cache_openai_write_observation_roundtrips_and_filters_nulls() {
         .await
         .expect("filter OpenAI native cache observation by retention");
     assert_eq!(matching_retention, vec![record.clone()]);
+    assert_eq!(matching_retention[0].observed_cached_tokens, None);
+    assert_eq!(matching_retention[0].observed_write_tokens, Some(300));
+    assert_eq!(matching_retention[0].retention_secs, Some(1_800));
+    assert_eq!(matching_retention[0].expires_at_unix_secs, Some(2_800));
+    assert_eq!(matching_retention[0].evidence_source, "responses_usage");
 
     let null_retention = storage
         .list_active_provider_observations_for_candidates(
@@ -288,13 +276,14 @@ async fn native_cache_openai_write_observation_roundtrips_and_filters_nulls() {
     assert!(null_retention.is_empty());
 
     let wrong_model = storage
-        .list_active_provider_observations(
-            upstream_id,
+        .list_active_provider_observations_for_candidates(
+            &[upstream_id],
             "openai",
             "gpt-5-mini",
             "responses",
             "account",
             "sha256:openai-account",
+            Some(1_800),
             2_000,
         )
         .await

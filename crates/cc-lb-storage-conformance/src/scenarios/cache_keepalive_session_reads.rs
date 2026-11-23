@@ -240,7 +240,7 @@ where
             "active", "fresh", "fresh-renewed", "incomplete", "legacy",
             "user-cancelled", "renewal-stale",
         ] {
-            storage.replace_from_real_request(&request(session, 1_000)).await?;
+            storage.replace_from_real_request_fenced(&request(session, 1_000), None).await?;
         }
         for (session, deadline) in [
             ("fresh", 4_000_000_000),
@@ -361,7 +361,7 @@ where
             ensure!(summary.total_spent_micros == 14 && summary.successful_hits == 2);
             ensure!(summary.unlisted_sessions == 0 && summary.unlisted_spent_micros == 0);
         }
-        storage.replace_from_real_request(&request("fresh", 1_002)).await?;
+        storage.replace_from_real_request_fenced(&request("fresh", 1_002), None).await?;
         let completed = storage.get_cache_keepalive_list_item(TARGET_PRINCIPAL, "fresh").await?
             .expect("completed request exists");
         ensure!(completed.status == Some(CacheKeepaliveSessionStatus::Active));
@@ -392,7 +392,7 @@ where
             (None, "Renewals ended"),
         ].into_iter().enumerate() {
             let now = 1_100 + index as u64;
-            storage.replace_from_real_request(&request("final-reason", now)).await?;
+            storage.replace_from_real_request_fenced(&request("final-reason", now), None).await?;
             if cancel_reason != Some("new_request") {
                 ensure!(
                     storage.begin_cache_keepalive_request_fenced(
@@ -424,7 +424,7 @@ where
         let baseline_summary = storage.read_cache_keepalive_summary_aggregate_for_horizon(
             TARGET_PRINCIPAL, horizon_start_ms, Some(horizon_start_ms),
         ).await?;
-        storage.replace_from_real_request(&request("zero-turn-live", now)).await?;
+        storage.replace_from_real_request_fenced(&request("zero-turn-live", now), None).await?;
         ensure!(
             storage.begin_cache_keepalive_request_fenced(
                 "zero-turn-live", None, now, now.saturating_add(300),
@@ -663,7 +663,10 @@ where
                 request.cache_anchor_at_unix_secs = 100;
                 request.now_unix_secs = 100;
                 request.expires_at_unix_secs = 200;
-                let original = storage.replace_from_real_request(&request).await?;
+                let original = storage
+                    .replace_from_real_request_fenced(&request, None)
+                    .await?
+                    .expect("unfenced real-request replace returns session");
                 let old = storage
                     .allocate_cache_keepalive_completion_ticket(&key, 100, 200)
                     .await?;
@@ -716,7 +719,9 @@ where
                 request.cache_anchor_at_unix_secs = 202;
                 request.now_unix_secs = 202;
                 request.expires_at_unix_secs = 900;
-                other.replace_from_real_request(&request).await?;
+                other
+                    .replace_from_real_request_fenced(&request, None)
+                    .await?;
                 ensure!(
                     other
                         .begin_cache_keepalive_request_fenced(&key, Some(current), 202, 500)
@@ -807,7 +812,9 @@ where
             request.cache_anchor_at_unix_secs = 100;
             request.now_unix_secs = 100;
             request.expires_at_unix_secs = 900;
-            storage.replace_from_real_request(&request).await?;
+            storage
+                .replace_from_real_request_fenced(&request, None)
+                .await?;
             let ticket = storage
                 .allocate_cache_keepalive_completion_ticket(&key, 100, 200)
                 .await?;
@@ -868,7 +875,10 @@ where
         request.cache_anchor_at_unix_secs = 100;
         request.now_unix_secs = 100;
         request.expires_at_unix_secs = 900;
-        let original = storage.replace_from_real_request(&request).await?;
+        let original = storage
+            .replace_from_real_request_fenced(&request, None)
+            .await?
+            .expect("unfenced real-request replace returns session");
         if let Some(raw) = raw {
             storage.put_meta_value(&order_key, raw).await?;
         }
@@ -1275,27 +1285,30 @@ where
             let cycle = Uuid::from_u128(90_000 + index as u128);
             if snapshot || name == "early" {
                 storage
-                    .replace_from_real_request(&CacheKeepaliveReplaceRequest {
-                        session_key_hash: session.clone(),
-                        principal_id: TARGET_PRINCIPAL.to_owned(),
-                        accounting_key_id: None,
-                        upstream_id: Uuid::from_u128(11),
-                        cycle_id: cycle,
-                        ttl: CacheTtl::Ttl5m,
-                        cache_anchor_at_unix_secs: anchor,
-                        run_at_unix_secs: anchor + 270,
-                        expires_at_unix_secs: anchor + 300,
-                        encrypted_payload: vec![1],
-                        display_reason: "agent-in-turn".to_owned(),
-                        config_snapshot: CacheKeepaliveConfigSnapshot {
-                            refresh_lead_time_5m_secs: 30,
-                            refresh_lead_time_1h_secs: 300,
-                            max_refreshes_per_session: 12,
-                            max_total_duration_secs: 14_400,
-                            snapshot_max_bytes: 524_288,
+                    .replace_from_real_request_fenced(
+                        &CacheKeepaliveReplaceRequest {
+                            session_key_hash: session.clone(),
+                            principal_id: TARGET_PRINCIPAL.to_owned(),
+                            accounting_key_id: None,
+                            upstream_id: Uuid::from_u128(11),
+                            cycle_id: cycle,
+                            ttl: CacheTtl::Ttl5m,
+                            cache_anchor_at_unix_secs: anchor,
+                            run_at_unix_secs: anchor + 270,
+                            expires_at_unix_secs: anchor + 300,
+                            encrypted_payload: vec![1],
+                            display_reason: "agent-in-turn".to_owned(),
+                            config_snapshot: CacheKeepaliveConfigSnapshot {
+                                refresh_lead_time_5m_secs: 30,
+                                refresh_lead_time_1h_secs: 300,
+                                max_refreshes_per_session: 12,
+                                max_total_duration_secs: 14_400,
+                                snapshot_max_bytes: 524_288,
+                            },
+                            now_unix_secs: anchor,
                         },
-                        now_unix_secs: anchor,
-                    })
+                        None,
+                    )
                     .await?;
             }
             for (ordinal, offset) in offsets.iter().copied().enumerate() {
@@ -1412,34 +1425,37 @@ where
             expected_not_needed += redundant;
             expected_unknown += unknown;
             let totals = storage
-                .read_cache_keepalive_summary_aggregate(TARGET_PRINCIPAL, 0)
+                .read_cache_keepalive_summary_aggregate_for_horizon(TARGET_PRINCIPAL, 0, None)
                 .await?;
             if name == "legacy-early" {
                 storage
-                    .replace_from_real_request(&CacheKeepaliveReplaceRequest {
-                        session_key_hash: session.clone(),
-                        principal_id: TARGET_PRINCIPAL.to_owned(),
-                        accounting_key_id: None,
-                        upstream_id: Uuid::from_u128(11),
-                        cycle_id: Uuid::from_u128(100_000 + index as u128),
-                        ttl: CacheTtl::Ttl5m,
-                        cache_anchor_at_unix_secs: anchor + 500,
-                        run_at_unix_secs: anchor + 770,
-                        expires_at_unix_secs: anchor + 800,
-                        encrypted_payload: vec![1],
-                        display_reason: "agent-in-turn".to_owned(),
-                        config_snapshot: CacheKeepaliveConfigSnapshot {
-                            refresh_lead_time_5m_secs: 10,
-                            refresh_lead_time_1h_secs: 300,
-                            max_refreshes_per_session: 12,
-                            max_total_duration_secs: 14_400,
-                            snapshot_max_bytes: 524_288,
+                    .replace_from_real_request_fenced(
+                        &CacheKeepaliveReplaceRequest {
+                            session_key_hash: session.clone(),
+                            principal_id: TARGET_PRINCIPAL.to_owned(),
+                            accounting_key_id: None,
+                            upstream_id: Uuid::from_u128(11),
+                            cycle_id: Uuid::from_u128(100_000 + index as u128),
+                            ttl: CacheTtl::Ttl5m,
+                            cache_anchor_at_unix_secs: anchor + 500,
+                            run_at_unix_secs: anchor + 770,
+                            expires_at_unix_secs: anchor + 800,
+                            encrypted_payload: vec![1],
+                            display_reason: "agent-in-turn".to_owned(),
+                            config_snapshot: CacheKeepaliveConfigSnapshot {
+                                refresh_lead_time_5m_secs: 10,
+                                refresh_lead_time_1h_secs: 300,
+                                max_refreshes_per_session: 12,
+                                max_total_duration_secs: 14_400,
+                                snapshot_max_bytes: 524_288,
+                            },
+                            now_unix_secs: anchor + 500,
                         },
-                        now_unix_secs: anchor + 500,
-                    })
+                        None,
+                    )
                     .await?;
                 let replaced = storage
-                    .read_cache_keepalive_summary_aggregate(TARGET_PRINCIPAL, 0)
+                    .read_cache_keepalive_summary_aggregate_for_horizon(TARGET_PRINCIPAL, 0, None)
                     .await?;
                 ensure!(
                     replaced.not_needed_cycles == expected_not_needed
@@ -1544,7 +1560,7 @@ where
                     "{name}: session must be purged"
                 );
                 let purged = storage
-                    .read_cache_keepalive_summary_aggregate(TARGET_PRINCIPAL, 0)
+                    .read_cache_keepalive_summary_aggregate_for_horizon(TARGET_PRINCIPAL, 0, None)
                     .await?;
                 ensure!(
                     purged.not_needed_cycles == expected_not_needed,
@@ -1571,27 +1587,30 @@ where
             .as_secs();
         let cycle = Uuid::from_u128(99_999);
         storage
-            .replace_from_real_request(&CacheKeepaliveReplaceRequest {
-                session_key_hash: "counterfactual-pending".to_owned(),
-                principal_id: principal.to_owned(),
-                accounting_key_id: None,
-                upstream_id: Uuid::from_u128(11),
-                cycle_id: cycle,
-                ttl: CacheTtl::Ttl5m,
-                cache_anchor_at_unix_secs: now.saturating_sub(270),
-                run_at_unix_secs: now,
-                expires_at_unix_secs: now + 300,
-                encrypted_payload: vec![1],
-                display_reason: "agent-in-turn".to_owned(),
-                config_snapshot: CacheKeepaliveConfigSnapshot {
-                    refresh_lead_time_5m_secs: 30,
-                    refresh_lead_time_1h_secs: 300,
-                    max_refreshes_per_session: 12,
-                    max_total_duration_secs: 14_400,
-                    snapshot_max_bytes: 524_288,
+            .replace_from_real_request_fenced(
+                &CacheKeepaliveReplaceRequest {
+                    session_key_hash: "counterfactual-pending".to_owned(),
+                    principal_id: principal.to_owned(),
+                    accounting_key_id: None,
+                    upstream_id: Uuid::from_u128(11),
+                    cycle_id: cycle,
+                    ttl: CacheTtl::Ttl5m,
+                    cache_anchor_at_unix_secs: now.saturating_sub(270),
+                    run_at_unix_secs: now,
+                    expires_at_unix_secs: now + 300,
+                    encrypted_payload: vec![1],
+                    display_reason: "agent-in-turn".to_owned(),
+                    config_snapshot: CacheKeepaliveConfigSnapshot {
+                        refresh_lead_time_5m_secs: 30,
+                        refresh_lead_time_1h_secs: 300,
+                        max_refreshes_per_session: 12,
+                        max_total_duration_secs: 14_400,
+                        snapshot_max_bytes: 524_288,
+                    },
+                    now_unix_secs: now,
                 },
-                now_unix_secs: now,
-            })
+                None,
+            )
             .await?;
         let (event, mut projections, _) = turn_fixture(TurnSeed {
             source_ref_id: "counterfactual-pending-turn",
@@ -1638,7 +1657,7 @@ where
             .append_request_event_with_projections(&event, &projections)
             .await?;
         let pending = storage
-            .read_cache_keepalive_summary_aggregate(principal, 0)
+            .read_cache_keepalive_summary_aggregate_for_horizon(principal, 0, None)
             .await?;
         ensure!(pending.evidence_status == "pending");
         ensure!(
@@ -1670,33 +1689,36 @@ where
             )
             .await?;
         let observed = storage
-            .read_cache_keepalive_summary_aggregate(principal, 0)
+            .read_cache_keepalive_summary_aggregate_for_horizon(principal, 0, None)
             .await?;
         ensure!(observed.evidence_status == "observed" && observed.not_needed_cycles == 1);
 
         let new_cycle = Uuid::from_u128(100_000);
         storage
-            .replace_from_real_request(&CacheKeepaliveReplaceRequest {
-                session_key_hash: "counterfactual-open-saved".to_owned(),
-                principal_id: principal.to_owned(),
-                accounting_key_id: None,
-                upstream_id: Uuid::from_u128(11),
-                cycle_id: new_cycle,
-                ttl: CacheTtl::Ttl5m,
-                cache_anchor_at_unix_secs: now - 540,
-                run_at_unix_secs: now,
-                expires_at_unix_secs: now + 300,
-                encrypted_payload: vec![1],
-                display_reason: "agent-in-turn".to_owned(),
-                config_snapshot: CacheKeepaliveConfigSnapshot {
-                    refresh_lead_time_5m_secs: 30,
-                    refresh_lead_time_1h_secs: 300,
-                    max_refreshes_per_session: 12,
-                    max_total_duration_secs: 14_400,
-                    snapshot_max_bytes: 524_288,
+            .replace_from_real_request_fenced(
+                &CacheKeepaliveReplaceRequest {
+                    session_key_hash: "counterfactual-open-saved".to_owned(),
+                    principal_id: principal.to_owned(),
+                    accounting_key_id: None,
+                    upstream_id: Uuid::from_u128(11),
+                    cycle_id: new_cycle,
+                    ttl: CacheTtl::Ttl5m,
+                    cache_anchor_at_unix_secs: now - 540,
+                    run_at_unix_secs: now,
+                    expires_at_unix_secs: now + 300,
+                    encrypted_payload: vec![1],
+                    display_reason: "agent-in-turn".to_owned(),
+                    config_snapshot: CacheKeepaliveConfigSnapshot {
+                        refresh_lead_time_5m_secs: 30,
+                        refresh_lead_time_1h_secs: 300,
+                        max_refreshes_per_session: 12,
+                        max_total_duration_secs: 14_400,
+                        snapshot_max_bytes: 524_288,
+                    },
+                    now_unix_secs: now,
                 },
-                now_unix_secs: now,
-            })
+                None,
+            )
             .await?;
         for (ordinal, start) in [now - 270, now].into_iter().enumerate() {
             let source = format!("counterfactual-open-saved-{ordinal}");
@@ -1750,7 +1772,7 @@ where
             )
             .await?;
         let saved = storage
-            .read_cache_keepalive_summary_aggregate(principal, 0)
+            .read_cache_keepalive_summary_aggregate_for_horizon(principal, 0, None)
             .await?;
         ensure!(saved.evidence_status == "observed" && saved.not_needed_cycles == 1);
         ensure!(

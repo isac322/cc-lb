@@ -230,13 +230,14 @@ where
         }
 
         let records = storage
-            .list_active_provider_observations(
-                upstream_id,
+            .list_active_provider_observations_for_candidates(
+                &[upstream_id],
                 "gemini",
                 "gemini-2.5-pro",
                 "explicit",
                 "scope",
                 "sha256:identity",
+                None,
                 now,
             )
             .await?;
@@ -252,13 +253,14 @@ where
         );
 
         let records = storage
-            .list_active_provider_observations(
-                upstream_id,
+            .list_active_provider_observations_for_candidates(
+                &[upstream_id],
                 "gemini",
                 "gemini-2.5-pro",
                 "explicit",
                 "scope",
                 "sha256:identity",
+                None,
                 now,
             )
             .await?;
@@ -309,13 +311,14 @@ where
         storage.upsert_provider_observation(&newer).await?;
 
         let records = storage
-            .list_active_provider_observations(
-                upstream_id,
+            .list_active_provider_observations_for_candidates(
+                &[upstream_id],
                 "openai",
                 "gpt-5.6",
                 "implicit",
                 "scope",
                 "sha256:identity",
+                Some(1_800),
                 now,
             )
             .await?;

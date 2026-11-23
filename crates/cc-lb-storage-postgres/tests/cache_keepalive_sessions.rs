@@ -78,7 +78,9 @@ async fn housekeeping_retains_protected_order_counters_and_fails_closed_at_overf
     for stale_pending in [false, true] {
         let key = format!("retained-order-{stale_pending}");
         let request = replace_request(&key, b"expiring-payload", 100);
-        storage.replace_from_real_request(&request).await?;
+        storage
+            .replace_from_real_request_fenced(&request, None)
+            .await?;
         assert_eq!(
             storage
                 .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
@@ -286,7 +288,10 @@ async fn in_request_completion_requires_original_start_ticket() -> Result<()> {
             for fresh_completion_ticket in [true, false] {
                 let key = format!("owner-{start_b}-{replacement}-{fresh_completion_ticket}");
                 let seed = replace_request(&key, b"prefix", 90);
-                let original = storage.replace_from_real_request(&seed).await?;
+                let original = storage
+                    .replace_from_real_request_fenced(&seed, None)
+                    .await?
+                    .expect("unfenced real-request replace returns session");
                 let ticket_a = storage
                     .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
                     .await?;
@@ -392,7 +397,9 @@ async fn in_request_completion_requires_original_start_ticket() -> Result<()> {
         let key = format!("compatibility-{absent}");
         let request = replace_request(&key, b"compatible", 100);
         if !absent {
-            storage.replace_from_real_request(&request).await?;
+            storage
+                .replace_from_real_request_fenced(&request, None)
+                .await?;
         }
         let ticket = storage
             .allocate_cache_keepalive_completion_ticket(&key, 100, 10_000_000)
@@ -956,7 +963,10 @@ async fn purge_expired_prunes_unmatched_and_invalid_follow_ups_without_changing_
     let key = "expired-evidence-session";
     let mut request = replace_request(key, b"payload", 0);
     request.cycle_id = Uuid::from_u128(8);
-    let session = storage.replace_from_real_request(&request).await?;
+    let session = storage
+        .replace_from_real_request_fenced(&request, None)
+        .await?
+        .expect("unfenced real-request replace returns session");
     storage
         .mark_cache_keepalive_enqueued(&session.session_key_hash, session.generation, 1)
         .await?;
@@ -1049,7 +1059,10 @@ async fn purge_expired_prunes_later_follow_up_across_sibling_renewals(
     let cycle_id = Uuid::from_u128(81);
     let mut request = replace_request("sibling-purge-session", b"payload", 0);
     request.cycle_id = cycle_id;
-    let session = storage.replace_from_real_request(&request).await?;
+    let session = storage
+        .replace_from_real_request_fenced(&request, None)
+        .await?
+        .expect("unfenced real-request replace returns session");
     storage
         .mark_cache_keepalive_enqueued(&session.session_key_hash, session.generation, 1)
         .await?;
@@ -1112,7 +1125,10 @@ async fn purge_expired_preserves_follow_up_earliest_for_one_matching_cycle(
     let cycle_two = Uuid::from_u128(84);
     let mut request = replace_request("multi-cycle-purge-session", b"payload", 0);
     request.cycle_id = cycle_one;
-    let session = storage.replace_from_real_request(&request).await?;
+    let session = storage
+        .replace_from_real_request_fenced(&request, None)
+        .await?
+        .expect("unfenced real-request replace returns session");
     storage
         .mark_cache_keepalive_enqueued(&session.session_key_hash, session.generation, 1)
         .await?;
@@ -1400,8 +1416,9 @@ async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences
     );
 
     let healthy = storage
-        .replace_from_real_request(&replace_request("fenced-healthy", b"healthy", 200))
-        .await?;
+        .replace_from_real_request_fenced(&replace_request("fenced-healthy", b"healthy", 200), None)
+        .await?
+        .expect("unfenced real-request replace returns session");
     assert_eq!(healthy.cycle_id, Some(Uuid::nil()));
     Ok(())
 }
@@ -1410,11 +1427,19 @@ async fn replace_from_real_request_bumps_generation_and_resets_counters(
     storage: &PostgresStorage,
 ) -> Result<()> {
     let first = storage
-        .replace_from_real_request(&replace_request("replace-session", b"ciphertext-one", 100))
-        .await?;
+        .replace_from_real_request_fenced(
+            &replace_request("replace-session", b"ciphertext-one", 100),
+            None,
+        )
+        .await?
+        .expect("unfenced real-request replace returns session");
     let second = storage
-        .replace_from_real_request(&replace_request("replace-session", b"ciphertext-two", 200))
-        .await?;
+        .replace_from_real_request_fenced(
+            &replace_request("replace-session", b"ciphertext-two", 200),
+            None,
+        )
+        .await?
+        .expect("unfenced real-request replace returns session");
 
     assert_eq!(first.generation, 1);
     assert_eq!(second.generation, 2);
@@ -1437,8 +1462,14 @@ async fn replace_roundtrips_optional_accounting_key_id(storage: &PostgresStorage
     };
     let without_key = replace_request("unkeyed-session", b"ciphertext-without-key", 110);
 
-    let with_key = storage.replace_from_real_request(&with_key).await?;
-    let without_key = storage.replace_from_real_request(&without_key).await?;
+    let with_key = storage
+        .replace_from_real_request_fenced(&with_key, None)
+        .await?
+        .expect("unfenced real-request replace returns session");
+    let without_key = storage
+        .replace_from_real_request_fenced(&without_key, None)
+        .await?
+        .expect("unfenced real-request replace returns session");
 
     assert_eq!(with_key.accounting_key_id.as_deref(), Some("key-live-123"));
     assert_eq!(without_key.accounting_key_id, None);
@@ -1469,12 +1500,12 @@ async fn update_payload_only_mutates_matching_pending_generation(
     storage: &PostgresStorage,
 ) -> Result<()> {
     let record = storage
-        .replace_from_real_request(&replace_request(
-            "payload-session",
-            b"pending-placeholder",
-            100,
-        ))
-        .await?;
+        .replace_from_real_request_fenced(
+            &replace_request("payload-session", b"pending-placeholder", 100),
+            None,
+        )
+        .await?
+        .expect("unfenced real-request replace returns session");
 
     assert!(
         !storage
@@ -1516,8 +1547,12 @@ async fn cache_hit_reschedule_preserves_duration_anchor_and_rejects_stale_genera
     storage: &PostgresStorage,
 ) -> Result<()> {
     let original = storage
-        .replace_from_real_request(&replace_request("hit-session", b"ciphertext-one", 100))
-        .await?;
+        .replace_from_real_request_fenced(
+            &replace_request("hit-session", b"ciphertext-one", 100),
+            None,
+        )
+        .await?
+        .expect("unfenced real-request replace returns session");
 
     let stale = storage
         .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
@@ -1573,8 +1608,12 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe(
     storage: &PostgresStorage,
 ) -> Result<()> {
     let record = storage
-        .replace_from_real_request(&replace_request("terminal-session", b"ciphertext", 50))
-        .await?;
+        .replace_from_real_request_fenced(
+            &replace_request("terminal-session", b"ciphertext", 50),
+            None,
+        )
+        .await?
+        .expect("unfenced real-request replace returns session");
 
     assert!(
         storage
@@ -1638,12 +1677,12 @@ async fn terminal_error_is_truncated_and_resets_running_enqueue_state(
     storage: &PostgresStorage,
 ) -> Result<()> {
     let record = storage
-        .replace_from_real_request(&replace_request(
-            "terminal-error-session",
-            b"ciphertext",
-            400,
-        ))
-        .await?;
+        .replace_from_real_request_fenced(
+            &replace_request("terminal-error-session", b"ciphertext", 400),
+            None,
+        )
+        .await?
+        .expect("unfenced real-request replace returns session");
     storage
         .mark_cache_keepalive_enqueued(&record.session_key_hash, record.generation, 401)
         .await?;
@@ -1670,8 +1709,12 @@ async fn terminal_error_is_truncated_and_resets_running_enqueue_state(
     assert_eq!(terminal.enqueue_state, CacheKeepaliveEnqueueState::Pending);
 
     let cancelled = storage
-        .replace_from_real_request(&replace_request("cancelled-session", b"ciphertext", 410))
-        .await?;
+        .replace_from_real_request_fenced(
+            &replace_request("cancelled-session", b"ciphertext", 410),
+            None,
+        )
+        .await?
+        .expect("unfenced real-request replace returns session");
     storage
         .mark_cache_keepalive_enqueued(&cancelled.session_key_hash, cancelled.generation, 411)
         .await?;
@@ -1696,8 +1739,12 @@ async fn terminal_error_is_truncated_and_resets_running_enqueue_state(
     assert_eq!(cancelled.error, None);
 
     let latest = storage
-        .replace_from_real_request(&replace_request("latest-session", b"ciphertext", 420))
-        .await?;
+        .replace_from_real_request_fenced(
+            &replace_request("latest-session", b"ciphertext", 420),
+            None,
+        )
+        .await?
+        .expect("unfenced real-request replace returns session");
     storage
         .mark_cache_keepalive_enqueued(&latest.session_key_hash, latest.generation, 421)
         .await?;
@@ -1721,8 +1768,12 @@ async fn terminal_error_is_truncated_and_resets_running_enqueue_state(
     assert_eq!(latest.error, None);
 
     let active = storage
-        .replace_from_real_request(&replace_request("reschedule-session", b"ciphertext", 430))
-        .await?;
+        .replace_from_real_request_fenced(
+            &replace_request("reschedule-session", b"ciphertext", 430),
+            None,
+        )
+        .await?
+        .expect("unfenced real-request replace returns session");
     sqlx::query(
         "UPDATE cache_keepalive_sessions SET error = $1 WHERE session_key_hash = $2 AND generation = $3",
     )
@@ -1757,9 +1808,13 @@ async fn recover_stale_running_requires_active_running_strictly_old_lease_and_sc
     ] {
         let mut request = replace_request(key, b"ciphertext", 100);
         request.accounting_key_id = Some(format!("accounting-{key}"));
-        storage.replace_from_real_request(&request).await?;
+        storage
+            .replace_from_real_request_fenced(&request, None)
+            .await?;
         request.now_unix_secs = 101;
-        storage.replace_from_real_request(&request).await?;
+        storage
+            .replace_from_real_request_fenced(&request, None)
+            .await?;
 
         sqlx::query(
             "UPDATE cache_keepalive_sessions
@@ -1853,11 +1908,19 @@ async fn recover_stale_running_requires_active_running_strictly_old_lease_and_sc
 async fn purge_stale_pending_keeps_enqueued_work(storage: &PostgresStorage) -> Result<()> {
     delete_sessions(storage, &["stale-pending", "old-enqueued"]).await?;
     let pending = storage
-        .replace_from_real_request(&replace_request("stale-pending", b"ciphertext", 100))
-        .await?;
+        .replace_from_real_request_fenced(
+            &replace_request("stale-pending", b"ciphertext", 100),
+            None,
+        )
+        .await?
+        .expect("unfenced real-request replace returns session");
     let enqueued = storage
-        .replace_from_real_request(&replace_request("old-enqueued", b"ciphertext", 110))
-        .await?;
+        .replace_from_real_request_fenced(
+            &replace_request("old-enqueued", b"ciphertext", 110),
+            None,
+        )
+        .await?
+        .expect("unfenced real-request replace returns session");
     assert!(
         storage
             .mark_cache_keepalive_enqueued("old-enqueued", enqueued.generation, 111)
@@ -1902,8 +1965,9 @@ async fn recover_stale_running_rejects_overflow_without_mutation(
     let key = "adapter-overflow";
     delete_sessions(storage, &[key]).await?;
     let record = storage
-        .replace_from_real_request(&replace_request(key, b"overflow", 100))
-        .await?;
+        .replace_from_real_request_fenced(&replace_request(key, b"overflow", 100), None)
+        .await?
+        .expect("unfenced real-request replace returns session");
     assert!(
         storage
             .mark_cache_keepalive_enqueued(key, record.generation, 110)
@@ -1952,7 +2016,7 @@ async fn purge_expired_uses_a_strict_cutoff_boundary(storage: &PostgresStorage) 
         ("adapter-expired-future", 101),
     ] {
         storage
-            .replace_from_real_request(&replace_request(key, b"expiry", now))
+            .replace_from_real_request_fenced(&replace_request(key, b"expiry", now), None)
             .await?;
     }
 
@@ -2013,7 +2077,7 @@ async fn purge_stale_pending_uses_strict_cutoff_and_state_predicates(
     delete_sessions(storage, &keys).await?;
     for key in keys {
         storage
-            .replace_from_real_request(&replace_request(key, b"pending", 100))
+            .replace_from_real_request_fenced(&replace_request(key, b"pending", 100), None)
             .await?;
     }
     for (key, status, enqueue_state, lease, updated_at) in [
@@ -2094,8 +2158,9 @@ async fn concurrent_recovery_counts_once_and_replacement_reschedule_preserve_lat
     delete_sessions(storage, &[key, latest_key]).await?;
     let storage = Arc::new(storage.clone());
     let running = storage
-        .replace_from_real_request(&replace_request(key, b"concurrent-running", 100))
-        .await?;
+        .replace_from_real_request_fenced(&replace_request(key, b"concurrent-running", 100), None)
+        .await?
+        .expect("unfenced real-request replace returns session");
     assert!(
         storage
             .mark_cache_keepalive_enqueued(key, running.generation, 110)
@@ -2142,8 +2207,12 @@ async fn concurrent_recovery_counts_once_and_replacement_reschedule_preserve_lat
     assert!(recovered.encrypted_payload.is_empty());
 
     let previous = storage
-        .replace_from_real_request(&replace_request(latest_key, b"previous-generation", 100))
-        .await?;
+        .replace_from_real_request_fenced(
+            &replace_request(latest_key, b"previous-generation", 100),
+            None,
+        )
+        .await?
+        .expect("unfenced real-request replace returns session");
     assert!(
         storage
             .mark_cache_keepalive_enqueued(latest_key, previous.generation, 110)
@@ -2155,8 +2224,12 @@ async fn concurrent_recovery_counts_once_and_replacement_reschedule_preserve_lat
             .await?
     );
     let latest = storage
-        .replace_from_real_request(&replace_request(latest_key, b"latest-before-recovery", 600))
-        .await?;
+        .replace_from_real_request_fenced(
+            &replace_request(latest_key, b"latest-before-recovery", 600),
+            None,
+        )
+        .await?
+        .expect("unfenced real-request replace returns session");
     let refreshed = storage
         .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
             session_key_hash: latest_key.to_owned(),
@@ -2191,8 +2264,9 @@ async fn concurrent_replace_from_real_request_bumps_each_generation(
 ) -> Result<()> {
     let session_key_hash = "concurrent-replace";
     let original = storage
-        .replace_from_real_request(&replace_request(session_key_hash, b"init", 100))
-        .await?;
+        .replace_from_real_request_fenced(&replace_request(session_key_hash, b"init", 100), None)
+        .await?
+        .expect("unfenced real-request replace returns session");
     assert_eq!(original.generation, 1);
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
 
@@ -2202,7 +2276,10 @@ async fn concurrent_replace_from_real_request_bumps_each_generation(
         async move {
             barrier.wait().await;
             storage
-                .replace_from_real_request(&replace_request(session_key_hash, b"first", 110))
+                .replace_from_real_request_fenced(
+                    &replace_request(session_key_hash, b"first", 110),
+                    None,
+                )
                 .await
         }
     });
@@ -2211,14 +2288,24 @@ async fn concurrent_replace_from_real_request_bumps_each_generation(
         let barrier = Arc::clone(&barrier);
         async move {
             barrier.wait().await;
+            // Use the same cache_anchor_at as `first` because unfenced
+            // `replace_from_real_request_fenced(..., None)` enforces
+            // `cache_anchor_at <= EXCLUDED.cache_anchor_at` and rejects
+            // older writes if a newer timestamp commits first.
             storage
-                .replace_from_real_request(&replace_request(session_key_hash, b"second", 120))
+                .replace_from_real_request_fenced(
+                    &replace_request(session_key_hash, b"second", 110),
+                    None,
+                )
                 .await
         }
     });
 
     let (first, second) = tokio::try_join!(first, second)?;
-    let mut generations = vec![first?.generation, second?.generation];
+    let mut generations = vec![
+        first?.expect("first session").generation,
+        second?.expect("second session").generation,
+    ];
     generations.sort_unstable();
     assert_eq!(generations, [2, 3]);
     let final_record = storage
@@ -2238,8 +2325,9 @@ async fn concurrent_hit_reschedule_allows_only_one_generation_cas(
 ) -> Result<()> {
     let session_key_hash = "concurrent-hit-cas";
     let original = storage
-        .replace_from_real_request(&replace_request(session_key_hash, b"init", 100))
-        .await?;
+        .replace_from_real_request_fenced(&replace_request(session_key_hash, b"init", 100), None)
+        .await?
+        .expect("unfenced real-request replace returns session");
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
 
     let first = tokio::spawn({
@@ -2283,8 +2371,9 @@ async fn pending_claim_requires_payload_and_mark_cannot_overwrite_running(
 ) -> Result<()> {
     let session_key_hash = "pending-claim-payload";
     let record = storage
-        .replace_from_real_request(&replace_request(session_key_hash, b"", 100))
-        .await?;
+        .replace_from_real_request_fenced(&replace_request(session_key_hash, b"", 100), None)
+        .await?
+        .expect("unfenced real-request replace returns session");
     assert!(
         !storage
             .claim_cache_keepalive_turn(session_key_hash, record.generation, 101)
@@ -2330,8 +2419,9 @@ async fn concurrent_claim_allows_exactly_one_enqueued_generation_winner(
 ) -> Result<()> {
     let session_key_hash = "concurrent-claim-cas";
     let record = storage
-        .replace_from_real_request(&replace_request(session_key_hash, b"init", 100))
-        .await?;
+        .replace_from_real_request_fenced(&replace_request(session_key_hash, b"init", 100), None)
+        .await?
+        .expect("unfenced real-request replace returns session");
     assert!(
         storage
             .mark_cache_keepalive_enqueued(session_key_hash, record.generation, 101)
@@ -2379,8 +2469,9 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
 ) -> Result<()> {
     let key = "ticketed-stable-logical-anchor";
     let original = storage
-        .replace_from_real_request(&replace_request(key, b"original-prefix", 100))
-        .await?;
+        .replace_from_real_request_fenced(&replace_request(key, b"original-prefix", 100), None)
+        .await?
+        .expect("unfenced real-request replace returns session");
     let replacement_ticket = storage
         .allocate_cache_keepalive_completion_ticket(key, 100, 10_000_000)
         .await?;
@@ -2501,8 +2592,9 @@ async fn ticketed_cancel_retires_generation_after_synthetic_refresh(
 ) -> Result<()> {
     let key = "ticketed-compaction-after-hit";
     let original = storage
-        .replace_from_real_request(&replace_request(key, b"old-prefix", 100))
-        .await?;
+        .replace_from_real_request_fenced(&replace_request(key, b"old-prefix", 100), None)
+        .await?
+        .expect("unfenced real-request replace returns session");
     let ticket = storage
         .allocate_cache_keepalive_completion_ticket(key, 100, 10_000_000)
         .await?;
@@ -2569,8 +2661,9 @@ async fn newer_ticket_replaces_terminal_generation_before_terminal_write_timesta
 ) -> Result<()> {
     let key = "ticketed-post-compaction-completion";
     let original = storage
-        .replace_from_real_request(&replace_request(key, b"old-prefix", 100))
-        .await?;
+        .replace_from_real_request_fenced(&replace_request(key, b"old-prefix", 100), None)
+        .await?
+        .expect("unfenced real-request replace returns session");
     let cancelled_ticket = storage
         .allocate_cache_keepalive_completion_ticket(key, 100, 10_000_000)
         .await?;
@@ -2632,8 +2725,9 @@ async fn completion_tickets_preserve_active_anchor_and_legacy_timestamp_guards(
 ) -> Result<()> {
     let key = "ticketed-active-and-legacy-guards";
     let original = storage
-        .replace_from_real_request(&replace_request(key, b"newer-active-prefix", 371))
-        .await?;
+        .replace_from_real_request_fenced(&replace_request(key, b"newer-active-prefix", 371), None)
+        .await?
+        .expect("unfenced real-request replace returns session");
     let ticket = storage
         .allocate_cache_keepalive_completion_ticket(key, 100, 10_000_000)
         .await?;
@@ -2798,8 +2892,9 @@ async fn cancellation_causes_roundtrip_and_replacement_clears_them(
     {
         let now = 100 + index as u64 * 10;
         let active = storage
-            .replace_from_real_request(&replace_request(key, b"prefix", now))
-            .await?;
+            .replace_from_real_request_fenced(&replace_request(key, b"prefix", now), None)
+            .await?
+            .expect("unfenced real-request replace returns session");
         assert_eq!(active.cancel_reason, None);
         assert!(
             storage

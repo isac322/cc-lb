@@ -1,0 +1,58 @@
+{
+  "pr": 1393,
+  "afterSource": "cfaa5427533e32ff06b8ade46217227c0d5ca2d0",
+  "surface": "admin-web-dist-vite-preview",
+  "widths": [390, 1440],
+  "height": 900,
+  "fixture": "sanitized-playwright-routes",
+  "backend": "vite-preview",
+  "captureScript": "out-of-tree-playwright-chromium",
+  "browser": "chromium",
+  "checks": [
+    {
+      "name": "overview-1440-dark",
+      "outcome": "pass",
+      "details": "Rendered / in dark theme at 1440x900 (after-overview-1440-dark.png); scrollWidth === innerWidth; 0 console/page/HTTP errors"
+    },
+    {
+      "name": "overview-1440-light",
+      "outcome": "pass",
+      "details": "Rendered / in light theme at 1440x900 (after-overview-1440-light.png); scrollWidth === innerWidth; 0 console/page/HTTP errors"
+    },
+    {
+      "name": "overview-390-dark",
+      "outcome": "pass",
+      "details": "Rendered / in dark theme at 390x900 (after-overview-390-dark.png); scrollWidth === innerWidth; 0 console/page/HTTP errors"
+    },
+    {
+      "name": "upstreams-1440-dark",
+      "outcome": "pass",
+      "details": "Rendered /upstreams in dark theme at 1440x900 (after-upstreams-1440-dark.png); scrollWidth === innerWidth; 0 console/page/HTTP errors"
+    },
+    {
+      "name": "principals-1440-dark",
+      "outcome": "pass",
+      "details": "Rendered /principals in dark theme at 1440x900 (after-principals-1440-dark.png); verified cache keepalive metrics and inherited openai_oauth_compat policy; 0 errors"
+    },
+    {
+      "name": "logs-1440-dark",
+      "outcome": "pass",
+      "details": "Rendered /logs in dark theme at 1440x900 (after-logs-1440-dark.png); scrollWidth === innerWidth; 0 console/page/HTTP errors"
+    },
+    {
+      "name": "plugins-1440-dark",
+      "outcome": "pass",
+      "details": "Rendered /plugins in dark theme at 1440x900 (after-plugins-1440-dark.png); scrollWidth === innerWidth; 0 console/page/HTTP errors"
+    },
+    {
+      "name": "settings-1440-dark",
+      "outcome": "pass",
+      "details": "Rendered /settings in dark theme at 1440x900 (after-settings-1440-dark.png); scrollWidth === innerWidth; 0 console/page/HTTP errors"
+    },
+    {
+      "name": "audit-1440-dark",
+      "outcome": "pass",
+      "details": "Rendered /audit in dark theme at 1440x900 (after-audit-1440-dark.png); scrollWidth === innerWidth; 0 console/page/HTTP errors"
+    }
+  ]
+}

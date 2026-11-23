@@ -14,8 +14,7 @@ use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 
 pub use cost::{
-    cache_creation_1h_micros_from_input, virtual_cost_micros_full,
-    virtual_cost_micros_full_with_context_and_provider_writes,
+    cache_creation_1h_micros_from_input, virtual_cost_micros_full_with_context_and_provider_writes,
 };
 use cost::{record_missing_price_field, resolved_cache_creation_1h_price};
 use tier_resolver::{resolve_optional_price, resolve_tier_rate};
@@ -168,13 +167,6 @@ impl NativePricingRate {
     pub const fn unknown() -> Self {
         Self {
             status: NativePricingStatus::Unknown,
-            price_per_million_usd: None,
-        }
-    }
-
-    pub const fn not_applicable() -> Self {
-        Self {
-            status: NativePricingStatus::NotApplicable,
             price_per_million_usd: None,
         }
     }
@@ -1071,7 +1063,7 @@ mod tests {
         let _guard = GLOBAL_TEST_LOCK.lock().expect("global catalog test lock");
         global_catalog().install_snapshot(CatalogSnapshot::empty_cost_disabled());
 
-        let breakdown = virtual_cost_micros_full("missing-model", 1, 1, 1, 1, 1, None);
+        let breakdown = crate::cost::virtual_cost_micros_full("missing-model", 1, 1, 1, 1, 1, None);
         assert_eq!(breakdown, ComputedCostBreakdown::unknown());
         assert_eq!(breakdown.pricing_status, PricingStatus::Unknown);
     }
@@ -1105,7 +1097,8 @@ mod tests {
             Some(UsdPerMillion::from_micros_usd(300_000)),
         ));
 
-        let breakdown = virtual_cost_micros_full(model, 0, 0, 1_000_000, 1_000_000, 0, None);
+        let breakdown =
+            crate::cost::virtual_cost_micros_full(model, 0, 0, 1_000_000, 1_000_000, 0, None);
         assert_eq!(breakdown.cache_creation_5m_micros, 3_750_000);
         assert_eq!(breakdown.cache_creation_1h_micros, 6_000_000);
         assert_eq!(breakdown.total_micros, 9_750_000);
@@ -1123,7 +1116,7 @@ mod tests {
             Some(UsdPerMillion::from_micros_usd(300_000)),
         ));
 
-        let breakdown = virtual_cost_micros_full(model, 0, 0, 0, 0, 1_000_000, None);
+        let breakdown = crate::cost::virtual_cost_micros_full(model, 0, 0, 0, 0, 1_000_000, None);
         assert_eq!(breakdown.cache_read_micros, 300_000);
         assert_eq!(breakdown.cache_creation_5m_micros, 0);
         assert_eq!(breakdown.cache_creation_1h_micros, 0);
@@ -1141,7 +1134,8 @@ mod tests {
             Some(UsdPerMillion::from_micros_usd(300_000)),
         ));
 
-        let breakdown = virtual_cost_micros_full(model, 0, 0, 1_000_000, 1_000_000, 0, None);
+        let breakdown =
+            crate::cost::virtual_cost_micros_full(model, 0, 0, 1_000_000, 1_000_000, 0, None);
         assert_eq!(breakdown.cache_creation_5m_micros, 0);
         assert_eq!(breakdown.cache_creation_1h_micros, 0);
         assert_eq!(breakdown.pricing_status, PricingStatus::Known);
@@ -1158,8 +1152,9 @@ mod tests {
             Some(UsdPerMillion::from_micros_usd(300_000)),
         ));
 
-        let breakdown =
-            virtual_cost_micros_full(model, 2_000_000, 1_000_000, 100_000, 200_000, 500_000, None);
+        let breakdown = crate::cost::virtual_cost_micros_full(
+            model, 2_000_000, 1_000_000, 100_000, 200_000, 500_000, None,
+        );
         let expected_sum = breakdown.input_micros
             + breakdown.output_micros
             + breakdown.cache_creation_5m_micros

@@ -219,3 +219,46 @@ async fn cache_keepalive_rejects_unimplemented_llm_judge_on_update() {
     assert_eq!(body["error"], "unsupported_cache_keepalive_llm_judge");
     assert_eq!(body["field"], "cache_keepalive.classifier.llm_judge");
 }
+
+#[tokio::test]
+async fn cache_keepalive_allows_explicit_null_llm_judge_on_create_and_update() {
+    let (_dir, storage) = temp_storage().await;
+    let state = test_state(Config::default(), Some(storage));
+    let (created, etag) = create_principal(
+        state.clone(),
+        json!({
+            "name": "kp-judge-null",
+            "kind": "machine",
+            "cache_keepalive": {
+                "enabled": true,
+                "classifier": { "llm_judge": null }
+            }
+        }),
+    )
+    .await;
+    let id = created["id"].as_str().expect("principal id").to_owned();
+    assert!(
+        created["cache_keepalive"]["classifier"]
+            .get("llm_judge")
+            .is_none()
+    );
+
+    let (status, body) = authed_patch_json(
+        app(state),
+        &format!("/admin/v1/principals/{id}"),
+        &etag,
+        json!({
+            "cache_keepalive": {
+                "enabled": true,
+                "classifier": { "llm_judge": null }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    assert!(
+        body["cache_keepalive"]["classifier"]
+            .get("llm_judge")
+            .is_none()
+    );
+}

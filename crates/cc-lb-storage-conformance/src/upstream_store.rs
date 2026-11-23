@@ -170,110 +170,6 @@ impl UpstreamStore for MemoryUpstreamStore {
         .await
     }
 
-    async fn set_enabled(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        enabled: bool,
-    ) -> StorageResult<UpstreamRecord> {
-        self.mutate(id, Some(expected_revision), |record| {
-            record.enabled = enabled;
-            Ok(())
-        })
-        .await
-    }
-
-    async fn update_spec(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        update: UpstreamUpdate,
-    ) -> StorageResult<UpstreamRecord> {
-        if let Some(name) = update.name.as_deref() {
-            validate_identifier("upstream.name", name)?;
-        }
-        self.mutate(id, Some(expected_revision), |record| {
-            let previous_vertex = record.vertex.clone();
-            if let Some(name) = update.name {
-                record.name = name;
-            }
-            if let Some(base_url) = update.base_url {
-                record.base_url = base_url;
-            }
-            if let Some(enabled) = update.enabled {
-                record.enabled = enabled;
-            }
-            if let Some(warmup_enabled) = update.warmup_enabled {
-                record.warmup_enabled = warmup_enabled;
-            }
-            if let Some(warmup_dialect_plugin) = update.warmup_dialect_plugin {
-                record.warmup_dialect_plugin = Some(warmup_dialect_plugin);
-            }
-            if let Some(workspace_id) = update.workspace_id {
-                record.workspace_id = workspace_id;
-            }
-            if let Some(vertex) = update.vertex {
-                record.vertex = vertex;
-            }
-            if let Some(credential_type) = update.vertex_credential_type {
-                record.vertex_credential_type = credential_type;
-            }
-            if let Some(quota_project_id) = update.vertex_quota_project_id {
-                record.vertex_quota_project_id = quota_project_id;
-            }
-            if previous_vertex != record.vertex
-                && matches!(
-                    record.kind,
-                    UpstreamKind::GeminiApiKey
-                        | UpstreamKind::VertexApiKey
-                        | UpstreamKind::VertexCredential
-                )
-            {
-                record.owner_epoch += 1;
-            }
-            Ok(())
-        })
-        .await
-    }
-
-    async fn update_api_key_secret(
-        &self,
-        id: Uuid,
-        api_key_ciphertext: Option<Vec<u8>>,
-    ) -> StorageResult<UpstreamRecord> {
-        self.mutate_without_revision(id, |record| {
-            let changed = record.api_key_ciphertext.as_ref() != api_key_ciphertext.as_ref();
-            record.api_key_ciphertext = api_key_ciphertext;
-            if changed
-                && matches!(
-                    record.kind,
-                    UpstreamKind::GeminiApiKey
-                        | UpstreamKind::VertexApiKey
-                        | UpstreamKind::VertexCredential
-                )
-            {
-                record.owner_epoch += 1;
-            }
-            if changed && record.kind == UpstreamKind::VertexCredential {
-                record.last_apply_error = None;
-            }
-            Ok(())
-        })
-        .await
-    }
-
-    async fn update_oauth_token(
-        &self,
-        id: Uuid,
-        tokens: EncryptedOAuthTokens,
-    ) -> StorageResult<UpstreamRecord> {
-        self.mutate_without_revision(id, |record| {
-            record.oauth_credentials = Some(tokens);
-            Ok(())
-        })
-        .await
-    }
-
     async fn set_status(&self, id: Uuid, status: UpstreamStatusUpdate) -> StorageResult<()> {
         let expected_revision = status.expected_spec_revision;
         let last_apply_error = status.last_apply_error;
@@ -309,8 +205,8 @@ impl UpstreamStore for MemoryUpstreamStore {
         never_refresh: bool,
     ) -> StorageResult<UpstreamRecord> {
         self.ensure_revision(id, expected_revision).await?;
-        self.update_oauth_token(id, tokens).await?;
         self.mutate_without_revision(id, |record| {
+            record.oauth_credentials = Some(tokens);
             record.oauth_never_refresh = never_refresh;
             Ok(())
         })
@@ -323,7 +219,11 @@ impl UpstreamStore for MemoryUpstreamStore {
         _holder: Uuid,
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord> {
-        self.update_oauth_token(id, tokens).await?;
+        self.mutate_without_revision(id, |record| {
+            record.oauth_credentials = Some(tokens);
+            Ok(())
+        })
+        .await?;
         self.set_status(
             id,
             UpstreamStatusUpdate {
@@ -579,10 +479,17 @@ scenario!(upstream_store_09_set_enabled_toggles, async {
     let s = store();
     let r = create_default(&s, "primary").await;
     assert!(
-        !s.set_enabled(r.id, r.revision, false)
-            .await
-            .unwrap()
-            .enabled
+        !s.update(
+            r.id,
+            r.revision,
+            UpstreamUpdate {
+                enabled: Some(false),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .unwrap()
+        .enabled
     );
 });
 scenario!(

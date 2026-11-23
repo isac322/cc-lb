@@ -246,8 +246,8 @@ scenario!(
             "workspace update bumps spec_revision by one"
         );
 
-        // Some(None): cleared, through `update_spec` this time.
-        let cleared = UpstreamStore::update_spec(
+        // Some(None): cleared, through `update`.
+        let cleared = UpstreamStore::update(
             store,
             created.id,
             set.revision,
@@ -1209,7 +1209,16 @@ scenario!(sto04_poll_candidate_query_filters, |storage| async move {
     excluded.push(future.id);
 
     let disabled = create_api_key_upstream(store, "cand-disabled").await?;
-    UpstreamStore::set_enabled(store, disabled.id, disabled.revision, false).await?;
+    UpstreamStore::update(
+        store,
+        disabled.id,
+        disabled.revision,
+        UpstreamUpdate {
+            enabled: Some(false),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await?;
     excluded.push(disabled.id);
 
     let deleted = create_api_key_upstream(store, "cand-deleted").await?;
@@ -1964,8 +1973,16 @@ scenario!(
         )
         .await?;
 
-        let disabled =
-            UpstreamStore::set_enabled(store, upstream.id, upstream.revision, false).await?;
+        let disabled = UpstreamStore::update(
+            store,
+            upstream.id,
+            upstream.revision,
+            UpstreamUpdate {
+                enabled: Some(false),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await?;
         let refused = UpstreamApiKeyStore::claim_api_key_usage_poll(
             store,
             disabled.id,
@@ -1988,15 +2005,31 @@ scenario!(
             "the refused claim leaves no token"
         );
 
-        let enabled =
-            UpstreamStore::set_enabled(store, upstream.id, disabled.revision, true).await?;
+        let enabled = UpstreamStore::update(
+            store,
+            upstream.id,
+            disabled.revision,
+            UpstreamUpdate {
+                enabled: Some(true),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await?;
         let token = Uuid::new_v4();
         ensure!(
             claim(store, &enabled, token, 1_800_000_160, 1_800_000_100).await?,
             "the re-enabled upstream is claimable"
         );
-        let disabled_again =
-            UpstreamStore::set_enabled(store, upstream.id, enabled.revision, false).await?;
+        let disabled_again = UpstreamStore::update(
+            store,
+            upstream.id,
+            enabled.revision,
+            UpstreamUpdate {
+                enabled: Some(false),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await?;
         let completion = UpstreamApiKeyStore::write_api_key_usage_poll_outcome(
             store,
             disabled_again.id,

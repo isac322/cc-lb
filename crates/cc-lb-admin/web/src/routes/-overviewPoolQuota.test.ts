@@ -16,7 +16,6 @@ import {
   poolQuotaResponseLatest,
   poolQuotaResponseObservation,
   poolQuotaWindowsPresent,
-  poolTooltipRows,
   poolWindowPace,
   poolWindowResets,
   recordedPoolQuotaChartData,
@@ -867,24 +866,5 @@ describe('formatAgo', () => {
     expect(formatAgo(100, 130)).toBe('just now');
     expect(formatAgo(0, 12 * 60)).toBe('12m ago');
     expect(formatAgo(0, 86400 + 19 * 3600 + 5)).toBe('1d 19h ago');
-  });
-});
-
-describe('Gemini pool tooltips', () => {
-  it('orders model windows and removes duplicate fill entries', () => {
-    const payload = [
-      { dataKey: 'third_party_7d' },
-      { dataKey: 'gemini_7d', type: 'none' },
-      { dataKey: 'gemini_7d' },
-      { dataKey: 'gemini_5h' },
-      { dataKey: 'third_party_5h' },
-      { dataKey: 'third_party_7d' },
-    ];
-    expect(poolTooltipRows(payload).map((entry) => entry.dataKey)).toEqual([
-      'gemini_5h',
-      'gemini_7d',
-      'third_party_5h',
-      'third_party_7d',
-    ]);
   });
 });

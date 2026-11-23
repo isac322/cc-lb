@@ -10,10 +10,9 @@ use cc_lb_storage_api::{
     AuditEntry, BackendKind, CacheKeepaliveConfig, CacheKeepaliveConfigSnapshot,
     CacheKeepaliveEnqueueState, CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus,
     CacheKeepaliveTerminalReason, CacheTtl, ClassifierConfig, ConfigDraftState, HistoryEntry,
-    JudgeResponseFormat, KeyStatus, LlmJudgeConfig, OAuthCredentials, PrincipalCreate,
-    PrincipalKind, PrincipalKindLite, RequestCacheBreakpoint, RequestCacheBreakpointSource,
-    RequestEvent, RequestEventKind, RequestProtocol, StorageError, UsageRollup,
-    UsageRollupResolution, UsageRollupRun,
+    KeyStatus, OAuthCredentials, PrincipalCreate, PrincipalKind, PrincipalKindLite,
+    RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestEvent, RequestEventKind,
+    RequestProtocol, StorageError, UsageRollup, UsageRollupResolution, UsageRollupRun,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -272,17 +271,6 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
             openai_responses_enabled: false,
             extra_wait_for_user_tools: vec!["ask_human".to_owned()],
             treat_end_turn_as_ambiguous: true,
-            llm_judge: Some(LlmJudgeConfig {
-                provider: "anthropic".to_owned(),
-                model: "claude-haiku-4-5".to_owned(),
-                api_key_secret_ref: "secret://judge".to_owned(),
-                base_url: Some("https://judge.local".to_owned()),
-                response_format: JudgeResponseFormat::JsonObject,
-                last_n_messages: 3,
-                max_tokens: 64,
-                temperature: 0.0,
-                timeout_secs: 4,
-            }),
         },
     });
     assert_json_roundtrip(CacheKeepaliveSessionRecord {

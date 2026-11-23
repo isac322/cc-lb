@@ -65,7 +65,7 @@ export function couponProductLabel(grant: LimitResetGrant): string {
   return 'Reset coupon';
 }
 
-export function openAIManualRedemptionBlock(
+function openAIManualRedemptionBlock(
   inventory: OpenAILimitResets | null | undefined,
 ): string | null {
   const manual = inventory?.manual_redemption;
@@ -172,17 +172,13 @@ export function couponScopeLabel(
     : 'Scope not reported';
 }
 
-export function couponTypeLabel(grant: LimitResetGrant): string {
+function couponTypeLabel(grant: LimitResetGrant): string {
   if (grant.openai_credit)
     return grant.openai_credit.reset_type === 'codex_rate_limits'
       ? 'Codex'
       : 'Reset';
   if (isFableRebateGrant(grant)) return 'Fable';
   return grant.type === 'weekly' ? 'Weekly' : 'Reset';
-}
-
-export function couponOptionLabel(grant: LimitResetGrant): string {
-  return `${couponTypeLabel(grant)} ×${grant.resets_left}`;
 }
 
 export interface CouponGroup {

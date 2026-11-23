@@ -151,23 +151,27 @@ pub async fn seed_cache_keepalive_contract_rows(
             "agent-in-turn (tool_use: `bash`)"
         };
         let record = storage
-            .replace_from_real_request(&CacheKeepaliveReplaceRequest {
-                session_key_hash: session.session_key_hash,
-                principal_id: principal_id.to_owned(),
-                accounting_key_id: None,
-                upstream_id: UPSTREAM_ID,
-                cycle_id: uuid::Uuid::from_u128(1),
-                cache_anchor_at_unix_secs: now,
-                ttl: session.ttl,
-                run_at_unix_secs: now + 270,
-                expires_at_unix_secs: now + 300,
-                encrypted_payload: vec![1],
-                display_reason: display_reason.to_owned(),
-                config_snapshot: config_snapshot(),
-                now_unix_secs: now,
-            })
+            .replace_from_real_request_fenced(
+                &CacheKeepaliveReplaceRequest {
+                    session_key_hash: session.session_key_hash,
+                    principal_id: principal_id.to_owned(),
+                    accounting_key_id: None,
+                    upstream_id: UPSTREAM_ID,
+                    cycle_id: uuid::Uuid::from_u128(1),
+                    cache_anchor_at_unix_secs: now,
+                    ttl: session.ttl,
+                    run_at_unix_secs: now + 270,
+                    expires_at_unix_secs: now + 300,
+                    encrypted_payload: vec![1],
+                    display_reason: display_reason.to_owned(),
+                    config_snapshot: config_snapshot(),
+                    now_unix_secs: now,
+                },
+                None,
+            )
             .await
-            .expect("seed cache keepalive session");
+            .expect("seed cache keepalive session")
+            .expect("cache keepalive session record");
 
         if let Some(reason) = session.terminal_reason {
             let error = (reason == CacheKeepaliveTerminalReason::DispatchError)

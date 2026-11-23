@@ -13,13 +13,13 @@ use cc_lb_storage_api::{
     AnthropicCompatibilityKvStore, CompatibilityKvRecord, MetaStore,
     MetadataTierMappingOverrideRecord, OrganizationMetadataRecord, OrganizationMetadataStore,
     PlanTierRatioRecord, PlanTierStore, PluginChainEntry, PluginChainEntryInput,
-    PluginChainEntryUpdate, PluginRegistryStore, PluginSlotKind, PrincipalCreate, PrincipalKind,
-    PrincipalRecord, PrincipalStore, PrincipalUpdate, PromptCacheObservationStore, StorageResult,
-    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaSample, UpstreamCreate,
-    UpstreamPlanTierRecord, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
-    UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
-    UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob,
-    WasmRegistryEntry, WasmRegistryEntryInput,
+    PluginRegistryStore, PluginSlotKind, PrincipalCreate, PrincipalKind, PrincipalRecord,
+    PrincipalStore, PrincipalUpdate, PromptCacheObservationStore, StorageResult,
+    SubscriptionQuotaSample, UpstreamCreate, UpstreamPlanTierRecord,
+    UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
+    UpstreamSubscriptionMetadataRecord, UpstreamSubscriptionMetadataStore,
+    UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob, WasmRegistryEntry,
+    WasmRegistryEntryInput,
 };
 
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
@@ -118,9 +118,17 @@ async fn create_upstream(storage: &Storage, name: &str) -> UpstreamRecord {
     let ciphertext = AeadService::from_master_key([25; 32])
         .encrypt(b"sk-ant-fixture-secret", created.id.as_bytes())
         .expect("api-key ciphertext");
-    UpstreamStore::update_api_key_secret(storage, created.id, Some(ciphertext))
-        .await
-        .expect("upstream api-key secret")
+    UpstreamStore::update(
+        storage,
+        created.id,
+        created.revision,
+        UpstreamUpdate {
+            api_key_ciphertext: Some(ciphertext),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await
+    .expect("upstream api-key secret")
 }
 
 async fn seed_registry(storage: &Storage, seed: u8, name: &str) -> WasmRegistryEntry {
@@ -528,40 +536,6 @@ impl UpstreamStore for BlockingUpstreamStore {
         unimplemented!()
     }
 
-    async fn set_enabled(
-        &self,
-        _id: Uuid,
-        _expected_revision: u64,
-        _enabled: bool,
-    ) -> StorageResult<UpstreamRecord> {
-        unimplemented!()
-    }
-
-    async fn update_spec(
-        &self,
-        _id: Uuid,
-        _expected_revision: u64,
-        _update: UpstreamUpdate,
-    ) -> StorageResult<UpstreamRecord> {
-        unimplemented!()
-    }
-
-    async fn update_api_key_secret(
-        &self,
-        _id: Uuid,
-        _api_key_ciphertext: Option<Vec<u8>>,
-    ) -> StorageResult<UpstreamRecord> {
-        unimplemented!()
-    }
-
-    async fn update_oauth_token(
-        &self,
-        _id: Uuid,
-        _tokens: cc_lb_aead::EncryptedOAuthTokens,
-    ) -> StorageResult<UpstreamRecord> {
-        unimplemented!()
-    }
-
     async fn set_status(&self, _id: Uuid, _status: UpstreamStatusUpdate) -> StorageResult<()> {
         unimplemented!()
     }
@@ -657,13 +631,6 @@ impl UpstreamSubscriptionQuotaStore for EmptySubscriptionQuotaStore {
         _upstream_ids: &[Uuid],
     ) -> StorageResult<Vec<SubscriptionQuotaSample>> {
         Ok(Vec::new())
-    }
-
-    async fn put_subscription_quota_checkpoints(
-        &self,
-        _records: &[SubscriptionQuotaCheckpointRecord],
-    ) -> StorageResult<usize> {
-        Ok(0)
     }
 }
 
@@ -836,9 +803,6 @@ impl PrincipalStore for EmptyPrincipalStore {
     ) -> StorageResult<Option<PrincipalRecord>> {
         unimplemented!()
     }
-    async fn hard_delete(&self, _id: Uuid) -> StorageResult<bool> {
-        unimplemented!()
-    }
 }
 
 struct EmptyPluginRegistryStore;
@@ -942,14 +906,6 @@ impl PluginRegistryStore for EmptyPluginRegistryStore {
     ) -> StorageResult<Vec<PluginChainEntry>> {
         Ok(Vec::new())
     }
-    async fn update_chain_entry(
-        &self,
-        _id: Uuid,
-        _expected_revision: u64,
-        _update: PluginChainEntryUpdate,
-    ) -> StorageResult<Option<PluginChainEntry>> {
-        unimplemented!()
-    }
     async fn reorder_chain(
         &self,
         _principal_id: Uuid,
@@ -963,13 +919,6 @@ impl PluginRegistryStore for EmptyPluginRegistryStore {
         _id: Uuid,
         _expected_revision: u64,
     ) -> StorageResult<Option<PluginChainEntry>> {
-        unimplemented!()
-    }
-    async fn rebalance_chain(
-        &self,
-        _principal_id: Uuid,
-        _slot: PluginSlotKind,
-    ) -> StorageResult<Vec<PluginChainEntry>> {
         unimplemented!()
     }
 }

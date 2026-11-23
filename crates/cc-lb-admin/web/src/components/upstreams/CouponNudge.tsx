@@ -4,10 +4,9 @@
 // only render the result and never consume or mutate coupon state. Quota
 // stays the single source of truth for usage numbers.
 
-import { Popover as BasePopover } from '@base-ui/react/popover';
 import { useIsMutating } from '@tanstack/react-query';
 import { Ticket } from 'lucide-react';
-import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import {
   type CouponNudge,
   type CouponNudgeKind,
@@ -155,17 +154,11 @@ function ticketOutlinePath(
  *  `loading` swaps the ticket icon for a same-size spinner and disables the
  *  button; callers keep the label constant so the width never shifts.
  *  `expiryLabel` renders as compact text immediately after the button —
- *  outside the ticket outline so it never moves the notches or divider.
- *
- *  `disabledReason` wraps a genuinely disabled button in a focusable
- *  popover trigger: a native disabled button swallows pointer events and
- *  leaves the tab order, so the wrapper (not a nested button) carries
- *  hover/focus/touch and explains why the action is unavailable. */
+ *  outside the ticket outline so it never moves the notches or divider. */
 export function CouponActionButton({
   kind,
   count,
   disabled,
-  disabledReason,
   loading,
   expiryLabel,
   title,
@@ -176,8 +169,6 @@ export function CouponActionButton({
   /** Remaining resets across unexpired grants; null hides the count. */
   count: number | null;
   disabled?: boolean;
-  /** Why the action is unavailable; shown in a popover while disabled. */
-  disabledReason?: string;
   /** In-flight claim: spinner replaces the icon, label stays put. */
   loading?: boolean;
   /** Compact expiry text rendered adjacent to the button (e.g. "Expires in
@@ -189,17 +180,13 @@ export function CouponActionButton({
 }) {
   const tone = TONE[kind];
   const isDisabled = Boolean(disabled || loading);
-  const wrapped = Boolean(isDisabled && disabledReason);
   // Disabled (not in-flight): the ticket reads inert — no fill, a dashed
   // disabled line and disabled ink. A loading claim keeps its normal look.
   const inert = isDisabled && !loading;
-  const [reasonOpen, setReasonOpen] = useState(false);
-  const suppressFocusOpen = useRef(false);
 
   // DOM nodes live in state (not refs) so the measurement effect re-runs
-  // whenever the button remounts — e.g. the disabled-reason wrapper toggles —
-  // or the count compartment mounts/unmounts. The ResizeObserver then covers
-  // count/label width changes without re-rendering.
+  // whenever the count compartment mounts/unmounts. The ResizeObserver then
+  // covers count/label width changes without re-rendering.
   const [btnNode, setBtnNode] = useState<HTMLButtonElement | null>(null);
   const [dividerNode, setDividerNode] = useState<HTMLSpanElement | null>(null);
   const [geo, setGeo] = useState<{ w: number; h: number; x: number | null }>({
@@ -244,7 +231,6 @@ export function CouponActionButton({
         // (`control-disabled` would add a dashed rectangle on top).
         'group/coupon relative items-stretch p-0 border-transparent disabled:border-transparent!',
         inert ? 'text-text-disabled' : 'text-text',
-        wrapped && 'pointer-events-none',
       )}
     >
       {geo.w > 0 ? (
@@ -295,62 +281,10 @@ export function CouponActionButton({
     </button>
   );
 
-  const action = !wrapped ? (
-    button
-  ) : (
-    <BasePopover.Root
-      open={reasonOpen}
-      onOpenChange={(nextOpen) => {
-        // After an Escape/outside dismissal the wrapper still holds focus;
-        // block focus from reopening it until the user deliberately presses.
-        if (!nextOpen) suppressFocusOpen.current = true;
-        setReasonOpen(nextOpen);
-      }}
-    >
-      <BasePopover.Trigger
-        nativeButton={false}
-        openOnHover
-        delay={150}
-        closeDelay={80}
-        onFocus={() => {
-          if (suppressFocusOpen.current) return;
-          setReasonOpen(true);
-        }}
-        onBlur={() => {
-          suppressFocusOpen.current = false;
-          setReasonOpen(false);
-        }}
-        render={
-          <span
-            className={cx(
-              'inline-flex cursor-not-allowed rounded-sm',
-              'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
-            )}
-          />
-        }
-      >
-        {button}
-      </BasePopover.Trigger>
-      <BasePopover.Portal>
-        <BasePopover.Positioner
-          className="z-50"
-          side="bottom"
-          align="end"
-          sideOffset={6}
-          collisionPadding={8}
-        >
-          <BasePopover.Popup className="max-w-[240px] rounded-md glass-strong px-2.5 py-1.5 text-caption text-text">
-            <BasePopover.Description>{disabledReason}</BasePopover.Description>
-          </BasePopover.Popup>
-        </BasePopover.Positioner>
-      </BasePopover.Portal>
-    </BasePopover.Root>
-  );
-
-  if (!expiryLabel) return action;
+  if (!expiryLabel) return button;
   return (
     <span className="inline-flex items-center gap-2">
-      {action}
+      {button}
       <span className="shrink-0 whitespace-nowrap text-caption text-warn-text">
         {expiryLabel}
       </span>

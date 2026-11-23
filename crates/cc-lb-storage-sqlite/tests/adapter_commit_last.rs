@@ -120,28 +120,14 @@ async fn upstream_mutations_return_the_committed_row() {
         storage.get_by_id(api.id).await.expect("read").as_ref()
     );
 
-    let renamed = storage
-        .update_spec(
+    let updated = storage
+        .update(
             api.id,
             api.revision,
             UpstreamUpdate {
                 name: Some("commit-last-api-renamed".to_owned()),
-                ..UpstreamUpdate::default()
-            },
-        )
-        .await
-        .expect("update_spec");
-    assert_eq!(
-        Some(&renamed),
-        storage.get_by_id(api.id).await.expect("read").as_ref()
-    );
-
-    let updated = storage
-        .update(
-            api.id,
-            renamed.revision,
-            UpstreamUpdate {
                 api_key_ciphertext: Some(vec![4, 5, 6]),
+                enabled: Some(false),
                 ..UpstreamUpdate::default()
             },
         )
@@ -152,26 +138,8 @@ async fn upstream_mutations_return_the_committed_row() {
         storage.get_by_id(api.id).await.expect("read").as_ref()
     );
 
-    let disabled = storage
-        .set_enabled(api.id, updated.revision, false)
-        .await
-        .expect("set_enabled");
-    assert_eq!(
-        Some(&disabled),
-        storage.get_by_id(api.id).await.expect("read").as_ref()
-    );
-
-    let rekeyed = storage
-        .update_api_key_secret(api.id, Some(vec![7, 8, 9]))
-        .await
-        .expect("update_api_key_secret");
-    assert_eq!(
-        Some(&rekeyed),
-        storage.get_by_id(api.id).await.expect("read").as_ref()
-    );
-
     let cleared = storage
-        .clear_warmup_dialect_plugin(api.id, rekeyed.revision)
+        .clear_warmup_dialect_plugin(api.id, updated.revision)
         .await
         .expect("clear_warmup_dialect_plugin")
         .expect("matching revision clears");
@@ -182,7 +150,7 @@ async fn upstream_mutations_return_the_committed_row() {
     assert_eq!(
         None,
         storage
-            .clear_warmup_dialect_plugin(api.id, rekeyed.revision)
+            .clear_warmup_dialect_plugin(api.id, updated.revision)
             .await
             .expect("stale clear keeps None semantics")
     );
@@ -200,15 +168,6 @@ async fn upstream_mutations_return_the_committed_row() {
         storage.get_by_id(oauth.id).await.expect("read").as_ref()
     );
 
-    let rotated = storage
-        .update_oauth_token(oauth.id, tokens(2))
-        .await
-        .expect("update_oauth_token");
-    assert_eq!(
-        Some(&rotated),
-        storage.get_by_id(oauth.id).await.expect("read").as_ref()
-    );
-
     let refreshed = storage
         .complete_refresh(oauth.id, Uuid::new_v4(), tokens(3))
         .await
@@ -219,7 +178,7 @@ async fn upstream_mutations_return_the_committed_row() {
     );
     assert_eq!(
         refreshed.oauth_token_generation,
-        rotated.oauth_token_generation + 1
+        stored.oauth_token_generation + 1
     );
 }
 
@@ -273,25 +232,6 @@ async fn upstream_mutations_roll_back_when_the_returned_record_cannot_decode() {
 
     assert_corrupted(
         storage
-            .update_spec(
-                api.id,
-                api.revision,
-                UpstreamUpdate {
-                    name: Some("commit-last-renamed".to_owned()),
-                    ..UpstreamUpdate::default()
-                },
-            )
-            .await,
-        "update_spec",
-    );
-    assert_eq!(
-        raw_upstream(&storage, api.id).await,
-        api_before,
-        "update_spec"
-    );
-
-    assert_corrupted(
-        storage
             .update(
                 api.id,
                 api.revision,
@@ -305,28 +245,6 @@ async fn upstream_mutations_roll_back_when_the_returned_record_cannot_decode() {
         "update",
     );
     assert_eq!(raw_upstream(&storage, api.id).await, api_before, "update");
-
-    assert_corrupted(
-        storage.set_enabled(api.id, api.revision, false).await,
-        "set_enabled",
-    );
-    assert_eq!(
-        raw_upstream(&storage, api.id).await,
-        api_before,
-        "set_enabled"
-    );
-
-    assert_corrupted(
-        storage
-            .update_api_key_secret(api.id, Some(vec![8, 8, 8]))
-            .await,
-        "update_api_key_secret",
-    );
-    assert_eq!(
-        raw_upstream(&storage, api.id).await,
-        api_before,
-        "update_api_key_secret"
-    );
 
     assert_corrupted(
         storage
@@ -350,16 +268,6 @@ async fn upstream_mutations_roll_back_when_the_returned_record_cannot_decode() {
         raw_upstream(&storage, oauth.id).await,
         oauth_before,
         "store_oauth_tokens"
-    );
-
-    assert_corrupted(
-        storage.update_oauth_token(oauth.id, tokens(2)).await,
-        "update_oauth_token",
-    );
-    assert_eq!(
-        raw_upstream(&storage, oauth.id).await,
-        oauth_before,
-        "update_oauth_token"
     );
 
     assert_corrupted(

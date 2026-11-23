@@ -68,8 +68,6 @@ mod lifecycle_observation_retry_path;
 mod lifecycle_observation_upstream_keyed;
 #[path = "lifecycle_oversized_body.rs"]
 mod lifecycle_oversized_body;
-#[path = "lifecycle_preview_route.rs"]
-mod lifecycle_preview_route;
 #[path = "lifecycle_request_events.rs"]
 mod lifecycle_request_events;
 #[path = "lifecycle_request_metrics_attribution.rs"]

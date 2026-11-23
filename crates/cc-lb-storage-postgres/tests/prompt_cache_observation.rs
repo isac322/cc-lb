@@ -132,17 +132,19 @@ async fn postgres_provider_cache_unknown_or_expired_rows_are_not_active_and_only
         PromptCacheObservationStore::upsert_provider_observation(&store, record).await?;
     }
 
-    let before_purge = PromptCacheObservationStore::list_active_provider_observations(
-        &store,
-        upstream_id,
-        "gemini",
-        "gemini-2.5-pro",
-        "explicit",
-        "scope",
-        "sha256:identity",
-        200,
-    )
-    .await?;
+    let before_purge =
+        PromptCacheObservationStore::list_active_provider_observations_for_candidates(
+            &store,
+            &[upstream_id],
+            "gemini",
+            "gemini-2.5-pro",
+            "explicit",
+            "scope",
+            "sha256:identity",
+            None,
+            200,
+        )
+        .await?;
     assert_eq!(before_purge.len(), 1);
     assert_eq!(before_purge[0].boundary, "active");
 
@@ -150,17 +152,19 @@ async fn postgres_provider_cache_unknown_or_expired_rows_are_not_active_and_only
         PromptCacheObservationStore::purge_expired_before(&store, 200).await?,
         1
     );
-    let after_purge = PromptCacheObservationStore::list_active_provider_observations(
-        &store,
-        upstream_id,
-        "gemini",
-        "gemini-2.5-pro",
-        "explicit",
-        "scope",
-        "sha256:identity",
-        200,
-    )
-    .await?;
+    let after_purge =
+        PromptCacheObservationStore::list_active_provider_observations_for_candidates(
+            &store,
+            &[upstream_id],
+            "gemini",
+            "gemini-2.5-pro",
+            "explicit",
+            "scope",
+            "sha256:identity",
+            None,
+            200,
+        )
+        .await?;
     assert_eq!(after_purge, vec![active]);
 
     fixture.drop_schema().await?;
@@ -295,24 +299,6 @@ async fn postgres_native_cache_openai_write_observation_roundtrips_and_filters_n
 
     PromptCacheObservationStore::upsert_provider_observation(&store, &record).await?;
 
-    let observed = PromptCacheObservationStore::list_active_provider_observations(
-        &store,
-        upstream_id,
-        "openai",
-        "gpt-5",
-        "responses",
-        "account",
-        "sha256:openai-account",
-        2_000,
-    )
-    .await?;
-    assert_eq!(observed, vec![record.clone()]);
-    assert_eq!(observed[0].observed_cached_tokens, None);
-    assert_eq!(observed[0].observed_write_tokens, Some(300));
-    assert_eq!(observed[0].retention_secs, Some(1_800));
-    assert_eq!(observed[0].expires_at_unix_secs, Some(2_800));
-    assert_eq!(observed[0].evidence_source, "responses_usage");
-
     let matching_retention =
         PromptCacheObservationStore::list_active_provider_observations_for_candidates(
             &store,
@@ -327,6 +313,11 @@ async fn postgres_native_cache_openai_write_observation_roundtrips_and_filters_n
         )
         .await?;
     assert_eq!(matching_retention, vec![record.clone()]);
+    assert_eq!(matching_retention[0].observed_cached_tokens, None);
+    assert_eq!(matching_retention[0].observed_write_tokens, Some(300));
+    assert_eq!(matching_retention[0].retention_secs, Some(1_800));
+    assert_eq!(matching_retention[0].expires_at_unix_secs, Some(2_800));
+    assert_eq!(matching_retention[0].evidence_source, "responses_usage");
 
     let null_retention =
         PromptCacheObservationStore::list_active_provider_observations_for_candidates(
@@ -343,17 +334,19 @@ async fn postgres_native_cache_openai_write_observation_roundtrips_and_filters_n
         .await?;
     assert!(null_retention.is_empty());
 
-    let wrong_model = PromptCacheObservationStore::list_active_provider_observations(
-        &store,
-        upstream_id,
-        "openai",
-        "gpt-5-mini",
-        "responses",
-        "account",
-        "sha256:openai-account",
-        2_000,
-    )
-    .await?;
+    let wrong_model =
+        PromptCacheObservationStore::list_active_provider_observations_for_candidates(
+            &store,
+            &[upstream_id],
+            "openai",
+            "gpt-5-mini",
+            "responses",
+            "account",
+            "sha256:openai-account",
+            Some(1_800),
+            2_000,
+        )
+        .await?;
     assert!(wrong_model.is_empty());
 
     fixture.drop_schema().await?;

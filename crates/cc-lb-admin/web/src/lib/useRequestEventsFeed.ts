@@ -47,9 +47,8 @@ export type RequestEventsFeedFilters = Omit<LogRowFilters, 'event_kind'> & {
  *   `pageSize` each time `loadMore` runs (driven by a scroll sentinel).
  *   Older history is fetched only when the retained rows are exhausted, and
  *   retention stops at `maxRetained`, after which `hasMore` is false.
- * - `preview`: the newest `pageSize` rows only; no paging or loading more.
  */
-export type RequestEventsFeedMode = 'paged' | 'infinite' | 'preview';
+export type RequestEventsFeedMode = 'paged' | 'infinite';
 
 export interface UseRequestEventsFeedOptions {
   readonly filters?: RequestEventsFeedFilters;

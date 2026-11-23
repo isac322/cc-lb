@@ -150,8 +150,9 @@ fn in_request_marker_lifecycle_preserves_ticket_and_logical_anchor_fences() {
         let storage = &fixture.b;
         let key = "request-marker";
         let original = storage
-            .replace_from_real_request(&seed_request(key))
-            .await?;
+            .replace_from_real_request_fenced(&seed_request(key), None)
+            .await?
+            .expect("unfenced real-request replace returns session");
         storage
             .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
                 session_key_hash: key.to_owned(),
@@ -289,7 +290,7 @@ fn in_request_marker_replacement_and_legacy_terminal_states() {
         let storage = &fixture.b;
         let key = "request-replacement";
         storage
-            .replace_from_real_request(&seed_request(key))
+            .replace_from_real_request_fenced(&seed_request(key), None)
             .await?;
         ensure!(
             storage
@@ -372,7 +373,11 @@ fn hit_reschedule_keeps_result_owned_when_real_request_supersedes() {
         {
             let key = format!("superseded-{suffix}");
             let seed = seed_request(&key);
-            let seed_record = fixture.b.replace_from_real_request(&seed).await?;
+            let seed_record = fixture
+                .b
+                .replace_from_real_request_fenced(&seed, None)
+                .await?
+                .expect("unfenced real-request replace returns session");
             ensure!(seed_record.generation == 1);
 
             let hit = hit_request(&key, 1, encrypted_payload);
@@ -394,7 +399,11 @@ fn hit_reschedule_keeps_result_owned_when_real_request_supersedes() {
 
             let replacement =
                 replacement_request(&key, b"", 200, "principal-b", 9, "accounting-b", 33);
-            let replacement_record = fixture.b.replace_from_real_request(&replacement).await?;
+            let replacement_record = fixture
+                .b
+                .replace_from_real_request_fenced(&replacement, None)
+                .await?
+                .expect("unfenced real-request replace returns session");
             assert_replacement_record(
                 &replacement_record,
                 &replacement,
@@ -482,7 +491,11 @@ fn hit_reschedule_keeps_result_owned_when_cancelled() {
         {
             let key = format!("cancelled-{suffix}");
             let seed = seed_request(&key);
-            let seed_record = fixture.b.replace_from_real_request(&seed).await?;
+            let seed_record = fixture
+                .b
+                .replace_from_real_request_fenced(&seed, None)
+                .await?
+                .expect("unfenced real-request replace returns session");
             ensure!(seed_record.generation == 1);
 
             let hit = hit_request(&key, 1, encrypted_payload);
@@ -595,7 +608,11 @@ fn hit_reschedule_missing_stale_and_terminal_are_noops() {
 
             let stale_key = format!("stale-{suffix}");
             let stale_seed = seed_request(&stale_key);
-            let stale_record = fixture.b.replace_from_real_request(&stale_seed).await?;
+            let stale_record = fixture
+                .b
+                .replace_from_real_request_fenced(&stale_seed, None)
+                .await?
+                .expect("unfenced real-request replace returns session");
             ensure!(
                 fixture
                     .b
@@ -617,7 +634,11 @@ fn hit_reschedule_missing_stale_and_terminal_are_noops() {
 
             let terminal_key = format!("terminal-{suffix}");
             let terminal_seed = seed_request(&terminal_key);
-            let terminal_record = fixture.b.replace_from_real_request(&terminal_seed).await?;
+            let terminal_record = fixture
+                .b
+                .replace_from_real_request_fenced(&terminal_seed, None)
+                .await?
+                .expect("unfenced real-request replace returns session");
             ensure!(
                 fixture
                     .b
@@ -980,7 +1001,10 @@ fn deployed_master_replacement_cannot_resolve_modern_request_marker() {
                 .put_meta_value(&format!("keepalive_order:{key}"), "3:3")
                 .await?;
             let seed = seed_request(&key);
-            let active = storage.replace_from_real_request(&seed).await?;
+            let active = storage
+                .replace_from_real_request_fenced(&seed, None)
+                .await?
+                .expect("unfenced real-request replace returns session");
             ensure!(active.first_scheduled_at_unix_secs == 100);
             let owner = storage
                 .allocate_cache_keepalive_completion_ticket(&key, 105, 900)
@@ -1125,7 +1149,10 @@ fn unticketed_marker_fence_restores_real_start_and_active_duration_anchor() {
         let storage = &fixture.b;
         let key = "unticketed-marker-fence";
         let seed = seed_request(key);
-        let active = storage.replace_from_real_request(&seed).await?;
+        let active = storage
+            .replace_from_real_request_fenced(&seed, None)
+            .await?
+            .expect("unfenced real-request replace returns session");
         let refreshed = storage
             .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
                 session_key_hash: key.to_owned(),

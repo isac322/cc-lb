@@ -47,7 +47,11 @@ async fn startup_attribution_resumes_committed_batches_without_double_counting()
                  (SELECT seq,tx_id FROM request_events_v1 ORDER BY tx_id DESC,seq DESC LIMIT 1) AS last_event;
              UPDATE usage_rollup_reconciliations_v1 SET status='complete';",
         ).execute(pool).await?;
-        let checkpoint = storage.usage_rollup_checkpoint().await?;
+        let checkpoint: Option<i64> = sqlx::query_scalar(
+            "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'",
+        )
+        .fetch_optional(pool)
+        .await?;
         // Schema still goes through the actual SQLx runner; initialization executes its hook.
         migrator.run_direct(None, &mut connection, false).await?;
         sqlx::raw_sql(
@@ -88,7 +92,14 @@ async fn startup_attribution_resumes_committed_batches_without_double_counting()
             ("minute".to_owned(), 1800000000, UPSTREAM.to_owned(), 10001),
         ];
         assert_eq!(snapshot(&resumed).await?, expected);
-        assert_eq!(resumed.usage_rollup_checkpoint().await?, checkpoint);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'",
+            )
+            .fetch_optional(pool)
+            .await?,
+            checkpoint
+        );
         let before = resumed.usage_rollup_revision().await?;
         let started = Instant::now();
         resumed.initialize().await?;
@@ -214,7 +225,11 @@ async fn retained_and_api_pruned_history_keep_exact_upstream_identity_and_checkp
                     "previous-release records must keep vertex=None"
                 );
             }
-            let checkpoint = storage.usage_rollup_checkpoint().await?;
+            let checkpoint: Option<i64> = sqlx::query_scalar(
+            "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'",
+        )
+        .fetch_optional(storage.pool())
+        .await?;
             if prune_history {
                 assert_eq!(
                     storage.prune_request_events_before(1_800_000_005_000_000_000, 100).await?,
@@ -259,7 +274,14 @@ async fn retained_and_api_pruned_history_keep_exact_upstream_identity_and_checkp
                     if prune_history { Some(1) } else { None },
                 );
             }
-            assert_eq!(storage.usage_rollup_checkpoint().await?, checkpoint);
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'",
+                )
+                .fetch_optional(storage.pool())
+                .await?,
+                checkpoint
+            );
             storage.initialize().await?;
             assert_eq!(snapshot(storage).await?, expected);
             storage.request_event_stable_seq_ceiling(std::time::Duration::from_secs(30)).await?;

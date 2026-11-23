@@ -2290,7 +2290,14 @@ async fn gemini_sqlite_affinity_rejects_stale_dynamic_view_before_dispatch() {
         .await
         .expect("create Gemini upstream");
     let current_record = storage
-        .update_api_key_secret(old_record.id, Some(vec![2]))
+        .update(
+            old_record.id,
+            old_record.revision,
+            cc_lb_storage_api::UpstreamUpdate {
+                api_key_ciphertext: Some(vec![2]),
+                ..Default::default()
+            },
+        )
         .await
         .expect("replace Gemini credential");
     assert_ne!(old_record.revision, current_record.revision);

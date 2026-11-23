@@ -518,9 +518,19 @@ async fn upstream_affinity_owner_epoch_fences_gemini_identity_only() -> TestResu
         .bind_upstream_affinities(std::slice::from_ref(&initial), 0, TTL_SECS)
         .await?;
 
-    let replaced =
-        UpstreamStore::update_api_key_secret(&storage, gemini, Some(b"gemini-new".to_vec()))
-            .await?;
+    let gemini_record = UpstreamStore::get_by_id(&storage, gemini)
+        .await?
+        .expect("gemini upstream");
+    let replaced = UpstreamStore::update(
+        &storage,
+        gemini,
+        gemini_record.revision,
+        UpstreamUpdate {
+            api_key_ciphertext: Some(b"gemini-new".to_vec()),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await?;
     assert_eq!(replaced.revision, 2);
     assert_eq!(
         storage.read_upstream_owner_epoch(gemini, 1).await?,
@@ -621,7 +631,16 @@ async fn upstream_affinity_owner_epoch_fences_gemini_identity_only() -> TestResu
         Some(1),
         "renaming does not change owner identity"
     );
-    let enabled = UpstreamStore::set_enabled(&storage, gemini, renamed.revision, false).await?;
+    let enabled = UpstreamStore::update(
+        &storage,
+        gemini,
+        renamed.revision,
+        UpstreamUpdate {
+            enabled: Some(false),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await?;
     assert_eq!(enabled.revision, renamed.revision + 1);
     assert_eq!(
         storage
@@ -682,7 +701,7 @@ async fn upstream_affinity_owner_epoch_fences_gemini_identity_only() -> TestResu
         vec![project_binding]
     );
 
-    let with_base_url = UpstreamStore::update_spec(
+    let with_base_url = UpstreamStore::update(
         &storage,
         gemini,
         enabled.revision,
@@ -712,7 +731,7 @@ async fn upstream_affinity_owner_epoch_fences_gemini_identity_only() -> TestResu
             .await?
             .is_empty()
     );
-    let same_base_url = UpstreamStore::update_spec(
+    let same_base_url = UpstreamStore::update(
         &storage,
         gemini,
         with_base_url.revision,
@@ -780,9 +799,19 @@ async fn upstream_affinity_owner_epoch_fences_gemini_identity_only() -> TestResu
     storage
         .bind_upstream_affinities(std::slice::from_ref(&openai_binding), 20, TTL_SECS)
         .await?;
-    let openai_updated =
-        UpstreamStore::update_api_key_secret(&storage, openai, Some(b"openai-new".to_vec()))
-            .await?;
+    let openai_record = UpstreamStore::get_by_id(&storage, openai)
+        .await?
+        .expect("openai upstream");
+    let openai_updated = UpstreamStore::update(
+        &storage,
+        openai,
+        openai_record.revision,
+        UpstreamUpdate {
+            api_key_ciphertext: Some(b"openai-new".to_vec()),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await?;
     assert_eq!(
         storage
             .read_upstream_owner_epoch(openai, openai_updated.revision)

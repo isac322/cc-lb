@@ -189,28 +189,6 @@ pub trait UpstreamStore: Send + Sync {
         expected_revision: u64,
         update: UpstreamUpdate,
     ) -> StorageResult<UpstreamRecord>;
-    async fn set_enabled(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        enabled: bool,
-    ) -> StorageResult<UpstreamRecord>;
-    async fn update_spec(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        update: UpstreamUpdate,
-    ) -> StorageResult<UpstreamRecord>;
-    async fn update_api_key_secret(
-        &self,
-        id: Uuid,
-        api_key_ciphertext: Option<Vec<u8>>,
-    ) -> StorageResult<UpstreamRecord>;
-    async fn update_oauth_token(
-        &self,
-        id: Uuid,
-        tokens: EncryptedOAuthTokens,
-    ) -> StorageResult<UpstreamRecord>;
     async fn set_status(&self, id: Uuid, status: UpstreamStatusUpdate) -> StorageResult<()>;
     async fn store_oauth_tokens(
         &self,

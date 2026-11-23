@@ -68,8 +68,7 @@ type StepId =
   | 'paste'
   | 'finish'
   | 'apikey'
-  | 'vertex'
-  | 'generic';
+  | 'vertex';
 
 const PENDING_INPUT_CLASS =
   'disabled:cursor-not-allowed disabled:border-subtle disabled:text-text-faint';
@@ -320,16 +319,12 @@ function ConnectDialogBody({
       ? session.flow === 'paste_code'
         ? ['provider', 'kind', 'signin', 'paste', 'finish']
         : ['provider', 'kind', 'signin', 'finish']
-      : provider === 'gemini'
-        ? ['provider', 'kind', 'signin', 'paste', 'finish']
-        : ['provider', 'kind', 'signin', 'paste', 'finish']
+      : ['provider', 'kind', 'signin', 'paste', 'finish']
     : provider === 'openai'
       ? session.flow === 'paste_code'
         ? ['signin', 'paste', 'finish']
         : ['signin', 'finish']
-      : provider === 'gemini'
-        ? ['signin', 'paste', 'finish']
-        : ['signin', 'paste', 'finish'];
+      : ['signin', 'paste', 'finish'];
   const rail = inVertexFlow
     ? [
         stepMeta('provider', true, provider),
@@ -814,8 +809,6 @@ function stepMeta(
       return { title: 'Provider', hint: 'Choose a provider' };
     case 'kind':
       return { title: 'Connect', hint: 'Choose a credential type' };
-    case 'generic':
-      return { title: 'Credential', hint: 'Paste and save' };
     case 'vertex':
       return { title: 'Google Cloud', hint: 'Add access' };
     case 'signin':

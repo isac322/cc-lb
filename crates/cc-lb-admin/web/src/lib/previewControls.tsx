@@ -72,16 +72,12 @@ export function intersectProviders(
 interface PreviewContextValue {
   previewProviders: readonly ProviderFamily[] | undefined;
   scope: ProviderScope;
-  explicit: boolean;
   providers: readonly ProviderFamily[] | undefined;
-  setScope: (scope: ProviderScope) => void;
 }
 const PreviewContext = createContext<PreviewContextValue>({
   previewProviders: undefined,
   scope: 'all',
-  explicit: false,
   providers: undefined,
-  setScope: () => {},
 });
 
 /** Mount once inside the authenticated root. Each query captures its own effective providers. */
@@ -89,7 +85,6 @@ export function PreviewProvider({ children }: { children: ReactNode }) {
   const search = useRouterState({
     select: (state) => state.location.search,
   }) as PreviewSearch;
-  const navigate = useNavigate();
   const inventory = useUpstreams();
   const previewProviders = useMemo(
     () =>
@@ -110,25 +105,12 @@ export function PreviewProvider({ children }: { children: ReactNode }) {
     () => ({
       previewProviders,
       scope,
-      explicit: search.provider !== undefined,
       providers: intersectProviders(
         previewProviders,
         scope === 'all' ? undefined : [scope],
       ),
-      setScope: (next) => {
-        void navigate({
-          to: '.',
-          search: (previous) => ({
-            ...previous,
-            provider: next === 'all' ? undefined : next,
-            selectedId: undefined,
-            upstream_id: undefined,
-            event_kind: undefined,
-          }),
-        });
-      },
     }),
-    [navigate, previewProviders, scope, search.provider],
+    [previewProviders, scope],
   );
   return (
     <PreviewContext.Provider value={value}>{children}</PreviewContext.Provider>

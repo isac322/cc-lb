@@ -125,8 +125,6 @@ export interface EntityListProps<T, F extends string, S extends string> {
   /** The count line under the title; `null` while loading. */
   countLine: ReactNode | null;
   action: ReactNode;
-  /** Optional provider facet or installation context above the list toolbar. */
-  header?: ReactNode;
   /** Render a group label when it changes; caller supplies already-grouped rows. */
   groupLabel?: (item: T) => string;
   loading: boolean;
@@ -247,7 +245,6 @@ export function EntityList<T, F extends string, S extends string>({
   noun,
   countLine,
   action,
-  header,
   groupLabel,
   loading,
   totalCount,
@@ -340,7 +337,6 @@ export function EntityList<T, F extends string, S extends string>({
           }
           actions={action}
         />
-        {header}
         {showToolbar ? <Toolbar noun={noun} toolbar={toolbar} /> : null}
       </div>
       {showToolbar && narrowed ? (

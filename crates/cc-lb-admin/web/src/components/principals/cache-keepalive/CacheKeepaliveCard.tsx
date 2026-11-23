@@ -11,7 +11,6 @@ import {
 import { undoToast } from '../../../lib/undoToast';
 import { DetailSection } from '../../ui/DetailPane';
 import { Button, cx, Hint, Skeleton, ToggleSwitch } from '../../ui/primitives';
-import { cacheKeepaliveAnimationContract } from './__fixtures__/cacheKeepaliveContract';
 import { CacheKeepaliveSessionsDrawer } from './CacheKeepaliveSessionsDrawer';
 import { CacheKeepaliveSettingsDrawer } from './CacheKeepaliveSettingsDrawer';
 
@@ -100,7 +99,7 @@ function MetricTile({
         style={
           flash && !window.PAUSE_ANIMATIONS
             ? {
-                animation: `flash-text ${cacheKeepaliveAnimationContract.metricFlash}`,
+                animation: 'flash-text 1s ease-out',
               }
             : undefined
         }

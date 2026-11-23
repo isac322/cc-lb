@@ -1632,7 +1632,7 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
 }
 
 /// Handle to the TTL sweeper task spawned by
-/// [`spawn_reservation_ttl_sweeper`]. Dropping the handle stops the task on
+/// [`spawn_reservation_ttl_sweeper_with_max_ttl`]. Dropping the handle stops the task on
 /// the next tick.
 pub struct ReservationTtlSweeperHandle {
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
@@ -1647,20 +1647,6 @@ impl ReservationTtlSweeperHandle {
             tracing::warn!(%error, "limit reservation ttl sweeper task panicked");
         }
     }
-}
-
-/// Spawn the TTL sweeper using the default hard max-TTL ceiling.
-pub fn spawn_reservation_ttl_sweeper(
-    engine: Arc<LimitEngine>,
-    ttl: Duration,
-    tick_interval: Duration,
-) -> ReservationTtlSweeperHandle {
-    spawn_reservation_ttl_sweeper_with_max_ttl(
-        engine,
-        ttl,
-        ttl.max(cc_lb_lifecycle::DEFAULT_LIFECYCLE_MAX_TTL),
-        tick_interval,
-    )
 }
 
 /// Spawn the TTL sweeper with explicit sliding idle TTL and hard max TTL.

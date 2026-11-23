@@ -1002,7 +1002,16 @@ async fn seed_runtime_state(
     // loads via config.aead.key_env.
     let aead = AeadService::from_master_key([0x11; 32]);
     let ciphertext = aead.encrypt(b"sk-ant-fixture-secret", created.id.as_bytes())?;
-    UpstreamStore::update_api_key_secret(storage.as_ref(), created.id, Some(ciphertext)).await?;
+    UpstreamStore::update(
+        storage.as_ref(),
+        created.id,
+        created.revision,
+        cc_lb_storage_api::UpstreamUpdate {
+            api_key_ciphertext: Some(ciphertext),
+            ..cc_lb_storage_api::UpstreamUpdate::default()
+        },
+    )
+    .await?;
     PrincipalStore::create(
         storage.as_ref(),
         PrincipalCreate {
@@ -1078,7 +1087,16 @@ async fn seed_qa1005_keys(
     .await?;
     let aead = AeadService::from_master_key([0x11; 32]);
     let ciphertext = aead.encrypt(b"sk-ant-qa1005-28", created.id.as_bytes())?;
-    UpstreamStore::update_api_key_secret(storage.as_ref(), created.id, Some(ciphertext)).await?;
+    UpstreamStore::update(
+        storage.as_ref(),
+        created.id,
+        created.revision,
+        cc_lb_storage_api::UpstreamUpdate {
+            api_key_ciphertext: Some(ciphertext),
+            ..cc_lb_storage_api::UpstreamUpdate::default()
+        },
+    )
+    .await?;
     let mut keys = Vec::with_capacity(QA_KEY_SPECS.len());
     for spec in QA_KEY_SPECS {
         PrincipalStore::create(

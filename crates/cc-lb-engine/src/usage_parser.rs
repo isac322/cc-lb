@@ -65,10 +65,7 @@ pub(crate) struct UsageCounts {
     /// Last Gemini candidates snapshot, kept separately from billable output
     /// so partial updates can retain it without adding cumulative counts.
     pub(crate) last_candidates_tokens: u64,
-    pub(crate) web_search_requests: u64,
-    pub(crate) web_fetch_requests: u64,
     pub(crate) service_tier: Option<String>,
-    pub(crate) inference_geo: Option<String>,
     pub(crate) iterations: Option<Value>,
     /// Accumulator for the per-frame `delta.estimated_tokens` field surfaced by
     /// the beta `thinking-token-count-2026-05-13` header on
@@ -957,29 +954,12 @@ pub(crate) fn merge_usage_value_for_shape(
     {
         usage.thinking_tokens = thinking;
     }
-    if let Some(server_tool_use) = reported.get("server_tool_use") {
-        if let Some(ws) = server_tool_use
-            .get("web_search_requests")
-            .and_then(Value::as_u64)
-        {
-            usage.web_search_requests = ws;
-        }
-        if let Some(wf) = server_tool_use
-            .get("web_fetch_requests")
-            .and_then(Value::as_u64)
-        {
-            usage.web_fetch_requests = wf;
-        }
-    }
     if let Some(tier) = reported
         .get("service_tier")
         .or_else(|| reported.get("serviceTier"))
         .and_then(Value::as_str)
     {
         usage.service_tier = Some(tier.to_owned());
-    }
-    if let Some(geo) = reported.get("inference_geo").and_then(Value::as_str) {
-        usage.inference_geo = Some(geo.to_owned());
     }
     if let Some(iterations) = reported.get("iterations").filter(|v| !v.is_null()) {
         usage.iterations = Some(iterations.clone());
@@ -1812,10 +1792,7 @@ mod tests {
         assert_eq!(usage.cache_creation_input_tokens_1h, 15);
         assert_eq!(usage.cache_read_input_tokens, 10);
         assert_eq!(usage.thinking_tokens, 12);
-        assert_eq!(usage.web_search_requests, 3);
-        assert_eq!(usage.web_fetch_requests, 1);
         assert_eq!(usage.service_tier.as_deref(), Some("priority"));
-        assert_eq!(usage.inference_geo.as_deref(), Some("us-east"));
     }
 
     #[test]
@@ -3145,7 +3122,6 @@ mod tests {
         assert_eq!(usage.input_tokens, 50);
         assert_eq!(usage.output_tokens, 100);
         assert_eq!(usage.thinking_tokens, 8);
-        assert_eq!(usage.web_search_requests, 2);
         assert_eq!(usage.service_tier.as_deref(), Some("standard"));
     }
     #[test]

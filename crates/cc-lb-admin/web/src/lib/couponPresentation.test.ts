@@ -7,7 +7,6 @@ import {
   couponClaimMessage,
   couponGroupKey,
   couponInventory,
-  couponOptionLabel,
   couponProductLabel,
   couponScopeLabel,
   couponUsageLabel,
@@ -234,14 +233,8 @@ describe('exact coupon scope and usage', () => {
     expect(presentation.targets[0].percentUsed).toBeNull();
   });
 
-  it('keeps the option label compact while scope includes Fable portion consistently', () => {
+  it('includes Fable portion in scope consistently', () => {
     const full = grant({ clears: ['7d', '7d_overage_included'] });
-    const narrow = grant({
-      id: 'narrow',
-      clears: ['7d_overage_included'],
-      resets_total: 3,
-      resets_left: 2,
-    });
     const fableOnly = grant({
       id: 'fable',
       type: 'full',
@@ -254,8 +247,6 @@ describe('exact coupon scope and usage', () => {
       gives_back_weekly: true,
       clears: ['5h', '7d_overage_included'],
     });
-    expect(couponOptionLabel(full)).toBe('Reset ×1');
-    expect(couponOptionLabel(narrow)).toBe('Reset ×2');
     expect(couponScopeLabel(full)).toBe('Weekly, Weekly (Fable)');
     expect(couponScopeLabel(fableOnly)).toBe(
       'Weekly (Fable portion), Weekly (Fable)',
@@ -503,7 +494,6 @@ describe('provider-specific reset semantics', () => {
     expect(
       presentCoupon(unknown, [quota('7d', 1)], FRESH).targets[0].state,
     ).toBe('unknown');
-    expect(couponOptionLabel(unknown)).not.toContain('All');
     expect(couponProductLabel(grant({ type: 'weekly' }))).toBe('Weekly reset');
     expect(isFableRebateGrant(grant({ type: 'full' }))).toBe(false);
   });

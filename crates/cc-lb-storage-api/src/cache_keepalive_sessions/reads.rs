@@ -286,23 +286,10 @@ pub trait CacheKeepaliveSessionReadStore: Send + Sync {
         follow_up_until_ms: u64,
     ) -> StorageResult<Vec<CacheKeepaliveEvidenceRecord>>;
 
-    async fn read_cache_keepalive_summary_aggregate(
-        &self,
-        principal_id: &str,
-        cutoff_ms: u64,
-    ) -> StorageResult<CacheKeepaliveSummaryAggregate> {
-        self.read_cache_keepalive_summary_aggregate_for_horizon(principal_id, cutoff_ms, None)
-            .await
-    }
-
     async fn read_cache_keepalive_summary_aggregate_for_horizon(
         &self,
         principal_id: &str,
         cutoff_ms: u64,
         horizon_start_ms: Option<u64>,
-    ) -> StorageResult<CacheKeepaliveSummaryAggregate> {
-        let _ = horizon_start_ms;
-        self.read_cache_keepalive_summary_aggregate(principal_id, cutoff_ms)
-            .await
-    }
+    ) -> StorageResult<CacheKeepaliveSummaryAggregate>;
 }

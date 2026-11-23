@@ -25,9 +25,7 @@ pub const OPENAI_OAUTH_DEVICE_VERIFICATION_URL: &str = "https://auth.openai.com/
 pub const OPENAI_OAUTH_DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 
 /// OAuth endpoints used by the Gemini CLI OAuth flow.
-pub const GEMINI_OAUTH_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 pub const GEMINI_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-pub const GEMINI_OAUTH_REDIRECT_URI: &str = "https://codeassist.google.com/authcode";
 pub const GEMINI_OAUTH_CODE_ASSIST_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal";
 
 /// OAuth endpoints and request metadata used by the Antigravity Gemini subscription flow.

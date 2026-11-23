@@ -722,50 +722,17 @@ scenario!(
     slim_checkpoints_select_per_source_left_anchors,
     |storage| async move {
         let upstream = upstream_id(26);
-        let header_anchor = checkpoint(&observation(
-            upstream,
-            30_000,
-            1,
-            SubscriptionQuotaSource::Header,
-            0.10,
-        ));
-        let header_first_change = checkpoint(&observation(
-            upstream,
-            75_000,
-            2,
-            SubscriptionQuotaSource::Header,
-            0.20,
-        ));
-        let header_second_change = checkpoint(&observation(
-            upstream,
-            90_000,
-            3,
-            SubscriptionQuotaSource::Header,
-            0.40,
-        ));
-        let header_late_change = checkpoint(&observation(
-            upstream,
-            180_000,
-            4,
-            SubscriptionQuotaSource::Header,
-            0.60,
-        ));
-        let api_anchor = checkpoint(&observation(
-            upstream,
-            45_000,
-            5,
-            SubscriptionQuotaSource::Api,
-            0.80,
-        ));
-        let api_change = checkpoint(&observation(
-            upstream,
-            120_000,
-            6,
-            SubscriptionQuotaSource::Api,
-            0.70,
-        ));
+        let header_anchor = observation(upstream, 30_000, 1, SubscriptionQuotaSource::Header, 0.10);
+        let header_first_change =
+            observation(upstream, 75_000, 2, SubscriptionQuotaSource::Header, 0.20);
+        let header_second_change =
+            observation(upstream, 90_000, 3, SubscriptionQuotaSource::Header, 0.40);
+        let header_late_change =
+            observation(upstream, 180_000, 4, SubscriptionQuotaSource::Header, 0.60);
+        let api_anchor = observation(upstream, 45_000, 5, SubscriptionQuotaSource::Api, 0.80);
+        let api_change = observation(upstream, 120_000, 6, SubscriptionQuotaSource::Api, 0.70);
         storage
-            .put_subscription_quota_checkpoints(&[
+            .record_subscription_quota_samples(&[
                 header_anchor.clone(),
                 header_first_change.clone(),
                 header_second_change.clone(),
@@ -784,10 +751,10 @@ scenario!(
         ensure!(
             header_rows
                 == [
-                    slim_checkpoint(header_anchor.clone()),
-                    slim_checkpoint(header_first_change.clone()),
-                    slim_checkpoint(header_second_change.clone()),
-                    slim_checkpoint(header_late_change.clone()),
+                    slim_checkpoint(checkpoint(&header_anchor)),
+                    slim_checkpoint(checkpoint(&header_first_change)),
+                    slim_checkpoint(checkpoint(&header_second_change)),
+                    slim_checkpoint(checkpoint(&header_late_change)),
                 ],
             "header rows must start with the header left anchor and contain only header provenance"
         );
@@ -801,8 +768,8 @@ scenario!(
         ensure!(
             api_rows
                 == [
-                    slim_checkpoint(api_anchor.clone()),
-                    slim_checkpoint(api_change.clone()),
+                    slim_checkpoint(checkpoint(&api_anchor)),
+                    slim_checkpoint(checkpoint(&api_change)),
                 ],
             "api anchor must be selected independently of header checkpoints"
         );
@@ -812,12 +779,12 @@ scenario!(
             .await?;
         both_rows.sort_by_key(slim_sort_key);
         let mut expected_both = [
-            header_anchor,
-            header_first_change,
-            header_second_change,
-            header_late_change,
-            api_anchor,
-            api_change,
+            checkpoint(&header_anchor),
+            checkpoint(&header_first_change),
+            checkpoint(&header_second_change),
+            checkpoint(&header_late_change),
+            checkpoint(&api_anchor),
+            checkpoint(&api_change),
         ]
         .into_iter()
         .map(slim_checkpoint)
@@ -829,22 +796,22 @@ scenario!(
         );
 
         let merged_upstream = upstream_id(27);
-        let merged_header = checkpoint(&observation(
+        let merged_header = observation(
             merged_upstream,
             60_000,
             7,
             SubscriptionQuotaSource::Header,
             0.30,
-        ));
-        let merged_api = checkpoint(&observation(
+        );
+        let merged_api = observation(
             merged_upstream,
             90_000,
             8,
             SubscriptionQuotaSource::Api,
             0.90,
-        ));
+        );
         storage
-            .put_subscription_quota_checkpoints(&[merged_header.clone(), merged_api.clone()])
+            .record_subscription_quota_samples(&[merged_header.clone(), merged_api.clone()])
             .await?;
         let mut merged_rows = storage
             .list_subscription_quota_slim_checkpoints(checkpoint_query(
@@ -854,7 +821,10 @@ scenario!(
             ))
             .await?;
         merged_rows.sort_by_key(slim_sort_key);
-        let mut expected_merged = vec![slim_checkpoint(merged_header), slim_checkpoint(merged_api)];
+        let mut expected_merged = vec![
+            slim_checkpoint(checkpoint(&merged_header)),
+            slim_checkpoint(checkpoint(&merged_api)),
+        ];
         expected_merged.sort_by_key(slim_sort_key);
         ensure!(
             merged_rows == expected_merged,
@@ -862,15 +832,15 @@ scenario!(
         );
 
         let no_anchor_upstream = upstream_id(28);
-        let no_anchor_first = checkpoint(&observation(
+        let no_anchor_first = observation(
             no_anchor_upstream,
             180_000,
             9,
             SubscriptionQuotaSource::Header,
             0.50,
-        ));
+        );
         storage
-            .put_subscription_quota_checkpoints(std::slice::from_ref(&no_anchor_first))
+            .record_subscription_quota_samples(std::slice::from_ref(&no_anchor_first))
             .await?;
         let no_anchor_rows = storage
             .list_subscription_quota_slim_checkpoints(SubscriptionQuotaCheckpointRangeQuery {
@@ -879,7 +849,7 @@ scenario!(
             })
             .await?;
         ensure!(
-            no_anchor_rows == [slim_checkpoint(no_anchor_first)],
+            no_anchor_rows == [slim_checkpoint(checkpoint(&no_anchor_first))],
             "rows without a left anchor should start at the first real checkpoint"
         );
         Ok(())
@@ -895,15 +865,9 @@ scenario!(
         let upstream = upstream_id(32);
         let since_unix_millis = 180 * DAY_MILLIS;
         let until_unix_millis = since_unix_millis + HOUR_MILLIS;
-        let anchor = checkpoint(&observation(
-            upstream,
-            1_000,
-            1,
-            SubscriptionQuotaSource::Header,
-            0.42,
-        ));
+        let anchor = observation(upstream, 1_000, 1, SubscriptionQuotaSource::Header, 0.42);
         storage
-            .put_subscription_quota_checkpoints(std::slice::from_ref(&anchor))
+            .record_subscription_quota_samples(std::slice::from_ref(&anchor))
             .await?;
 
         let rows = storage
@@ -913,7 +877,7 @@ scenario!(
             })
             .await?;
         ensure!(
-            rows == [slim_checkpoint(anchor)],
+            rows == [slim_checkpoint(checkpoint(&anchor))],
             "an arbitrarily old left anchor must be returned with its exact carried state"
         );
         Ok(())
@@ -955,60 +919,22 @@ aggregate_scenario!(
     slim_checkpoints_preserve_left_anchor_sources_and_same_millis_ties,
     |storage| async move {
         let upstream = upstream_id(30);
-        let checkpoints = [
-            checkpoint(&observation(
-                upstream,
-                1_000,
-                1,
-                SubscriptionQuotaSource::Header,
-                0.1,
-            )),
-            checkpoint(&observation(
-                upstream,
-                1_000,
-                2,
-                SubscriptionQuotaSource::Header,
-                0.2,
-            )),
-            checkpoint(&observation(
-                upstream,
-                2_000,
-                3,
-                SubscriptionQuotaSource::Header,
-                0.3,
-            )),
-            checkpoint(&observation(
-                upstream,
-                2_000,
-                4,
-                SubscriptionQuotaSource::Header,
-                0.4,
-            )),
-            checkpoint(&observation(
-                upstream,
-                1_000,
-                5,
-                SubscriptionQuotaSource::Api,
-                0.5,
-            )),
-            checkpoint(&observation(
-                upstream,
-                2_000,
-                6,
-                SubscriptionQuotaSource::Api,
-                0.6,
-            )),
+        let samples = [
+            observation(upstream, 1_000, 1, SubscriptionQuotaSource::Header, 0.1),
+            observation(upstream, 1_000, 2, SubscriptionQuotaSource::Header, 0.2),
+            observation(upstream, 2_000, 3, SubscriptionQuotaSource::Header, 0.3),
+            observation(upstream, 2_000, 4, SubscriptionQuotaSource::Header, 0.4),
+            observation(upstream, 1_000, 5, SubscriptionQuotaSource::Api, 0.5),
+            observation(upstream, 2_000, 6, SubscriptionQuotaSource::Api, 0.6),
         ];
-        storage
-            .put_subscription_quota_checkpoints(&checkpoints)
-            .await?;
+        storage.record_subscription_quota_samples(&samples).await?;
 
         let query = checkpoint_query(upstream, 2_000, 2_000);
         // Per key: the greatest-sample_id checkpoint before `since` as the
         // left anchor, then every checkpoint inside the inclusive range.
-        let mut expected = checkpoints[1..]
+        let mut expected = samples[1..]
             .iter()
-            .cloned()
+            .map(checkpoint)
             .map(slim_checkpoint)
             .collect::<Vec<_>>();
         let mut actual = storage
@@ -1057,7 +983,7 @@ aggregate_scenario!(
         let mut api = observation(upstream, 60_000, 2, SubscriptionQuotaSource::Api, 0.8);
         api.resets_at_unix_secs = Some(54_000);
         storage
-            .put_subscription_quota_checkpoints(&[checkpoint(&header), checkpoint(&api)])
+            .record_subscription_quota_samples(&[header, api])
             .await?;
 
         for (source_merge, expected_source, expected_utilization, expected_reset) in [
@@ -1127,7 +1053,7 @@ aggregate_scenario!(
         );
         reset.resets_at_unix_secs = Some(new_reset_unix_secs);
         storage
-            .put_subscription_quota_checkpoints(&[checkpoint(&anchor), checkpoint(&reset)])
+            .record_subscription_quota_samples(&[anchor, reset])
             .await?;
 
         let lots = storage
@@ -1309,36 +1235,30 @@ scenario!(
     checkpoint_history_suppresses_duplicate_semantic_state,
     |storage| async move {
         let upstream = upstream_id(20);
-        let first = checkpoint(&observation(
-            upstream,
-            100,
-            1,
-            SubscriptionQuotaSource::Header,
-            0.4,
-        ));
-        let mut duplicate = first.clone();
-        duplicate.changed_at_unix_millis = 200;
-        duplicate.sample_id = Uuid::from_u128(2);
-        duplicate.representative_claim = Some("changed-evidence".to_owned());
-        duplicate.ingested_at_unix_millis = 201;
+        let first_sample = observation(upstream, 100, 1, SubscriptionQuotaSource::Header, 0.4);
+        let first = checkpoint(&first_sample);
+        let mut duplicate_sample = first_sample.clone();
+        duplicate_sample.observed_at_unix_millis = 200;
+        duplicate_sample.sample_id = Uuid::from_u128(2);
+        duplicate_sample.representative_claim = Some("changed-evidence".to_owned());
+        duplicate_sample.ingested_at_unix_millis = 201;
 
-        let first_inserted = storage
-            .put_subscription_quota_checkpoints(std::slice::from_ref(&first))
+        storage
+            .record_subscription_quota_samples(std::slice::from_ref(&first_sample))
             .await?;
-        ensure!(first_inserted == 1, "first semantic state should insert");
-
-        let duplicate_inserted = storage
-            .put_subscription_quota_checkpoints(std::slice::from_ref(&duplicate))
-            .await?;
+        let first_persisted = checkpoint_rows(&*storage, &[upstream]).await?;
         ensure!(
-            duplicate_inserted == 0,
-            "persisted duplicate semantic state should be skipped on a later call"
+            first_persisted.len() == 1,
+            "first semantic state should insert"
         );
 
+        storage
+            .record_subscription_quota_samples(std::slice::from_ref(&duplicate_sample))
+            .await?;
         let persisted = checkpoint_rows(&*storage, &[upstream]).await?;
         ensure!(
             persisted == [first],
-            "latest checkpoint should remain first row"
+            "persisted duplicate semantic state should be skipped and leave latest checkpoint unchanged"
         );
         Ok(())
     }
@@ -1348,32 +1268,13 @@ scenario!(
     checkpoint_history_returns_left_anchor_and_in_range_rows,
     |storage| async move {
         let upstream = upstream_id(21);
-        let checkpoints = [
-            checkpoint(&observation(
-                upstream,
-                100,
-                1,
-                SubscriptionQuotaSource::Header,
-                0.1,
-            )),
-            checkpoint(&observation(
-                upstream,
-                200,
-                2,
-                SubscriptionQuotaSource::Header,
-                0.2,
-            )),
-            checkpoint(&observation(
-                upstream,
-                300,
-                3,
-                SubscriptionQuotaSource::Header,
-                0.3,
-            )),
+        let samples = [
+            observation(upstream, 100, 1, SubscriptionQuotaSource::Header, 0.1),
+            observation(upstream, 200, 2, SubscriptionQuotaSource::Header, 0.2),
+            observation(upstream, 300, 3, SubscriptionQuotaSource::Header, 0.3),
         ];
-        storage
-            .put_subscription_quota_checkpoints(&checkpoints)
-            .await?;
+        let checkpoints: Vec<_> = samples.iter().map(checkpoint).collect();
+        storage.record_subscription_quota_samples(&samples).await?;
 
         ensure!(
             checkpoint_rows(&*storage, &[upstream]).await? == checkpoints,
@@ -1419,22 +1320,12 @@ scenario!(
     checkpoint_history_keeps_sources_separate,
     |storage| async move {
         let upstream = upstream_id(22);
-        let header = checkpoint(&observation(
-            upstream,
-            100,
-            1,
-            SubscriptionQuotaSource::Header,
-            0.2,
-        ));
-        let api = checkpoint(&observation(
-            upstream,
-            100,
-            2,
-            SubscriptionQuotaSource::Api,
-            0.8,
-        ));
+        let header_sample = observation(upstream, 100, 1, SubscriptionQuotaSource::Header, 0.2);
+        let api_sample = observation(upstream, 100, 2, SubscriptionQuotaSource::Api, 0.8);
+        let header = checkpoint(&header_sample);
+        let api = checkpoint(&api_sample);
         storage
-            .put_subscription_quota_checkpoints(&[header.clone(), api.clone()])
+            .record_subscription_quota_samples(&[header_sample, api_sample])
             .await?;
 
         let mut rows = storage
@@ -1462,22 +1353,12 @@ scenario!(
     checkpoint_history_orders_same_millis_ties_deterministically,
     |storage| async move {
         let upstream = upstream_id(23);
-        let first_sample = checkpoint(&observation(
-            upstream,
-            500,
-            1,
-            SubscriptionQuotaSource::Header,
-            0.1,
-        ));
-        let second_sample = checkpoint(&observation(
-            upstream,
-            500,
-            2,
-            SubscriptionQuotaSource::Header,
-            0.2,
-        ));
+        let first_obs = observation(upstream, 500, 1, SubscriptionQuotaSource::Header, 0.1);
+        let second_obs = observation(upstream, 500, 2, SubscriptionQuotaSource::Header, 0.2);
+        let first_sample = checkpoint(&first_obs);
+        let second_sample = checkpoint(&second_obs);
         storage
-            .put_subscription_quota_checkpoints(&[second_sample.clone(), first_sample.clone()])
+            .record_subscription_quota_samples(&[second_obs, first_obs])
             .await?;
 
         let rows = storage

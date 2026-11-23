@@ -9,7 +9,7 @@ use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory;
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_api::{MetaStore, UpstreamCreate, UpstreamStore};
+use cc_lb_storage_api::{MetaStore, UpstreamCreate, UpstreamStore, UpstreamUpdate};
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignerError,
@@ -139,7 +139,14 @@ impl Fixture {
             .encrypt(b"sk-ant-fixture-secret", record.id.as_bytes())
             .expect("api-key ciphertext");
         self.storage
-            .update_api_key_secret(record.id, Some(ciphertext))
+            .update(
+                record.id,
+                record.revision,
+                UpstreamUpdate {
+                    api_key_ciphertext: Some(ciphertext),
+                    ..UpstreamUpdate::default()
+                },
+            )
             .await
             .expect("api-key secret stored");
         record.id

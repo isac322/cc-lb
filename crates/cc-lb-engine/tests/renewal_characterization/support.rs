@@ -110,29 +110,33 @@ impl RenewalFixture {
     pub(super) async fn schedule_session(&self) -> CacheKeepaliveSessionRecord {
         let now = unix_secs(self.clock.now());
         self.storage
-            .replace_from_real_request(&CacheKeepaliveReplaceRequest {
-                session_key_hash: "renewal-session".to_owned(),
-                principal_id: "renewal-principal".to_owned(),
-                accounting_key_id: None,
-                upstream_id: self.upstream_id,
-                cycle_id: uuid::Uuid::nil(),
-                ttl: CacheTtl::Ttl5m,
-                cache_anchor_at_unix_secs: now,
-                run_at_unix_secs: now + 10,
-                expires_at_unix_secs: now + 300,
-                encrypted_payload: vec![1],
-                display_reason: "agent-in-turn".to_owned(),
-                config_snapshot: CacheKeepaliveConfigSnapshot {
-                    refresh_lead_time_5m_secs: 30,
-                    refresh_lead_time_1h_secs: 300,
-                    max_refreshes_per_session: 12,
-                    max_total_duration_secs: 14_400,
-                    snapshot_max_bytes: 524_288,
+            .replace_from_real_request_fenced(
+                &CacheKeepaliveReplaceRequest {
+                    session_key_hash: "renewal-session".to_owned(),
+                    principal_id: "renewal-principal".to_owned(),
+                    accounting_key_id: None,
+                    upstream_id: self.upstream_id,
+                    cycle_id: uuid::Uuid::nil(),
+                    ttl: CacheTtl::Ttl5m,
+                    cache_anchor_at_unix_secs: now,
+                    run_at_unix_secs: now + 10,
+                    expires_at_unix_secs: now + 300,
+                    encrypted_payload: vec![1],
+                    display_reason: "agent-in-turn".to_owned(),
+                    config_snapshot: CacheKeepaliveConfigSnapshot {
+                        refresh_lead_time_5m_secs: 30,
+                        refresh_lead_time_1h_secs: 300,
+                        max_refreshes_per_session: 12,
+                        max_total_duration_secs: 14_400,
+                        snapshot_max_bytes: 524_288,
+                    },
+                    now_unix_secs: now,
                 },
-                now_unix_secs: now,
-            })
+                None,
+            )
             .await
             .expect("schedule renewal session")
+            .expect("renewal session record")
     }
 
     pub(super) async fn request_event_count(&self) -> i64 {

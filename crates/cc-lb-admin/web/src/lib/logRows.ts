@@ -80,14 +80,6 @@ export function effectiveRequestEventKind(event: {
     : 'unclassified';
 }
 
-/** Whether a row's effective endpoint category is `messages`. */
-export function isMessagesRequestEvent(event: {
-  readonly source_kind?: string | null;
-  readonly event_kind?: string | null;
-}): boolean {
-  return effectiveRequestEventKind(event) === 'messages';
-}
-
 export const GENERATION_REQUEST_EVENT_KINDS = [
   'messages',
   'openai_responses',
@@ -147,26 +139,6 @@ export function filterLiveEventsByUnixSeconds(
     filtered.set(identity, entry);
   }
   return filtered;
-}
-
-// Map.set keeps an existing key in place, so taking the tail highlights newly
-// inserted rows without making a partial-to-final update look newly arrived.
-export function newestLiveEventIds(
-  liveEvents: LiveEventMap,
-  limit = 20,
-): Set<string> {
-  if (limit <= 0) return new Set();
-  const entries = Array.from(liveEvents.values());
-  const ids = new Set<string>();
-  for (
-    let index = Math.max(0, entries.length - limit);
-    index < entries.length;
-    index += 1
-  ) {
-    const entry = entries[index];
-    if (entry) ids.add(eventIdentity(entry.event));
-  }
-  return ids;
 }
 
 export function filterLogRowsByStatusClass(

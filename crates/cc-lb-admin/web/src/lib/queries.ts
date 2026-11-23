@@ -168,7 +168,6 @@ export interface Principal {
       extra_wait_for_user_tools: string[];
       treat_end_turn_as_ambiguous: boolean;
       openai_responses_enabled?: boolean;
-      llm_judge?: unknown;
     };
   } | null;
   openai_oauth_compat?: OpenaiOauthCompatOverride | null;
@@ -345,7 +344,6 @@ export const qk = {
       principalId ?? null,
     ] as const,
   upstreams: ['upstreams'] as const,
-  upstream: (id: string) => ['upstream', id] as const,
   upstreamWorkspaces: (id: string) => ['upstream-workspaces', id] as const,
   upstreamKeyUsage: (id: string, range: string, step: string) =>
     ['upstream-key-usage', id, range, step] as const,
@@ -598,31 +596,6 @@ export function useRouterTerminalStrategy(principalId: string | null) {
     enabled: !!principalId,
   });
 }
-export function useRecentEvents(
-  inputFilters: Record<string, string | undefined>,
-  options: ProviderQueryOptions = {},
-) {
-  const filters = useProviderFilters(inputFilters, options.providers);
-  const params = new URLSearchParams();
-  appendQueryParams(params, filters);
-  return usePolledData(
-    {
-      queryKey: qk.events(filters),
-      enabled: filters.providers !== '',
-      queryFn: ({ signal }) =>
-        getJson<RecentEventsPayload>(
-          `/admin/v1/events/recent?${params.toString()}`,
-          { signal },
-        ),
-      placeholderData: (previousData, previousQuery) =>
-        previousQuery?.queryKey[0] === 'events' &&
-        hasSameEventFilters(previousQuery.queryKey[1], filters)
-          ? previousData
-          : undefined,
-    },
-    POLLING_INTERVALS.RECENT_EVENTS_MS,
-  );
-}
 
 export function useEventsHistogram(
   inputFilters: Record<string, string | undefined>,
@@ -671,8 +644,6 @@ export function useRequestEventDetail(eventId: string | null) {
   });
 }
 
-const RECENT_EVENTS_PAGE_SIZE = 200;
-
 export type RecentEventsCursor = {
   readonly ts_ms: number;
   readonly event_id: string;
@@ -686,12 +657,6 @@ export type RecentEventsPageParam =
       readonly ts_ms: number;
       readonly event_id: string;
     };
-
-type RecentEventsQueryKey = readonly [
-  'events',
-  Record<string, string | undefined>,
-  'infinite',
-];
 
 type RecentEventsPageQueryKey = readonly [
   'events',
@@ -761,42 +726,6 @@ export function useRecentEventsPage(
 ) {
   const filters = useProviderFilters(inputFilters, options.providers);
   return useQuery(recentEventsPageQueryOptions(filters, pageParam));
-}
-
-export function useRecentEventsInfinite(
-  inputFilters: Record<string, string | undefined>,
-  options: ProviderQueryOptions = {},
-) {
-  const filters = useProviderFilters(inputFilters, options.providers);
-  const queryKey: RecentEventsQueryKey = [...qk.events(filters), 'infinite'];
-  const initialPageParam: RecentEventsPageParam = {
-    kind: 'initial',
-    limit: RECENT_EVENTS_PAGE_SIZE,
-  };
-  return useInfiniteQuery<
-    RecentEventsPayload,
-    Error,
-    InfiniteData<RecentEventsPayload, RecentEventsPageParam>,
-    RecentEventsQueryKey,
-    RecentEventsPageParam
-  >({
-    queryKey,
-    enabled: filters.providers !== '',
-    initialPageParam,
-    queryFn: ({ pageParam }) => fetchRecentEventsPage(filters, pageParam),
-    getNextPageParam: (last) => {
-      if (!last.events.length || last.events.length < last.limit) {
-        return undefined;
-      }
-      const cursor = getRecentEventsCursor(last.events[last.events.length - 1]);
-      if (cursor === undefined) return undefined;
-      return {
-        kind: 'cursor',
-        limit: RECENT_EVENTS_PAGE_SIZE,
-        ...cursor,
-      };
-    },
-  });
 }
 
 export function usePrincipalNameMap(): Map<string, string> {
@@ -1293,7 +1222,6 @@ export function useUpdateUpstream({
       ),
     onSuccess: (_d, vars) => {
       qc.invalidateQueries({ queryKey: qk.upstreams });
-      qc.invalidateQueries({ queryKey: qk.upstream(vars.id) });
       // Key, workspace and endpoint edits change whose usage the card reads
       // and which workspaces the key lists.
       qc.invalidateQueries({ queryKey: qk.upstreamWorkspaces(vars.id) });
@@ -1321,7 +1249,6 @@ export function useRecheckApiKey() {
     onSuccess: async (_response, id) => {
       await Promise.all([
         qc.invalidateQueries({ queryKey: qk.upstreams }),
-        qc.invalidateQueries({ queryKey: qk.upstream(id) }),
         qc.invalidateQueries({ queryKey: qk.upstreamWorkspaces(id) }),
         qc.invalidateQueries({ queryKey: ['upstream-key-usage', id] }),
       ]);
@@ -1427,8 +1354,7 @@ export function useFireNowUpstreamWarmup() {
         throw error;
       }
     },
-    onSuccess: async (_response, { id }) => {
-      await qc.invalidateQueries({ queryKey: qk.upstream(id) });
+    onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: qk.upstreams });
     },
     // Any fire-now outcome records an attempt: refresh per-lane Last run and
@@ -1453,11 +1379,9 @@ export function useClearUpstreamWarmupDialectPlugin() {
       deleteJson<Upstream>(`/admin/v1/upstreams/${id}/warmup-dialect-plugin`, {
         ifMatch: spec_revision,
       }),
-    onSuccess: async (serverResponse, { id }) => {
+    onSuccess: async (_serverResponse, { id }) => {
       await qc.cancelQueries({ queryKey: warmupKeys.summary(id) });
-      qc.setQueryData(qk.upstream(id), serverResponse);
       await qc.invalidateQueries({ queryKey: warmupKeys.summary(id) });
-      await qc.invalidateQueries({ queryKey: qk.upstream(id) });
       await qc.invalidateQueries({ queryKey: qk.upstreams });
     },
   });
@@ -1480,11 +1404,9 @@ export function useUpdateUpstreamWarmupSettings() {
         body,
         { ifMatch: spec_revision },
       ),
-    onSuccess: async (serverResponse, { id }) => {
+    onSuccess: async (_serverResponse, { id }) => {
       await qc.cancelQueries({ queryKey: warmupKeys.summary(id) });
-      qc.setQueryData(qk.upstream(id), serverResponse);
       await qc.invalidateQueries({ queryKey: warmupKeys.summary(id) });
-      await qc.invalidateQueries({ queryKey: qk.upstream(id) });
       await qc.invalidateQueries({ queryKey: qk.upstreams });
     },
   });

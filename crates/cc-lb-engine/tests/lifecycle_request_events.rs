@@ -380,14 +380,14 @@ async fn concurrent_limit_denial_emits_one_rejected_decision_without_reserved_or
         .try_acquire("key-test", 1)
         .expect("fixture occupies the only concurrent slot");
     let limit_engine = LimitEngine::new(concurrency, Arc::new(cc_lb_clock::SystemClock));
-    let lifecycle = Lifecycle::new_with_dynamic_view(
-        authn.authn.clone(),
-        Arc::new(DynamicViewHolder::new(view)),
-        Arc::new(CapturingDispatch::default()),
-        LifecycleConfig::default(),
-        Arc::new(cc_lb_clock::SystemClock),
-    )
-    .with_static_limit_subject(
+    let lifecycle = crate::common::with_static_limit_subject(
+        Lifecycle::new_with_dynamic_view(
+            authn.authn.clone(),
+            Arc::new(DynamicViewHolder::new(view)),
+            Arc::new(CapturingDispatch::default()),
+            LifecycleConfig::default(),
+            Arc::new(cc_lb_clock::SystemClock),
+        ),
         limit_engine,
         "principal-test".to_owned(),
         "key-test".to_owned(),

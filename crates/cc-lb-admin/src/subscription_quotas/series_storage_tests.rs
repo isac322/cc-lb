@@ -5,10 +5,10 @@
 use std::sync::Arc;
 
 use cc_lb_storage_api::{
-    MetaStore, SubscriptionQuotaBucket, SubscriptionQuotaCheckpointRecord, SubscriptionQuotaSample,
-    SubscriptionQuotaSampleKind, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
-    SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
-    SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore,
+    MetaStore, SubscriptionQuotaBucket, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery, SubscriptionQuotaSource,
+    SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
+    UpstreamSubscriptionQuotaStore,
 };
 use cc_lb_storage_sqlite::SqliteStorage;
 use tempfile::TempDir;
@@ -465,52 +465,16 @@ async fn checkpoint_series_anchor_merge() {
     let (_dir, storage) = open_storage().await;
     let upstream = upstream_id(26);
     storage
-        .put_subscription_quota_checkpoints(&[
-            checkpoint(&observation(
-                upstream,
-                30_000,
-                1,
-                SubscriptionQuotaSource::Header,
-                0.10,
-            )),
-            checkpoint(&observation(
-                upstream,
-                75_000,
-                2,
-                SubscriptionQuotaSource::Header,
-                0.20,
-            )),
-            checkpoint(&observation(
-                upstream,
-                90_000,
-                3,
-                SubscriptionQuotaSource::Header,
-                0.40,
-            )),
-            checkpoint(&observation(
-                upstream,
-                180_000,
-                4,
-                SubscriptionQuotaSource::Header,
-                0.60,
-            )),
-            checkpoint(&observation(
-                upstream,
-                45_000,
-                5,
-                SubscriptionQuotaSource::Api,
-                0.80,
-            )),
-            checkpoint(&observation(
-                upstream,
-                120_000,
-                6,
-                SubscriptionQuotaSource::Api,
-                0.70,
-            )),
+        .record_subscription_quota_samples(&[
+            observation(upstream, 30_000, 1, SubscriptionQuotaSource::Header, 0.10),
+            observation(upstream, 75_000, 2, SubscriptionQuotaSource::Header, 0.20),
+            observation(upstream, 90_000, 3, SubscriptionQuotaSource::Header, 0.40),
+            observation(upstream, 180_000, 4, SubscriptionQuotaSource::Header, 0.60),
+            observation(upstream, 45_000, 5, SubscriptionQuotaSource::Api, 0.80),
+            observation(upstream, 120_000, 6, SubscriptionQuotaSource::Api, 0.70),
         ])
         .await
-        .expect("put checkpoints");
+        .expect("record quota samples");
 
     let header_series = load_series(
         &storage,
@@ -588,24 +552,24 @@ async fn checkpoint_series_anchor_merge() {
 
     let merged_upstream = upstream_id(27);
     storage
-        .put_subscription_quota_checkpoints(&[
-            checkpoint(&observation(
+        .record_subscription_quota_samples(&[
+            observation(
                 merged_upstream,
                 60_000,
                 7,
                 SubscriptionQuotaSource::Header,
                 0.30,
-            )),
-            checkpoint(&observation(
+            ),
+            observation(
                 merged_upstream,
                 90_000,
                 8,
                 SubscriptionQuotaSource::Api,
                 0.90,
-            )),
+            ),
         ])
         .await
-        .expect("put merged checkpoints");
+        .expect("record merged samples");
     let merged_series = load_series(
         &storage,
         series_query(
@@ -637,15 +601,15 @@ async fn checkpoint_series_anchor_merge() {
 
     let no_anchor_upstream = upstream_id(28);
     storage
-        .put_subscription_quota_checkpoints(&[checkpoint(&observation(
+        .record_subscription_quota_samples(&[observation(
             no_anchor_upstream,
             180_000,
             9,
             SubscriptionQuotaSource::Header,
             0.50,
-        ))])
+        )])
         .await
-        .expect("put no-anchor checkpoint");
+        .expect("record no-anchor sample");
     let no_anchor_series = load_series(
         &storage,
         series_query(
@@ -678,15 +642,15 @@ async fn checkpoint_series_old_anchor_is_bounded_and_dense() {
     let since_unix_millis = 180 * DAY_MILLIS;
     let until_unix_millis = since_unix_millis + HOUR_MILLIS;
     storage
-        .put_subscription_quota_checkpoints(&[checkpoint(&observation(
+        .record_subscription_quota_samples(&[observation(
             upstream,
             1_000,
             1,
             SubscriptionQuotaSource::Header,
             0.42,
-        ))])
+        )])
         .await
-        .expect("put anchor checkpoint");
+        .expect("record anchor sample");
 
     let series = load_series(
         &storage,
@@ -791,10 +755,6 @@ fn absent(upstream_id: Uuid) -> SubscriptionQuotaSample {
     absent.status = None;
     absent.resets_at_unix_secs = None;
     absent
-}
-
-fn checkpoint(record: &SubscriptionQuotaSample) -> SubscriptionQuotaCheckpointRecord {
-    SubscriptionQuotaCheckpointRecord::from(record)
 }
 
 fn series_query(

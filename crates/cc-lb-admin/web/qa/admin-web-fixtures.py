@@ -122,7 +122,6 @@ COVERAGE_GROUPS: dict[str, list[dict[str, Any]]] = {
     ],
     "router": [
         {"id": "UI-PR-14", "method": "PUT", "path": "/admin/v1/principals/{id}/router-terminal", "fixture": "principal.primary", "reset": "snapshot"},
-        {"id": "API-ROUTER-PREVIEW", "method": "POST", "path": "/admin/v1/router/preview", "fixture": "principal.primary", "reset": "none", "side_effect": "read-only POST; no DB, Audit, or external call"},
         {"id": "UI-PR-15/UI-PR-16/UI-PR-18/UI-PR-19", "method": "POST/DELETE", "path": "/admin/v1/principals/{id}/plugin-chain and /admin/v1/plugin-chain-entries/{id}", "fixture": "plugin.primary", "reset": "snapshot"},
     ],
     "upstreams": [

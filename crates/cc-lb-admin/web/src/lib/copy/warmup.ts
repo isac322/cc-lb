@@ -1,5 +1,4 @@
 export const COPY = {
-  cardTitle: 'Warmup',
   cardSubtitle: 'Prepares the next quota window during idle gaps.',
   helpText:
     'Warm-up sends a tiny background request during idle time so the next quota window is ready when traffic resumes. It uses only windows the account reports. Gemini upstreams warm Gemini models and Claude and GPT-OSS models separately; each group follows its own reset.',
@@ -21,12 +20,10 @@ export const COPY = {
     '{lane} are no longer available for this account. Close this dialog and choose again.',
   laneHistoryAllOption: 'All',
   laneNotReported: 'Not reported by this account',
-  lastCycleLabel: 'Last cycle',
   dialectPluginLabel: 'Shape plugin',
   defaultPluginOption: 'None (default request shape)',
   enableButtonLabel: 'Enable warmup',
   fireNowButtonLabel: 'Fire now',
-  clearPluginButtonLabel: 'Clear plugin',
   confirmFireTitle: 'Fire warmup now?',
   confirmFireConfirmLabel: 'Fire now',
   confirmFireCancelLabel: 'Cancel',
@@ -38,9 +35,6 @@ export const COPY = {
   toggleDisabledSuccess: 'Warmup disabled',
   dialectPluginSaveSuccess: 'Shape plugin updated',
   dialectPluginClearSuccess: 'Shape plugin cleared',
-  disabledEmpty:
-    'Warmup is off for this upstream. Enable to start idle subscription windows.',
-  lastNull: 'Never warmed',
   confirmFireBody:
     'This sends a real request to {upstreamName} and consumes a small amount of quota. The next scheduled attempt follows the subscription window reset.',
   fireSuccess: 'Warmup request completed',
@@ -85,7 +79,6 @@ export const COPY = {
 
 export const TOAST_DURATIONS = {
   success: 6000, // toast.success(msg, { duration: TOAST_DURATIONS.success })
-  error: undefined, // sonner default — error toasts are NOT auto-dismissed; rely on inline error panel
 } as const;
 export const LEASE_PANEL_AUTO_DISMISS_MS = 10000; // setTimeout to clear leasePanel state
 export const FIRE_NOW_COOLDOWN_MS = 1000; // post-200 cooldown before re-enable

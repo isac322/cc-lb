@@ -3372,10 +3372,7 @@ fn usage_snapshot(usage: UsageCounts) -> UsageSnapshot {
         },
         thinking_tokens: usage.thinking_tokens,
         tool_use_prompt_tokens: usage.tool_use_prompt_tokens,
-        web_search_requests: usage.web_search_requests,
-        web_fetch_requests: usage.web_fetch_requests,
         service_tier: usage.service_tier,
-        inference_geo: usage.inference_geo,
         iterations: usage.iterations,
     }
 }
@@ -4014,10 +4011,20 @@ pub(crate) mod tests {
                 .signer_factory(Arc::new(UnusedSignerFactory))
                 .principal_view(view.clone())
                 .build();
+            struct UnusedDispatcher;
+            #[async_trait::async_trait]
+            impl crate::UpstreamDispatch for UnusedDispatcher {
+                async fn dispatch(
+                    &self,
+                    _request: cc_lb_upstream::SignedRequest,
+                ) -> Result<http::Response<crate::Body>, crate::DispatchError> {
+                    unreachable!("unused dispatcher in websocket accounting test")
+                }
+            }
             let lifecycle = Arc::new(Lifecycle::new_with_dynamic_view(
                 authn,
                 Arc::new(DynamicViewHolder::new(dynamic)),
-                Arc::new(crate::HyperDispatcher::new()),
+                Arc::new(UnusedDispatcher),
                 crate::LifecycleConfig::default(),
                 clock.clone(),
             ));

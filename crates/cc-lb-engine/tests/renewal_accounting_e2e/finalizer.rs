@@ -5,8 +5,8 @@ use cc_lb_control::{InMemoryBus, RequestEventBus};
 use cc_lb_engine::cache_keepalive::RenewalFinalization;
 use cc_lb_lifecycle::LifecycleEvent;
 use cc_lb_pricing::{
-    CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion, global_catalog,
-    virtual_cost_micros_full,
+    CatalogSnapshot, CatalogStatus, ComputedCostBreakdown, Pricing, UsdPerMillion, global_catalog,
+    virtual_cost_micros_full_with_context_and_provider_writes,
 };
 use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveSessionRecord, CacheKeepaliveTurnRow, RequestEvent,
@@ -39,15 +39,27 @@ pub(crate) async fn persist_finalization(input: FinalizeInput<'_>) -> Completion
         input.session.generation
     );
     let event_id = format!("renewal:{source_ref_id}");
-    let cost = virtual_cost_micros_full(
+    let cache_creation = input
+        .finalization
+        .usage
+        .cache_creation_input_tokens_5m
+        .saturating_add(input.finalization.usage.cache_creation_input_tokens_1h);
+    let cost = virtual_cost_micros_full_with_context_and_provider_writes(
         "claude-test",
         input.finalization.usage.input_tokens,
         input.finalization.usage.output_tokens,
+        0,
+        0,
+        cache_creation,
         input.finalization.usage.cache_creation_input_tokens_5m,
         input.finalization.usage.cache_creation_input_tokens_1h,
         input.finalization.usage.cache_read_input_tokens,
         None,
-    );
+        None,
+        None,
+        None,
+    )
+    .unwrap_or_else(ComputedCostBreakdown::unknown);
     let event = renewal_event(&event_id, &source_ref_id, &input, cost.total_micros);
     let projections = renewal_projections(&source_ref_id, &input, cost.total_micros);
     let cursor = input

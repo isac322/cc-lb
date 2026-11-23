@@ -81,7 +81,7 @@ fn tier_snapshot(with_explicit_tiers: bool) -> CatalogSnapshot {
 fn total_for(service_tier: Option<&str>, with_explicit_tiers: bool) -> i64 {
     let _guard = GLOBAL_TEST_LOCK.lock().expect("global catalog test lock");
     global_catalog().install_snapshot(tier_snapshot(with_explicit_tiers));
-    virtual_cost_micros_full(
+    crate::cost::virtual_cost_micros_full(
         MODEL,
         1_000_000,
         1_000_000,

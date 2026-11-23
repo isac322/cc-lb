@@ -1632,19 +1632,19 @@ async fn assert_selected_bundle_failover_cost_boundary(
         ],
     )
     .with_lifecycle(|lifecycle| {
-        lifecycle
-            .with_static_limit_subject(
-                limit_engine.clone(),
-                PRINCIPAL.to_owned(),
-                LIMIT_KEY.to_owned(),
-                StoredApiKeyRecord {
-                    key_hash_b64: LIMIT_KEY.to_owned(),
-                    status: KeyStatus::Active,
-                    ..StoredApiKeyRecord::default()
-                },
-            )
-            .with_limit_cost_estimator(policy_limit_cost_estimator())
-            .with_event_bus(test_bus.bus_arc())
+        crate::common::with_static_limit_subject(
+            lifecycle,
+            limit_engine.clone(),
+            PRINCIPAL.to_owned(),
+            LIMIT_KEY.to_owned(),
+            StoredApiKeyRecord {
+                key_hash_b64: LIMIT_KEY.to_owned(),
+                status: KeyStatus::Active,
+                ..StoredApiKeyRecord::default()
+            },
+        )
+        .with_limit_cost_estimator(policy_limit_cost_estimator())
+        .with_event_bus(test_bus.bus_arc())
     });
     let official_replies = fixture
         .dispatch
@@ -1824,19 +1824,19 @@ async fn run_with_limits_request(
     let limit_engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
     let reconcile = spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, limit_engine.clone());
     let fixture = Fixture::with_limits(upstreams, failover_limits()).with_lifecycle(|lifecycle| {
-        lifecycle
-            .with_static_limit_subject(
-                limit_engine.clone(),
-                PRINCIPAL.to_owned(),
-                LIMIT_KEY.to_owned(),
-                StoredApiKeyRecord {
-                    key_hash_b64: LIMIT_KEY.to_owned(),
-                    status: KeyStatus::Active,
-                    ..StoredApiKeyRecord::default()
-                },
-            )
-            .with_limit_cost_estimator(estimator.clone())
-            .with_event_bus(test_bus.bus_arc())
+        crate::common::with_static_limit_subject(
+            lifecycle,
+            limit_engine.clone(),
+            PRINCIPAL.to_owned(),
+            LIMIT_KEY.to_owned(),
+            StoredApiKeyRecord {
+                key_hash_b64: LIMIT_KEY.to_owned(),
+                status: KeyStatus::Active,
+                ..StoredApiKeyRecord::default()
+            },
+        )
+        .with_limit_cost_estimator(estimator.clone())
+        .with_event_bus(test_bus.bus_arc())
     });
 
     let status = match client_read {
@@ -3021,7 +3021,8 @@ async fn responses_websocket_output_cap_rejects_missing_max_output_tokens_before
         }],
     )
     .with_lifecycle(|lifecycle| {
-        lifecycle.with_static_limit_subject(
+        crate::common::with_static_limit_subject(
+            lifecycle,
             engine,
             PRINCIPAL.to_owned(),
             "ws-output-key".to_owned(),
@@ -3085,7 +3086,8 @@ async fn responses_websocket_close_releases_inflight_queued_and_steer_reservatio
         limits,
     )
     .with_lifecycle(|lifecycle| {
-        lifecycle.with_static_limit_subject(
+        crate::common::with_static_limit_subject(
+            lifecycle,
             engine,
             PRINCIPAL.to_owned(),
             "ws-limit-key".to_owned(),
@@ -3623,18 +3625,18 @@ async fn responses_websocket_terminal_releases_concurrency_before_background_set
         }],
     )
     .with_lifecycle(|lifecycle| {
-        lifecycle
-            .with_static_limit_subject(
-                engine.clone(),
-                PRINCIPAL.to_owned(),
-                "ws-serial-key".to_owned(),
-                StoredApiKeyRecord {
-                    key_hash_b64: "ws-serial-key".to_owned(),
-                    status: KeyStatus::Active,
-                    ..Default::default()
-                },
-            )
-            .with_event_bus(bus)
+        crate::common::with_static_limit_subject(
+            lifecycle,
+            engine.clone(),
+            PRINCIPAL.to_owned(),
+            "ws-serial-key".to_owned(),
+            StoredApiKeyRecord {
+                key_hash_b64: "ws-serial-key".to_owned(),
+                status: KeyStatus::Active,
+                ..Default::default()
+            },
+        )
+        .with_event_bus(bus)
     });
     let (mut gateway, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
     let first = websocket_admit(&mut gateway, websocket_create("main", None))
@@ -3758,18 +3760,18 @@ async fn responses_websocket_incomplete_without_usage_refunds_reservation() {
         ],
     )
     .with_lifecycle(|lifecycle| {
-        lifecycle
-            .with_static_limit_subject(
-                engine.clone(),
-                PRINCIPAL.to_owned(),
-                "ws-incomplete-key".to_owned(),
-                StoredApiKeyRecord {
-                    key_hash_b64: "ws-incomplete-key".to_owned(),
-                    status: KeyStatus::Active,
-                    ..Default::default()
-                },
-            )
-            .with_event_bus(bus)
+        crate::common::with_static_limit_subject(
+            lifecycle,
+            engine.clone(),
+            PRINCIPAL.to_owned(),
+            "ws-incomplete-key".to_owned(),
+            StoredApiKeyRecord {
+                key_hash_b64: "ws-incomplete-key".to_owned(),
+                status: KeyStatus::Active,
+                ..Default::default()
+            },
+        )
+        .with_event_bus(bus)
     });
     let (mut gateway, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
     let turn = websocket_admit(&mut gateway, websocket_create("main", None))
@@ -4269,18 +4271,18 @@ async fn responses_websocket_expired_queued_reservation_rejects_before_sign_or_s
         }],
     )
     .with_lifecycle(|lifecycle| {
-        lifecycle
-            .with_static_limit_subject(
-                engine.clone(),
-                PRINCIPAL.to_owned(),
-                "ws-expired-hold".to_owned(),
-                StoredApiKeyRecord {
-                    key_hash_b64: "ws-expired-hold".to_owned(),
-                    status: KeyStatus::Active,
-                    ..Default::default()
-                },
-            )
-            .with_event_bus(bus)
+        crate::common::with_static_limit_subject(
+            lifecycle,
+            engine.clone(),
+            PRINCIPAL.to_owned(),
+            "ws-expired-hold".to_owned(),
+            StoredApiKeyRecord {
+                key_hash_b64: "ws-expired-hold".to_owned(),
+                status: KeyStatus::Active,
+                ..Default::default()
+            },
+        )
+        .with_event_bus(bus)
     });
     let (mut gateway, dispatch_log) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
     let first = websocket_admit(&mut gateway, websocket_create("main", None))
@@ -4476,18 +4478,18 @@ async fn responses_websocket_interrupt_routes_to_owner_handles_ack_orderings_and
         ],
     )
     .with_lifecycle(|lifecycle| {
-        lifecycle
-            .with_static_limit_subject(
-                engine.clone(),
-                PRINCIPAL.to_owned(),
-                "ws-interrupt-key".to_owned(),
-                StoredApiKeyRecord {
-                    key_hash_b64: "ws-interrupt-key".to_owned(),
-                    status: KeyStatus::Active,
-                    ..Default::default()
-                },
-            )
-            .with_event_bus(bus)
+        crate::common::with_static_limit_subject(
+            lifecycle,
+            engine.clone(),
+            PRINCIPAL.to_owned(),
+            "ws-interrupt-key".to_owned(),
+            StoredApiKeyRecord {
+                key_hash_b64: "ws-interrupt-key".to_owned(),
+                status: KeyStatus::Active,
+                ..Default::default()
+            },
+        )
+        .with_event_bus(bus)
     });
     let (mut gateway, dispatch_log) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
 

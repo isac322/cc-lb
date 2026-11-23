@@ -228,14 +228,7 @@ pub trait UsageRollupStore: Send + Sync {
         Ok(Vec::new())
     }
 
-    async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>>;
-
-    async fn usage_rollup_revision(&self) -> StorageResult<Option<String>> {
-        Ok(self
-            .usage_rollup_checkpoint()
-            .await?
-            .map(|checkpoint| checkpoint.to_string()))
-    }
+    async fn usage_rollup_revision(&self) -> StorageResult<Option<String>>;
 }
 
 #[async_trait]

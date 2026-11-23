@@ -1,21 +1,24 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_clock::TestClock;
 use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
-use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, SubscriptionQuotaCacheLike};
+use cc_lb_control::{
+    DynamicViewBuilder, DynamicViewHolder, InMemoryBus, RequestEventBus, SubscriptionQuotaCacheLike,
+};
 use cc_lb_domain::{
-    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, TerminalStrategy,
+    RoutingTrace, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, TerminalStrategy,
 };
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
-use cc_lb_engine::lifecycle::{PreviewRouteInput, PreviewRouteOutcome};
 use cc_lb_engine::{Body, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
+use cc_lb_lifecycle::LifecycleEvent;
 use cc_lb_storage_api::SubscriptionQuotaSample;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use cc_lb_upstream::SignedRequest;
-use http::{HeaderMap, Response, StatusCode};
+use http::{Response, StatusCode};
 use parking_lot::Mutex as ParkingMutex;
 use url::Url;
 use uuid::Uuid;
@@ -25,8 +28,16 @@ use super::common::{TestAuthn, TestState, collect_body, messages_request};
 const PRINCIPAL: &str = "principal-test";
 const NOW: u64 = 1_700_000_000;
 
+#[derive(Debug, Clone)]
+pub struct TestRouteOutcome {
+    pub trace: RoutingTrace,
+    pub winner_upstream_id: Option<Uuid>,
+    pub winner_upstream_name: Option<String>,
+}
+
 pub struct PreviewFixture {
     lifecycle: Lifecycle,
+    bus: Arc<InMemoryBus>,
     cache: Arc<MutableQuotaCache>,
     dispatch: Arc<RecordingDispatch>,
     pub urgent_id: Uuid,
@@ -53,10 +64,17 @@ impl PreviewFixture {
             (urgent_id, urgent),
             (steady_id, steady),
         ])));
+        let bus = Arc::new(InMemoryBus::new());
         let dispatch = Arc::new(RecordingDispatch::new(urgent_status, steady_status));
-        let lifecycle = lifecycle(Arc::clone(&cache), [urgent_id, steady_id], dispatch.clone());
+        let lifecycle = lifecycle(
+            Arc::clone(&cache),
+            [urgent_id, steady_id],
+            dispatch.clone(),
+            Arc::clone(&bus),
+        );
         Self {
             lifecycle,
+            bus,
             cache,
             dispatch,
             urgent_id,
@@ -64,23 +82,49 @@ impl PreviewFixture {
         }
     }
 
-    pub async fn preview(&self, request_id: &str) -> PreviewRouteOutcome {
+    pub async fn preview(&self, request_id: &str) -> TestRouteOutcome {
         self.preview_model(request_id, "claude-test").await
     }
 
-    pub async fn preview_model(&self, request_id: &str, model: &str) -> PreviewRouteOutcome {
+    pub async fn preview_model(&self, _request_id: &str, model: &str) -> TestRouteOutcome {
+        let mut rx = self.bus.subscribe_lifecycle();
+        self.dispatch.set_recording(false);
         let body = format!(r#"{{"model":"{model}","messages":[]}}"#);
-        self.lifecycle
-            .preview_route(PreviewRouteInput {
-                principal_id: PRINCIPAL.to_owned(),
-                request_id: Some(request_id.to_owned()),
-                headers: HeaderMap::new(),
-                body_bytes: Bytes::from(body),
-                provider: Some(cc_lb_domain::Provider::Anthropic),
-                path: "/v1/messages".to_owned(),
-            })
+        let request = messages_request(Bytes::from(body));
+        let auth = self
+            .lifecycle
+            .authenticate(request.headers())
             .await
-            .expect("preview succeeds")
+            .expect("test request authenticates");
+        let response = self
+            .lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("handle succeeds");
+        let _ = collect_body(response).await;
+        self.dispatch.set_recording(true);
+
+        let mut outcome = None;
+        while let Ok(event) = rx.try_recv() {
+            if let LifecycleEvent::RouteCompleted {
+                result,
+                routing_trace,
+                ..
+            } = event
+            {
+                let (winner_upstream_id, winner_upstream_name) = match result {
+                    Ok(info) => (Some(info.upstream_id), Some(info.upstream_name)),
+                    Err(_) => (None, None),
+                };
+                outcome = Some(TestRouteOutcome {
+                    trace: routing_trace.expect("RouteCompleted includes routing_trace"),
+                    winner_upstream_id,
+                    winner_upstream_name,
+                });
+                break;
+            }
+        }
+        outcome.expect("RouteCompleted event observed")
     }
 
     pub async fn handle_model(&self, model: &str) -> StatusCode {
@@ -154,6 +198,7 @@ fn lifecycle(
     cache: Arc<MutableQuotaCache>,
     ids: [Uuid; 2],
     dispatcher: Arc<dyn UpstreamDispatch>,
+    bus: Arc<InMemoryBus>,
 ) -> Lifecycle {
     let state = TestState::default();
     let principal_view = principal_view();
@@ -172,6 +217,7 @@ fn lifecycle(
         LifecycleConfig::default(),
         Arc::new(TestClock::new_at_secs(NOW)),
     )
+    .with_event_bus(bus as Arc<dyn RequestEventBus>)
 }
 
 fn principal_view() -> Arc<PrincipalView> {
@@ -315,6 +361,7 @@ fn quota(window: &str, utilization: f64, reset: u64) -> SubscriptionQuotaCandida
 struct RecordingDispatch {
     calls: ParkingMutex<Vec<String>>,
     statuses: HashMap<String, StatusCode>,
+    record_calls: AtomicBool,
 }
 
 impl RecordingDispatch {
@@ -325,7 +372,12 @@ impl RecordingDispatch {
                 ("urgent.invalid".to_owned(), urgent_status),
                 ("steady.invalid".to_owned(), steady_status),
             ]),
+            record_calls: AtomicBool::new(true),
         }
+    }
+
+    fn set_recording(&self, enabled: bool) {
+        self.record_calls.store(enabled, AtomicOrdering::Relaxed);
     }
 }
 
@@ -337,7 +389,9 @@ impl UpstreamDispatch for RecordingDispatch {
             .host_str()
             .expect("test request has host")
             .to_owned();
-        self.calls.lock().push(host.clone());
+        if self.record_calls.load(AtomicOrdering::Relaxed) {
+            self.calls.lock().push(host.clone());
+        }
         let status = self.statuses[&host];
         let body = if status.is_success() {
             Bytes::from_static(

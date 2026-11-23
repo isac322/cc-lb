@@ -3,67 +3,14 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use cc_lb_admin::ports::{
-    RoutePreviewError, RoutePreviewInput, RoutePreviewOutcome, RoutePreviewPort,
-    RoutePreviewWinner, SubscriptionQuotaIngestionPort, WarmupAttemptInput,
-    WarmupAttemptOutcomeSnapshot, WarmupAttemptResult, WarmupPort,
+    SubscriptionQuotaIngestionPort, WarmupAttemptInput, WarmupAttemptOutcomeSnapshot,
+    WarmupAttemptResult, WarmupPort,
 };
 use cc_lb_engine::Lifecycle;
-use cc_lb_engine::lifecycle::{PreviewRouteError, PreviewRouteInput as EnginePreviewRouteInput};
 use cc_lb_engine::warmup_attempts::{
     WarmupAttemptExecution, WarmupAttemptExecutionResult, execute_warmup_attempt,
 };
 use cc_lb_storage_api::WarmupAttemptTrigger;
-
-pub(crate) struct ServerRoutePreviewPort {
-    lifecycle: Arc<Lifecycle>,
-}
-
-impl ServerRoutePreviewPort {
-    pub(crate) const fn new(lifecycle: Arc<Lifecycle>) -> Self {
-        Self { lifecycle }
-    }
-}
-
-#[async_trait]
-impl RoutePreviewPort for ServerRoutePreviewPort {
-    async fn preview_route(
-        &self,
-        input: RoutePreviewInput,
-    ) -> Result<RoutePreviewOutcome, RoutePreviewError> {
-        let outcome = self
-            .lifecycle
-            .preview_route(EnginePreviewRouteInput {
-                principal_id: input.principal_id,
-                request_id: input.request_id,
-                headers: input.headers,
-                body_bytes: input.body_bytes,
-                provider: input.provider,
-                path: input.path,
-            })
-            .await
-            .map_err(map_preview_error)?;
-        let winner = match (outcome.winner_upstream_id, outcome.winner_upstream_name) {
-            (Some(upstream_id), Some(name)) => Some(RoutePreviewWinner { upstream_id, name }),
-            (None, None) | (Some(_), None) | (None, Some(_)) => None,
-        };
-        Ok(RoutePreviewOutcome {
-            trace: outcome.trace,
-            winner,
-        })
-    }
-}
-
-fn map_preview_error(error: PreviewRouteError) -> RoutePreviewError {
-    match error {
-        PreviewRouteError::PrincipalNotFound(id) => RoutePreviewError::PrincipalNotFound(id),
-        PreviewRouteError::PipelineInstantiationError(detail) => {
-            RoutePreviewError::PipelineInstantiationError(detail)
-        }
-        PreviewRouteError::UnsupportedOperation { method, path } => {
-            RoutePreviewError::UnsupportedOperation { method, path }
-        }
-    }
-}
 
 pub(crate) struct ServerWarmupPort;
 

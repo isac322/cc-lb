@@ -14,7 +14,7 @@ use cc_lb_clock::{ClockHandle, SystemClock};
 use cc_lb_config::Config;
 use cc_lb_storage_api::{
     ManagedKeyStore, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, Storage,
-    StorageError, StorageResult, UpstreamCreate, UpstreamStore, principal::Limit,
+    StorageError, StorageResult, UpstreamCreate, UpstreamStore, UpstreamUpdate, principal::Limit,
 };
 
 use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
@@ -1194,9 +1194,17 @@ async fn seed_storage_on(
         let ciphertext = aead
             .encrypt(b"sk-ant-fixture-secret", upstream.id.as_bytes())
             .expect("seed api-key ciphertext");
-        UpstreamStore::update_api_key_secret(storage.as_ref(), upstream.id, Some(ciphertext))
-            .await
-            .expect("seed upstream api-key secret");
+        UpstreamStore::update(
+            storage.as_ref(),
+            upstream.id,
+            upstream.revision,
+            UpstreamUpdate {
+                api_key_ciphertext: Some(ciphertext),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("seed upstream api-key secret");
     }
     PrincipalStore::create(
         storage.as_ref(),

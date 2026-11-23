@@ -49,13 +49,13 @@ export function CardBody({
  * - `danger`: outline; page-level Delete / Revoke.
  * - `danger-solid`: only the confirm button of a destructive `ConfirmDialog`.
  */
-export type ButtonVariant =
+type ButtonVariant =
   | 'primary'
   | 'secondary'
   | 'ghost'
   | 'danger'
   | 'danger-solid';
-export type ButtonSize = 'sm' | 'md' | 'lg';
+type ButtonSize = 'sm' | 'md' | 'lg';
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
   size?: ButtonSize;
@@ -176,13 +176,7 @@ export function IconButton({
  * (model IDs, key IDs) only. At most one status badge per object header;
  * healthy states are shown by omission.
  */
-export type BadgeTone =
-  | 'neutral'
-  | 'accent'
-  | 'ok'
-  | 'warn'
-  | 'danger'
-  | 'mono';
+type BadgeTone = 'neutral' | 'accent' | 'ok' | 'warn' | 'danger' | 'mono';
 const BADGE_TONES: Record<BadgeTone, string> = {
   neutral: 'bg-overlay-5 text-text-muted text-caption font-medium',
   accent: 'border border-accent text-accent-text text-caption font-medium',
@@ -1190,7 +1184,7 @@ export function Drawer({
 }
 
 // ─── Notice ──────────────────────────────────────────────────────────────────
-export type NoticeTone = 'info' | 'success' | 'warning' | 'danger';
+type NoticeTone = 'info' | 'success' | 'warning' | 'danger';
 /**
  * - `inline` (default): a well inside a card — tone/8 fill, no border, 14px
  *   icon. Use it inside the object that owns the problem.
@@ -1199,7 +1193,7 @@ export type NoticeTone = 'info' | 'success' | 'warning' | 'danger';
  *   at most one action. Collapse lists
  *   into a sentence.
  */
-export type NoticeVariant = 'inline' | 'banner';
+type NoticeVariant = 'inline' | 'banner';
 
 const NOTICE_FILL: Record<NoticeTone, string> = {
   info: 'bg-overlay-3',

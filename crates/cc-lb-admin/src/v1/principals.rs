@@ -158,14 +158,19 @@ struct ListResponse {
 async fn create_principal(
     State(state): State<AdminState>,
     Extension(identity): Extension<AdminIdentity>,
-    Json(body): Json<CreatePrincipalBody>,
+    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
 ) -> axum::response::Response {
+    let raw = match extract_principal_json(body) {
+        Ok(raw) => raw,
+        Err(error) => return error.into_response(),
+    };
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
-    if unsupported_llm_judge(body.cache_keepalive.as_ref()) {
-        return unsupported_llm_judge_response();
-    }
+    let body: CreatePrincipalBody = match parse_principal_body(raw) {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
     let name = body.name.clone();
 
     let input = PrincipalCreate {
@@ -269,16 +274,19 @@ async fn update_principal(
     Path(id): Path<String>,
     headers: HeaderMap,
     Extension(identity): Extension<AdminIdentity>,
-    Json(body): Json<UpdatePrincipalBody>,
+    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
 ) -> axum::response::Response {
+    let raw = match extract_principal_json(body) {
+        Ok(raw) => raw,
+        Err(error) => return error.into_response(),
+    };
     let Some(expected_revision) = if_match_revision(&headers) else {
         return error_response(StatusCode::PRECONDITION_REQUIRED, "if_match_required");
     };
-    if let Some(Some(config)) = body.cache_keepalive.as_ref()
-        && unsupported_llm_judge(Some(config))
-    {
-        return unsupported_llm_judge_response();
-    }
+    let body: UpdatePrincipalBody = match parse_principal_body(raw) {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
     let fields_changed = update_fields_changed(&body);
     let route = format!("/admin/v1/principals/{id}");
     update_principal_record(
@@ -841,10 +849,47 @@ fn error_response(status: StatusCode, code: &str) -> axum::response::Response {
     (status, Json(json!({ "error": code }))).into_response()
 }
 
-fn unsupported_llm_judge(config: Option<&CacheKeepaliveConfig>) -> bool {
-    config
-        .and_then(|config| config.classifier.llm_judge.as_ref())
-        .is_some()
+enum PrincipalBodyError {
+    UnsupportedLlmJudge,
+    Validation { status: StatusCode, message: String },
+}
+
+impl axum::response::IntoResponse for PrincipalBodyError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::UnsupportedLlmJudge => unsupported_llm_judge_response(),
+            Self::Validation { status, message } => validation_failed_response(status, message),
+        }
+    }
+}
+
+fn extract_principal_json(
+    raw: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
+) -> Result<serde_json::Value, PrincipalBodyError> {
+    raw.map(|Json(value)| value)
+        .map_err(|rejection| PrincipalBodyError::Validation {
+            status: rejection.status(),
+            message: rejection.body_text(),
+        })
+}
+
+fn parse_principal_body<T: serde::de::DeserializeOwned>(
+    value: serde_json::Value,
+) -> Result<T, PrincipalBodyError> {
+    if has_non_null_llm_judge(&value) {
+        return Err(PrincipalBodyError::UnsupportedLlmJudge);
+    }
+    serde_json::from_value(value).map_err(|error| PrincipalBodyError::Validation {
+        status: StatusCode::UNPROCESSABLE_ENTITY,
+        message: error.to_string(),
+    })
+}
+
+fn has_non_null_llm_judge(body: &serde_json::Value) -> bool {
+    body.get("cache_keepalive")
+        .and_then(|keepalive| keepalive.get("classifier"))
+        .and_then(|classifier| classifier.get("llm_judge"))
+        .is_some_and(|judge| !judge.is_null())
 }
 
 fn unsupported_llm_judge_response() -> axum::response::Response {
@@ -854,6 +899,23 @@ fn unsupported_llm_judge_response() -> axum::response::Response {
             "error": "unsupported_cache_keepalive_llm_judge",
             "field": "cache_keepalive.classifier.llm_judge",
             "reason": "llm_judge is not implemented in this release"
+        })),
+    )
+        .into_response()
+}
+
+fn validation_failed_response(status: StatusCode, message: String) -> axum::response::Response {
+    let field = message
+        .split('`')
+        .nth(1)
+        .filter(|field| !field.is_empty())
+        .map(ToOwned::to_owned);
+    (
+        status,
+        Json(json!({
+            "error": "validation_failed",
+            "field": field,
+            "message": message,
         })),
     )
         .into_response()

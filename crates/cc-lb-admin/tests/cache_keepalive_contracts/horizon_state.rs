@@ -222,9 +222,10 @@ async fn selected_horizon_state_matrix(
             cache_keepalive_replace_request(principal, id, NOW_UNIX_SECS, NOW_UNIX_SECS + 300);
         request.display_reason = "agent-in-turn".to_owned();
         let mut record = storage
-            .replace_from_real_request(&request)
+            .replace_from_real_request_fenced(&request, None)
             .await
-            .expect("seed state");
+            .expect("seed state")
+            .expect("seed state record");
         if let Some(age) = turn_age {
             seed_turn(storage, principal, id, NOW_UNIX_SECS - age).await;
             if id != "cancelled-no-counter" {
@@ -602,7 +603,7 @@ async fn current_follow_up_evidence_matrix(
         let mut request = cache_keepalive_replace_request(principal, id, now - 600, now + 300);
         request.cycle_id = cycle;
         storage
-            .replace_from_real_request(&request)
+            .replace_from_real_request_fenced(&request, None)
             .await
             .expect("seed paused cycle");
         if let Some(age) = renewal_age {
@@ -765,7 +766,7 @@ async fn detail_table_retains_the_rail_cycle_range(
         cache_keepalive_replace_request(principal, id, NOW_UNIX_SECS - 7_201, NOW_UNIX_SECS + 300);
     request.cycle_id = first_cycle;
     storage
-        .replace_from_real_request(&request)
+        .replace_from_real_request_fenced(&request, None)
         .await
         .expect("old cycle");
     for index in 0..9 {
@@ -796,7 +797,7 @@ async fn detail_table_retains_the_rail_cycle_range(
     request.cache_anchor_at_unix_secs = NOW_UNIX_SECS;
     request.now_unix_secs = NOW_UNIX_SECS;
     storage
-        .replace_from_real_request(&request)
+        .replace_from_real_request_fenced(&request, None)
         .await
         .expect("empty current cycle");
     for (horizon, expected_turns, unknown_cycles) in [("24h", 9, 1), ("1h", 8, 0)] {
@@ -853,7 +854,7 @@ async fn detail_follow_up_counts_preserve_mixed_gap_outcomes(
     let mut request =
         cache_keepalive_replace_request(principal, id, NOW_UNIX_SECS - 7_201, NOW_UNIX_SECS + 300);
     storage
-        .replace_from_real_request(&request)
+        .replace_from_real_request_fenced(&request, None)
         .await
         .expect("outcome session");
     for index in 0..11 {
@@ -937,7 +938,7 @@ async fn detail_follow_up_counts_preserve_mixed_gap_outcomes(
     request.cache_anchor_at_unix_secs = NOW_UNIX_SECS;
     request.now_unix_secs = NOW_UNIX_SECS;
     storage
-        .replace_from_real_request(&request)
+        .replace_from_real_request_fenced(&request, None)
         .await
         .expect("new pending cycle");
     let detail = get(

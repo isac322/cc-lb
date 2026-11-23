@@ -1,6 +1,5 @@
 import { Link, useNavigate, useSearch } from '@tanstack/react-router';
 import { useMemo } from 'react';
-import * as z from 'zod';
 import {
   PageContainer,
   Section,
@@ -25,7 +24,6 @@ import { usePrincipalNameMap, useUpstreams, useUsage } from '../lib/queries';
 import {
   TIME_PRESET_OPTIONS,
   TIME_PRESET_SECONDS,
-  TIME_PRESETS,
   type TimePreset,
   useSharedTimeRange,
 } from '../lib/timePresets';
@@ -84,10 +82,6 @@ function LiveRequestsSection({
     </Section>
   );
 }
-
-export const multiProviderOverviewSearchSchema = z.object({
-  range: z.enum(TIME_PRESETS).optional().catch(undefined),
-});
 
 type UsageResult = {
   data: DashboardUsageResponse | undefined;

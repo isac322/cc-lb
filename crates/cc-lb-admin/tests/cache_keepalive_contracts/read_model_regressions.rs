@@ -112,7 +112,7 @@ async fn seed_session(
     );
     request.cycle_id = cycle_id;
     storage
-        .replace_from_real_request(&request)
+        .replace_from_real_request_fenced(&request, None)
         .await
         .expect("seed cache keepalive regression session");
     if terminal {
@@ -536,7 +536,7 @@ async fn replacement_retains_c1_economics_without_inheriting_c2_timeline_case() 
     );
     replacement.cycle_id = CYCLE_TWO;
     storage
-        .replace_from_real_request(&replacement)
+        .replace_from_real_request_fenced(&replacement, None)
         .await
         .expect("replace c1 with c2");
 
@@ -737,7 +737,7 @@ async fn paused_current_cycle_pending_http_contract_case() {
     let mut request = cache_keepalive_replace_request(&principal, id, wall_now, wall_now + 300);
     request.cycle_id = CYCLE_ONE;
     storage
-        .replace_from_real_request(&request)
+        .replace_from_real_request_fenced(&request, None)
         .await
         .expect("seed current cycle");
     append_turn(
@@ -1374,7 +1374,7 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
     );
     replacement.cycle_id = CYCLE_TWO;
     historical_storage
-        .replace_from_real_request(&replacement)
+        .replace_from_real_request_fenced(&replacement, None)
         .await
         .expect("replace with current cycle");
     append_turn(
@@ -2581,7 +2581,7 @@ async fn legacy_cancelled_rows_never_advertise_a_scheduled_renewal() {
     request.display_reason =
         "agent-in-turn (tool_use: `bash`) — first renewal in 4m 30s".to_owned();
     storage
-        .replace_from_real_request(&request)
+        .replace_from_real_request_fenced(&request, None)
         .await
         .expect("seed session");
     storage
@@ -2630,7 +2630,7 @@ async fn cancelled_rows_expose_persisted_causes_in_list_and_detail() {
         request.display_reason =
             "agent-in-turn (tool_use: `bash`) — first renewal in 4m 30s".to_owned();
         storage
-            .replace_from_real_request(&request)
+            .replace_from_real_request_fenced(&request, None)
             .await
             .expect("seed session");
         assert!(

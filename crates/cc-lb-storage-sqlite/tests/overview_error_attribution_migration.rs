@@ -148,8 +148,13 @@ async fn startup_attribution_resumes_committed_batches_without_double_counting()
     ];
     assert_eq!(snapshot(&storage).await, expected);
     assert_eq!(
-        storage.usage_rollup_checkpoint().await.unwrap(),
-        Some(10001)
+        sqlx::query_scalar::<_, i64>(
+            "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'"
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap(),
+        10001
     );
     let before = storage.usage_rollup_revision().await.unwrap();
     let started = Instant::now();
@@ -365,7 +370,15 @@ async fn retained_and_api_pruned_history_keep_exact_upstream_identity_and_checkp
                 if prune_history { 2 } else { 1 },
             );
         }
-        assert_eq!(storage.usage_rollup_checkpoint().await.unwrap(), Some(4));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'"
+            )
+            .fetch_one(storage.pool())
+            .await
+            .unwrap(),
+            4
+        );
         storage.initialize().await.unwrap();
         assert_eq!(snapshot(&storage).await, expected);
         assert_eq!(

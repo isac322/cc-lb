@@ -4,10 +4,10 @@ use async_trait::async_trait;
 use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, MAX_WASM_BLOB_BYTES, PluginChainConflictReason,
-    PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore,
-    PluginSlotKind, StorageError, StorageResult, WasmBlob, WasmBlobRecord,
-    WasmRegistryCascadeDelete, WasmRegistryEntry, WasmRegistryEntryInput, WasmRegistryReference,
-    WasmRegistryReferenceFingerprint, WasmRegistryReferences, sparse_order, validate_identifier,
+    PluginChainEntry, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, StorageError,
+    StorageResult, WasmBlob, WasmBlobRecord, WasmRegistryCascadeDelete, WasmRegistryEntry,
+    WasmRegistryEntryInput, WasmRegistryReference, WasmRegistryReferenceFingerprint,
+    WasmRegistryReferences, validate_identifier,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -470,41 +470,6 @@ impl PluginRegistryStore for PostgresStorage {
         rows.into_iter().map(chain_from_row).collect()
     }
 
-    async fn update_chain_entry(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        update: PluginChainEntryUpdate,
-    ) -> StorageResult<Option<PluginChainEntry>> {
-        let Some(config) = update.config else {
-            return Err(StorageError::InvalidInput {
-                field: "plugin_chain.update".to_owned(),
-                reason: "empty_update".to_owned(),
-            });
-        };
-        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let Some(current) = self.get_chain_in_tx(&mut tx, id).await? else {
-            tx.commit().await.map_err(map_sqlx_error)?;
-            return Ok(None);
-        };
-        if current.revision != expected_revision {
-            return Err(StorageError::StalePluginChainRevision {
-                current: current.revision,
-            });
-        }
-        let row = sqlx::query("UPDATE plugin_chains_v2 SET config=$3, revision=revision+1 WHERE id=$1 AND revision=$2 RETURNING *")
-            .bind(id).bind(u64_to_i64(expected_revision, "plugin_chain.revision")?).bind(config)
-            .fetch_one(&mut *tx).await.map_err(map_sqlx_error)?;
-        let entry = chain_from_row(row)?;
-        sqlx::query("SELECT pg_notify('cclb_plugin_chain_changed', $1)")
-            .bind(entry.principal_id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-        tx.commit().await.map_err(map_sqlx_error)?;
-        Ok(Some(entry))
-    }
-
     async fn reorder_chain(
         &self,
         principal_id: Uuid,
@@ -637,25 +602,6 @@ impl PluginRegistryStore for PostgresStorage {
             .map_err(map_sqlx_error)?;
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(Some(entry))
-    }
-
-    async fn rebalance_chain(
-        &self,
-        principal_id: Uuid,
-        slot: PluginSlotKind,
-    ) -> StorageResult<Vec<PluginChainEntry>> {
-        let entries = self.list_chain_for_principal(principal_id, slot).await?;
-        let orders = sparse_order::rebalance(vec![0; entries.len()]);
-        self.reorder_chain(
-            principal_id,
-            slot,
-            entries
-                .into_iter()
-                .zip(orders)
-                .map(|(entry, order)| (entry.id, order, entry.revision))
-                .collect(),
-        )
-        .await
     }
 }
 

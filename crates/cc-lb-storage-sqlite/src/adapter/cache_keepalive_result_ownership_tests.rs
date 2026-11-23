@@ -231,9 +231,10 @@ fn assert_hit_snapshot(
 async fn run_hit_supersession_case(encrypted_payload: Option<Vec<u8>>) {
     let (_dir, storage_a, storage_b, gate) = storages().await;
     let seed = storage_b
-        .replace_from_real_request(&seed_request())
+        .replace_from_real_request_fenced(&seed_request(), None)
         .await
-        .expect("seed real request");
+        .expect("seed real request")
+        .expect("seed real request record");
     let expected_payload = encrypted_payload
         .clone()
         .unwrap_or_else(|| seed.encrypted_payload.clone());
@@ -252,7 +253,9 @@ async fn run_hit_supersession_case(encrypted_payload: Option<Vec<u8>>) {
     }
 
     let committed_result = storage_b.get_cache_keepalive_session("session-hash").await;
-    let b_result = storage_b.replace_from_real_request(&b_request()).await;
+    let b_result = storage_b
+        .replace_from_real_request_fenced(&b_request(), None)
+        .await;
     gate.release();
     let committed = committed_result
         .expect("read committed hit row")
@@ -270,7 +273,7 @@ async fn run_hit_supersession_case(encrypted_payload: Option<Vec<u8>>) {
         cache_keepalive_job_key("session-hash", 2)
     );
     assert_hit_snapshot(&committed, &seed, &expected_payload);
-    let b = b_result.expect("B replacement");
+    let b = b_result.expect("B replacement").expect("B replacement row");
     let a = tokio::time::timeout(Duration::from_secs(15), task)
         .await
         .expect("A task did not finish after gate release")
@@ -334,9 +337,10 @@ async fn hit_reschedule_keeps_result_owned_when_superseded() {
 async fn run_hit_cancellation_case(encrypted_payload: Option<Vec<u8>>) {
     let (_dir, storage_a, storage_b, gate) = storages().await;
     let seed = storage_b
-        .replace_from_real_request(&seed_request())
+        .replace_from_real_request_fenced(&seed_request(), None)
         .await
-        .expect("seed real request");
+        .expect("seed real request")
+        .expect("seed real request record");
     let expected_payload = encrypted_payload
         .clone()
         .unwrap_or_else(|| seed.encrypted_payload.clone());
@@ -439,9 +443,10 @@ async fn hit_reschedule_keeps_result_owned_when_cancelled() {
 async fn run_real_replacement_case(ticketed: bool) {
     let (_dir, storage_a, storage_b, gate) = storages().await;
     let seed = storage_b
-        .replace_from_real_request(&seed_request())
+        .replace_from_real_request_fenced(&seed_request(), None)
         .await
-        .expect("seed real request");
+        .expect("seed real request")
+        .expect("seed real request record");
     assert_eq!(seed.generation, 1);
     let a_input = a_request();
     let b_input = b_request();
@@ -475,10 +480,11 @@ async fn run_real_replacement_case(ticketed: bool) {
                     .replace_from_real_request_fenced(&task_input, Some(ticket))
                     .await
             }
-            None => task_storage
-                .replace_from_real_request(&task_input)
-                .await
-                .map(Some),
+            None => {
+                task_storage
+                    .replace_from_real_request_fenced(&task_input, None)
+                    .await
+            }
         }
     });
     if !gate.wait_until_entered().await {
@@ -494,10 +500,11 @@ async fn run_real_replacement_case(ticketed: bool) {
                 .replace_from_real_request_fenced(&b_input, Some(ticket))
                 .await
         }
-        None => storage_b
-            .replace_from_real_request(&b_input)
-            .await
-            .map(Some),
+        None => {
+            storage_b
+                .replace_from_real_request_fenced(&b_input, None)
+                .await
+        }
     };
     gate.release();
     let committed = committed_result
@@ -595,9 +602,10 @@ async fn run_hit_negative_cases(encrypted_payload: Option<Vec<u8>>) {
     );
 
     let seed = storage
-        .replace_from_real_request(&seed_request())
+        .replace_from_real_request_fenced(&seed_request(), None)
         .await
-        .expect("seed real request");
+        .expect("seed real request")
+        .expect("seed real request record");
     let before_stale = storage
         .get_cache_keepalive_session("session-hash")
         .await

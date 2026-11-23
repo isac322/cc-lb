@@ -1,7 +1,4 @@
-export {
-  MultiProviderOverview,
-  multiProviderOverviewSearchSchema,
-} from './MultiProviderOverview';
+export { MultiProviderOverview } from './MultiProviderOverview';
 export { ProviderOverviewPage } from './ProviderOverviewPage';
 export type {
   MergedPrincipalUsage,

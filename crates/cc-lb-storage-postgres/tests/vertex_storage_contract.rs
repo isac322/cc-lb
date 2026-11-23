@@ -247,7 +247,7 @@ async fn qa_sto_5_through_8_postgres_epochs_status_latch_rebuild_and_peer_materi
         MetaStore::initialize(&storage).await?;
         let created = create_vertex(&storage, "qa-sto-5-8-postgres").await?;
         let version_only = storage
-            .update_spec(
+            .update(
                 created.id,
                 created.revision,
                 UpstreamUpdate {

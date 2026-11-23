@@ -2144,7 +2144,9 @@ mod tests {
     use cc_lb_clock::TestClock;
     use cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
     use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
-    use cc_lb_storage_api::{MetaStore, PromptCacheObservationRecord, UpstreamCreate};
+    use cc_lb_storage_api::{
+        MetaStore, PromptCacheObservationRecord, UpstreamCreate, UpstreamUpdate,
+    };
     use cc_lb_storage_sqlite::SqliteStorage as Storage;
     use std::collections::VecDeque;
     use std::sync::Arc;
@@ -2550,9 +2552,17 @@ mod tests {
         let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("runtime"));
         let principal = create_machine_principal(&storage, "dual-role-both").await;
         let upstream = create_upstream(&storage, "dual-role-both-upstream").await;
-        let upstream = UpstreamStore::set_enabled(&*storage, upstream.id, upstream.revision, true)
-            .await
-            .expect("enabled upstream");
+        let upstream = UpstreamStore::update(
+            &*storage,
+            upstream.id,
+            upstream.revision,
+            UpstreamUpdate {
+                enabled: Some(true),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("enabled upstream");
         let registry = install_dual_role_provider(&storage).await;
         let router =
             attach_dual_role_provider(&storage, principal.id, registry, PluginSlotKind::Router)
@@ -2597,9 +2607,17 @@ mod tests {
         let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("runtime"));
         let principal = create_machine_principal(&storage, "dual-role-filter-first").await;
         let upstream = create_upstream(&storage, "dual-role-filter-first-upstream").await;
-        let upstream = UpstreamStore::set_enabled(&*storage, upstream.id, upstream.revision, true)
-            .await
-            .expect("enabled upstream");
+        let upstream = UpstreamStore::update(
+            &*storage,
+            upstream.id,
+            upstream.revision,
+            UpstreamUpdate {
+                enabled: Some(true),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("enabled upstream");
         let registry = install_dual_role_provider(&storage).await;
         let router =
             attach_dual_role_provider(&storage, principal.id, registry, PluginSlotKind::Router)
@@ -2655,10 +2673,17 @@ mod tests {
             let principal = create_machine_principal(&storage, "dual-role-detach").await;
             let sibling = create_machine_principal(&storage, "dual-role-sibling").await;
             let upstream = create_upstream(&storage, "dual-role-detach-upstream").await;
-            let upstream =
-                UpstreamStore::set_enabled(&*storage, upstream.id, upstream.revision, true)
-                    .await
-                    .expect("enabled upstream");
+            let upstream = UpstreamStore::update(
+                &*storage,
+                upstream.id,
+                upstream.revision,
+                UpstreamUpdate {
+                    enabled: Some(true),
+                    ..UpstreamUpdate::default()
+                },
+            )
+            .await
+            .expect("enabled upstream");
             let registry = install_dual_role_provider(&storage).await;
             let router =
                 attach_dual_role_provider(&storage, principal.id, registry, PluginSlotKind::Router)
@@ -2808,13 +2833,28 @@ mod tests {
         )
         .await
         .expect("OpenAI upstream");
-        let openai = UpstreamStore::set_enabled(storage.as_ref(), openai.id, openai.revision, true)
-            .await
-            .expect("OpenAI enabled");
-        let anthropic =
-            UpstreamStore::set_enabled(storage.as_ref(), anthropic.id, anthropic.revision, true)
-                .await
-                .expect("Anthropic enabled");
+        let openai = UpstreamStore::update(
+            storage.as_ref(),
+            openai.id,
+            openai.revision,
+            UpstreamUpdate {
+                enabled: Some(true),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("OpenAI enabled");
+        let anthropic = UpstreamStore::update(
+            storage.as_ref(),
+            anthropic.id,
+            anthropic.revision,
+            UpstreamUpdate {
+                enabled: Some(true),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("Anthropic enabled");
         let wasm = anthropic_filter_provider_fixture();
         let metadata = cc_lb_runtime_wasmtime::inspect_wasm_agnostic(&wasm)
             .expect("inspection")
@@ -3055,9 +3095,17 @@ mod tests {
         )
         .await
         .expect("OpenAI upstream");
-        let openai = UpstreamStore::set_enabled(storage.as_ref(), openai.id, openai.revision, true)
-            .await
-            .expect("OpenAI enabled");
+        let openai = UpstreamStore::update(
+            storage.as_ref(),
+            openai.id,
+            openai.revision,
+            UpstreamUpdate {
+                enabled: Some(true),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("OpenAI enabled");
         let gemini = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
@@ -3078,13 +3126,28 @@ mod tests {
         )
         .await
         .expect("Gemini upstream");
-        let gemini = UpstreamStore::set_enabled(storage.as_ref(), gemini.id, gemini.revision, true)
-            .await
-            .expect("Gemini enabled");
-        let anthropic =
-            UpstreamStore::set_enabled(storage.as_ref(), anthropic.id, anthropic.revision, true)
-                .await
-                .expect("Anthropic enabled");
+        let gemini = UpstreamStore::update(
+            storage.as_ref(),
+            gemini.id,
+            gemini.revision,
+            UpstreamUpdate {
+                enabled: Some(true),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("Gemini enabled");
+        let anthropic = UpstreamStore::update(
+            storage.as_ref(),
+            anthropic.id,
+            anthropic.revision,
+            UpstreamUpdate {
+                enabled: Some(true),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("Anthropic enabled");
 
         install_shape_plugin(
             &storage,
@@ -3232,10 +3295,17 @@ mod tests {
         )
         .await
         .expect("oauth upstream created");
-        let snapshot =
-            UpstreamStore::set_enabled(storage.as_ref(), created.id, created.revision, true)
-                .await
-                .expect("capture enabled state before credential installation");
+        let snapshot = UpstreamStore::update(
+            storage.as_ref(),
+            created.id,
+            created.revision,
+            UpstreamUpdate {
+                enabled: Some(true),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("capture enabled state before credential installation");
         let encrypted = cc_lb_aead::EncryptedOAuthTokens::encrypt(
             &aead,
             &cc_lb_aead::OAuthTokenBundle {
@@ -3333,10 +3403,17 @@ mod tests {
         let ciphertext = aead
             .encrypt(plaintext, &vertex_credential_aad(&upstream.id.to_string()))
             .expect("credential encrypts");
-        upstream =
-            UpstreamStore::update_api_key_secret(storage.as_ref(), upstream.id, Some(ciphertext))
-                .await
-                .expect("credential stored");
+        upstream = UpstreamStore::update(
+            storage.as_ref(),
+            upstream.id,
+            upstream.revision,
+            UpstreamUpdate {
+                api_key_ciphertext: Some(ciphertext),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("credential stored");
 
         for marker in [
             "stale_validation_error",
@@ -3427,10 +3504,17 @@ mod tests {
             )
             .await
             .expect("oauth credential stored");
-            let snapshot =
-                UpstreamStore::set_enabled(storage.as_ref(), stored.id, stored.revision, enabled)
-                    .await
-                    .expect("capture pre-failure upstream state");
+            let snapshot = UpstreamStore::update(
+                storage.as_ref(),
+                stored.id,
+                stored.revision,
+                UpstreamUpdate {
+                    enabled: Some(enabled),
+                    ..UpstreamUpdate::default()
+                },
+            )
+            .await
+            .expect("capture pre-failure upstream state");
             UpstreamStore::set_status(
                 storage.as_ref(),
                 snapshot.id,
@@ -3668,9 +3752,17 @@ mod tests {
         let ciphertext = aead
             .encrypt(b"sk-ant-fixture-secret", created.id.as_bytes())
             .expect("api-key ciphertext encrypts");
-        UpstreamStore::update_api_key_secret(storage, created.id, Some(ciphertext))
-            .await
-            .expect("api-key secret stored")
+        UpstreamStore::update(
+            storage,
+            created.id,
+            created.revision,
+            UpstreamUpdate {
+                api_key_ciphertext: Some(ciphertext),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("api-key secret stored")
     }
 
     async fn build_view(
@@ -4676,10 +4768,17 @@ mod tests {
         )
         .await
         .expect("oauth credential stored");
-        let installed =
-            UpstreamStore::set_enabled(storage.as_ref(), stored.id, stored.revision, true)
-                .await
-                .expect("oauth upstream enabled");
+        let installed = UpstreamStore::update(
+            storage.as_ref(),
+            stored.id,
+            stored.revision,
+            UpstreamUpdate {
+                enabled: Some(true),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("oauth upstream enabled");
         let mut stores = stores(
             storage.clone(),
             Arc::new(FakePromptCacheObservationStore::new()),
@@ -4877,10 +4976,6 @@ mod tests {
             PrincipalStore::soft_delete(self.storage.as_ref(), id, expected_revision, now_unix_secs)
                 .await
         }
-
-        async fn hard_delete(&self, id: Uuid) -> StorageResult<bool> {
-            PrincipalStore::hard_delete(self.storage.as_ref(), id).await
-        }
     }
 
     fn oauth_bundle(access_token: &str, refresh_token: &str) -> cc_lb_aead::OAuthTokenBundle {
@@ -4942,10 +5037,17 @@ mod tests {
         )
         .await
         .expect("oauth credential stored");
-        let installed =
-            UpstreamStore::set_enabled(storage.as_ref(), stored.id, stored.revision, true)
-                .await
-                .expect("oauth upstream enabled");
+        let installed = UpstreamStore::update(
+            storage.as_ref(),
+            stored.id,
+            stored.revision,
+            UpstreamUpdate {
+                enabled: Some(true),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("oauth upstream enabled");
         let principals = Arc::new(ScriptedPrincipals {
             storage: storage.clone(),
             upstream_id: installed.id,

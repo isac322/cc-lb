@@ -865,57 +865,12 @@ mod tests {
                 if let Some(base_url) = update.base_url {
                     record.base_url = base_url;
                 }
+                if let Some(enabled) = update.enabled {
+                    record.enabled = enabled;
+                }
                 if let Some(api_key_ciphertext) = update.api_key_ciphertext {
                     record.api_key_ciphertext = Some(api_key_ciphertext);
                 }
-                Ok(())
-            })
-            .await
-        }
-
-        async fn set_enabled(
-            &self,
-            id: UpstreamRecordId,
-            expected_revision: u64,
-            enabled: bool,
-        ) -> StorageResult<UpstreamRecord> {
-            self.mutate(id, Some(expected_revision), |record| {
-                record.enabled = enabled;
-                Ok(())
-            })
-            .await
-        }
-
-        async fn update_spec(
-            &self,
-            id: UpstreamRecordId,
-            expected_revision: u64,
-            update: UpstreamUpdate,
-        ) -> StorageResult<UpstreamRecord> {
-            self.update(id, expected_revision, update).await
-        }
-
-        async fn update_api_key_secret(
-            &self,
-            id: UpstreamRecordId,
-            api_key_ciphertext: Option<Vec<u8>>,
-        ) -> StorageResult<UpstreamRecord> {
-            self.mutate(id, None, |record| {
-                record.api_key_ciphertext = api_key_ciphertext;
-                Ok(())
-            })
-            .await
-        }
-
-        async fn update_oauth_token(
-            &self,
-            id: UpstreamRecordId,
-            tokens: EncryptedOAuthTokens,
-        ) -> StorageResult<UpstreamRecord> {
-            self.mutate(id, None, |record| {
-                record.oauth_credentials = Some(tokens);
-                record.oauth_token_generation += 1;
-                record.last_apply_error = None;
                 Ok(())
             })
             .await
@@ -1069,7 +1024,14 @@ mod tests {
             .unwrap();
         let record = store.get_by_name("primary").await.unwrap().unwrap();
         store
-            .set_enabled(record.id, record.revision, false)
+            .update(
+                record.id,
+                record.revision,
+                UpstreamUpdate {
+                    enabled: Some(false),
+                    ..UpstreamUpdate::default()
+                },
+            )
             .await
             .unwrap();
         let factory =
@@ -1097,7 +1059,14 @@ mod tests {
             .unwrap();
         let record = store.get_by_name("primary").await.unwrap().unwrap();
         store
-            .set_enabled(record.id, record.revision, false)
+            .update(
+                record.id,
+                record.revision,
+                UpstreamUpdate {
+                    enabled: Some(false),
+                    ..UpstreamUpdate::default()
+                },
+            )
             .await
             .unwrap();
         let factory =

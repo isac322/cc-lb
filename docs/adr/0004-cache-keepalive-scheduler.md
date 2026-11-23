@@ -51,7 +51,7 @@ The amended scheduling invariants are:
 
 The durable implementation keeps the engine/scheduler module boundary intact. `cc-lb-engine` defines a scheduling port and owns classification, snapshot construction, and cache-anchor extraction; it must not depend on `cc-lb-scheduler`, Apalis, SQLx pools, or storage adapters. Storage record/operation traits live in `cc-lb-storage-api`; SQLite/Postgres adapters implement them; `cc-lb-scheduler` owns `CacheKeepaliveJob` and workers; `cc-lb-server` wires the dependencies.
 
-The amended decision preserves per-principal opt-in, cache-control-only tracking, 5 m / 1 h TTLs, `refresh_lead_time_5m_secs = 30`, `refresh_lead_time_1h_secs = 300`, `max_total_duration_secs = 14400`, `snapshot_max_bytes = 8388608` (8 MiB), and `min_cache_tokens = 10000`. Session identity comes from `x-claude-code-session-id`, `x-claude-session-id`, `x-session-affinity`, `x-session-id`, then cache-prefix-hash fallback, with `x-claude-code-agent-id` isolating non-main subagent sessions by `(thread_id, agent_id)`. The 2026-11-12 amendment lowers the default `max_refreshes_per_session` from `12` to `4` and adds `SubagentHandback` and `EndConversation` to the built-in wait-for-user tools. Explicit caps remain unchanged. `llm_judge` remains reserved/rejected.
+The amended decision preserves per-principal opt-in, cache-control-only tracking, 5 m / 1 h TTLs, `refresh_lead_time_5m_secs = 30`, `refresh_lead_time_1h_secs = 300`, `max_total_duration_secs = 14400`, `snapshot_max_bytes = 8388608` (8 MiB), and `min_cache_tokens = 10000`. Session identity comes from `x-claude-code-session-id`, `x-claude-session-id`, `x-session-affinity`, `x-session-id`, then cache-prefix-hash fallback, with `x-claude-code-agent-id` isolating non-main subagent sessions by `(thread_id, agent_id)`. The 2026-11-12 amendment lowers the default `max_refreshes_per_session` from `12` to `4` and adds `SubagentHandback` and `EndConversation` to the built-in wait-for-user tools. Explicit caps remain unchanged. `LlmJudgeConfig` and the runtime `ClassifierConfig.llm_judge` struct field were subsequently removed in cleanup, while the admin API continues to reject non-null `cache_keepalive.classifier.llm_judge` request payloads.
 Amendment 2026-11-14: lower the default `refresh_lead_time_5m_secs` from 30
 to 10. Anthropic measurements through cc-lb found 5-minute reads through about
 309 seconds after `message_start` and misses from about 310 seconds; production
@@ -111,7 +111,7 @@ Unchanged by the Section 1' amendment.
 - **`max_tokens` / `stop_sequence` -> Ambiguous.**
 - **`null` / unknown -> UserTurn** (fail-safe).
 
-`Ambiguous` responses default to `UserTurn` in this release (fail-safe: better to lose a warm-cache and re-write than to spend money on a wasted fire). The `llm_judge` config field is reserved for a future provider-agnostic judge and is rejected by the admin API while it is unimplemented.
+`Ambiguous` responses default to `UserTurn` in this release (fail-safe: better to lose a warm-cache and re-write than to spend money on a wasted fire). The unimplemented `ClassifierConfig.llm_judge` struct field was removed in cleanup, and non-null `cache_keepalive.classifier.llm_judge` payloads continue to be rejected by the admin API while unimplemented.
 
 Before scheduling an `AgentInTurn` renewal, the response usage must report at
 least `min_cache_tokens` cached input tokens, computed as

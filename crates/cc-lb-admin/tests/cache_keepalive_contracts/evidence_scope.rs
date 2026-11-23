@@ -33,9 +33,10 @@ async fn seed_boundary_evidence(storage: &cc_lb_storage_sqlite::SqliteStorage, p
         NOW_UNIX_SECS + 300,
     );
     let record = storage
-        .replace_from_real_request(&session)
+        .replace_from_real_request_fenced(&session, None)
         .await
-        .expect("seed evidence-scope session");
+        .expect("seed evidence-scope session")
+        .expect("evidence-scope session record");
     sqlx::query("UPDATE cache_keepalive_sessions SET cycle_id = ? WHERE session_key_hash = ?")
         .bind(CYCLE_ID.to_string())
         .bind(SESSION_ID)
@@ -375,9 +376,10 @@ async fn seed_subsecond_upper_boundary_evidence(
         NOW_UNIX_SECS + 240,
     );
     let record = storage
-        .replace_from_real_request(&session)
+        .replace_from_real_request_fenced(&session, None)
         .await
-        .expect("seed upper-bound evidence session");
+        .expect("seed upper-bound evidence session")
+        .expect("upper-bound evidence session record");
     assert!(
         storage
             .mark_cache_keepalive_terminal(
