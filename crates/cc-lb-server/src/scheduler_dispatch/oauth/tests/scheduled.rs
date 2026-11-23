@@ -294,11 +294,14 @@ async fn disabled_valid_oauth_credential_refreshes_and_schedules_next_cycle() {
     let mut fixture = DispatchFixture::new().await;
     set_token_endpoint(&mut fixture, endpoint);
     let upstream = fixture.oauth_upstream(false).await;
-    UpstreamStore::set_enabled(
+    UpstreamStore::update(
         fixture.storage.as_ref(),
         upstream.id,
         upstream.revision,
-        false,
+        UpstreamUpdate {
+            enabled: Some(false),
+            ..UpstreamUpdate::default()
+        },
     )
     .await
     .expect("disable routing");
@@ -502,7 +505,7 @@ async fn in_flight_usage_success_cannot_clear_terminal_refresh_failure() {
     });
     let fixture = DispatchFixture::new().await;
     let upstream = fixture.oauth_upstream(true).await;
-    UpstreamStore::update_spec(
+    UpstreamStore::update(
         fixture.storage.as_ref(),
         upstream.id,
         upstream.revision,
@@ -1160,7 +1163,7 @@ async fn poll_usage_post_refresh_generation_guard_ignores_concurrent_reconnect()
             axum::serve(listener, app).await.expect("serve race usage");
         });
 
-        UpstreamStore::update_spec(
+        UpstreamStore::update(
             fixture.storage.as_ref(),
             upstream_id,
             upstream.revision,

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::StorageResult;
-use crate::{SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord};
+use crate::SubscriptionQuotaCheckpointRangeQuery;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SubscriptionQuotaWindow {
@@ -500,15 +500,6 @@ pub trait UpstreamSubscriptionQuotaStore: Send + Sync {
         &self,
         upstream_ids: &[Uuid],
     ) -> StorageResult<Vec<SubscriptionQuotaSample>>;
-
-    /// Inserts semantic checkpoints, skipping an identical fingerprint or a
-    /// utilization-only change below 0.001 while the checkpoint's status,
-    /// reset, overage, fallback, disabled, and extra-usage flags are unchanged.
-    /// Returns the number of rows inserted.
-    async fn put_subscription_quota_checkpoints(
-        &self,
-        records: &[SubscriptionQuotaCheckpointRecord],
-    ) -> StorageResult<usize>;
 
     /// Removes at most `batch_size` old checkpoints, preserving the latest
     /// checkpoint at or before the cutoff for each upstream/window/source key.

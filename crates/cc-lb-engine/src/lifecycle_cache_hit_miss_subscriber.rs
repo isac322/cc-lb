@@ -43,7 +43,8 @@ impl CacheHitMissSubscriberHandle {
     }
 }
 
-pub fn spawn_lifecycle_cache_hit_miss_subscriber(
+#[cfg(test)]
+fn spawn_lifecycle_cache_hit_miss_subscriber(
     rx: mpsc::Receiver<LifecycleEvent>,
     metrics: Arc<dyn EngineMetricsHook>,
 ) -> CacheHitMissSubscriberHandle {

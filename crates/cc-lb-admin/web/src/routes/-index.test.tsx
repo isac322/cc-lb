@@ -70,7 +70,6 @@ vi.mock('../components/upstreams/UpstreamUsageTable', () => ({
     statusPending: false,
     usagePending: false,
     quotaError: false,
-    reconnectCount: 0,
   }),
   UpstreamUsageTable: ({ empty }: { empty?: ReactNode }) => <>{empty}</>,
 }));

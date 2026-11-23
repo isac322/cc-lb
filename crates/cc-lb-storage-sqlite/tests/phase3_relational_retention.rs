@@ -1363,29 +1363,33 @@ async fn append_evidence_filters_follow_ups_and_deduplicates_overlapping_cycles(
         vec!["first-follow-up", "overlapping-renewal", "renewal",]
     );
     let running = storage
-        .replace_from_real_request(&CacheKeepaliveReplaceRequest {
-            session_key_hash: "running-evidence-session".to_owned(),
-            principal_id: "principal".to_owned(),
-            upstream_id,
-            cycle_id,
-            ttl: CacheTtl::Ttl5m,
-            cache_anchor_at_unix_secs: 0,
-            run_at_unix_secs: 1,
-            expires_at_unix_secs: 1_000,
-            encrypted_payload: b"payload".to_vec(),
-            accounting_key_id: None,
-            display_reason: "test".to_owned(),
-            config_snapshot: cc_lb_storage_api::CacheKeepaliveConfigSnapshot {
-                refresh_lead_time_5m_secs: 30,
-                refresh_lead_time_1h_secs: 300,
-                max_refreshes_per_session: 12,
-                max_total_duration_secs: 14_400,
-                snapshot_max_bytes: 524_288,
+        .replace_from_real_request_fenced(
+            &CacheKeepaliveReplaceRequest {
+                session_key_hash: "running-evidence-session".to_owned(),
+                principal_id: "principal".to_owned(),
+                upstream_id,
+                cycle_id,
+                ttl: CacheTtl::Ttl5m,
+                cache_anchor_at_unix_secs: 0,
+                run_at_unix_secs: 1,
+                expires_at_unix_secs: 1_000,
+                encrypted_payload: b"payload".to_vec(),
+                accounting_key_id: None,
+                display_reason: "test".to_owned(),
+                config_snapshot: cc_lb_storage_api::CacheKeepaliveConfigSnapshot {
+                    refresh_lead_time_5m_secs: 30,
+                    refresh_lead_time_1h_secs: 300,
+                    max_refreshes_per_session: 12,
+                    max_total_duration_secs: 14_400,
+                    snapshot_max_bytes: 524_288,
+                },
+                now_unix_secs: 0,
             },
-            now_unix_secs: 0,
-        })
+            None,
+        )
         .await
-        .expect("seed running session");
+        .expect("seed running session")
+        .expect("running session record");
     storage
         .mark_cache_keepalive_enqueued(&running.session_key_hash, running.generation, 1)
         .await
@@ -1726,29 +1730,33 @@ async fn purge_expired_prunes_unmatched_and_invalid_follow_ups_without_changing_
     let upstream_id = Uuid::from_u128(7);
     let cycle_id = Uuid::from_u128(8);
     let session = storage
-        .replace_from_real_request(&CacheKeepaliveReplaceRequest {
-            session_key_hash: "expired-session".to_owned(),
-            principal_id: "principal".to_owned(),
-            upstream_id,
-            cycle_id,
-            ttl: CacheTtl::Ttl5m,
-            cache_anchor_at_unix_secs: 0,
-            run_at_unix_secs: 1,
-            expires_at_unix_secs: 50,
-            encrypted_payload: b"payload".to_vec(),
-            accounting_key_id: None,
-            display_reason: "test".to_owned(),
-            config_snapshot: cc_lb_storage_api::CacheKeepaliveConfigSnapshot {
-                refresh_lead_time_5m_secs: 30,
-                refresh_lead_time_1h_secs: 300,
-                max_refreshes_per_session: 12,
-                max_total_duration_secs: 14_400,
-                snapshot_max_bytes: 524_288,
+        .replace_from_real_request_fenced(
+            &CacheKeepaliveReplaceRequest {
+                session_key_hash: "expired-session".to_owned(),
+                principal_id: "principal".to_owned(),
+                upstream_id,
+                cycle_id,
+                ttl: CacheTtl::Ttl5m,
+                cache_anchor_at_unix_secs: 0,
+                run_at_unix_secs: 1,
+                expires_at_unix_secs: 50,
+                encrypted_payload: b"payload".to_vec(),
+                accounting_key_id: None,
+                display_reason: "test".to_owned(),
+                config_snapshot: cc_lb_storage_api::CacheKeepaliveConfigSnapshot {
+                    refresh_lead_time_5m_secs: 30,
+                    refresh_lead_time_1h_secs: 300,
+                    max_refreshes_per_session: 12,
+                    max_total_duration_secs: 14_400,
+                    snapshot_max_bytes: 524_288,
+                },
+                now_unix_secs: 0,
             },
-            now_unix_secs: 0,
-        })
+            None,
+        )
         .await
-        .expect("seed expired session");
+        .expect("seed expired session")
+        .expect("expired session record");
     storage
         .mark_cache_keepalive_enqueued(&session.session_key_hash, session.generation, 1)
         .await
@@ -1851,29 +1859,33 @@ async fn purge_expired_prunes_later_follow_up_across_sibling_renewals() {
     let upstream_id = Uuid::from_u128(7);
     let cycle_id = Uuid::from_u128(81);
     let session = storage
-        .replace_from_real_request(&CacheKeepaliveReplaceRequest {
-            session_key_hash: "sibling-purge-session".to_owned(),
-            principal_id: "principal".to_owned(),
-            upstream_id,
-            cycle_id,
-            ttl: CacheTtl::Ttl5m,
-            cache_anchor_at_unix_secs: 0,
-            run_at_unix_secs: 1,
-            expires_at_unix_secs: 50,
-            encrypted_payload: b"payload".to_vec(),
-            accounting_key_id: None,
-            display_reason: "test".to_owned(),
-            config_snapshot: cc_lb_storage_api::CacheKeepaliveConfigSnapshot {
-                refresh_lead_time_5m_secs: 30,
-                refresh_lead_time_1h_secs: 300,
-                max_refreshes_per_session: 12,
-                max_total_duration_secs: 14_400,
-                snapshot_max_bytes: 524_288,
+        .replace_from_real_request_fenced(
+            &CacheKeepaliveReplaceRequest {
+                session_key_hash: "sibling-purge-session".to_owned(),
+                principal_id: "principal".to_owned(),
+                upstream_id,
+                cycle_id,
+                ttl: CacheTtl::Ttl5m,
+                cache_anchor_at_unix_secs: 0,
+                run_at_unix_secs: 1,
+                expires_at_unix_secs: 50,
+                encrypted_payload: b"payload".to_vec(),
+                accounting_key_id: None,
+                display_reason: "test".to_owned(),
+                config_snapshot: cc_lb_storage_api::CacheKeepaliveConfigSnapshot {
+                    refresh_lead_time_5m_secs: 30,
+                    refresh_lead_time_1h_secs: 300,
+                    max_refreshes_per_session: 12,
+                    max_total_duration_secs: 14_400,
+                    snapshot_max_bytes: 524_288,
+                },
+                now_unix_secs: 0,
             },
-            now_unix_secs: 0,
-        })
+            None,
+        )
         .await
-        .expect("seed sibling purge session");
+        .expect("seed sibling purge session")
+        .expect("sibling purge session record");
     storage
         .mark_cache_keepalive_enqueued(&session.session_key_hash, session.generation, 1)
         .await
@@ -1946,29 +1958,33 @@ async fn purge_expired_preserves_follow_up_earliest_for_one_matching_cycle() {
     let cycle_one = Uuid::from_u128(83);
     let cycle_two = Uuid::from_u128(84);
     let session = storage
-        .replace_from_real_request(&CacheKeepaliveReplaceRequest {
-            session_key_hash: "multi-cycle-purge-session".to_owned(),
-            principal_id: "principal".to_owned(),
-            upstream_id,
-            cycle_id: cycle_one,
-            ttl: CacheTtl::Ttl5m,
-            cache_anchor_at_unix_secs: 0,
-            run_at_unix_secs: 1,
-            expires_at_unix_secs: 50,
-            encrypted_payload: b"payload".to_vec(),
-            accounting_key_id: None,
-            display_reason: "test".to_owned(),
-            config_snapshot: cc_lb_storage_api::CacheKeepaliveConfigSnapshot {
-                refresh_lead_time_5m_secs: 30,
-                refresh_lead_time_1h_secs: 300,
-                max_refreshes_per_session: 12,
-                max_total_duration_secs: 14_400,
-                snapshot_max_bytes: 524_288,
+        .replace_from_real_request_fenced(
+            &CacheKeepaliveReplaceRequest {
+                session_key_hash: "multi-cycle-purge-session".to_owned(),
+                principal_id: "principal".to_owned(),
+                upstream_id,
+                cycle_id: cycle_one,
+                ttl: CacheTtl::Ttl5m,
+                cache_anchor_at_unix_secs: 0,
+                run_at_unix_secs: 1,
+                expires_at_unix_secs: 50,
+                encrypted_payload: b"payload".to_vec(),
+                accounting_key_id: None,
+                display_reason: "test".to_owned(),
+                config_snapshot: cc_lb_storage_api::CacheKeepaliveConfigSnapshot {
+                    refresh_lead_time_5m_secs: 30,
+                    refresh_lead_time_1h_secs: 300,
+                    max_refreshes_per_session: 12,
+                    max_total_duration_secs: 14_400,
+                    snapshot_max_bytes: 524_288,
+                },
+                now_unix_secs: 0,
             },
-            now_unix_secs: 0,
-        })
+            None,
+        )
         .await
-        .expect("seed multi-cycle purge session");
+        .expect("seed multi-cycle purge session")
+        .expect("multi-cycle purge session record");
     storage
         .mark_cache_keepalive_enqueued(&session.session_key_hash, session.generation, 1)
         .await

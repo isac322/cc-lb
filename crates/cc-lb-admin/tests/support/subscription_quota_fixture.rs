@@ -1,8 +1,7 @@
 use axum::http::StatusCode;
 use cc_lb_storage_api::{
-    RequestEvent, SubscriptionQuotaCheckpointRecord, SubscriptionQuotaSample,
-    SubscriptionQuotaSampleKind, SubscriptionQuotaSource, SubscriptionQuotaStatus,
-    SubscriptionQuotaWindow,
+    RequestEvent, SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -30,15 +29,15 @@ pub(crate) async fn create_oauth_upstream(
         .expect("created upstream id is uuid")
 }
 
-pub(crate) fn quota_checkpoint(
+pub(crate) fn quota_sample(
     upstream_id: Uuid,
     window: SubscriptionQuotaWindow,
     observed_at_unix_secs: u64,
     sample_seed: u128,
     utilization: f64,
     resets_at_unix_secs: u64,
-) -> SubscriptionQuotaCheckpointRecord {
-    SubscriptionQuotaCheckpointRecord::from(&SubscriptionQuotaSample {
+) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
         upstream_id,
         window,
         source: SubscriptionQuotaSource::Header,
@@ -61,7 +60,7 @@ pub(crate) fn quota_checkpoint(
         extra_usage_used_credits: None,
         credits: None,
         ingested_at_unix_millis: observed_at_unix_secs.saturating_mul(1_000),
-    })
+    }
 }
 
 pub(crate) fn usage_event(

@@ -11,7 +11,6 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import * as z from 'zod';
 import {
   FirstRunChecklist,
   useFirstRunIncomplete,
@@ -134,7 +133,6 @@ import {
 import {
   TIME_PRESET_OPTIONS,
   TIME_PRESET_SECONDS,
-  TIME_PRESETS,
   type TimePreset,
   useSharedTimeRange,
 } from '../../lib/timePresets';
@@ -162,12 +160,6 @@ import {
   recordedPoolQuotaChartData,
   visiblePoolQuotaChartData,
 } from '../../routes/-overviewPoolQuota';
-
-export const overviewSearchSchema = z.object({
-  // An explicit `?range=` owns the view; without it the shared, persisted
-  // range governs, so `range` stays optional rather than URL-defaulted.
-  range: z.enum(TIME_PRESETS).optional().catch(undefined),
-});
 
 type Range = TimePreset;
 const RANGE_OPTIONS = TIME_PRESET_OPTIONS;
@@ -1219,23 +1211,11 @@ const QUOTA_VALUE_CLASS: Record<QuotaSeverity, string> = {
   ok: 'text-text',
 };
 
-function UpstreamsUsageSection({
-  range,
-  provider,
-}: {
-  range: Range;
-  provider?: ProviderFamily;
-}) {
-  return <ProviderUsageAreas provider={provider} range={range} />;
+function UpstreamsUsageSection({ provider }: { provider?: ProviderFamily }) {
+  return <ProviderUsageAreas provider={provider} />;
 }
 
-function ProviderUsageAreas({
-  range: _range,
-  provider,
-}: {
-  range: Range;
-  provider?: ProviderFamily;
-}) {
+function ProviderUsageAreas({ provider }: { provider?: ProviderFamily }) {
   const usage = useUpstreamUsageData(provider);
   return (
     <Section
@@ -2607,7 +2587,7 @@ export function ProviderOverviewPage({
             </div>
           </section>
 
-          <UpstreamsUsageSection provider={scopedProvider} range={range} />
+          <UpstreamsUsageSection provider={scopedProvider} />
 
           {/* Latest requests: the feed is not range-scoped (newest events of any
           age), so its label must not suggest it follows the range picker. */}

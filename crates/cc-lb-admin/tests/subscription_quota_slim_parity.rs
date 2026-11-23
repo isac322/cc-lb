@@ -14,7 +14,7 @@ use cc_lb_storage_api::{
 use serde_json::json;
 
 use subscription_quota_fixture::{
-    NOW_UNIX_SECS, assert_close, create_oauth_upstream, legacy_inclusive_tokens, quota_checkpoint,
+    NOW_UNIX_SECS, assert_close, create_oauth_upstream, legacy_inclusive_tokens, quota_sample,
     usage_event,
 };
 
@@ -28,7 +28,7 @@ async fn subscription_quota_aggregate_exact_boundary_tokens_match_legacy_inclusi
     let cc_start = NOW_UNIX_SECS - NOW_UNIX_SECS % (5 * 3_600);
     server
         .storage
-        .put_subscription_quota_checkpoints(&[quota_checkpoint(
+        .record_subscription_quota_samples(&[quota_sample(
             upstream_id,
             SubscriptionQuotaWindow::FiveHour,
             NOW_UNIX_SECS - 1_200,
@@ -103,7 +103,7 @@ async fn subscription_quota_aggregate_scatter_exact_duplicate_intervals_match_le
     ];
     server
         .storage
-        .put_subscription_quota_checkpoints(&[quota_checkpoint(
+        .record_subscription_quota_samples(&[quota_sample(
             upstream_id,
             SubscriptionQuotaWindow::FiveHour,
             NOW_UNIX_SECS - 1_200,
@@ -170,7 +170,7 @@ async fn subscription_quota_slim_aggregate_matches_legacy_reference_for_seven_da
     let clock: ClockHandle = Arc::new(TestClock::new_at_secs(NOW_UNIX_SECS));
     let server = admin_test_common::spawn_admin_server_with_clock(clock).await;
     let mut upstream_ids = Vec::with_capacity(50);
-    let mut checkpoints = Vec::with_capacity(100);
+    let mut samples = Vec::with_capacity(100);
     let mut buckets = Vec::with_capacity(50);
     for token_count in 1..=50_u64 {
         let index = usize::try_from(token_count - 1).unwrap();
@@ -178,8 +178,8 @@ async fn subscription_quota_slim_aggregate_matches_legacy_reference_for_seven_da
         let upstream_id = create_oauth_upstream(&server, &name).await;
         upstream_ids.push(upstream_id);
         let sample_seed = u128::from(token_count) * 2;
-        checkpoints.extend([
-            quota_checkpoint(
+        samples.extend([
+            quota_sample(
                 upstream_id,
                 SubscriptionQuotaWindow::FiveHour,
                 NOW_UNIX_SECS - 1_200,
@@ -187,7 +187,7 @@ async fn subscription_quota_slim_aggregate_matches_legacy_reference_for_seven_da
                 0.5,
                 NOW_UNIX_SECS + 3_600,
             ),
-            quota_checkpoint(
+            quota_sample(
                 upstream_id,
                 SubscriptionQuotaWindow::SevenDay,
                 NOW_UNIX_SECS - 1_800,
@@ -211,7 +211,7 @@ async fn subscription_quota_slim_aggregate_matches_legacy_reference_for_seven_da
     }
     server
         .storage
-        .put_subscription_quota_checkpoints(&checkpoints)
+        .record_subscription_quota_samples(&samples)
         .await
         .unwrap();
     server.storage.rollup_usage_once().await.unwrap();
@@ -266,7 +266,7 @@ async fn subscription_quota_aggregate_is_identical_after_independent_storage_and
     let upstream_id = create_oauth_upstream(&server, "quota-restart").await;
     server
         .storage
-        .put_subscription_quota_checkpoints(&[quota_checkpoint(
+        .record_subscription_quota_samples(&[quota_sample(
             upstream_id,
             SubscriptionQuotaWindow::FiveHour,
             NOW_UNIX_SECS - 1_200,

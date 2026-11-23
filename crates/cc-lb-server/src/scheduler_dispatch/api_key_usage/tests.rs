@@ -1163,11 +1163,14 @@ async fn pol02_oau03_candidate_set() {
     let disabled = fixture
         .org_upstream("disabled", keys[2], Some("apikey_dis"), None)
         .await;
-    UpstreamStore::set_enabled(
+    UpstreamStore::update(
         fixture.storage.as_ref(),
         disabled.id,
         disabled.revision,
-        false,
+        UpstreamUpdate {
+            enabled: Some(false),
+            ..UpstreamUpdate::default()
+        },
     )
     .await
     .expect("disable");
@@ -2533,19 +2536,25 @@ async fn conc_enable_toggle_during_poll_keeps_the_result() {
         .expect("poll reaches the usage report")
         .expect("gate open");
 
-    let disabled = UpstreamStore::set_enabled(
+    let disabled = UpstreamStore::update(
         fixture.storage.as_ref(),
         upstream.id,
         upstream.revision,
-        false,
+        UpstreamUpdate {
+            enabled: Some(false),
+            ..UpstreamUpdate::default()
+        },
     )
     .await
     .expect("disable");
-    let enabled = UpstreamStore::set_enabled(
+    let enabled = UpstreamStore::update(
         fixture.storage.as_ref(),
         upstream.id,
         disabled.revision,
-        true,
+        UpstreamUpdate {
+            enabled: Some(true),
+            ..UpstreamUpdate::default()
+        },
     )
     .await
     .expect("re-enable");
@@ -2587,11 +2596,14 @@ async fn conc_disable_before_claim_never_polls_the_disabled_upstream() {
     assert_eq!(candidates.len(), 1, "the enabled upstream is a candidate");
     let candidate = candidates.remove(0);
 
-    UpstreamStore::set_enabled(
+    UpstreamStore::update(
         fixture.storage.as_ref(),
         upstream.id,
         upstream.revision,
-        false,
+        UpstreamUpdate {
+            enabled: Some(false),
+            ..UpstreamUpdate::default()
+        },
     )
     .await
     .expect("disable");
@@ -2636,11 +2648,14 @@ async fn conc_disable_during_poll_drops_the_result() {
         let entered = tokio::time::timeout(Duration::from_secs(30), pause.wait_until_entered())
             .await
             .is_ok();
-        UpstreamStore::set_enabled(
+        UpstreamStore::update(
             fixture.storage.as_ref(),
             upstream.id,
             upstream.revision,
-            false,
+            UpstreamUpdate {
+                enabled: Some(false),
+                ..UpstreamUpdate::default()
+            },
         )
         .await
         .expect("disable");

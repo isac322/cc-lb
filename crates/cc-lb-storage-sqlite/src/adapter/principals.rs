@@ -211,31 +211,6 @@ impl PrincipalStore for SqliteStorage {
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(record)
     }
-
-    async fn hard_delete(&self, id: Uuid) -> StorageResult<bool> {
-        let mut tx = self.begin_immediate().await?;
-        let audit_refs = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(1) FROM audit_log_v1 WHERE principal_id = ?",
-        )
-        .bind(id.to_string())
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-        if audit_refs > 0 {
-            return Err(StorageError::Conflict {
-                message: "principal is referenced by audit entries".to_owned(),
-            });
-        }
-        cascade_plugin_chains_in_tx(&mut tx, id).await?;
-        let result = sqlx::query("DELETE FROM principals_v1 WHERE id = ?")
-            .bind(id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-        let deleted = result.rows_affected() == 1;
-        tx.commit().await.map_err(map_sqlx_error)?;
-        Ok(deleted)
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

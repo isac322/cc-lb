@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::dynamic_view_rebind::{assert_catalog_urls, catalog_configs, create_catalog_upstreams};
 use async_trait::async_trait;
-use cc_lb_aead::{AeadService, EncryptedOAuthTokens};
+use cc_lb_aead::AeadService;
 use cc_lb_control::DynamicViewHolder;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
@@ -132,40 +132,6 @@ impl UpstreamStore for ControlledUpstreamStore {
         update: UpstreamUpdate,
     ) -> StorageResult<UpstreamRecord> {
         UpstreamStore::update(&*self.inner, id, expected_revision, update).await
-    }
-
-    async fn set_enabled(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        enabled: bool,
-    ) -> StorageResult<UpstreamRecord> {
-        UpstreamStore::set_enabled(&*self.inner, id, expected_revision, enabled).await
-    }
-
-    async fn update_spec(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        update: UpstreamUpdate,
-    ) -> StorageResult<UpstreamRecord> {
-        UpstreamStore::update_spec(&*self.inner, id, expected_revision, update).await
-    }
-
-    async fn update_api_key_secret(
-        &self,
-        id: Uuid,
-        api_key_ciphertext: Option<Vec<u8>>,
-    ) -> StorageResult<UpstreamRecord> {
-        UpstreamStore::update_api_key_secret(&*self.inner, id, api_key_ciphertext).await
-    }
-
-    async fn update_oauth_token(
-        &self,
-        id: Uuid,
-        tokens: EncryptedOAuthTokens,
-    ) -> StorageResult<UpstreamRecord> {
-        UpstreamStore::update_oauth_token(&*self.inner, id, tokens).await
     }
 
     async fn set_status(&self, id: Uuid, status: UpstreamStatusUpdate) -> StorageResult<()> {
@@ -545,9 +511,17 @@ async fn hydrate_notifications_refresh_peer_caches_without_view_rebuild() {
         .aead
         .encrypt(b"sk-ant-fixture-secret", upstream.id.as_bytes())
         .expect("api-key ciphertext");
-    UpstreamStore::update_api_key_secret(&*fixture.storage, upstream.id, Some(ciphertext))
-        .await
-        .expect("upstream api-key secret");
+    UpstreamStore::update(
+        &*fixture.storage,
+        upstream.id,
+        upstream.revision,
+        UpstreamUpdate {
+            api_key_ciphertext: Some(ciphertext),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await
+    .expect("upstream api-key secret");
     fixture
         .stores
         .upstream_rate_limits

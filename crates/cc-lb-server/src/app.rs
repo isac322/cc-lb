@@ -79,9 +79,7 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tracing::Instrument as _;
 
-use crate::admin_ports::{
-    ServerRoutePreviewPort, ServerSubscriptionQuotaIngestionPort, ServerWarmupPort,
-};
+use crate::admin_ports::{ServerSubscriptionQuotaIngestionPort, ServerWarmupPort};
 use crate::build_meta::BuildMeta;
 use crate::dynamic_view_builder::{
     Stores as DynamicStores, VertexState, build_dynamic_view, ensure_wasm_cache_dirs,
@@ -624,7 +622,6 @@ pub async fn run_serve(
 fn print_preflight_report(report: &preflight::PreflightReport) {
     println!("preflight: ok");
     println!("preflight: upstream_count: {}", report.upstream_count);
-    println!("preflight: upstream_warnings: {}", report.upstream_warnings);
     println!("preflight: principal_count: {}", report.principal_count);
     println!(
         "preflight: principal_disabled_count: {}",
@@ -852,7 +849,16 @@ pub async fn seed_app_testing_storage(
                     .map_err(|error| BuildError::StorageConnect {
                         message: format!("test upstream api-key encryption failed: {error}"),
                     })?;
-                UpstreamStore::update_api_key_secret(storage, record.id, Some(ciphertext)).await?;
+                UpstreamStore::update(
+                    storage,
+                    record.id,
+                    record.revision,
+                    cc_lb_storage_api::UpstreamUpdate {
+                        api_key_ciphertext: Some(ciphertext),
+                        ..cc_lb_storage_api::UpstreamUpdate::default()
+                    },
+                )
+                .await?;
             }
             Err(StorageError::Conflict { .. }) => {}
             Err(error) => return Err(error.into()),
@@ -1770,7 +1776,6 @@ async fn build_app_with_storage_inner(
         key_store: Some(key_store),
         aead: aead.clone(),
         lifecycle: Some(AdminPorts {
-            route_preview: Some(Arc::new(ServerRoutePreviewPort::new(lifecycle.clone()))),
             warmup: Some(Arc::new(ServerWarmupPort)),
             subscription_quota_ingestion: Some(Arc::new(
                 ServerSubscriptionQuotaIngestionPort::new(lifecycle.clone()),
@@ -4614,6 +4619,37 @@ mod tests {
 
     use super::*;
 
+    fn with_static_limit_subject(
+        lifecycle: cc_lb_engine::Lifecycle,
+        limit_engine: Arc<LimitEngine>,
+        principal_id: String,
+        key_id: String,
+        record: StoredApiKeyRecord,
+    ) -> cc_lb_engine::Lifecycle {
+        struct StaticTestLimitSubjectProvider(cc_lb_engine::AuthLimitSubject);
+        #[async_trait]
+        impl cc_lb_engine::LimitSubjectProvider for StaticTestLimitSubjectProvider {
+            async fn limit_subject(
+                &self,
+                _ctx: &cc_lb_engine::RequestContext,
+                _principal: &cc_lb_domain::Principal,
+                _authn_success: &cc_lb_control::api_keys::builtin_authn::AuthnSuccess,
+            ) -> Option<cc_lb_engine::AuthLimitSubject> {
+                Some(self.0.clone())
+            }
+        }
+        lifecycle.with_limit_engine(
+            limit_engine,
+            Arc::new(StaticTestLimitSubjectProvider(
+                cc_lb_engine::AuthLimitSubject {
+                    principal_id,
+                    key_id,
+                    record,
+                },
+            )),
+        )
+    }
+
     const TIER_PRICING_TEST_MODEL: &str = "tier-pricing-test-model";
 
     #[test]
@@ -6418,11 +6454,14 @@ mod tests {
                 .await
                 .expect("seed upstream spec in affinity sqlite");
                 if !record.enabled {
-                    cc_lb_storage_api::UpstreamStore::set_enabled(
+                    cc_lb_storage_api::UpstreamStore::update(
                         &*sqlite,
                         created.id,
                         created.revision,
-                        false,
+                        cc_lb_storage_api::UpstreamUpdate {
+                            enabled: Some(false),
+                            ..cc_lb_storage_api::UpstreamUpdate::default()
+                        },
                     )
                     .await
                     .expect("disable seeded upstream in affinity sqlite");
@@ -6632,15 +6671,15 @@ mod tests {
             let lifecycle = Arc::try_unwrap(state.lifecycle)
                 .unwrap_or_else(|_| panic!("private fixture lifecycle must have one owner"));
             let lifecycle = Arc::new(
-                lifecycle
-                    .with_static_limit_subject(
-                        engine.clone(),
-                        TEST_PRINCIPAL.to_owned(),
-                        TEST_KEY.key_id.clone(),
-                        record.clone(),
-                    )
-                    .with_limit_cost_estimator(Arc::new(WebSocketTestLimitEstimator))
-                    .with_event_bus(bus),
+                with_static_limit_subject(
+                    lifecycle,
+                    engine.clone(),
+                    TEST_PRINCIPAL.to_owned(),
+                    TEST_KEY.key_id.clone(),
+                    record.clone(),
+                )
+                .with_limit_cost_estimator(Arc::new(WebSocketTestLimitEstimator))
+                .with_event_bus(bus),
             );
             let headers = websocket_request("127.0.0.1:1".parse().unwrap())
                 .headers()

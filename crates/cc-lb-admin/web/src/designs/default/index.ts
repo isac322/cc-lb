@@ -19,6 +19,5 @@ const defaultDesign: Design = {
     })),
   OverviewPage,
   PrincipalsActivity,
-  UpstreamsListAddon: { groupBy: 'none' },
 };
 export default defaultDesign;

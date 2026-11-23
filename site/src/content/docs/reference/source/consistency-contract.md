@@ -102,8 +102,6 @@ Optimistic concurrency: principal, upstream, plugin registry, and plugin chain r
 | `POST /admin/v1/upstreams/{id}/warmup/fire-now` | Provider call done inline; the warmup attempt row is written best-effort | After state | Not rebuilt |
 | `POST /admin/v1/upstreams/{id}/limit-resets/claim` | Provider claim done inline; epoch advanced after any outcome; successful `reset` or `already_used` followed by awaited single-upstream usage refresh | Success and failure of the claim, after the upstream lookup | Quota cache published before `usage_refresh: "refreshed"`; reset outcome retained if refresh fails |
 
-`POST /admin/v1/router/preview` is a `POST` but changes no state and writes no audit row.
-
 ## Dynamic routing view
 
 Code: `crates/cc-lb-admin/src/v1/mod.rs`, `crates/cc-lb-control/src/dynamic_view.rs`, `crates/cc-lb-server/src/notify_listener.rs`, `crates/cc-lb-server/src/reconcile.rs`.

@@ -199,7 +199,6 @@ function usageData(targetUtilization: number): UpstreamUsageData {
     statusPending: false,
     usagePending: false,
     quotaError: false,
-    reconnectCount: 0,
   };
 }
 

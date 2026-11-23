@@ -122,7 +122,8 @@ where
         "idempotent rerun should not mutate existing rollups"
     );
     ensure!(
-        storage.usage_rollup_checkpoint().await? == first_run.checkpoint,
+        storage.usage_rollup_revision().await?
+            == Some(format!("high_water={}", first_run.checkpoint.unwrap())),
         "stored checkpoint should match first rollup checkpoint"
     );
 

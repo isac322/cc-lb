@@ -88,15 +88,6 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         Ok(decisions_removed + turns_removed + evidence_removed)
     }
 
-    async fn replace_from_real_request(
-        &self,
-        request: &CacheKeepaliveReplaceRequest,
-    ) -> StorageResult<CacheKeepaliveSessionRecord> {
-        self.replace_from_real_request_fenced(request, None)
-            .await?
-            .ok_or_else(missing_after_write)
-    }
-
     async fn allocate_cache_keepalive_completion_ticket(
         &self,
         session_key_hash: &str,

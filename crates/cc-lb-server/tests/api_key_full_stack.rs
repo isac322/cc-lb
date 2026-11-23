@@ -43,7 +43,7 @@ use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::{
     ApiKeyOrgCapability, ManagedKeyStore, MetaStore, PrincipalCreate, PrincipalKind,
     PrincipalStore, Storage as StorageTrait, UpstreamApiKeyDetailsRecord, UpstreamApiKeyStore,
-    UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStore,
+    UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStore, UpstreamUpdate,
 };
 use fake_anthropic::{
     AppConfig, FakeApiKey, FakeWorkspace, KeyPolicies, KeyPolicy, MessageScript, RecordedRequest,
@@ -366,10 +366,14 @@ impl Stage {
         .await
         .expect("upstream created");
         let ciphertext = seal(&self.aead, &record, key);
-        let record = UpstreamStore::update_api_key_secret(
+        let record = UpstreamStore::update(
             self.storage.as_ref(),
             record.id,
-            Some(ciphertext),
+            record.revision,
+            UpstreamUpdate {
+                api_key_ciphertext: Some(ciphertext),
+                ..UpstreamUpdate::default()
+            },
         )
         .await
         .expect("credential stored");

@@ -297,7 +297,6 @@ describe('useFireNowUpstreamWarmup', () => {
     });
 
     expect(invalidateSpy.mock.calls.map(([arg]) => arg?.queryKey)).toEqual([
-      qk.upstream(UPSTREAM_ID),
       qk.upstreams,
       warmupKeys.summary(UPSTREAM_ID),
       warmupKeys.attemptsAll(UPSTREAM_ID),
@@ -322,7 +321,6 @@ describe('useFireNowUpstreamWarmup', () => {
     });
 
     expect(invalidateSpy.mock.calls.map(([arg]) => arg?.queryKey)).toEqual([
-      qk.upstream(UPSTREAM_ID),
       qk.upstreams,
       warmupKeys.summary(UPSTREAM_ID),
       warmupKeys.attemptsAll(UPSTREAM_ID),
@@ -349,7 +347,6 @@ describe('useFireNowUpstreamWarmup', () => {
       ).resolves.toEqual(response);
 
       expect(invalidateSpy.mock.calls.map(([arg]) => arg?.queryKey)).toEqual([
-        qk.upstream(UPSTREAM_ID),
         qk.upstreams,
         warmupKeys.summary(UPSTREAM_ID),
         warmupKeys.attemptsAll(UPSTREAM_ID),

@@ -182,7 +182,6 @@ function renderSurfaces(windows: QuotaSnapshot[]) {
             usagePending: false,
             quotaError: false,
             creditHistory,
-            reconnectCount: 0,
           }}
         />
       </section>

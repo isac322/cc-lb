@@ -2,12 +2,11 @@ use crate::common;
 mod subscription_preference_v11_preview_support;
 
 use cc_lb_domain::{CandidateUrgency, SubscriptionPreferenceTrace, SubscriptionTier};
-use cc_lb_engine::lifecycle::PreviewRouteOutcome;
 use http::StatusCode;
 use uuid::Uuid;
 
 use subscription_preference_v11_preview_support::{
-    PreviewFixture, exhausted_shared_quota, fable_quota,
+    PreviewFixture, TestRouteOutcome, exhausted_shared_quota, fable_quota,
     fable_quota_with_unobserved_shared_seven_day, fable_quota_without_shared_seven_day,
     on_pace_quota, sonnet_quota, stale_exhausted_shared_quota, stale_overage_positive_quota,
     urgent_quota,
@@ -395,7 +394,7 @@ async fn handle_chain_without_builtin_filter_keeps_429_failover_to_next_candidat
     );
 }
 
-fn subscription_trace(outcome: &PreviewRouteOutcome) -> &SubscriptionPreferenceTrace {
+fn subscription_trace(outcome: &TestRouteOutcome) -> &SubscriptionPreferenceTrace {
     outcome
         .trace
         .stages
@@ -412,7 +411,7 @@ fn candidate(trace: &SubscriptionPreferenceTrace, upstream_id: Uuid) -> &Candida
         .expect("candidate appears in trace")
 }
 
-fn terminal_upstream(outcome: &PreviewRouteOutcome) -> Option<Uuid> {
+fn terminal_upstream(outcome: &TestRouteOutcome) -> Option<Uuid> {
     outcome
         .trace
         .terminal_decision
@@ -429,7 +428,7 @@ fn assert_weight_fields(candidate: &CandidateUrgency, uniform: bool) {
     assert_eq!(candidate.warning_multiplier, 1.0);
 }
 
-fn print_outcome(label: &str, outcome: &PreviewRouteOutcome) {
+fn print_outcome(label: &str, outcome: &TestRouteOutcome) {
     println!(
         "{label}: selected_upstream={:?} trace={}",
         outcome.winner_upstream_id,

@@ -850,15 +850,6 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
         Ok(evidence)
     }
 
-    async fn read_cache_keepalive_summary_aggregate(
-        &self,
-        principal_id: &str,
-        cutoff_ms: u64,
-    ) -> StorageResult<cc_lb_storage_api::CacheKeepaliveSummaryAggregate> {
-        self.read_cache_keepalive_summary_aggregate_for_horizon(principal_id, cutoff_ms, None)
-            .await
-    }
-
     async fn read_cache_keepalive_summary_aggregate_for_horizon(
         &self,
         principal_id: &str,

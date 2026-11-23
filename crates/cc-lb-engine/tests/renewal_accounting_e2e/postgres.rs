@@ -19,29 +19,33 @@ async fn postgres_renewal_storage_paths_require_live_dsn() {
         .await
         .expect("initialize isolated postgres schema");
     let session = storage
-        .replace_from_real_request(&CacheKeepaliveReplaceRequest {
-            session_key_hash: "postgres-renewal-session".to_owned(),
-            principal_id: "postgres-renewal-principal".to_owned(),
-            accounting_key_id: None,
-            upstream_id: Uuid::from_u128(7),
-            cycle_id: Uuid::nil(),
-            ttl: CacheTtl::Ttl5m,
-            cache_anchor_at_unix_secs: 1_000,
-            run_at_unix_secs: 1_010,
-            expires_at_unix_secs: 1_300,
-            encrypted_payload: vec![1],
-            display_reason: "agent-in-turn".to_owned(),
-            config_snapshot: CacheKeepaliveConfigSnapshot {
-                refresh_lead_time_5m_secs: 30,
-                refresh_lead_time_1h_secs: 300,
-                max_refreshes_per_session: 12,
-                max_total_duration_secs: 14_400,
-                snapshot_max_bytes: 524_288,
+        .replace_from_real_request_fenced(
+            &CacheKeepaliveReplaceRequest {
+                session_key_hash: "postgres-renewal-session".to_owned(),
+                principal_id: "postgres-renewal-principal".to_owned(),
+                accounting_key_id: None,
+                upstream_id: Uuid::from_u128(7),
+                cycle_id: Uuid::nil(),
+                ttl: CacheTtl::Ttl5m,
+                cache_anchor_at_unix_secs: 1_000,
+                run_at_unix_secs: 1_010,
+                expires_at_unix_secs: 1_300,
+                encrypted_payload: vec![1],
+                display_reason: "agent-in-turn".to_owned(),
+                config_snapshot: CacheKeepaliveConfigSnapshot {
+                    refresh_lead_time_5m_secs: 30,
+                    refresh_lead_time_1h_secs: 300,
+                    max_refreshes_per_session: 12,
+                    max_total_duration_secs: 14_400,
+                    snapshot_max_bytes: 524_288,
+                },
+                now_unix_secs: 1_000,
             },
-            now_unix_secs: 1_000,
-        })
+            None,
+        )
         .await
-        .expect("schedule postgres renewal session");
+        .expect("schedule postgres renewal session")
+        .expect("postgres renewal session record");
     assert!(
         storage
             .mark_cache_keepalive_enqueued(&session.session_key_hash, session.generation, 1_001)

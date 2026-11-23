@@ -1378,36 +1378,6 @@ export const UpstreamSchema = z.object({
   }),
 });
 
-export type UpstreamProvider = 'Anthropic' | 'OpenAI' | 'Gemini';
-
-const UPSTREAM_PROVIDERS: Record<UpstreamKind, UpstreamProvider> = {
-  anthropic_api_key: 'Anthropic',
-  anthropic_oauth: 'Anthropic',
-  openai_api_key: 'OpenAI',
-  openai_oauth: 'OpenAI',
-  gemini_api_key: 'Gemini',
-  gemini_oauth: 'Gemini',
-  vertex_api_key: 'Gemini',
-  vertex_credential: 'Gemini',
-};
-
-export function upstreamProvider(kind: UpstreamKind): UpstreamProvider {
-  return UPSTREAM_PROVIDERS[kind];
-}
-
-export function upstreamKindLabel(kind: UpstreamKind): string {
-  if (kind === 'vertex_api_key') return 'Vertex API key';
-  if (kind === 'vertex_credential') return 'Vertex credential';
-  if (
-    kind === 'anthropic_oauth' ||
-    kind === 'openai_oauth' ||
-    kind === 'gemini_oauth'
-  ) {
-    return `${upstreamProvider(kind)} Subscription`;
-  }
-  return `${upstreamProvider(kind)} API key`;
-}
-
 export type Upstream = z.infer<typeof UpstreamSchema>;
 
 /** Snapshot of an API-key upstream saved before key checks existed. */
@@ -1616,7 +1586,6 @@ export type SubscriptionQuotaDataState =
   | 'stale'
   | 'absent'
   | 'unobserved';
-export type SubscriptionQuotaSourceMerge = 'header' | 'api' | 'merged';
 
 export interface QuotaCredits {
   has_credits: boolean | null;

@@ -384,7 +384,7 @@ async fn append_filtered_evidence_uses_bounded_cycle_window() {
     );
 
     storage
-        .replace_from_real_request(&request("sqlite-running", 20_000, "running"))
+        .replace_from_real_request_fenced(&request("sqlite-running", 20_000, "running"), None)
         .await
         .expect("create running session");
     sqlx::query(
@@ -426,13 +426,17 @@ async fn lists_frozen_session_and_decision_projection_rows() {
     // Given: sessions in every storage state and a decision-only not-tracked row.
     let (_temp_dir, storage) = storage().await;
     let renewed = storage
-        .replace_from_real_request(&request(
-            "renewed-session",
-            1_730_000_003,
-            "agent-in-turn (tool_use: `bash`) — first renewal in 4m 30s",
-        ))
+        .replace_from_real_request_fenced(
+            &request(
+                "renewed-session",
+                1_730_000_003,
+                "agent-in-turn (tool_use: `bash`) — first renewal in 4m 30s",
+            ),
+            None,
+        )
         .await
-        .expect("insert renewed session");
+        .expect("insert renewed session")
+        .expect("unfenced real-request replace returns session");
     storage
         .reschedule_after_cache_hit(&cc_lb_storage_api::CacheKeepaliveHitRefreshRequest {
             session_key_hash: renewed.session_key_hash,
@@ -447,13 +451,13 @@ async fn lists_frozen_session_and_decision_projection_rows() {
         .expect("renew session");
 
     let capped = storage
-        .replace_from_real_request(&request(
-            "capped-session",
-            1_730_000_002,
-            "max renewals reached",
-        ))
+        .replace_from_real_request_fenced(
+            &request("capped-session", 1_730_000_002, "max renewals reached"),
+            None,
+        )
         .await
-        .expect("insert capped session");
+        .expect("insert capped session")
+        .expect("unfenced real-request replace returns session");
     storage
         .mark_cache_keepalive_terminal(
             &capped.session_key_hash,
@@ -466,13 +470,17 @@ async fn lists_frozen_session_and_decision_projection_rows() {
         .expect("cap session");
 
     let expired = storage
-        .replace_from_real_request(&request(
-            "expired-session",
-            1_730_000_001,
-            "TTL expired before follow-up",
-        ))
+        .replace_from_real_request_fenced(
+            &request(
+                "expired-session",
+                1_730_000_001,
+                "TTL expired before follow-up",
+            ),
+            None,
+        )
         .await
-        .expect("insert expired session");
+        .expect("insert expired session")
+        .expect("unfenced real-request replace returns session");
     storage
         .mark_cache_keepalive_terminal(
             &expired.session_key_hash,
@@ -484,13 +492,17 @@ async fn lists_frozen_session_and_decision_projection_rows() {
         .await
         .expect("expire session");
     let max_duration = storage
-        .replace_from_real_request(&request(
-            "max-duration-session",
-            1_730_000_000,
-            "max duration reached (4h)",
-        ))
+        .replace_from_real_request_fenced(
+            &request(
+                "max-duration-session",
+                1_730_000_000,
+                "max duration reached (4h)",
+            ),
+            None,
+        )
         .await
-        .expect("insert max-duration session");
+        .expect("insert max-duration session")
+        .expect("unfenced real-request replace returns session");
     storage
         .mark_cache_keepalive_terminal(
             &max_duration.session_key_hash,
@@ -502,13 +514,13 @@ async fn lists_frozen_session_and_decision_projection_rows() {
         .await
         .expect("terminate max-duration session");
     let scheduled = storage
-        .replace_from_real_request(&request(
-            "scheduled-session",
-            1_730_000_006,
-            "agent-in-turn",
-        ))
+        .replace_from_real_request_fenced(
+            &request("scheduled-session", 1_730_000_006, "agent-in-turn"),
+            None,
+        )
         .await
-        .expect("insert scheduled session");
+        .expect("insert scheduled session")
+        .expect("unfenced real-request replace returns session");
     storage
         .append_request_event_with_projections(
             &event("not-tracked-decision", 1_730_000_005),
@@ -651,13 +663,13 @@ async fn lists_frozen_session_and_decision_projection_rows() {
 async fn terminal_error_is_listed_and_cleared_after_real_request() {
     let (_temp_dir, storage) = storage().await;
     let record = storage
-        .replace_from_real_request(&request(
-            "terminal-error-session",
-            1_730_000_010,
-            "dispatch failed",
-        ))
+        .replace_from_real_request_fenced(
+            &request("terminal-error-session", 1_730_000_010, "dispatch failed"),
+            None,
+        )
         .await
-        .expect("insert session");
+        .expect("insert session")
+        .expect("unfenced real-request replace returns session");
     storage
         .mark_cache_keepalive_terminal(
             &record.session_key_hash,
@@ -693,13 +705,13 @@ async fn terminal_error_is_listed_and_cleared_after_real_request() {
     );
 
     let replaced = storage
-        .replace_from_real_request(&request(
-            "terminal-error-session",
-            1_730_000_020,
-            "recovered",
-        ))
+        .replace_from_real_request_fenced(
+            &request("terminal-error-session", 1_730_000_020, "recovered"),
+            None,
+        )
         .await
-        .expect("replace recovered session");
+        .expect("replace recovered session")
+        .expect("unfenced real-request replace returns session");
     assert_eq!(replaced.error, None);
     let cleared = storage
         .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
@@ -725,7 +737,10 @@ async fn paginates_horizon_and_stable_tie_breaks_without_duplicates() {
             200
         };
         storage
-            .replace_from_real_request(&request(session_key_hash, timestamp, "agent-in-turn"))
+            .replace_from_real_request_fenced(
+                &request(session_key_hash, timestamp, "agent-in-turn"),
+                None,
+            )
             .await
             .expect("insert session");
     }
@@ -764,11 +779,12 @@ async fn frozen_message_timestamp_ignores_scheduler_state_updates_and_rejects_ma
     // Given: an older session whose scheduler state changes after a newer message is stored.
     let (_temp_dir, storage) = storage().await;
     let older = storage
-        .replace_from_real_request(&request("older-session", 100, "agent-in-turn"))
+        .replace_from_real_request_fenced(&request("older-session", 100, "agent-in-turn"), None)
         .await
-        .expect("insert older session");
+        .expect("insert older session")
+        .expect("unfenced real-request replace returns session");
     storage
-        .replace_from_real_request(&request("newer-session", 200, "agent-in-turn"))
+        .replace_from_real_request_fenced(&request("newer-session", 200, "agent-in-turn"), None)
         .await
         .expect("insert newer session");
     storage
@@ -980,9 +996,13 @@ fn all_query(limit: u32) -> CacheKeepaliveSessionListQuery {
 async fn direct_lookup_returns_exact_session() {
     let (_temp_dir, storage) = storage().await;
     let inserted = storage
-        .replace_from_real_request(&request("sess-100", 1_700_000_100, "agent-in-turn"))
+        .replace_from_real_request_fenced(
+            &request("sess-100", 1_700_000_100, "agent-in-turn"),
+            None,
+        )
         .await
-        .expect("insert session");
+        .expect("insert session")
+        .expect("unfenced real-request replace returns session");
     storage
         .reschedule_after_cache_hit(&cc_lb_storage_api::CacheKeepaliveHitRefreshRequest {
             session_key_hash: inserted.session_key_hash,
@@ -1060,7 +1080,7 @@ async fn direct_lookup_hides_decision_after_late_turn() {
 async fn direct_lookup_uses_newest_collision_candidate() {
     let (_temp_dir, storage) = storage().await;
     storage
-        .replace_from_real_request(&request("clash-400", 2_000, "agent-in-turn"))
+        .replace_from_real_request_fenced(&request("clash-400", 2_000, "agent-in-turn"), None)
         .await
         .expect("insert collision session");
     insert_decision(&storage, PRINCIPAL_ID, "clash-400", 1).await;
@@ -1098,7 +1118,7 @@ async fn direct_lookup_uses_newest_collision_candidate() {
 async fn direct_lookup_preserves_equal_timestamp_namespace_order() {
     let (_temp_dir, storage) = storage().await;
     storage
-        .replace_from_real_request(&request("clash-tie", 4_000, "agent-in-turn"))
+        .replace_from_real_request_fenced(&request("clash-tie", 4_000, "agent-in-turn"), None)
         .await
         .expect("insert collision session");
     insert_decision(&storage, PRINCIPAL_ID, "clash-tie", 4_000).await;
@@ -1125,11 +1145,10 @@ async fn direct_lookup_preserves_equal_timestamp_namespace_order() {
 async fn direct_lookup_is_principal_scoped() {
     let (_temp_dir, storage) = storage().await;
     storage
-        .replace_from_real_request(&request_for_principal(
-            "principal-b",
-            "tenant-session",
-            5_000,
-        ))
+        .replace_from_real_request_fenced(
+            &request_for_principal("principal-b", "tenant-session", 5_000),
+            None,
+        )
         .await
         .expect("insert other-principal session");
     insert_decision(&storage, "principal-b", "tenant-decision", 5_001).await;
@@ -1157,11 +1176,14 @@ async fn pagination_reaches_terminal_with_engine_parity() {
     let (_temp_dir, storage) = storage().await;
     for index in 0..85_u64 {
         storage
-            .replace_from_real_request(&request(
-                &format!("many-page-{index:03}"),
-                20_000 - index / 3,
-                "agent-in-turn",
-            ))
+            .replace_from_real_request_fenced(
+                &request(
+                    &format!("many-page-{index:03}"),
+                    20_000 - index / 3,
+                    "agent-in-turn",
+                ),
+                None,
+            )
             .await
             .expect("insert paginated session");
     }
@@ -1198,7 +1220,7 @@ async fn pagination_reaches_terminal_with_engine_parity() {
 async fn single_source_filters_skip_unrelated_branch() {
     let (_temp_dir, storage) = storage().await;
     storage
-        .replace_from_real_request(&request("scheduled-safe", 9_000, "agent-in-turn"))
+        .replace_from_real_request_fenced(&request("scheduled-safe", 9_000, "agent-in-turn"), None)
         .await
         .expect("insert scheduled session");
     insert_decision(&storage, PRINCIPAL_ID, "decision-corrupt", 9_001).await;
@@ -1273,11 +1295,14 @@ async fn list_boundaries_preserve_invalid_input_contract() {
     let (_temp_dir, storage) = storage().await;
     for index in 0..3 {
         storage
-            .replace_from_real_request(&request(
-                &format!("boundary-{index}"),
-                10_000 + index,
-                "agent-in-turn",
-            ))
+            .replace_from_real_request_fenced(
+                &request(
+                    &format!("boundary-{index}"),
+                    10_000 + index,
+                    "agent-in-turn",
+                ),
+                None,
+            )
             .await
             .expect("insert boundary session");
     }
@@ -1332,7 +1357,10 @@ async fn list_boundaries_preserve_invalid_input_contract() {
 async fn selected_corruption_is_not_silently_dropped() {
     let (_temp_dir, storage) = storage().await;
     storage
-        .replace_from_real_request(&request("corrupt-session", 11_000, "agent-in-turn"))
+        .replace_from_real_request_fenced(
+            &request("corrupt-session", 11_000, "agent-in-turn"),
+            None,
+        )
         .await
         .expect("insert corruptible session");
     sqlx::query(
@@ -1361,7 +1389,10 @@ async fn selected_corruption_is_not_silently_dropped() {
 async fn list_and_detail_match_legacy_on_same_database_collation() {
     let (_temp_dir, storage) = storage().await;
     storage
-        .replace_from_real_request(&request("collation-clash", 13_000, "agent-in-turn"))
+        .replace_from_real_request_fenced(
+            &request("collation-clash", 13_000, "agent-in-turn"),
+            None,
+        )
         .await
         .expect("insert collision session");
     insert_decision(&storage, PRINCIPAL_ID, "collation-clash", 13_000).await;
@@ -1527,9 +1558,10 @@ async fn summary_aggregate_observes_complete_unfollowed_terminal_loss() {
     let mut replace = request("renewed-session", 1_000, "agent-in-turn");
     replace.cycle_id = cycle_id;
     let session = storage
-        .replace_from_real_request(&replace)
+        .replace_from_real_request_fenced(&replace, None)
         .await
-        .expect("create terminal cycle");
+        .expect("create terminal cycle")
+        .expect("unfenced real-request replace returns session");
     for (id, ts, outcome, cost) in [
         ("terminal-miss", 1_001, "miss", 15_000),
         ("terminal-hit", 1_002, "HiT", 6_000),
@@ -1554,7 +1586,7 @@ async fn summary_aggregate_observes_complete_unfollowed_terminal_loss() {
         .expect("finish cycle without follow-up");
 
     let aggregate = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 2_000_000, None)
         .await
         .expect("aggregate terminal retained economics");
     assert_eq!(aggregate.renewing_now, 0);
@@ -1582,9 +1614,10 @@ async fn summary_aggregate_active_complete_unfollowed_hit_and_miss_are_pending()
         let mut replace = request(&session_key_hash, now, "agent-in-turn");
         replace.cycle_id = cycle_id;
         let session = storage
-            .replace_from_real_request(&replace)
+            .replace_from_real_request_fenced(&replace, None)
             .await
-            .expect("create active cycle");
+            .expect("create active cycle")
+            .expect("unfenced real-request replace returns session");
         let source_ref_id = format!("active-{outcome}-renewal");
         let mut projection = economics_projection(
             &source_ref_id,
@@ -1609,7 +1642,7 @@ async fn summary_aggregate_active_complete_unfollowed_hit_and_miss_are_pending()
     }
 
     let aggregate = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 2_000_000, None)
         .await
         .expect("aggregate active pending economics");
     assert_eq!(aggregate.renewing_now, 2);
@@ -1632,9 +1665,10 @@ async fn summary_aggregate_active_complete_follow_up_is_observed() {
     let mut replace = request("active-follow-up", 1_000, "agent-in-turn");
     replace.cycle_id = cycle_id;
     let session = storage
-        .replace_from_real_request(&replace)
+        .replace_from_real_request_fenced(&replace, None)
         .await
-        .expect("create active cycle");
+        .expect("create active cycle")
+        .expect("unfenced real-request replace returns session");
     let source_ref_id = "active-follow-up-renewal";
     let ts = 1_001;
     let mut projection = economics_projection(source_ref_id, Some(cycle_id), ts, "hit", 6_000);
@@ -1659,7 +1693,7 @@ async fn summary_aggregate_active_complete_follow_up_is_observed() {
         .expect("persist active proven follow-up");
 
     let aggregate = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 2_000_000, None)
         .await
         .expect("aggregate active observed economics");
     assert_eq!(aggregate.renewing_now, 1);
@@ -1681,7 +1715,7 @@ async fn summary_aggregate_follow_up_credits_kept_tokens_on_hits_and_misses() {
         let mut replace = request(&session_key_hash, 1_000, "agent-in-turn");
         replace.cycle_id = cycle_id;
         storage
-            .replace_from_real_request(&replace)
+            .replace_from_real_request_fenced(&replace, None)
             .await
             .expect("create follow-up cycle");
         append_economics_turn(
@@ -1701,7 +1735,7 @@ async fn summary_aggregate_follow_up_credits_kept_tokens_on_hits_and_misses() {
     }
 
     let aggregate = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 2_000_000, None)
         .await
         .expect("aggregate hit and miss follow-up economics");
     assert_eq!(aggregate.renewing_now, 2);
@@ -1722,7 +1756,7 @@ async fn summary_aggregate_same_cycle_hit_then_miss_credits_earliest_matching_re
     let mut replace = request(session_key_hash, 1_000, "agent-in-turn");
     replace.cycle_id = cycle_id;
     storage
-        .replace_from_real_request(&replace)
+        .replace_from_real_request_fenced(&replace, None)
         .await
         .expect("create same-cycle follow-up cycle");
 
@@ -1768,7 +1802,7 @@ async fn summary_aggregate_same_cycle_hit_then_miss_credits_earliest_matching_re
         .expect("persist same-cycle miss renewal and follow-up");
 
     let aggregate = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 2_000_000, None)
         .await
         .expect("aggregate same-cycle hit then miss economics");
     assert_eq!(aggregate.renewing_now, 1);
@@ -1789,7 +1823,7 @@ async fn summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pe
     let mut replace = request("active-multi-turn", now, "agent-in-turn");
     replace.cycle_id = cycle_id;
     storage
-        .replace_from_real_request(&replace)
+        .replace_from_real_request_fenced(&replace, None)
         .await
         .expect("create active multi-turn cycle");
     append_economics_turn(
@@ -1822,7 +1856,7 @@ async fn summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pe
     .await;
 
     let aggregate = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 2_000_000, None)
         .await
         .expect("aggregate active multi-turn pending economics");
     assert_eq!(aggregate.renewing_now, 1);
@@ -1846,7 +1880,7 @@ async fn summary_aggregate_multiple_follow_ups_selects_first_qualifying_follow_u
     let mut replace = request("active-multiple-follow-ups", now, "agent-in-turn");
     replace.cycle_id = cycle_id;
     storage
-        .replace_from_real_request(&replace)
+        .replace_from_real_request_fenced(&replace, None)
         .await
         .expect("create active first-qualifying follow-up cycle");
     // Each follow-up carries its renewal's prefix hash; the cycle-wide group
@@ -1881,7 +1915,7 @@ async fn summary_aggregate_multiple_follow_ups_selects_first_qualifying_follow_u
     .await;
 
     let aggregate = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 2_000_000, None)
         .await
         .expect("aggregate multiple follow-up pending economics");
     assert_eq!(aggregate.renewing_now, 1);
@@ -1902,7 +1936,7 @@ async fn summary_aggregate_active_two_follow_ups_selects_earliest_follow_up_rene
     let mut replace = request(session_key_hash, now, "agent-in-turn");
     replace.cycle_id = cycle_id;
     storage
-        .replace_from_real_request(&replace)
+        .replace_from_real_request_fenced(&replace, None)
         .await
         .expect("create two-follow-up cycle");
 
@@ -1938,7 +1972,7 @@ async fn summary_aggregate_active_two_follow_ups_selects_earliest_follow_up_rene
     .await;
 
     let aggregate = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 2_000_000, None)
         .await
         .expect("aggregate two-follow-up economics");
     assert_eq!(aggregate.renewing_now, 1);
@@ -1959,7 +1993,7 @@ async fn summary_aggregate_historical_observed_turn_does_not_clear_active_pendin
     let mut historical = request("historical-active-pending", now, "agent-in-turn");
     historical.cycle_id = historical_cycle_id;
     storage
-        .replace_from_real_request(&historical)
+        .replace_from_real_request_fenced(&historical, None)
         .await
         .expect("create historical cycle");
     append_economics_turn(
@@ -1979,7 +2013,7 @@ async fn summary_aggregate_historical_observed_turn_does_not_clear_active_pendin
     let mut current = request("historical-active-pending", now + 5, "agent-in-turn");
     current.cycle_id = current_cycle_id;
     storage
-        .replace_from_real_request(&current)
+        .replace_from_real_request_fenced(&current, None)
         .await
         .expect("replace with current cycle");
     append_economics_turn(
@@ -1998,7 +2032,7 @@ async fn summary_aggregate_historical_observed_turn_does_not_clear_active_pendin
     .await;
 
     let aggregate = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 2_000_000, None)
         .await
         .expect("aggregate historical plus active pending economics");
     assert_eq!(aggregate.renewing_now, 1);
@@ -2018,7 +2052,7 @@ async fn summary_aggregate_historical_observed_turn_does_not_clear_active_pendin
 async fn summary_aggregate_empty_has_no_economics_evidence() {
     let (_temp_dir, storage) = storage().await;
     let aggregate = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
         .await
         .expect("aggregate empty history");
     assert_eq!(aggregate.total_spent_micros, 0);
@@ -2056,7 +2090,7 @@ async fn summary_aggregate_legacy_and_incomplete_evidence_remain_unknown() {
             .await
             .expect("persist incomplete evidence control");
         let aggregate = storage
-            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
             .await
             .expect("aggregate incomplete evidence");
         assert_eq!(aggregate.total_spent_micros, 15_000, "{missing}");
@@ -2095,7 +2129,7 @@ async fn summary_aggregate_counts_only_hits_and_keeps_miss_and_zero_costs() {
             .expect("persist mixed renewal outcomes");
     }
     let aggregate = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
         .await
         .expect("aggregate mixed renewal outcomes");
     assert_eq!(aggregate.total_spent_micros, 21_000);
@@ -2115,13 +2149,13 @@ async fn scalar_session_reads_project_current_cycle_and_null_decision_cycle() {
     let mut replace = request("scalar-cycle-session", 1_000, "agent-in-turn");
     replace.cycle_id = Uuid::from_u128(1_074);
     storage
-        .replace_from_real_request(&replace)
+        .replace_from_real_request_fenced(&replace, None)
         .await
         .expect("create first cycle");
     replace.cycle_id = Uuid::from_u128(1_075);
     replace.now_unix_secs = 1_001;
     storage
-        .replace_from_real_request(&replace)
+        .replace_from_real_request_fenced(&replace, None)
         .await
         .expect("replace current cycle");
     insert_decision(&storage, PRINCIPAL_ID, "scalar-cycle-decision", 1_002).await;
@@ -2197,9 +2231,13 @@ async fn purged_session_reconstructs_display_reason_from_turn() {
     let (_temp_dir, storage) = storage().await;
     let display_reason = "agent-in-turn (tool_use: `Bash`) — first renewal in 4m 30s";
     let session = storage
-        .replace_from_real_request(&request("purged-display-reason", 100, display_reason))
+        .replace_from_real_request_fenced(
+            &request("purged-display-reason", 100, display_reason),
+            None,
+        )
         .await
-        .expect("insert display-reason session");
+        .expect("insert display-reason session")
+        .expect("unfenced real-request replace returns session");
     let mut projection = economics_projection("purged-display-renewal", None, 200, "hit", 6_000);
     projection
         .turn
@@ -2295,7 +2333,7 @@ async fn unlisted_aggregate_counts_only_turns_without_renewal_evidence() {
 async fn list_horizon_membership_uses_in_horizon_turn_timestamp() {
     let (_temp_dir, storage) = storage().await;
     storage
-        .replace_from_real_request(&request("old-last-message", 100, "scheduled"))
+        .replace_from_real_request_fenced(&request("old-last-message", 100, "scheduled"), None)
         .await
         .expect("seed old session");
     let mut projection = economics_projection("inside-horizon", None, 200, "hit", 6_000);
@@ -2371,7 +2409,7 @@ async fn status_filters_match_capped_cancelled_and_failed_terminal_reasons() {
         ),
     ] {
         storage
-            .replace_from_real_request(&request(id, 1_000, "terminal"))
+            .replace_from_real_request_fenced(&request(id, 1_000, "terminal"), None)
             .await
             .expect("seed filter session");
         let mut projection = economics_projection(id, None, 1_001, "hit", 1_000);
@@ -2424,7 +2462,7 @@ async fn cancelled_sessions_require_a_renewal_inside_the_selected_horizon() {
     let (_directory, storage) = storage().await;
     for (id, ts) in [("old-renewal", 100), ("recent-renewal", 200)] {
         storage
-            .replace_from_real_request(&request(id, 210, "first renewal in 4m 30s"))
+            .replace_from_real_request_fenced(&request(id, 210, "first renewal in 4m 30s"), None)
             .await
             .expect("seed recent session");
         let mut projection = economics_projection(id, None, ts, "hit", 6_000);
@@ -2526,7 +2564,10 @@ async fn cancelled_session_read_model_preserves_each_cause_and_legacy_null() {
     ] {
         let id = cause.unwrap_or("legacy");
         storage
-            .replace_from_real_request(&request(id, 210, "agent-in-turn — first renewal in 4m 30s"))
+            .replace_from_real_request_fenced(
+                &request(id, 210, "agent-in-turn — first renewal in 4m 30s"),
+                None,
+            )
             .await
             .expect("seed session");
         assert!(
@@ -2656,7 +2697,7 @@ async fn session_only_follow_up_survives_purge_and_proves_cycle() {
     let mut replace = request(session_key, ts, "agent-in-turn");
     replace.cycle_id = cycle_id;
     storage
-        .replace_from_real_request(&replace)
+        .replace_from_real_request_fenced(&replace, None)
         .await
         .expect("seed session");
     let mut projection = economics_projection(source_ref, Some(cycle_id), ts, "hit", 6_000);
@@ -2670,7 +2711,7 @@ async fn session_only_follow_up_survives_purge_and_proves_cycle() {
         .expect("persist renewal");
     assert_eq!(
         storage
-            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
             .await
             .expect("pending summary")
             .evidence_status,
@@ -2686,7 +2727,7 @@ async fn session_only_follow_up_survives_purge_and_proves_cycle() {
         .await
         .expect("persist session-only follow-up");
     let aggregate = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
         .await
         .expect("proven summary");
     assert_eq!(aggregate.evidence_status, "observed");
@@ -2715,7 +2756,7 @@ async fn session_only_follow_up_survives_purge_and_proves_cycle() {
     assert_eq!(evidence[1].prefix_hash, None);
     assert_eq!(evidence[1].session_key_hash.as_deref(), Some(session_key));
     let aggregate = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
         .await
         .expect("purged summary");
     assert_eq!(aggregate.groups[0].renewals, 1);
@@ -2763,7 +2804,7 @@ async fn session_match_requires_complete_renewed_cache() {
         assert_eq!(evidence.len(), 1, "{source}");
     }
     let aggregate = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
         .await
         .expect("rejected summary");
     assert!(aggregate.groups.iter().all(|group| group.renewals == 0));
@@ -2859,7 +2900,7 @@ async fn mixed_identity_follow_ups_credit_only_first_request() {
         assert_eq!(evidence.len(), 2);
     }
     let aggregate = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
         .await
         .expect("mixed identity summary");
     assert_eq!(
@@ -2944,7 +2985,7 @@ async fn session_evidence_honors_long_ttl_boundaries() {
         .await
         .expect("TTL housekeeping");
     let aggregate = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
         .await
         .expect("TTL summary");
     assert_eq!(
@@ -3005,7 +3046,7 @@ async fn counterfactual_summary_natural_expiry_earliest_renewal_and_token_caps()
                 .expect("persist follow-up");
         }
         let aggregate = storage
-            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
             .await
             .expect("counterfactual summary");
         let avoided_tokens = aggregate
@@ -3045,7 +3086,7 @@ async fn legacy_anchor_is_derived_at_read_time_without_rewriting_evidence() {
             let mut replace = request("renewed-session", 1_000, "agent-in-turn");
             replace.cycle_id = cycle;
             storage
-                .replace_from_real_request(&replace)
+                .replace_from_real_request_fenced(&replace, None)
                 .await
                 .expect("legacy owning snapshot");
         }
@@ -3065,7 +3106,7 @@ async fn legacy_anchor_is_derived_at_read_time_without_rewriting_evidence() {
             .await
             .expect("persist legacy follow-up");
         let aggregate = storage
-            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
             .await
             .expect("legacy economics");
         assert_eq!(aggregate.total_spent_micros, 7);
@@ -3126,7 +3167,7 @@ async fn cycle_anchor_is_resolved_from_all_renewals_and_avoided_tokens_fall_back
         .await
         .expect("retain evidence without earliest turn");
     let retained = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
         .await
         .expect("evidence-only kept-token fallback");
     assert_eq!(retained.unknown_cycles, 0);
@@ -3148,7 +3189,7 @@ async fn legacy_anchor_uses_ttl_specific_snapshot_lead() {
         replace.cycle_id = cycle;
         replace.ttl = ttl;
         storage
-            .replace_from_real_request(&replace)
+            .replace_from_real_request_fenced(&replace, None)
             .await
             .expect("owning TTL snapshot");
         let renewal_at = anchor + ttl.as_secs() - lead;
@@ -3172,7 +3213,7 @@ async fn legacy_anchor_uses_ttl_specific_snapshot_lead() {
             .await
             .expect("follow-up at natural expiry");
         let summary = storage
-            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
             .await
             .expect("TTL-specific legacy derivation");
         assert_eq!(summary.unknown_cycles, 0, "{persisted}");
@@ -3185,9 +3226,10 @@ async fn legacy_anchor_uses_ttl_specific_snapshot_lead() {
 async fn real_request_anchor_survives_synthetic_refresh_and_provisional_request_fence() {
     let (_directory, storage) = storage().await;
     let original = storage
-        .replace_from_real_request(&request("cycle-anchor", 1_000, "agent-in-turn"))
+        .replace_from_real_request_fenced(&request("cycle-anchor", 1_000, "agent-in-turn"), None)
         .await
-        .expect("owning real request");
+        .expect("owning real request")
+        .expect("unfenced real-request replace returns session");
     let refreshed = storage
         .reschedule_after_cache_hit(&cc_lb_storage_api::CacheKeepaliveHitRefreshRequest {
             session_key_hash: original.session_key_hash.clone(),
@@ -3226,7 +3268,7 @@ async fn first_pre_expiry_followup_remains_not_needed_after_later_followup_and_p
     let mut replace = request("renewed-session", 1_000, "agent-in-turn");
     replace.cycle_id = cycle;
     storage
-        .replace_from_real_request(&replace)
+        .replace_from_real_request_fenced(&replace, None)
         .await
         .expect("owning session");
     let mut projection = economics_projection("two-followups", Some(cycle), 1_270, "hit", 7);
@@ -3251,7 +3293,7 @@ async fn first_pre_expiry_followup_remains_not_needed_after_later_followup_and_p
                 .expect("purge expired session");
         }
         let summary = storage
-            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
             .await
             .expect("first-follow-up outcome");
         assert_eq!(summary.not_needed_cycles, 1, "purged={purged}");
@@ -3272,7 +3314,7 @@ async fn open_and_in_request_cycles_with_followups_are_never_pending() {
             let mut replace = request("renewed-session", anchor, "agent-in-turn");
             replace.cycle_id = cycle;
             storage
-                .replace_from_real_request(&replace)
+                .replace_from_real_request_fenced(&replace, None)
                 .await
                 .expect("open cycle");
             let offsets = if saved { vec![270, 540] } else { vec![270] };
@@ -3309,7 +3351,7 @@ async fn open_and_in_request_cycles_with_followups_are_never_pending() {
                 .await
                 .expect("open-cycle follow-up");
             let summary = storage
-                .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+                .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
                 .await
                 .expect("resolved open cycle");
             assert_eq!(
@@ -3361,7 +3403,7 @@ async fn summary_groups_sum_identical_cycle_sizes_without_rounding_away_savings(
             .expect("grouped follow-up");
     }
     let summary = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
         .await
         .expect("multi-cycle groups");
     assert_eq!(summary.groups.len(), 2);
@@ -3393,7 +3435,7 @@ async fn purged_legacy_cycle_uses_renewal_decision_snapshot_for_anchor() {
     let mut replace = request("renewed-session", 1_000, "agent-in-turn");
     replace.cycle_id = cycle;
     storage
-        .replace_from_real_request(&replace)
+        .replace_from_real_request_fenced(&replace, None)
         .await
         .expect("legacy owner");
     let mut projection = economics_projection("purged-legacy", Some(cycle), 1_270, "hit", 7);
@@ -3410,7 +3452,7 @@ async fn purged_legacy_cycle_uses_renewal_decision_snapshot_for_anchor() {
         .await
         .expect("legacy follow-up");
     let before = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
         .await
         .expect("before purge");
     storage
@@ -3425,7 +3467,7 @@ async fn purged_legacy_cycle_uses_renewal_decision_snapshot_for_anchor() {
             .is_none()
     );
     let after = storage
-        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
         .await
         .expect("after purge");
     assert_eq!(after.unknown_cycles, 0);
@@ -3443,7 +3485,7 @@ async fn legacy_delay_clamps_to_one_second_when_lead_reaches_or_exceeds_ttl() {
         replace.cycle_id = cycle;
         replace.config_snapshot.refresh_lead_time_5m_secs = lead;
         storage
-            .replace_from_real_request(&replace)
+            .replace_from_real_request_fenced(&replace, None)
             .await
             .expect("large lead snapshot");
         let mut projection = economics_projection("lead-clamp", Some(cycle), 1_001, "hit", 7);
@@ -3459,7 +3501,7 @@ async fn legacy_delay_clamps_to_one_second_when_lead_reaches_or_exceeds_ttl() {
             .await
             .expect("follow-up one second past natural expiry");
         let summary = storage
-            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
             .await
             .expect("clamped delay");
         assert_eq!(summary.not_needed_cycles, 0, "lead={lead}");
@@ -3479,7 +3521,7 @@ async fn replacing_session_cannot_change_historical_legacy_anchor_or_outcome() {
         let mut replace = request("renewed-session", 1_000, "agent-in-turn");
         replace.cycle_id = cycle;
         storage
-            .replace_from_real_request(&replace)
+            .replace_from_real_request_fenced(&replace, None)
             .await
             .expect("original owning cycle");
         let mut projection =
@@ -3499,7 +3541,7 @@ async fn replacing_session_cannot_change_historical_legacy_anchor_or_outcome() {
             .await
             .expect("follow-up while original cache remains warm");
         let before = storage
-            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
             .await
             .expect("before replacement");
         assert_eq!(before.not_needed_cycles, 1);
@@ -3508,11 +3550,11 @@ async fn replacing_session_cannot_change_historical_legacy_anchor_or_outcome() {
         replacement.cycle_id = Uuid::from_u128(92_002);
         replacement.config_snapshot.refresh_lead_time_5m_secs = 10;
         storage
-            .replace_from_real_request(&replacement)
+            .replace_from_real_request_fenced(&replacement, None)
             .await
             .expect("later cycle with different lead");
         let after = storage
-            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
             .await
             .expect("after replacement");
         assert_eq!(after.not_needed_cycles, u64::from(own_decision_snapshot));

@@ -127,27 +127,30 @@ async fn cache_keepalive_list_preserves_soft_deleted_upstream_names() {
         .expect("create upstream");
     let session_key_hash = "soft-deleted-upstream-session";
     storage
-        .replace_from_real_request(&CacheKeepaliveReplaceRequest {
-            session_key_hash: session_key_hash.to_owned(),
-            principal_id: principal_id.clone(),
-            accounting_key_id: None,
-            upstream_id: upstream.id,
-            cycle_id: uuid::Uuid::nil(),
-            cache_anchor_at_unix_secs: NOW_UNIX_SECS,
-            ttl: CacheTtl::Ttl5m,
-            run_at_unix_secs: NOW_UNIX_SECS + 270,
-            expires_at_unix_secs: NOW_UNIX_SECS + 300,
-            encrypted_payload: vec![1],
-            display_reason: "scheduled".to_owned(),
-            config_snapshot: CacheKeepaliveConfigSnapshot {
-                refresh_lead_time_5m_secs: 30,
-                refresh_lead_time_1h_secs: 300,
-                max_refreshes_per_session: 12,
-                max_total_duration_secs: 14_400,
-                snapshot_max_bytes: 524_288,
+        .replace_from_real_request_fenced(
+            &CacheKeepaliveReplaceRequest {
+                session_key_hash: session_key_hash.to_owned(),
+                principal_id: principal_id.clone(),
+                accounting_key_id: None,
+                upstream_id: upstream.id,
+                cycle_id: uuid::Uuid::nil(),
+                cache_anchor_at_unix_secs: NOW_UNIX_SECS,
+                ttl: CacheTtl::Ttl5m,
+                run_at_unix_secs: NOW_UNIX_SECS + 270,
+                expires_at_unix_secs: NOW_UNIX_SECS + 300,
+                encrypted_payload: vec![1],
+                display_reason: "scheduled".to_owned(),
+                config_snapshot: CacheKeepaliveConfigSnapshot {
+                    refresh_lead_time_5m_secs: 30,
+                    refresh_lead_time_1h_secs: 300,
+                    max_refreshes_per_session: 12,
+                    max_total_duration_secs: 14_400,
+                    snapshot_max_bytes: 524_288,
+                },
+                now_unix_secs: NOW_UNIX_SECS,
             },
-            now_unix_secs: NOW_UNIX_SECS,
-        })
+            None,
+        )
         .await
         .expect("seed keepalive session");
     storage
@@ -392,27 +395,30 @@ async fn cache_keepalive_overview_batches_activity_loads() {
     let (_directory, storage, state, principal_id) = create_principal_id().await;
     for index in 0..=500 {
         storage
-            .replace_from_real_request(&CacheKeepaliveReplaceRequest {
-                session_key_hash: format!("batch-session-{index:04}"),
-                principal_id: principal_id.clone(),
-                accounting_key_id: None,
-                upstream_id: uuid::Uuid::nil(),
-                cycle_id: uuid::Uuid::nil(),
-                cache_anchor_at_unix_secs: NOW_UNIX_SECS,
-                ttl: CacheTtl::Ttl5m,
-                run_at_unix_secs: NOW_UNIX_SECS + 270,
-                expires_at_unix_secs: NOW_UNIX_SECS + 300,
-                encrypted_payload: vec![1],
-                display_reason: "agent-in-turn (tool_use: `bash`)".to_owned(),
-                config_snapshot: CacheKeepaliveConfigSnapshot {
-                    refresh_lead_time_5m_secs: 30,
-                    refresh_lead_time_1h_secs: 300,
-                    max_refreshes_per_session: 12,
-                    max_total_duration_secs: 14_400,
-                    snapshot_max_bytes: 524_288,
+            .replace_from_real_request_fenced(
+                &CacheKeepaliveReplaceRequest {
+                    session_key_hash: format!("batch-session-{index:04}"),
+                    principal_id: principal_id.clone(),
+                    accounting_key_id: None,
+                    upstream_id: uuid::Uuid::nil(),
+                    cycle_id: uuid::Uuid::nil(),
+                    cache_anchor_at_unix_secs: NOW_UNIX_SECS,
+                    ttl: CacheTtl::Ttl5m,
+                    run_at_unix_secs: NOW_UNIX_SECS + 270,
+                    expires_at_unix_secs: NOW_UNIX_SECS + 300,
+                    encrypted_payload: vec![1],
+                    display_reason: "agent-in-turn (tool_use: `bash`)".to_owned(),
+                    config_snapshot: CacheKeepaliveConfigSnapshot {
+                        refresh_lead_time_5m_secs: 30,
+                        refresh_lead_time_1h_secs: 300,
+                        max_refreshes_per_session: 12,
+                        max_total_duration_secs: 14_400,
+                        snapshot_max_bytes: 524_288,
+                    },
+                    now_unix_secs: NOW_UNIX_SECS,
                 },
-                now_unix_secs: NOW_UNIX_SECS,
-            })
+                None,
+            )
             .await
             .expect("seed batch session");
     }

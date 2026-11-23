@@ -6,7 +6,6 @@ import {
   fmtMsCompact,
   fmtSetupMs,
   fmtUsdCents,
-  formatBigInteger,
   formatCostMicros,
   formatCount,
   formatRate,
@@ -302,23 +301,6 @@ describe('fmtUsdCents', () => {
     expect(fmtUsdCents(10_000)).toBe('$0.01');
     expect(fmtUsdCents(1_234_500_000)).toBe('$1,235');
     expect(fmtUsdCents(null)).toBe('—');
-  });
-});
-
-describe('formatBigInteger', () => {
-  it('returns dash for null/undefined', () => {
-    expect(formatBigInteger(null)).toBe('—');
-    expect(formatBigInteger(undefined)).toBe('—');
-  });
-  it('returns dash for non-finite', () => {
-    expect(formatBigInteger(Number.NaN)).toBe('—');
-    expect(formatBigInteger(Number.POSITIVE_INFINITY)).toBe('—');
-  });
-  it('returns dash for overflow', () => {
-    expect(formatBigInteger(2 ** 53)).toBe('—');
-  });
-  it('formats normal numbers', () => {
-    expect(formatBigInteger(1234567)).toBe('1,234,567');
   });
 });
 

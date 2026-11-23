@@ -624,23 +624,47 @@ impl Fixture {
 
     async fn create_api_key_upstream(&self, name: &str, secret: &str) -> Uuid {
         let id = self.create_api_key_upstream_record(name).await;
+        let record = UpstreamStore::get_by_id(self.storage.as_ref(), id)
+            .await
+            .expect("load upstream")
+            .expect("upstream exists");
         let ciphertext = self
             .aead
             .encrypt(secret.as_bytes(), id.as_bytes())
             .expect("api key encrypt");
-        UpstreamStore::update_api_key_secret(self.storage.as_ref(), id, Some(ciphertext))
-            .await
-            .expect("api key secret stored");
+        UpstreamStore::update(
+            self.storage.as_ref(),
+            id,
+            record.revision,
+            UpstreamUpdate {
+                api_key_ciphertext: Some(ciphertext),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("api key secret stored");
         id
     }
 
     /// Persists an arbitrary (aad, plaintext) pair as the upstream's stored
     /// credential so tests can seed each historical on-disk ciphertext shape.
     async fn store_api_key_ciphertext(&self, id: Uuid, aad: &[u8], plaintext: &[u8]) {
-        let ciphertext = self.aead.encrypt(plaintext, aad).expect("api key encrypt");
-        UpstreamStore::update_api_key_secret(self.storage.as_ref(), id, Some(ciphertext))
+        let record = UpstreamStore::get_by_id(self.storage.as_ref(), id)
             .await
-            .expect("api key secret stored");
+            .expect("load upstream")
+            .expect("upstream exists");
+        let ciphertext = self.aead.encrypt(plaintext, aad).expect("api key encrypt");
+        UpstreamStore::update(
+            self.storage.as_ref(),
+            id,
+            record.revision,
+            UpstreamUpdate {
+                api_key_ciphertext: Some(ciphertext),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("api key secret stored");
     }
 
     async fn create_api_key_upstream_record(&self, name: &str) -> Uuid {
@@ -744,40 +768,6 @@ impl UpstreamStore for OrderedUpstreamStore {
         update: UpstreamUpdate,
     ) -> StorageResult<UpstreamRecord> {
         UpstreamStore::update(self.inner.as_ref(), id, expected_revision, update).await
-    }
-
-    async fn set_enabled(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        enabled: bool,
-    ) -> StorageResult<UpstreamRecord> {
-        UpstreamStore::set_enabled(self.inner.as_ref(), id, expected_revision, enabled).await
-    }
-
-    async fn update_spec(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        update: UpstreamUpdate,
-    ) -> StorageResult<UpstreamRecord> {
-        UpstreamStore::update_spec(self.inner.as_ref(), id, expected_revision, update).await
-    }
-
-    async fn update_api_key_secret(
-        &self,
-        id: Uuid,
-        api_key_ciphertext: Option<Vec<u8>>,
-    ) -> StorageResult<UpstreamRecord> {
-        UpstreamStore::update_api_key_secret(self.inner.as_ref(), id, api_key_ciphertext).await
-    }
-
-    async fn update_oauth_token(
-        &self,
-        id: Uuid,
-        tokens: EncryptedOAuthTokens,
-    ) -> StorageResult<UpstreamRecord> {
-        UpstreamStore::update_oauth_token(self.inner.as_ref(), id, tokens).await
     }
 
     async fn set_status(&self, id: Uuid, status: UpstreamStatusUpdate) -> StorageResult<()> {

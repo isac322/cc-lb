@@ -115,6 +115,4 @@ pub trait PrincipalStore: Send + Sync {
         expected_revision: u64,
         now_unix_secs: u64,
     ) -> StorageResult<Option<PrincipalRecord>>;
-
-    async fn hard_delete(&self, id: Uuid) -> StorageResult<bool>;
 }

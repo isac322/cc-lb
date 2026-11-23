@@ -600,33 +600,10 @@
     "GeminiOAuthConfig": {
       "type": "object",
       "properties": {
-        "auth_url": {
-          "type": "string",
-          "format": "uri",
-          "default": "https://accounts.google.com/o/oauth2/v2/auth"
-        },
-        "client_id": {
-          "type": "string",
-          "default": ""
-        },
-        "client_secret": {
-          "type": "string",
-          "default": ""
-        },
         "code_assist_url": {
           "type": "string",
           "format": "uri",
           "default": "https://cloudcode-pa.googleapis.com/v1internal"
-        },
-        "redirect_uri": {
-          "type": "string",
-          "format": "uri",
-          "default": "https://codeassist.google.com/authcode"
-        },
-        "token_url": {
-          "type": "string",
-          "format": "uri",
-          "default": "https://oauth2.googleapis.com/token"
         },
         "userinfo_url": {
           "type": "string",

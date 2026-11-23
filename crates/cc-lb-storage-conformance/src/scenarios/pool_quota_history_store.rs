@@ -37,13 +37,16 @@ where
             .await?;
 
         let latest = storage
-            .list_latest_pool_quota_snapshots(
+            .list_latest_pool_quota_snapshot_summaries(
                 cc_lb_storage_api::Provider::Anthropic,
                 &[SubscriptionQuotaWindow::SevenDayFable],
             )
             .await?;
         ensure!(
-            latest == vec![record.clone()],
+            latest
+                == vec![cc_lb_storage_api::PoolQuotaSnapshotSummaryRecord::from(
+                    &record
+                )],
             "latest Fable row round-trips"
         );
 
@@ -53,7 +56,7 @@ where
             .record_pool_quota_snapshots(std::slice::from_ref(&record))
             .await?;
         let range = storage
-            .list_pool_quota_snapshots_in_range(
+            .list_pool_quota_snapshot_summaries_in_range(
                 cc_lb_storage_api::Provider::Anthropic,
                 &[SubscriptionQuotaWindow::SevenDayFable],
                 1_800_000_000,
@@ -61,7 +64,10 @@ where
             )
             .await?;
         ensure!(
-            range == vec![record],
+            range
+                == vec![cc_lb_storage_api::PoolQuotaSnapshotSummaryRecord::from(
+                    &record
+                )],
             "Fable primary-key upsert replaces the row"
         );
 
@@ -250,20 +256,6 @@ where
                         },
                     ),
                 );
-                let latest = storage
-                    .list_latest_pool_quota_snapshots(provider, &[window])
-                    .await?;
-                ensure!(
-                    latest == vec![expected.clone()],
-                    "provider latest isolation"
-                );
-                let raw = storage
-                    .list_pool_quota_snapshots_in_range(provider, &[window], 10, 10)
-                    .await?;
-                ensure!(
-                    raw == latest,
-                    "provider timestamp/window upsert is idempotent"
-                );
                 let summary = storage
                     .list_latest_pool_quota_snapshot_summaries(provider, &[window])
                     .await?;
@@ -332,17 +324,10 @@ where
         for (provider, windows) in provider_windows() {
             for window in windows {
                 let raw = storage
-                    .list_pool_quota_snapshots_in_range(provider, &[window], 0, 40)
+                    .list_pool_quota_snapshot_summaries_in_range(provider, &[window], 0, 40)
                     .await?;
                 ensure!(raw.len() == 2 && raw[0].utilization.is_none());
                 ensure!(raw[1].snapshot_at_unix_secs == 30);
-                ensure!(
-                    storage
-                        .list_pool_quota_snapshots_in_range(provider, &[window], 25, 29)
-                        .await?
-                        .is_empty(),
-                    "raw range does not synthesize anchors"
-                );
                 let summaries = storage
                     .list_pool_quota_snapshot_summaries_in_range(provider, &[window], 25, 29)
                     .await?;

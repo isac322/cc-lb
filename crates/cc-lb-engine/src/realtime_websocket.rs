@@ -1120,10 +1120,7 @@ impl RealtimeUsage {
                 },
                 thinking_tokens: counts.thinking_tokens,
                 tool_use_prompt_tokens: counts.tool_use_prompt_tokens,
-                web_search_requests: counts.web_search_requests,
-                web_fetch_requests: counts.web_fetch_requests,
                 service_tier: counts.service_tier.clone(),
-                inference_geo: counts.inference_geo.clone(),
                 iterations: counts.iterations.clone(),
             })
             .unwrap_or_default()

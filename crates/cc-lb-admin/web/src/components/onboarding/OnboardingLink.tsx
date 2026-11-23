@@ -3,11 +3,7 @@ import { ArrowRight } from 'lucide-react';
 import type { ReactNode } from 'react';
 
 /** Where a first-run step sends the operator: the existing page or its create dialog. */
-export type OnboardingTarget =
-  | 'new-upstream'
-  | 'new-principal'
-  | 'principals'
-  | 'logs';
+export type OnboardingTarget = 'new-upstream' | 'new-principal' | 'principals';
 
 // Ink text with a quiet rule that turns brand on hover; accent stays reserved
 // for the pool quota lines and the one primary action.
@@ -48,12 +44,6 @@ export function OnboardingLink({
     case 'principals':
       return (
         <Link to="/principals" className={LINK_CLASS}>
-          {body}
-        </Link>
-      );
-    case 'logs':
-      return (
-        <Link to="/logs" className={LINK_CLASS}>
           {body}
         </Link>
       );

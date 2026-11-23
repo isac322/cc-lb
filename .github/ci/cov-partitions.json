@@ -177,7 +177,6 @@
           "cargo_args": [],
           "extra_features": [
             "cc-lb-storage-api/dto-roundtrip",
-            "cc-lb-engine/sqlite",
             "cc-lb-engine/postgres"
           ]
         }

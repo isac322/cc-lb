@@ -11,7 +11,7 @@ use cc_lb_storage_api::{
     MetaStore, OrganizationMetadataRecord, OrganizationMetadataStore, PlanTierStore,
     PrincipalCreate, PrincipalKind, PrincipalStore, TierResolutionSource, UpstreamCreate,
     UpstreamStatusUpdate, UpstreamStore, UpstreamSubscriptionMetadataRecord,
-    UpstreamSubscriptionMetadataStore,
+    UpstreamSubscriptionMetadataStore, UpstreamUpdate,
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -96,9 +96,17 @@ async fn create_api_key_upstream(
     let ciphertext = AeadService::from_master_key([1; 32])
         .encrypt(b"sk-ant-fixture-secret", created.id.as_bytes())
         .expect("api-key ciphertext");
-    UpstreamStore::update_api_key_secret(storage, created.id, Some(ciphertext))
-        .await
-        .expect("upstream api-key secret")
+    UpstreamStore::update(
+        storage,
+        created.id,
+        created.revision,
+        UpstreamUpdate {
+            api_key_ciphertext: Some(ciphertext),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await
+    .expect("upstream api-key secret")
 }
 
 async fn attach_plan_metadata(storage: &SqliteStorage, upstream_id: uuid::Uuid) {
@@ -515,9 +523,17 @@ async fn oauth_reconnect_error_survives_active_and_disabled_rebuilds_until_token
             .expect("initial oauth status");
         assert_eq!(status.status, ApplyStatus::Active);
         assert_eq!(status.last_apply_error.as_deref(), Some(*reason));
-        UpstreamStore::set_enabled(storage.as_ref(), upstream.id, upstream.revision, false)
-            .await
-            .expect("disable routing without reconnecting");
+        UpstreamStore::update(
+            storage.as_ref(),
+            upstream.id,
+            upstream.revision,
+            UpstreamUpdate {
+                enabled: Some(false),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("disable routing without reconnecting");
     }
     let disabled = build(&stores, initial.generation, &runtime, dir.path()).await;
     let rebuilt = build(&stores, disabled.generation, &runtime, dir.path()).await;
@@ -554,9 +570,17 @@ async fn oauth_reconnect_error_survives_active_and_disabled_rebuilds_until_token
             replaced.oauth_token_generation,
             upstream.oauth_token_generation + 1
         );
-        UpstreamStore::set_enabled(storage.as_ref(), replaced.id, replaced.revision, true)
-            .await
-            .expect("enable reconnected upstream");
+        UpstreamStore::update(
+            storage.as_ref(),
+            replaced.id,
+            replaced.revision,
+            UpstreamUpdate {
+                enabled: Some(true),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("enable reconnected upstream");
     }
     let reconnected = build(&stores, rebuilt.generation, &runtime, dir.path()).await;
     for (upstream, _) in &upstreams {
@@ -682,9 +706,17 @@ async fn repaired_upstream_leaves_apply_error_and_becomes_routable() {
     let ciphertext = aead
         .encrypt(b"sk-ant-repaired-secret", broken.id.as_bytes())
         .expect("api-key ciphertext");
-    UpstreamStore::update_api_key_secret(storage.as_ref(), broken.id, Some(ciphertext))
-        .await
-        .expect("api-key secret repaired");
+    UpstreamStore::update(
+        storage.as_ref(),
+        broken.id,
+        broken.revision,
+        UpstreamUpdate {
+            api_key_ciphertext: Some(ciphertext),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await
+    .expect("api-key secret repaired");
 
     let repaired_view = build(&stores, broken_view.generation, &runtime, dir.path()).await;
     let status = repaired_view

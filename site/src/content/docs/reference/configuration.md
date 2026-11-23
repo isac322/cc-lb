@@ -40,11 +40,6 @@ device_verification_url = "https://auth.openai.com/codex/device"
 device_redirect_uri = "https://auth.openai.com/deviceauth/callback"
 
 [oauth.gemini]
-client_id = "<GEMINI_CLI_CLIENT_ID>"
-client_secret = "<GEMINI_CLI_CLIENT_SECRET>"
-auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
-token_url = "https://oauth2.googleapis.com/token"
-redirect_uri = "https://codeassist.google.com/authcode"
 code_assist_url = "https://cloudcode-pa.googleapis.com/v1internal"
 userinfo_url = "https://www.googleapis.com/oauth2/v3/userinfo"
 

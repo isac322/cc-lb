@@ -270,7 +270,7 @@ scenario!(qa_sto_5_vertex_owner_epoch_matrix, |store| async move {
     ensure!(created.owner_epoch == 0);
 
     let version_only = store
-        .update_spec(
+        .update(
             created.id,
             created.revision,
             UpstreamUpdate {
@@ -306,7 +306,7 @@ scenario!(qa_sto_5_vertex_owner_epoch_matrix, |store| async move {
     let version_only = credential_type_only;
 
     let project_changed = store
-        .update_spec(
+        .update(
             version_only.id,
             version_only.revision,
             UpstreamUpdate {
@@ -324,7 +324,7 @@ scenario!(qa_sto_5_vertex_owner_epoch_matrix, |store| async move {
     ensure!(project_changed.owner_epoch == 1);
 
     let location_changed = store
-        .update_spec(
+        .update(
             project_changed.id,
             project_changed.revision,
             UpstreamUpdate {
@@ -342,7 +342,7 @@ scenario!(qa_sto_5_vertex_owner_epoch_matrix, |store| async move {
     ensure!(location_changed.owner_epoch == 2);
 
     let base_url_changed = store
-        .update_spec(
+        .update(
             location_changed.id,
             location_changed.revision,
             UpstreamUpdate {
@@ -661,13 +661,29 @@ scenario!(update_renames_name_index, |store| async move {
 
 scenario!(set_enabled_toggle, |store| async move {
     let record = create_named(store.as_ref(), "upstream-enabled").await?;
-    let disabled = store.set_enabled(record.id, record.revision, false).await?;
+    let disabled = store
+        .update(
+            record.id,
+            record.revision,
+            UpstreamUpdate {
+                enabled: Some(false),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await?;
     ensure!(
         !disabled.enabled && disabled.revision == 2,
         "disable mismatch"
     );
     let enabled = store
-        .set_enabled(record.id, disabled.revision, true)
+        .update(
+            record.id,
+            disabled.revision,
+            UpstreamUpdate {
+                enabled: Some(true),
+                ..UpstreamUpdate::default()
+            },
+        )
         .await?;
     ensure!(enabled.enabled && enabled.revision == 3, "enable mismatch");
     Ok(())
@@ -758,7 +774,7 @@ scenario!(
                 && connected.last_warmup_at_unix_secs == Some(1_800_000_001),
             "credential write must preserve spec revision and unrelated status fields"
         );
-        for (write_token, generation) in [(false, 2), (true, 3)] {
+        for generation in [2, 3] {
             store
                 .set_status(
                     record.id,
@@ -778,13 +794,9 @@ scenario!(
             let replacement = token_bundle("replacement-access", "replacement-refresh");
             let encrypted =
                 EncryptedOAuthTokens::encrypt(&aead, &replacement, record.id.as_bytes())?;
-            let reconnected = if write_token {
-                store
-                    .store_oauth_tokens(record.id, record.revision, encrypted, false)
-                    .await?
-            } else {
-                store.update_oauth_token(record.id, encrypted).await?
-            };
+            let reconnected = store
+                .store_oauth_tokens(record.id, record.revision, encrypted, false)
+                .await?;
             ensure!(
                 reconnected.oauth_token_generation == generation
                     && reconnected.last_apply_error.is_none(),
@@ -1329,7 +1341,14 @@ scenario!(
             .set_last_apply_error(record.id, Some("status_401".to_owned()))
             .await?;
         let replaced = store
-            .update_api_key_secret(record.id, Some(vec![4, 5, 6]))
+            .update(
+                record.id,
+                record.revision,
+                UpstreamUpdate {
+                    api_key_ciphertext: Some(vec![4, 5, 6]),
+                    ..UpstreamUpdate::default()
+                },
+            )
             .await?;
         ensure!(
             replaced.api_key_ciphertext == Some(vec![4, 5, 6]),
@@ -1396,7 +1415,7 @@ scenario!(
             "status update should not bump spec revision"
         );
         let spec_updated = store
-            .update_spec(
+            .update(
                 record.id,
                 record.revision,
                 UpstreamUpdate {
@@ -1420,7 +1439,14 @@ scenario!(
         // A credential replace is a spec update: the new key must reach
         // replicas and invalidate expected-revision guards in flight.
         let secret_updated = store
-            .update_api_key_secret(record.id, Some(vec![9, 8, 7]))
+            .update(
+                record.id,
+                record.revision,
+                UpstreamUpdate {
+                    api_key_ciphertext: Some(vec![9, 8, 7]),
+                    ..UpstreamUpdate::default()
+                },
+            )
             .await?;
         ensure!(
             secret_updated.revision == record.revision + 1,
@@ -1432,13 +1458,15 @@ scenario!(
             &token_bundle("access-stable", "refresh-stable"),
             record.id.as_bytes(),
         )?;
-        let token_updated = store.update_oauth_token(record.id, encrypted).await?;
+        let token_updated = store
+            .store_oauth_tokens(record.id, secret_updated.revision, encrypted, false)
+            .await?;
         ensure!(
             token_updated.revision == secret_updated.revision,
             "token update should not bump spec revision"
         );
         let spec_updated = store
-            .update_spec(
+            .update(
                 record.id,
                 secret_updated.revision,
                 UpstreamUpdate {
@@ -1457,7 +1485,14 @@ scenario!(
         );
         // Omitting base_url preserves the override.
         let preserved = store
-            .update_spec(record.id, spec_updated.revision, UpstreamUpdate::default())
+            .update(
+                record.id,
+                spec_updated.revision,
+                UpstreamUpdate {
+                    enabled: Some(true),
+                    ..UpstreamUpdate::default()
+                },
+            )
             .await?;
         ensure!(
             preserved.base_url == Some(url("https://secret-token-stable.example.com")?),
@@ -1473,7 +1508,7 @@ scenario!(
         );
         // An explicit null clears the override.
         let cleared = store
-            .update_spec(
+            .update(
                 record.id,
                 preserved.revision,
                 UpstreamUpdate {
@@ -1496,7 +1531,7 @@ scenario!(
         );
         // A new URL replaces the cleared override.
         let replaced = store
-            .update_spec(
+            .update(
                 record.id,
                 cleared.revision,
                 UpstreamUpdate {
@@ -1515,7 +1550,7 @@ scenario!(
         );
         // A stale clear must fail and leave the current URL untouched.
         let error = store
-            .update_spec(
+            .update(
                 record.id,
                 cleared.revision,
                 UpstreamUpdate {
@@ -1564,7 +1599,7 @@ scenario!(
         store.soft_delete(record.id, record.revision).await?;
         let deleted = store.get_by_id(record.id).await?.expect("record remains");
         let error = store
-            .update_spec(
+            .update(
                 record.id,
                 deleted.revision,
                 UpstreamUpdate {
@@ -1621,7 +1656,14 @@ scenario!(
         let record = create_named(store.as_ref(), "upstream-secret-after-delete").await?;
         store.soft_delete(record.id, record.revision).await?;
         let error = store
-            .update_api_key_secret(record.id, Some(vec![9, 9, 9]))
+            .update(
+                record.id,
+                record.revision + 1,
+                UpstreamUpdate {
+                    api_key_ciphertext: Some(vec![9, 9, 9]),
+                    ..UpstreamUpdate::default()
+                },
+            )
             .await
             .expect_err("secret update on soft-deleted upstream should fail");
         ensure!(

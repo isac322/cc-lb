@@ -77,82 +77,10 @@ pub struct ClassifierConfig {
     #[serde(default)]
     pub extra_wait_for_user_tools: Vec<String>,
 
-    /// If true, classify `stop_reason: "end_turn"` as Ambiguous as well.
-    /// Because the LLM judge is reserved for a future release, Ambiguous
-    /// currently fails closed as UserTurn.
+    /// If true, classify `stop_reason: "end_turn"` as Ambiguous as well;
+    /// Ambiguous currently fails closed as UserTurn.
     #[serde(default)]
     pub treat_end_turn_as_ambiguous: bool,
-
-    /// Reserved for a future small-LLM judge for Ambiguous classifier
-    /// decisions. The admin API rejects non-None values in this release;
-    /// stored legacy values fail closed as UserTurn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub llm_judge: Option<LlmJudgeConfig>,
-}
-
-/// Reserved future small-LLM judge configuration for Ambiguous classifier
-/// decisions. The admin API rejects non-None values in this release, and
-/// any legacy stored value fails closed as UserTurn.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LlmJudgeConfig {
-    /// Provider identifier for the future judge implementation.
-    /// Examples: `"anthropic"`, `"openai"`, `"gemini"`, `"kimi"`,
-    /// `"moonshot"`, `"zai"`, `"bigmodel"`, `"custom_openai"`.
-    pub provider: String,
-
-    /// Model identifier for the future judge implementation.
-    pub model: String,
-
-    /// Opaque reference into the cc-lb secret store for the future judge.
-    pub api_key_secret_ref: String,
-
-    /// Base URL override for OpenAI-compatible gateways / self-hosted
-    /// endpoints. Ignored when the provider has a native adapter and no
-    /// override is desired.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-
-    /// Structured output mode. Not all providers support strict JSON
-    /// schema; fall back to `JsonObject` (JSON mode) or `Text` where
-    /// needed.
-    #[serde(default)]
-    pub response_format: JudgeResponseFormat,
-
-    /// Number of tail messages from the request to include in the judge
-    /// prompt. Default 4.
-    #[serde(default = "default_last_n_messages")]
-    pub last_n_messages: usize,
-
-    /// Maximum output tokens for the judge response. Default 128.
-    #[serde(default = "default_judge_max_tokens")]
-    pub max_tokens: u32,
-
-    /// Sampling temperature. Default 0.0 for deterministic judgment.
-    #[serde(default = "default_judge_temperature")]
-    pub temperature: f32,
-
-    /// Overall timeout (seconds) for the judge call including network.
-    /// On timeout the session is treated as UserTurn (fail-closed).
-    #[serde(default = "default_judge_timeout")]
-    pub timeout_secs: u32,
-}
-
-/// Which structured-output surface to request from the judge model.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum JudgeResponseFormat {
-    /// Strict JSON schema. Supported by Anthropic Claude, OpenAI recent
-    /// models, and newer Kimi (k2.5+). Rejected by Zhipu GLM and older
-    /// Moonshot models.
-    #[default]
-    JsonSpec,
-    /// Generic JSON mode. Widely supported. Weaker than `JsonSpec` but
-    /// still parseable.
-    JsonObject,
-    /// Plain text. Last-resort fallback for providers without any JSON
-    /// mode; classifier will best-effort parse `agent_in_turn: true/false`
-    /// from the reply.
-    Text,
 }
 
 // -- Default value helpers ---------------------------------------------
@@ -174,18 +102,6 @@ fn default_snapshot_max_bytes() -> u32 {
 }
 pub fn default_min_cache_tokens() -> u64 {
     10_000
-}
-fn default_last_n_messages() -> usize {
-    4
-}
-fn default_judge_max_tokens() -> u32 {
-    128
-}
-fn default_judge_temperature() -> f32 {
-    0.0
-}
-fn default_judge_timeout() -> u32 {
-    5
 }
 
 // -- Convenience -------------------------------------------------------
@@ -296,7 +212,6 @@ mod tests {
         assert_eq!(cfg.min_cache_tokens, 10_000);
         assert!(cfg.classifier.extra_wait_for_user_tools.is_empty());
         assert!(!cfg.classifier.treat_end_turn_as_ambiguous);
-        assert!(cfg.classifier.llm_judge.is_none());
         for max_refreshes in [12, 20] {
             let cfg: CacheKeepaliveConfig = serde_json::from_value(serde_json::json!({
                 "enabled": true,
@@ -347,22 +262,5 @@ mod tests {
         assert_eq!(CacheTtl::from_ttl_str(Some("30m")), CacheTtl::Ttl5m);
         assert_eq!(CacheTtl::from_ttl_str(Some("12h")), CacheTtl::Ttl5m);
         assert_eq!(CacheTtl::from_ttl_str(Some("1h")), CacheTtl::Ttl1h);
-    }
-
-    #[test]
-    fn llm_judge_config_serialises_response_format() {
-        let cfg = LlmJudgeConfig {
-            provider: "anthropic".into(),
-            model: "claude-haiku-4-5".into(),
-            api_key_secret_ref: "secret://principals/x/anthropic".into(),
-            base_url: None,
-            response_format: JudgeResponseFormat::JsonSpec,
-            last_n_messages: 4,
-            max_tokens: 128,
-            temperature: 0.0,
-            timeout_secs: 5,
-        };
-        let json = serde_json::to_string(&cfg).unwrap();
-        assert!(json.contains("\"response_format\":\"json_spec\""));
     }
 }

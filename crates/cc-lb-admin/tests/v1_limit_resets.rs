@@ -1167,11 +1167,14 @@ async fn list_limit_resets_filters_upstreams_and_preserves_unknown_snapshots() {
         .await
         .unwrap();
     let disabled = seed_oauth_upstream(&server, &provider.uri()).await;
-    UpstreamStore::set_enabled(
+    UpstreamStore::update(
         server.storage.as_ref(),
         disabled.id,
         disabled.revision,
-        false,
+        cc_lb_storage_api::UpstreamUpdate {
+            enabled: Some(false),
+            ..Default::default()
+        },
     )
     .await
     .unwrap();

@@ -6,9 +6,7 @@ use cc_lb_control::api_keys::principal_view::PrincipalView;
 use cc_lb_control::{DynamicView, DynamicViewBuilder};
 use cc_lb_domain::{TtlClass, UpstreamCandidate, WarmCacheEntry};
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
-use cc_lb_engine::{
-    RequestKind, build_candidates, lifecycle::HASH_SCHEMA_VERSION, parse_request_cache_breakpoints,
-};
+use cc_lb_engine::{RequestKind, build_candidates, lifecycle::HASH_SCHEMA_VERSION};
 use cc_lb_routing::{FilterPlugin, RoutingContext};
 use http::{HeaderMap, Method};
 use uuid::Uuid;
@@ -36,7 +34,7 @@ fn built_candidate_cache_score_drives_subscription_preference_component_route() 
             "max_tokens":16
         }"#,
     );
-    let breakpoints = parse_request_cache_breakpoints(&HeaderMap::new(), &body);
+    let breakpoints = common::test_parse_cache_breakpoints(&body);
     assert_eq!(breakpoints.len(), 1);
     let owner_prefix = breakpoints[0].lookback_prefixes[0].prefix_hash.clone();
     let warm_entries = HashMap::from([
@@ -132,7 +130,7 @@ fn moved_cache_control_keeps_warm_upstream_routed_by_cache_hash() {
         }))
         .expect("turn one body serializes"),
     );
-    let turn_one_breakpoints = parse_request_cache_breakpoints(&HeaderMap::new(), &turn_one);
+    let turn_one_breakpoints = common::test_parse_cache_breakpoints(&turn_one);
     assert_eq!(turn_one_breakpoints.len(), 2);
     let deep_prefix = turn_one_breakpoints[1].lookback_prefixes[0]
         .prefix_hash
@@ -154,7 +152,7 @@ fn moved_cache_control_keeps_warm_upstream_routed_by_cache_hash() {
         }))
         .expect("turn two body serializes"),
     );
-    let turn_two_breakpoints = parse_request_cache_breakpoints(&HeaderMap::new(), &turn_two);
+    let turn_two_breakpoints = common::test_parse_cache_breakpoints(&turn_two);
 
     let warm_entries = HashMap::from([
         (

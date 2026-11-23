@@ -11,7 +11,6 @@ import defaultDesign from './default';
 import type { Design, NavGroup, NavItem } from './types';
 
 export { defaultDesign };
-export const designs: Record<'default', Design> = { default: defaultDesign };
 
 /** Shared administration pages always use the incumbent design. */
 export function useDesign(): Design {

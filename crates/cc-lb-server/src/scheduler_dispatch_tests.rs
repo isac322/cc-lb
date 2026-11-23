@@ -491,21 +491,24 @@ async fn apalis_housekeeping_maintains_separate_sqlite_application_and_scheduler
     ] {
         fixture
             .storage
-            .replace_from_real_request(&CacheKeepaliveReplaceRequest {
-                session_key_hash: key.to_owned(),
-                principal_id: "principal".to_owned(),
-                accounting_key_id: None,
-                upstream_id: fixture.upstream_id,
-                cycle_id: uuid::Uuid::nil(),
-                cache_anchor_at_unix_secs: NOW - 60,
-                ttl: CacheTtl::Ttl5m,
-                run_at_unix_secs: NOW + 30,
-                expires_at_unix_secs: NOW + 3_600,
-                encrypted_payload: vec![1, 2, 3, 4],
-                display_reason: "housekeeping regression".to_owned(),
-                config_snapshot: fixture.enqueue_request().config_snapshot,
-                now_unix_secs: NOW - 7_200,
-            })
+            .replace_from_real_request_fenced(
+                &CacheKeepaliveReplaceRequest {
+                    session_key_hash: key.to_owned(),
+                    principal_id: "principal".to_owned(),
+                    accounting_key_id: None,
+                    upstream_id: fixture.upstream_id,
+                    cycle_id: uuid::Uuid::nil(),
+                    cache_anchor_at_unix_secs: NOW - 60,
+                    ttl: CacheTtl::Ttl5m,
+                    run_at_unix_secs: NOW + 30,
+                    expires_at_unix_secs: NOW + 3_600,
+                    encrypted_payload: vec![1, 2, 3, 4],
+                    display_reason: "housekeeping regression".to_owned(),
+                    config_snapshot: fixture.enqueue_request().config_snapshot,
+                    now_unix_secs: NOW - 7_200,
+                },
+                None,
+            )
             .await
             .expect("create application keepalive session through storage");
         sqlx::query(
@@ -840,21 +843,24 @@ async fn apalis_housekeeping_reopened_scheduler_factory_cleans_existing_files_qa
     let mut fixture = Fixture::new().await;
     fixture
         .storage
-        .replace_from_real_request(&CacheKeepaliveReplaceRequest {
-            session_key_hash: "qa18-stale".to_owned(),
-            principal_id: "principal".to_owned(),
-            accounting_key_id: None,
-            upstream_id: fixture.upstream_id,
-            cycle_id: uuid::Uuid::nil(),
-            cache_anchor_at_unix_secs: NOW - 60,
-            ttl: CacheTtl::Ttl5m,
-            run_at_unix_secs: NOW,
-            expires_at_unix_secs: NOW + 3_600,
-            encrypted_payload: vec![1, 2, 3],
-            display_reason: "QA-18".to_owned(),
-            config_snapshot: fixture.enqueue_request().config_snapshot,
-            now_unix_secs: NOW - 7_200,
-        })
+        .replace_from_real_request_fenced(
+            &CacheKeepaliveReplaceRequest {
+                session_key_hash: "qa18-stale".to_owned(),
+                principal_id: "principal".to_owned(),
+                accounting_key_id: None,
+                upstream_id: fixture.upstream_id,
+                cycle_id: uuid::Uuid::nil(),
+                cache_anchor_at_unix_secs: NOW - 60,
+                ttl: CacheTtl::Ttl5m,
+                run_at_unix_secs: NOW,
+                expires_at_unix_secs: NOW + 3_600,
+                encrypted_payload: vec![1, 2, 3],
+                display_reason: "QA-18".to_owned(),
+                config_snapshot: fixture.enqueue_request().config_snapshot,
+                now_unix_secs: NOW - 7_200,
+            },
+            None,
+        )
         .await
         .expect("seed existing application file");
     sqlx::query(
@@ -979,21 +985,24 @@ async fn apalis_housekeeping_repeat_dispatch_converges_and_preserves_healthy_row
     for (key, running_since) in [("qa12-stale", Some(NOW - 121)), ("qa12-healthy", None)] {
         fixture
             .storage
-            .replace_from_real_request(&CacheKeepaliveReplaceRequest {
-                session_key_hash: key.to_owned(),
-                principal_id: "principal".to_owned(),
-                accounting_key_id: None,
-                upstream_id: fixture.upstream_id,
-                cycle_id: uuid::Uuid::nil(),
-                cache_anchor_at_unix_secs: NOW - 60,
-                ttl: CacheTtl::Ttl5m,
-                run_at_unix_secs: NOW,
-                expires_at_unix_secs: NOW + 3_600,
-                encrypted_payload: vec![4, 5, 6],
-                display_reason: "QA-12".to_owned(),
-                config_snapshot: fixture.enqueue_request().config_snapshot,
-                now_unix_secs: NOW - 7_200,
-            })
+            .replace_from_real_request_fenced(
+                &CacheKeepaliveReplaceRequest {
+                    session_key_hash: key.to_owned(),
+                    principal_id: "principal".to_owned(),
+                    accounting_key_id: None,
+                    upstream_id: fixture.upstream_id,
+                    cycle_id: uuid::Uuid::nil(),
+                    cache_anchor_at_unix_secs: NOW - 60,
+                    ttl: CacheTtl::Ttl5m,
+                    run_at_unix_secs: NOW,
+                    expires_at_unix_secs: NOW + 3_600,
+                    encrypted_payload: vec![4, 5, 6],
+                    display_reason: "QA-12".to_owned(),
+                    config_snapshot: fixture.enqueue_request().config_snapshot,
+                    now_unix_secs: NOW - 7_200,
+                },
+                None,
+            )
             .await
             .expect("seed application session");
         if let Some(running_since) = running_since {

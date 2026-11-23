@@ -63,7 +63,11 @@ async fn migration_166_to_168_is_metadata_only_and_never_repairs_history() -> Te
         assert!(started.elapsed() < Duration::from_secs(2),"already-applied migration should be a fast no-op");
         connection.close().await?;
         assert_eq!(totals(pool).await?, (0, 0, 0));
-        let high_water = fixture.storage.usage_rollup_checkpoint().await?;
+        let high_water: Option<i64> = sqlx::query_scalar(
+            "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'",
+        )
+        .fetch_optional(pool)
+        .await?;
         let revision = fixture.storage.usage_rollup_revision().await?;
         let resumed = PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock));
         for _ in 0..4 {
@@ -72,7 +76,14 @@ async fn migration_166_to_168_is_metadata_only_and_never_repairs_history() -> Te
             assert_eq!(run.updated_rollups, 0);
             assert_eq!(totals(pool).await?, (0, 0, 0));
         }
-        assert_eq!(resumed.usage_rollup_checkpoint().await?, high_water);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'",
+            )
+            .fetch_optional(pool)
+            .await?,
+            high_water
+        );
         assert_eq!(resumed.usage_rollup_revision().await?, revision);
         let legacy: Vec<(i64, i64, i64, i64, Option<i64>)> = sqlx::query_as(
             "SELECT request_count,priced_event_count,unpriced_event_count,unmetered_event_count, \
@@ -174,13 +185,24 @@ async fn historical_cost_components_recover_without_classifying_pricing() -> Tes
             .run_direct(Some(168), &mut connection, false)
             .await?;
         connection.close().await?;
-        let high_water = fixture.storage.usage_rollup_checkpoint().await?;
+        let high_water: Option<i64> = sqlx::query_scalar(
+            "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'",
+        )
+        .fetch_optional(pool)
+        .await?;
         let revision = fixture.storage.usage_rollup_revision().await?;
         assert_eq!(
             fixture.storage.rollup_usage_once().await?.processed_events,
             0
         );
-        assert_eq!(fixture.storage.usage_rollup_checkpoint().await?, high_water);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'",
+            )
+            .fetch_optional(pool)
+            .await?,
+            high_water
+        );
         assert_ne!(fixture.storage.usage_rollup_revision().await?, revision);
         assert_eq!(totals(pool).await?, (0, 0, 0));
         for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
@@ -421,7 +443,11 @@ async fn old_worker_gaps_and_new_live_classification_remain_additive() -> TestRe
                  (SELECT seq,tx_id FROM request_events_v1 ORDER BY tx_id DESC,seq DESC LIMIT 1) \
                  WHERE id='high_water';",
         ).execute(pool).await?;
-        let old_checkpoint = fixture.storage.usage_rollup_checkpoint().await?;
+        let old_checkpoint: Option<i64> = sqlx::query_scalar(
+            "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'",
+        )
+        .fetch_optional(pool)
+        .await?;
         for _ in 0..3 {
             assert_eq!(fixture.storage.rollup_usage_once().await?.processed_events, 0);
             assert_eq!(totals(pool).await?, (2, 0, 0));
@@ -453,7 +479,14 @@ async fn old_worker_gaps_and_new_live_classification_remain_additive() -> TestRe
             fixture.storage.rollup_usage_once(),
         );
         assert_eq!(left?.processed_events + right?.processed_events, 2);
-        assert_ne!(fixture.storage.usage_rollup_checkpoint().await?, old_checkpoint);
+        assert_ne!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'",
+            )
+            .fetch_optional(pool)
+            .await?,
+            old_checkpoint
+        );
         let revision = fixture.storage.usage_rollup_revision().await?;
         fixture.storage.append_request_event(&next).await?;
         assert_eq!(fixture.storage.rollup_usage_once().await?.processed_events, 0);

@@ -145,7 +145,6 @@ function data(
     statusPending: false,
     usagePending: false,
     quotaError: false,
-    reconnectCount: nudges.size,
   };
 }
 

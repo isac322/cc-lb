@@ -687,10 +687,6 @@ plugin_registry_sqlite_test!(
     reorder_chain_rejects_final_chain_gap
 );
 plugin_registry_sqlite_test!(
-    plugin_registry_update_chain_entry_rejects_no_op_sqlite,
-    update_chain_entry_rejects_no_op
-);
-plugin_registry_sqlite_test!(
     plugin_registry_upload_returns_existed_flag_sqlite,
     upload_returns_existed_flag
 );

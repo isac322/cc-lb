@@ -249,15 +249,15 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![upstream_record(base_url)])
         .build();
-    let lifecycle = Lifecycle::new_with_dynamic_view(
-        authn.authn.clone(),
-        Arc::new(DynamicViewHolder::new(view)),
-        dispatcher,
-        LifecycleConfig::default(),
-        Arc::new(cc_lb_clock::SystemClock),
-    )
-    .with_event_bus(Arc::clone(&bus) as Arc<dyn RequestEventBus>)
-    .with_static_limit_subject(
+    let lifecycle = common::with_static_limit_subject(
+        Lifecycle::new_with_dynamic_view(
+            authn.authn.clone(),
+            Arc::new(DynamicViewHolder::new(view)),
+            dispatcher,
+            LifecycleConfig::default(),
+            Arc::new(cc_lb_clock::SystemClock),
+        )
+        .with_event_bus(Arc::clone(&bus) as Arc<dyn RequestEventBus>),
         limit_engine,
         "principal-test".to_owned(),
         "key-test".to_owned(),

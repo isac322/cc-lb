@@ -1,9 +1,8 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     PoolQuotaChartPointRecord, PoolQuotaHistoryStore, PoolQuotaSnapshotRecord,
-    PoolQuotaSnapshotSummaryRecord, Provider, StorageError, StorageResult, SubscriptionQuotaWindow,
+    PoolQuotaSnapshotSummaryRecord, Provider, StorageResult, SubscriptionQuotaWindow,
 };
-use sqlx::Row;
 
 use crate::{adapter::PostgresStorage, error_map::map_sqlx_error};
 
@@ -171,87 +170,6 @@ impl PoolQuotaHistoryStore for PostgresStorage {
         Ok(())
     }
 
-    async fn list_latest_pool_quota_snapshots(
-        &self,
-        provider: Provider,
-        windows: &[SubscriptionQuotaWindow],
-    ) -> StorageResult<Vec<PoolQuotaSnapshotRecord>> {
-        if windows.is_empty() {
-            return Ok(Vec::new());
-        }
-        macro_rules! query {
-            ($table:literal) => {
-                concat!(
-                    r#"SELECT provider, snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
-                              capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
-                              stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
-                              header_contributing_upstreams, api_contributing_upstreams,
-                              max_observed_at_unix_millis, computed_at_unix_millis, policy_version
-                       FROM "#,
-                    $table,
-                    r#" WHERE provider = $1 AND "quota_window" = $2
-                       ORDER BY snapshot_at_unix_secs DESC LIMIT 1"#,
-                )
-            };
-        }
-        let mut out = Vec::with_capacity(windows.len());
-        for window in windows {
-            let row = sqlx::query(history_read!(provider, query))
-                .bind(provider_key(provider))
-                .bind(window.as_str())
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(map_sqlx_error)?;
-            if let Some(row) = row {
-                out.push(row_to_record(row, provider)?);
-            }
-        }
-        Ok(out)
-    }
-
-    async fn list_pool_quota_snapshots_in_range(
-        &self,
-        provider: Provider,
-        windows: &[SubscriptionQuotaWindow],
-        since_unix_secs: i64,
-        until_unix_secs: i64,
-    ) -> StorageResult<Vec<PoolQuotaSnapshotRecord>> {
-        if windows.is_empty() || since_unix_secs > until_unix_secs {
-            return Ok(Vec::new());
-        }
-        macro_rules! query {
-            ($table:literal) => {
-                concat!(
-                    r#"SELECT provider, snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
-                              capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
-                              stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
-                              header_contributing_upstreams, api_contributing_upstreams,
-                              max_observed_at_unix_millis, computed_at_unix_millis, policy_version
-                       FROM "#,
-                    $table,
-                    r#" WHERE provider = $1 AND "quota_window" = $2
-                          AND snapshot_at_unix_secs BETWEEN $3 AND $4
-                       ORDER BY snapshot_at_unix_secs ASC"#,
-                )
-            };
-        }
-        let mut out = Vec::new();
-        for window in windows {
-            let rows = sqlx::query(history_read!(provider, query))
-                .bind(provider_key(provider))
-                .bind(window.as_str())
-                .bind(since_unix_secs)
-                .bind(until_unix_secs)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(map_sqlx_error)?;
-            for row in rows {
-                out.push(row_to_record(row, provider)?);
-            }
-        }
-        Ok(out)
-    }
-
     async fn list_latest_pool_quota_snapshot_summaries(
         &self,
         provider: Provider,
@@ -295,65 +213,6 @@ impl PoolQuotaHistoryStore for PostgresStorage {
         )
         .await
     }
-}
-
-fn row_to_record(
-    row: sqlx::postgres::PgRow,
-    provider: Provider,
-) -> StorageResult<PoolQuotaSnapshotRecord> {
-    let window_text = row
-        .try_get::<String, _>("quota_window")
-        .map_err(map_sqlx_error)?;
-    let window =
-        SubscriptionQuotaWindow::from_str(&window_text).ok_or_else(|| StorageError::Corrupted {
-            message: format!("unknown quota_window in pool quota history: {window_text}"),
-        })?;
-    Ok(PoolQuotaSnapshotRecord {
-        provider,
-        snapshot_at_unix_secs: row
-            .try_get::<i64, _>("snapshot_at_unix_secs")
-            .map_err(map_sqlx_error)?,
-        window,
-        utilization: row
-            .try_get::<Option<f64>, _>("utilization")
-            .map_err(map_sqlx_error)?,
-        weighted_utilization_sum: row
-            .try_get::<f64, _>("weighted_utilization_sum")
-            .map_err(map_sqlx_error)?,
-        capacity_ratio_sum: row
-            .try_get::<f64, _>("capacity_ratio_sum")
-            .map_err(map_sqlx_error)?,
-        eligible_upstreams: row
-            .try_get::<i64, _>("eligible_upstreams")
-            .map_err(map_sqlx_error)?,
-        contributing_upstreams: row
-            .try_get::<i64, _>("contributing_upstreams")
-            .map_err(map_sqlx_error)?,
-        stale_upstreams: row
-            .try_get::<i64, _>("stale_upstreams")
-            .map_err(map_sqlx_error)?,
-        missing_observation_upstreams: row
-            .try_get::<i64, _>("missing_observation_upstreams")
-            .map_err(map_sqlx_error)?,
-        missing_metadata_upstreams: row
-            .try_get::<i64, _>("missing_metadata_upstreams")
-            .map_err(map_sqlx_error)?,
-        header_contributing_upstreams: row
-            .try_get::<i64, _>("header_contributing_upstreams")
-            .map_err(map_sqlx_error)?,
-        api_contributing_upstreams: row
-            .try_get::<i64, _>("api_contributing_upstreams")
-            .map_err(map_sqlx_error)?,
-        max_observed_at_unix_millis: row
-            .try_get::<Option<i64>, _>("max_observed_at_unix_millis")
-            .map_err(map_sqlx_error)?,
-        computed_at_unix_millis: row
-            .try_get::<i64, _>("computed_at_unix_millis")
-            .map_err(map_sqlx_error)?,
-        policy_version: row
-            .try_get::<i32, _>("policy_version")
-            .map_err(map_sqlx_error)?,
-    })
 }
 
 pub(super) fn provider_key(provider: Provider) -> &'static str {

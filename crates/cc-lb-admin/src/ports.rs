@@ -2,52 +2,12 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use axum::http::{HeaderMap, StatusCode};
-use bytes::Bytes;
-use cc_lb_domain::RoutingTrace;
 use cc_lb_quota::UnifiedQuotaObservation;
 use cc_lb_storage_api::{
     Storage, UpstreamRecord, WarmupAttemptOutcome, WarmupDispatchKind, WarmupLane,
     WarmupPermanentFailureReason, WarmupSkipReason, WarmupTransientFailureReason,
 };
-use serde::Serialize;
 use uuid::Uuid;
-
-#[derive(Debug)]
-pub struct RoutePreviewInput {
-    pub principal_id: String,
-    pub request_id: Option<String>,
-    pub headers: HeaderMap,
-    pub body_bytes: Bytes,
-    pub provider: Option<cc_lb_domain::Provider>,
-    pub path: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RoutePreviewWinner {
-    pub upstream_id: Uuid,
-    pub name: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RoutePreviewOutcome {
-    pub trace: RoutingTrace,
-    pub winner: Option<RoutePreviewWinner>,
-}
-
-#[derive(Debug)]
-pub enum RoutePreviewError {
-    PrincipalNotFound(String),
-    PipelineInstantiationError(String),
-    UnsupportedOperation { method: String, path: String },
-}
-
-#[async_trait]
-pub trait RoutePreviewPort: Send + Sync {
-    async fn preview_route(
-        &self,
-        input: RoutePreviewInput,
-    ) -> Result<RoutePreviewOutcome, RoutePreviewError>;
-}
 
 #[derive(Clone, Copy)]
 pub struct WarmupAttemptInput<'a> {

@@ -2,8 +2,7 @@ use cc_lb_domain::OpenaiOauthCompatPolicy;
 use cc_lb_oauth_protocol::{
     ANTIGRAVITY_OAUTH_AUTH_URL, ANTIGRAVITY_OAUTH_CODE_ASSIST_URL, ANTIGRAVITY_OAUTH_REDIRECT_URI,
     ANTIGRAVITY_OAUTH_SCOPES, ANTIGRAVITY_OAUTH_TOKEN_URL, ANTIGRAVITY_OAUTH_USER_AGENT,
-    ANTIGRAVITY_OAUTH_USERINFO_URL, GEMINI_OAUTH_AUTH_URL, GEMINI_OAUTH_CODE_ASSIST_URL,
-    GEMINI_OAUTH_REDIRECT_URI, GEMINI_OAUTH_TOKEN_URL, OPENAI_CODEX_CLIENT_ID,
+    ANTIGRAVITY_OAUTH_USERINFO_URL, GEMINI_OAUTH_CODE_ASSIST_URL, OPENAI_CODEX_CLIENT_ID,
     OPENAI_OAUTH_AUTHORIZE_URL, OPENAI_OAUTH_BROWSER_REDIRECT_URI,
     OPENAI_OAUTH_DEVICE_REDIRECT_URI, OPENAI_OAUTH_DEVICE_TOKEN_URL,
     OPENAI_OAUTH_DEVICE_USERCODE_URL, OPENAI_OAUTH_DEVICE_VERIFICATION_URL, OPENAI_OAUTH_TOKEN_URL,
@@ -535,11 +534,6 @@ impl Default for OpenAiOAuthConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct GeminiOAuthConfig {
-    pub client_id: String,
-    pub client_secret: String,
-    pub auth_url: Url,
-    pub token_url: Url,
-    pub redirect_uri: Url,
     pub code_assist_url: Url,
     pub userinfo_url: Url,
 }
@@ -547,11 +541,6 @@ pub struct GeminiOAuthConfig {
 impl Default for GeminiOAuthConfig {
     fn default() -> Self {
         Self {
-            client_id: String::new(),
-            client_secret: String::new(),
-            auth_url: Url::parse(GEMINI_OAUTH_AUTH_URL).expect("valid url"),
-            token_url: Url::parse(GEMINI_OAUTH_TOKEN_URL).expect("valid url"),
-            redirect_uri: Url::parse(GEMINI_OAUTH_REDIRECT_URI).expect("valid url"),
             code_assist_url: Url::parse(GEMINI_OAUTH_CODE_ASSIST_URL).expect("valid url"),
             userinfo_url: Url::parse("https://www.googleapis.com/oauth2/v3/userinfo")
                 .expect("valid url"),

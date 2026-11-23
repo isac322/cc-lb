@@ -4,8 +4,8 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
-    AuditEntry, AuditStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind,
-    PrincipalStore, StorageError, WasmBlob, WasmRegistryEntryInput, default_wire_version,
+    AuditStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalStore,
+    StorageError, WasmBlob, WasmRegistryEntryInput, default_wire_version,
     principal::{
         Limit, LimitKind, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalUpdate,
     },
@@ -38,9 +38,6 @@ where
     soft_delete_excludes_default_list(Arc::clone(&backend)).await?;
     recreate_same_name_after_soft_delete_creates_new_principal(Arc::clone(&backend)).await?;
     soft_delete_cascades_plugin_chains(Arc::clone(&backend)).await?;
-    hard_delete_removes_unreferenced(Arc::clone(&backend)).await?;
-    hard_delete_cascades_plugin_chains(Arc::clone(&backend)).await?;
-    hard_delete_referenced_by_audit_conflicts(Arc::clone(&backend)).await?;
     validate_identifier_rejects_invalid_name(backend).await?;
     Ok(())
 }
@@ -493,64 +490,6 @@ where
     .await
 }
 
-async fn hard_delete_removes_unreferenced<B>(backend: Arc<B>) -> Result<()>
-where
-    B: ConformanceBackend,
-    B::Storage: AuditStore + PrincipalStore,
-{
-    with_fixture(backend, |storage| async move {
-        let record = PrincipalStore::create(&*storage, principal_create(10), BASE_TS).await?;
-        ensure!(PrincipalStore::hard_delete(&*storage, record.id).await?);
-        ensure!(
-            PrincipalStore::get_by_id(&*storage, record.id)
-                .await?
-                .is_none()
-        );
-        ensure!(!PrincipalStore::hard_delete(&*storage, record.id).await?);
-        Ok(())
-    })
-    .await
-}
-
-async fn hard_delete_cascades_plugin_chains<B>(backend: Arc<B>) -> Result<()>
-where
-    B: ConformanceBackend,
-    B::Storage: AuditStore + PrincipalStore + PluginRegistryStore,
-{
-    with_fixture(backend, |storage| async move {
-        let (principal, plugin_id) = principal_with_plugin(storage.as_ref(), 17).await?;
-        insert_all_slots(storage.as_ref(), principal.id, plugin_id).await?;
-
-        ensure!(PrincipalStore::hard_delete(storage.as_ref(), principal.id).await?);
-
-        ensure_all_slots_empty(storage.as_ref(), principal.id).await?;
-        Ok(())
-    })
-    .await
-}
-
-async fn hard_delete_referenced_by_audit_conflicts<B>(backend: Arc<B>) -> Result<()>
-where
-    B: ConformanceBackend,
-    B::Storage: AuditStore + PrincipalStore,
-{
-    with_fixture(backend, |storage| async move {
-        let record = PrincipalStore::create(&*storage, principal_create(11), BASE_TS).await?;
-        AuditStore::append_audit(&*storage, &audit_entry(&record)).await?;
-        let error = PrincipalStore::hard_delete(&*storage, record.id)
-            .await
-            .expect_err("referenced principal must not be hard deleted");
-        ensure!(matches!(error, StorageError::Conflict { .. }));
-        ensure!(
-            PrincipalStore::get_by_id(&*storage, record.id)
-                .await?
-                .is_some()
-        );
-        Ok(())
-    })
-    .await
-}
-
 async fn validate_identifier_rejects_invalid_name<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,
@@ -604,25 +543,6 @@ fn limits() -> Vec<Limit> {
 
 fn names(records: &[PrincipalRecord]) -> Vec<&str> {
     records.iter().map(|record| record.name.as_str()).collect()
-}
-
-fn audit_entry(record: &PrincipalRecord) -> AuditEntry {
-    AuditEntry {
-        ts: BASE_TS + 10,
-        request_id: format!("request-{}", record.id),
-        principal_id: record.id.to_string(),
-        route: "messages".to_owned(),
-        upstream: "primary".to_owned(),
-        model: Some("claude-sonnet-4-5".to_owned()),
-        status: 200,
-        input_tokens: Some(1),
-        output_tokens: Some(2),
-        duration_ms: 3,
-        agent_label: None,
-        admin_action: Some("principal_store".to_owned()),
-        payload: None,
-        ..Default::default()
-    }
 }
 
 async fn principal_with_plugin<S>(storage: &S, seed: u8) -> Result<(PrincipalRecord, Uuid)>

@@ -59,12 +59,15 @@ async fn seed_session(
     expires_at_unix_secs: u64,
 ) {
     storage
-        .replace_from_real_request(&cache_keepalive_replace_request(
-            principal_id,
-            id,
-            last_message_at_ms / 1_000,
-            expires_at_unix_secs,
-        ))
+        .replace_from_real_request_fenced(
+            &cache_keepalive_replace_request(
+                principal_id,
+                id,
+                last_message_at_ms / 1_000,
+                expires_at_unix_secs,
+            ),
+            None,
+        )
         .await
         .expect("seed cache keepalive session");
     sqlx::query(
@@ -855,9 +858,10 @@ async fn reactivation_increments_generation_and_resets_summary_inputs() {
         NOW_UNIX_SECS + 300,
     );
     let first = storage
-        .replace_from_real_request(&request)
+        .replace_from_real_request_fenced(&request, None)
         .await
-        .expect("create session");
+        .expect("create session")
+        .expect("created session record");
     let renewed = storage
         .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
             session_key_hash: first.session_key_hash.clone(),
@@ -895,14 +899,18 @@ async fn reactivation_increments_generation_and_resets_summary_inputs() {
     assert_eq!(before["attempts"], 1);
 
     let replacement = storage
-        .replace_from_real_request(&cache_keepalive_replace_request(
-            &principal_id,
-            "reactivated-session",
-            NOW_UNIX_SECS,
-            NOW_UNIX_SECS + 300,
-        ))
+        .replace_from_real_request_fenced(
+            &cache_keepalive_replace_request(
+                &principal_id,
+                "reactivated-session",
+                NOW_UNIX_SECS,
+                NOW_UNIX_SECS + 300,
+            ),
+            None,
+        )
         .await
-        .expect("reactivate session");
+        .expect("reactivate session")
+        .expect("reactivated session record");
     assert_eq!(replacement.generation, renewed.generation + 1);
     assert_eq!(replacement.refresh_count, 0);
     assert!(replacement.error.is_none());

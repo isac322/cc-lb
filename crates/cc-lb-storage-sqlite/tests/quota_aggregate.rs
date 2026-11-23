@@ -26,14 +26,14 @@ async fn quota_storage(database_name: &str) -> (TempDir, SqliteStorage) {
     (temp_dir, storage)
 }
 
-fn quota_checkpoint(
+fn quota_sample(
     upstream_id: Uuid,
     changed_at_unix_millis: u64,
     sample_id: u128,
     utilization: f64,
     resets_at_unix_secs: Option<u64>,
-) -> SubscriptionQuotaCheckpointRecord {
-    SubscriptionQuotaCheckpointRecord::from(&SubscriptionQuotaSample {
+) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
         upstream_id,
         window: SubscriptionQuotaWindow::FiveHour,
         source: SubscriptionQuotaSource::Header,
@@ -56,7 +56,7 @@ fn quota_checkpoint(
         extra_usage_used_credits: None,
         credits: None,
         ingested_at_unix_millis: changed_at_unix_millis,
-    })
+    }
 }
 
 fn slim(checkpoint: SubscriptionQuotaCheckpointRecord) -> SubscriptionQuotaSlimCheckpoint {
@@ -254,10 +254,17 @@ async fn quota_poll_rejects_changed_credentials_deleted_and_missing_upstreams() 
             .await
             .expect("publish old generation before rotation")
     );
+    let old_record = storage
+        .get_by_id(old_fence.upstream_id)
+        .await
+        .expect("load poll upstream")
+        .expect("poll upstream");
     let rotated = storage
-        .update_oauth_token(
+        .store_oauth_tokens(
             old_fence.upstream_id,
+            old_record.revision,
             EncryptedOAuthTokens::from_ciphertext(vec![2; 8]),
+            false,
         )
         .await
         .expect("rotate poll credential");
@@ -419,16 +426,16 @@ async fn quota_slim_checkpoints_return_left_anchor_and_inclusive_range_with_samp
     let (_temp_dir, storage) = quota_storage("slim-parity.sqlite").await;
     let upstream_id = Uuid::from_u128(0x100);
     let records = vec![
-        quota_checkpoint(upstream_id, 1_000, 1, 0.1, Some(18_000)),
-        quota_checkpoint(upstream_id, 1_000, 2, 0.2, Some(18_000)),
-        quota_checkpoint(upstream_id, 2_000, 3, 0.3, Some(18_000)),
-        quota_checkpoint(upstream_id, 3_000, 4, 0.4, Some(18_000)),
-        quota_checkpoint(upstream_id, 3_000, 5, 0.5, Some(18_000)),
+        quota_sample(upstream_id, 1_000, 1, 0.1, Some(18_000)),
+        quota_sample(upstream_id, 1_000, 2, 0.2, Some(18_000)),
+        quota_sample(upstream_id, 2_000, 3, 0.3, Some(18_000)),
+        quota_sample(upstream_id, 3_000, 4, 0.4, Some(18_000)),
+        quota_sample(upstream_id, 3_000, 5, 0.5, Some(18_000)),
     ];
     storage
-        .put_subscription_quota_checkpoints(&records)
+        .record_subscription_quota_samples(&records)
         .await
-        .expect("seed quota checkpoints");
+        .expect("seed quota samples");
     let query = SubscriptionQuotaCheckpointRangeQuery {
         upstream_ids: vec![upstream_id],
         windows: vec![SubscriptionQuotaWindow::FiveHour],
@@ -439,7 +446,11 @@ async fn quota_slim_checkpoints_return_left_anchor_and_inclusive_range_with_samp
 
     // Left anchor: the greatest-sample_id checkpoint before `since`; then every
     // checkpoint inside the inclusive `[since, until]` range in sample order.
-    let expected = records[1..].iter().cloned().map(slim).collect::<Vec<_>>();
+    let expected = records[1..]
+        .iter()
+        .map(SubscriptionQuotaCheckpointRecord::from)
+        .map(slim)
+        .collect::<Vec<_>>();
     let actual = storage
         .list_subscription_quota_slim_checkpoints(query)
         .await
@@ -512,12 +523,12 @@ async fn quota_provider_lots_preserve_reset_cycles_without_full_records() {
     let (_temp_dir, storage) = quota_storage("provider-lots.sqlite").await;
     let upstream_id = Uuid::from_u128(0x200);
     storage
-        .put_subscription_quota_checkpoints(&[
-            quota_checkpoint(upstream_id, 0, 1, 0.8, Some(18_000)),
-            quota_checkpoint(upstream_id, 60_000, 2, 0.2, Some(36_000)),
+        .record_subscription_quota_samples(&[
+            quota_sample(upstream_id, 0, 1, 0.8, Some(18_000)),
+            quota_sample(upstream_id, 60_000, 2, 0.2, Some(36_000)),
         ])
         .await
-        .expect("seed provider lot checkpoints");
+        .expect("seed provider lot samples");
 
     let lots = storage
         .list_subscription_quota_provider_lots(SubscriptionQuotaProviderLotQuery {
@@ -808,18 +819,18 @@ async fn quota_checkpoint_pruning_is_bounded_and_retains_partition_anchors() {
     let (_dir, storage) = quota_storage("quota-prune.sqlite").await;
     let upstream_id = Uuid::from_u128(0x302);
     let mut records = vec![
-        quota_checkpoint(upstream_id, 100, 1, 0.1, Some(18_000)),
-        quota_checkpoint(upstream_id, 200, 2, 0.2, Some(18_000)),
-        quota_checkpoint(upstream_id, 200, 3, 0.3, Some(18_000)),
-        quota_checkpoint(upstream_id, 300, 4, 0.4, Some(18_000)),
+        quota_sample(upstream_id, 100, 1, 0.1, Some(18_000)),
+        quota_sample(upstream_id, 200, 2, 0.2, Some(18_000)),
+        quota_sample(upstream_id, 200, 3, 0.3, Some(18_000)),
+        quota_sample(upstream_id, 300, 4, 0.4, Some(18_000)),
     ];
-    let mut other = quota_checkpoint(upstream_id, 50, 5, 0.5, Some(18_000));
+    let mut other = quota_sample(upstream_id, 50, 5, 0.5, Some(18_000));
     other.source = SubscriptionQuotaSource::Api;
     records.push(other);
     storage
-        .put_subscription_quota_checkpoints(&records)
+        .record_subscription_quota_samples(&records)
         .await
-        .expect("seed checkpoints");
+        .expect("seed quota samples");
     assert_eq!(
         storage
             .prune_subscription_quota_checkpoints_before(250, 0)

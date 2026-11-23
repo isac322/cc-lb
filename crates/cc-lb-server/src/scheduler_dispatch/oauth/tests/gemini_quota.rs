@@ -209,7 +209,6 @@ async fn gemini_poll_fallback_matrix() {
         config.oauth.gemini = Some(cc_lb_config::GeminiOAuthConfig {
             code_assist_url: provider.base.clone(),
             userinfo_url: provider.base.clone(),
-            ..Default::default()
         });
         config.oauth.antigravity = Some(cc_lb_config::AntigravityOAuthConfig {
             code_assist_url: provider.base.clone(),
@@ -527,7 +526,6 @@ async fn gemini_raw_quota_replacement_rejects_delayed_old_subject_poll() {
         config.oauth.gemini = Some(cc_lb_config::GeminiOAuthConfig {
             code_assist_url: provider.base.clone(),
             userinfo_url: provider.base.clone(),
-            ..Default::default()
         });
         let profile = GeminiOAuthProfile::GeminiCli;
         let upstream = provider_metadata::create_provider(
@@ -822,7 +820,6 @@ async fn gemini_poll_persists_provider_json_without_group_duplication() {
         Some(cc_lb_config::GeminiOAuthConfig {
             code_assist_url: provider.base.clone(),
             userinfo_url: provider.base.clone(),
-            ..Default::default()
         });
     let upstream = provider_metadata::create_provider(
         &fixture,
@@ -899,7 +896,6 @@ async fn gemini_delayed_fallback_preserves_newer_summary_receipt() {
         config.oauth.gemini = Some(cc_lb_config::GeminiOAuthConfig {
             code_assist_url: provider.base.clone(),
             userinfo_url: provider.base.clone(),
-            ..Default::default()
         });
         config.oauth.antigravity = Some(cc_lb_config::AntigravityOAuthConfig {
             code_assist_url: provider.base.clone(),

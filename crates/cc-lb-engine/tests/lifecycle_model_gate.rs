@@ -47,14 +47,14 @@ fn active_record() -> StoredApiKeyRecord {
 async fn model_gate_rejects_disallowed_model_before_upstream() {
     let state = TestState::default();
     let (limit_engine, view) = engine_with_allowed_models(vec!["allowed-model".to_owned()]);
-    let lifecycle = lifecycle_with(
-        TestAuthn::with_principal_view(state.clone(), view),
-        MockDispatch {
-            state: state.clone(),
-            mode: DispatchMode::StreamingOk,
-        },
-    )
-    .with_static_limit_subject(
+    let lifecycle = common::with_static_limit_subject(
+        lifecycle_with(
+            TestAuthn::with_principal_view(state.clone(), view),
+            MockDispatch {
+                state: state.clone(),
+                mode: DispatchMode::StreamingOk,
+            },
+        ),
         limit_engine,
         "principal-test".to_owned(),
         "key-test".to_owned(),

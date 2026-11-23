@@ -169,14 +169,6 @@ pub fn reject_unauthenticated_for_route(
     )
 }
 
-/// Build an Anthropic-shaped rejection for unscoped legacy callers.
-pub fn reject_unauthenticated(
-    error: &BuiltinAuthError,
-    observer: Option<&LifecycleContext>,
-) -> Response<Body> {
-    reject_unauthenticated_for_provider(error, None, observer)
-}
-
 /// Proof that the request carrying it has been authenticated.
 ///
 /// Obtainable only from [`authenticate_first`]. Hold one to be allowed to do
@@ -256,10 +248,12 @@ mod tests {
     #[test]
     fn rejection_maps_status_per_error_kind() {
         assert_eq!(
-            reject_unauthenticated(&BuiltinAuthError::PrincipalDisabled, None).status(),
+            reject_unauthenticated_for_provider(&BuiltinAuthError::PrincipalDisabled, None, None)
+                .status(),
             StatusCode::FORBIDDEN
         );
-        let unavailable = reject_unauthenticated(&BuiltinAuthError::Unavailable, None);
+        let unavailable =
+            reject_unauthenticated_for_provider(&BuiltinAuthError::Unavailable, None, None);
         assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(
             unavailable

@@ -1,8 +1,7 @@
 //! Sparse integer ordering utility for plugin chain positioning.
 //!
 //! Maintains ordering with gaps (multiples of STEP) to allow insertions between
-//! existing values without reordering the entire sequence. When gaps become too tight,
-//! `rebalance` redistributes values evenly.
+//! existing values without reordering the entire sequence.
 
 /// Gap size supporting ~10 consecutive inserts before rebalance needed.
 pub const STEP: i64 = 1000;
@@ -27,17 +26,6 @@ pub fn between(lower: i64, upper: i64) -> i64 {
         upper
     );
     (lower + upper) / 2
-}
-
-/// Returns evenly-spaced values with STEP spacing, starting at STEP.
-///
-/// Rebalances a sequence by redistributing N values as [STEP, 2*STEP, 3*STEP, ..., N*STEP].
-pub fn rebalance(existing: Vec<i64>) -> Vec<i64> {
-    existing
-        .iter()
-        .enumerate()
-        .map(|(idx, _)| STEP * (idx as i64 + 1))
-        .collect()
 }
 
 /// Returns true if any adjacent pair has a gap smaller than 2.
@@ -83,24 +71,6 @@ mod tests {
         // Gap of exactly 1 should panic in debug mode
         let result = std::panic::catch_unwind(|| between(1000, 1001));
         assert!(result.is_err(), "Should panic for gap < 2 in debug mode");
-    }
-
-    #[test]
-    fn rebalance_idempotent() {
-        let input = vec![1000, 2000, 3000, 4000];
-        let rebalanced = rebalance(input);
-        assert_eq!(rebalanced, vec![1000, 2000, 3000, 4000]);
-
-        // Rebalancing again should be the same
-        let rebalanced_again = rebalance(rebalanced);
-        assert_eq!(rebalanced_again, vec![1000, 2000, 3000, 4000]);
-    }
-
-    #[test]
-    fn rebalance_handles_unsorted_input() {
-        let input = vec![3000, 1000, 2000];
-        let rebalanced = rebalance(input);
-        assert_eq!(rebalanced, vec![1000, 2000, 3000]);
     }
 
     #[test]

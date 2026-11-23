@@ -100,7 +100,7 @@ mod usage_parser;
 pub mod warmup_attempts;
 #[cfg(not(loom))]
 pub use authn_rail::{
-    Authenticated, authenticate_first, reject_unauthenticated, reject_unauthenticated_for_provider,
+    Authenticated, authenticate_first, reject_unauthenticated_for_provider,
     reject_unauthenticated_for_route,
 };
 #[cfg(not(loom))]
@@ -133,16 +133,14 @@ pub use error_format::{
 pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop};
 #[cfg(not(loom))]
 pub use lifecycle::{
-    AuthLimitSubject, Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig,
-    LimitCostEstimator, LimitSubjectProvider, ProxyError, RequestKind, UpstreamDispatch,
-    build_candidates, live_eligible, observe_rate_limits, parse_request_cache_breakpoints,
+    AuthLimitSubject, Body, DispatchError, Lifecycle, LifecycleConfig, LimitCostEstimator,
+    LimitSubjectProvider, ProxyError, RequestKind, UpstreamDispatch, build_candidates,
+    live_eligible, observe_rate_limits,
 };
 pub use lifecycle_api_key_metrics_subscriber::{
     ApiKeyMetricsSubscriberHandle, spawn_lifecycle_api_key_metrics_subscriber,
 };
-pub use lifecycle_cache_hit_miss_subscriber::{
-    CacheHitMissSubscriberHandle, spawn_lifecycle_cache_hit_miss_subscriber,
-};
+pub use lifecycle_cache_hit_miss_subscriber::CacheHitMissSubscriberHandle;
 pub use lifecycle_event_assembler::{
     RequestEventAssemblerHandle, spawn_request_event_assembler,
     spawn_request_event_assembler_with_diagnostics,
@@ -158,9 +156,7 @@ pub use lifecycle_limit_rejection_audit_subscriber::{
 pub use lifecycle_rate_limit_header_subscriber::{
     RateLimitHeaderSubscriberHandle, spawn_lifecycle_rate_limit_header_subscriber,
 };
-pub use lifecycle_routing_tier_subscriber::{
-    RoutingTierSubscriberHandle, spawn_lifecycle_routing_tier_subscriber,
-};
+pub use lifecycle_routing_tier_subscriber::RoutingTierSubscriberHandle;
 #[cfg(not(loom))]
 pub use lifecycle_subscription_quota_subscriber::{
     SubscriptionQuotaSubscriberHandle, spawn_lifecycle_subscription_quota_subscriber,

@@ -6,10 +6,7 @@ use std::time::Duration;
 
 use cc_lb_config::{PostgresPoolConfig, SchedulerConfig, StorageConfig};
 use cc_lb_server::scheduler_factory::open_scheduler_storage;
-use cc_lb_server::storage_factory::{
-    open_pg_fanout_pool, open_storage, open_storage_for_maintenance, open_wal_size_probe,
-    probe_postgres_connection,
-};
+use cc_lb_server::storage_factory::{open_pg_fanout_pool, open_storage, probe_postgres_connection};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -29,8 +26,6 @@ enum Factory {
     Storage,
     Scheduler,
     Probe,
-    Maintenance,
-    Wal,
     Fanout,
 }
 
@@ -182,14 +177,6 @@ async fn call_factory(
                 .map_err(|error| error.to_string())
         }
         Factory::Probe => probe(url, storage_mode).await,
-        Factory::Maintenance => open_storage_for_maintenance(&storage, clock)
-            .await
-            .map(|_| ())
-            .map_err(|error| error.to_string()),
-        Factory::Wal => open_wal_size_probe(&storage)
-            .await
-            .map(|_| ())
-            .map_err(|error| error.to_string()),
         Factory::Fanout => match open_pg_fanout_pool(&storage).await {
             Ok(Some(pool)) => {
                 let result = sqlx::query("SELECT 1")
@@ -422,8 +409,6 @@ async fn invalid_explicit_sslmode_fails_without_connecting() {
         Factory::Storage,
         Factory::Scheduler,
         Factory::Probe,
-        Factory::Maintenance,
-        Factory::Wal,
         Factory::Fanout,
     ] {
         let observations = exercise(
@@ -446,8 +431,6 @@ async fn invalid_url_sslmode_fails_without_connecting() {
         Factory::Storage,
         Factory::Scheduler,
         Factory::Probe,
-        Factory::Maintenance,
-        Factory::Wal,
         Factory::Fanout,
     ] {
         let observations = exercise(factory, Some("sslmode=not-a-real-sslmode"), None, None).await;
@@ -459,11 +442,9 @@ async fn invalid_url_sslmode_fails_without_connecting() {
 }
 
 #[tokio::test]
-async fn maintenance_wal_and_fanout_preserve_strict_url_without_pool_sslmode() {
-    for factory in [Factory::Maintenance, Factory::Wal, Factory::Fanout] {
-        let observations = exercise(factory, Some("sslmode=require"), None, None).await;
-        assert_packets(&observations, true, false);
-    }
+async fn fanout_preserves_strict_url_without_pool_sslmode() {
+    let observations = exercise(Factory::Fanout, Some("sslmode=require"), None, None).await;
+    assert_packets(&observations, true, false);
 }
 
 #[tokio::test]

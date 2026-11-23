@@ -166,7 +166,15 @@ async fn concurrent_live_rollups_classify_only_their_own_deltas_and_recreated_mi
         left.unwrap().processed_events + right.unwrap().processed_events,
         3
     );
-    assert_eq!(storage.usage_rollup_checkpoint().await.unwrap(), Some(4));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'"
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap(),
+        4
+    );
     for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
         let rows = storage
             .query_usage_rollups_in_range(resolution, 1800000000, 1800003600)
@@ -289,7 +297,15 @@ async fn failed_live_batch_rolls_back_cost_backfill_and_checkpoint_then_restarts
     }
     let snapshot = rows_snapshot(&storage).await;
     assert!(storage.rollup_usage_once().await.is_err());
-    assert_eq!(storage.usage_rollup_checkpoint().await.unwrap(), Some(1));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'"
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap(),
+        1
+    );
     assert_eq!(rows_snapshot(&storage).await, snapshot);
     let category_totals: (i64, i64) = sqlx::query_as(
         "SELECT SUM(cost_input_micros),SUM(cost_components_event_count) FROM usage_rollups_v2",
@@ -320,7 +336,15 @@ async fn failed_live_batch_rolls_back_cost_backfill_and_checkpoint_then_restarts
         .unwrap();
     let run = storage.rollup_usage_once().await.unwrap();
     assert_eq!(run.processed_events, 1);
-    assert_eq!(storage.usage_rollup_checkpoint().await.unwrap(), Some(4));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'"
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap(),
+        4
+    );
     for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
         let rows = storage
             .query_usage_rollups_in_range(resolution, 1800000000, 1800003600)

@@ -36,9 +36,7 @@ pub mod warmup_attempts;
 pub use anthropic_compatibility_kv::*;
 pub use api_key_usage::*;
 pub use audit::*;
-pub use cache_keepalive::{
-    CacheKeepaliveConfig, CacheTtl, ClassifierConfig, JudgeResponseFormat, LlmJudgeConfig,
-};
+pub use cache_keepalive::{CacheKeepaliveConfig, CacheTtl, ClassifierConfig};
 pub use cache_keepalive_sessions::*;
 
 pub use error::{PluginChainConflictReason, StorageError, StorageResult};

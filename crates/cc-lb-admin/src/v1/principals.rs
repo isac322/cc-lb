@@ -163,9 +163,6 @@ async fn create_principal(
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
-    if unsupported_llm_judge(body.cache_keepalive.as_ref()) {
-        return unsupported_llm_judge_response();
-    }
     let name = body.name.clone();
 
     let input = PrincipalCreate {
@@ -274,11 +271,6 @@ async fn update_principal(
     let Some(expected_revision) = if_match_revision(&headers) else {
         return error_response(StatusCode::PRECONDITION_REQUIRED, "if_match_required");
     };
-    if let Some(Some(config)) = body.cache_keepalive.as_ref()
-        && unsupported_llm_judge(Some(config))
-    {
-        return unsupported_llm_judge_response();
-    }
     let fields_changed = update_fields_changed(&body);
     let route = format!("/admin/v1/principals/{id}");
     update_principal_record(
@@ -839,24 +831,6 @@ fn storage_unavailable() -> axum::response::Response {
 
 fn error_response(status: StatusCode, code: &str) -> axum::response::Response {
     (status, Json(json!({ "error": code }))).into_response()
-}
-
-fn unsupported_llm_judge(config: Option<&CacheKeepaliveConfig>) -> bool {
-    config
-        .and_then(|config| config.classifier.llm_judge.as_ref())
-        .is_some()
-}
-
-fn unsupported_llm_judge_response() -> axum::response::Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({
-            "error": "unsupported_cache_keepalive_llm_judge",
-            "field": "cache_keepalive.classifier.llm_judge",
-            "reason": "llm_judge is not implemented in this release"
-        })),
-    )
-        .into_response()
 }
 
 fn principal_kind_name(kind: PrincipalKind) -> &'static str {

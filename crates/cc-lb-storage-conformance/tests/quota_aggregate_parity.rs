@@ -5,11 +5,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use cc_lb_clock::SystemClock;
 use cc_lb_storage_api::{
-    MetaStore, SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
-    SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
-    SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
-    UpstreamSubscriptionQuotaStore, UsageTokenInterval, UsageTokenIntervalStore,
+    MetaStore, SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaProviderLotQuery,
+    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
+    UpstreamSubscriptionQuotaAggregateStore, UpstreamSubscriptionQuotaStore, UsageTokenInterval,
+    UsageTokenIntervalStore,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use cc_lb_storage_sqlite::open_sqlite;
@@ -39,15 +39,15 @@ async fn quota_aggregate_parity_is_byte_equal() -> Result<()> {
         .record_subscription_quota_samples(std::slice::from_ref(&absent))
         .await?;
     sqlite_storage
-        .record_subscription_quota_samples(&[absent])
+        .record_subscription_quota_samples(std::slice::from_ref(&absent))
         .await?;
-    let checkpoints = vec![
-        checkpoint(upstream_id, 30_000, 2, SubscriptionQuotaSource::Header, 0.2),
-        checkpoint(upstream_id, 30_000, 1, SubscriptionQuotaSource::Header, 0.1),
-        checkpoint(upstream_id, 75_000, 4, SubscriptionQuotaSource::Header, 0.4),
-        checkpoint(upstream_id, 75_000, 3, SubscriptionQuotaSource::Header, 0.3),
-        checkpoint(upstream_id, 75_000, 9, SubscriptionQuotaSource::Api, 0.35),
-        checkpoint(
+    let samples = vec![
+        sample(upstream_id, 30_000, 2, SubscriptionQuotaSource::Header, 0.2),
+        sample(upstream_id, 30_000, 1, SubscriptionQuotaSource::Header, 0.1),
+        sample(upstream_id, 75_000, 4, SubscriptionQuotaSource::Header, 0.4),
+        sample(upstream_id, 75_000, 3, SubscriptionQuotaSource::Header, 0.3),
+        sample(upstream_id, 75_000, 9, SubscriptionQuotaSource::Api, 0.35),
+        sample(
             upstream_id,
             135_000,
             5,
@@ -56,10 +56,10 @@ async fn quota_aggregate_parity_is_byte_equal() -> Result<()> {
         ),
     ];
     postgres_storage
-        .put_subscription_quota_checkpoints(&checkpoints)
+        .record_subscription_quota_samples(&samples)
         .await?;
     sqlite_storage
-        .put_subscription_quota_checkpoints(&checkpoints)
+        .record_subscription_quota_samples(&samples)
         .await?;
     for (bucket, tokens) in [
         (60, [1, 2, 3, 4]),
@@ -137,12 +137,17 @@ async fn quota_aggregate_parity_is_byte_equal() -> Result<()> {
     let latest = postgres_storage
         .list_latest_subscription_quota_for_upstreams(&[upstream_id])
         .await?;
-    assert_eq!(latest.len(), 1);
-    assert!(latest.first().is_some_and(|sample| {
-        sample.sample_kind == SubscriptionQuotaSampleKind::Absent
-            && sample.utilization.is_none()
-            && sample.resets_at_unix_secs.is_none()
-    }));
+    assert_eq!(latest.len(), 2);
+    assert!(
+        latest
+            .iter()
+            .find(|sample| sample.source == SubscriptionQuotaSource::Api)
+            .is_some_and(|sample| {
+                sample.sample_kind == SubscriptionQuotaSampleKind::Absent
+                    && sample.utilization.is_none()
+                    && sample.resets_at_unix_secs.is_none()
+            })
+    );
     sqlite_pool.close().await;
     postgres.drop_schema().await
 }
@@ -179,19 +184,19 @@ fn absent_sample(
     }
 }
 
-fn checkpoint(
+fn sample(
     upstream_id: Uuid,
     observed_at_unix_millis: u64,
     sample_id: u128,
     source: SubscriptionQuotaSource,
     utilization: f64,
-) -> SubscriptionQuotaCheckpointRecord {
+) -> SubscriptionQuotaSample {
     let resets_at_unix_secs = if observed_at_unix_millis < 120_000 {
         2_000_000
     } else {
         2_018_000
     };
-    SubscriptionQuotaCheckpointRecord::from(&SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
         upstream_id,
         window: SubscriptionQuotaWindow::FiveHour,
         source,
@@ -214,7 +219,7 @@ fn checkpoint(
         extra_usage_used_credits: None,
         credits: None,
         ingested_at_unix_millis: observed_at_unix_millis,
-    })
+    }
 }
 
 async fn insert_postgres_rollup(

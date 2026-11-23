@@ -72,21 +72,21 @@ async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dy
     let storage = Arc::new(sqlite_storage(&_dir, "lifecycle-terminal.sqlite").await?);
     let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
-    let lifecycle = lifecycle_with_terminal(
-        TerminalStrategy::FirstPick,
-        vec![Arc::new(KeepFilter {
-            kept_upstream_ids: vec![second, third],
-            calls: Arc::clone(&filter_calls),
-        })],
-        vec![
-            upstream_record(first, "first"),
-            upstream_record(second, "second"),
-            upstream_record(third, "third"),
-        ],
-        Arc::clone(&choices),
-    )
-    .with_event_bus(test_bus.bus_arc())
-    .with_static_limit_subject(
+    let lifecycle = common::with_static_limit_subject(
+        lifecycle_with_terminal(
+            TerminalStrategy::FirstPick,
+            vec![Arc::new(KeepFilter {
+                kept_upstream_ids: vec![second, third],
+                calls: Arc::clone(&filter_calls),
+            })],
+            vec![
+                upstream_record(first, "first"),
+                upstream_record(second, "second"),
+                upstream_record(third, "third"),
+            ],
+            Arc::clone(&choices),
+        )
+        .with_event_bus(test_bus.bus_arc()),
         LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
             Arc::new(cc_lb_clock::SystemClock),

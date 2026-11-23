@@ -44,10 +44,7 @@ pub struct UsageSnapshot {
     pub cache_write_input_tokens_30m: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_input_tokens_12h: Option<u64>,
-    pub web_search_requests: u64,
-    pub web_fetch_requests: u64,
     pub service_tier: Option<String>,
-    pub inference_geo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iterations: Option<JsonValue>,
 }

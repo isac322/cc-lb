@@ -5,8 +5,8 @@ use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_clock::SystemClock;
 use cc_lb_storage_api::{
     CacheKeepaliveSessionStore, MetaStore, OAuthTokensCreate, PoolQuotaHistoryStore,
-    PoolQuotaSnapshotRecord, PriceCatalogCache, Provider, SubscriptionQuotaCheckpointRangeQuery,
-    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaPollFence,
+    PoolQuotaSnapshotRecord, PoolQuotaSnapshotSummaryRecord, PriceCatalogCache, Provider,
+    SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaPollFence,
     SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
     SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
     SubscriptionQuotaWindow, UpstreamCreate, UpstreamKind, UpstreamStore,
@@ -27,17 +27,15 @@ async fn quota_aggregates_preserve_anchor_ties_and_inclusive_token_boundaries() 
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
     storage.initialize().await?;
     let upstream_id = Uuid::from_u128(1);
-    let checkpoints = [
-        checkpoint(upstream_id, 30_000, 2, 0.2, 2_000_000),
-        checkpoint(upstream_id, 30_000, 1, 0.1, 2_000_000),
-        checkpoint(upstream_id, 75_000, 4, 0.4, 2_000_000),
-        checkpoint(upstream_id, 75_000, 3, 0.3, 2_000_000),
-        checkpoint(upstream_id, 135_000, 5, 0.1, 2_018_000),
-        checkpoint(upstream_id, 240_000, 6, 0.8, 2_018_000),
+    let samples = [
+        sample(upstream_id, 30_000, 2, 0.2, 2_000_000),
+        sample(upstream_id, 30_000, 1, 0.1, 2_000_000),
+        sample(upstream_id, 75_000, 4, 0.4, 2_000_000),
+        sample(upstream_id, 75_000, 3, 0.3, 2_000_000),
+        sample(upstream_id, 135_000, 5, 0.1, 2_018_000),
+        sample(upstream_id, 240_000, 6, 0.8, 2_018_000),
     ];
-    storage
-        .put_subscription_quota_checkpoints(&checkpoints)
-        .await?;
+    storage.record_subscription_quota_samples(&samples).await?;
 
     let slim = storage
         .list_subscription_quota_slim_checkpoints(SubscriptionQuotaCheckpointRangeQuery {
@@ -159,10 +157,10 @@ async fn quota_deadband_keeps_exact_latest_and_pruning_preserves_each_anchor() -
             .record_subscription_quota_samples(&[threshold_changed])
             .await?;
         storage
-            .put_subscription_quota_checkpoints(&[
-                checkpoint(upstream, 50, 5, 0.4, 1000),
-                checkpoint(upstream, 50, 6, 0.5, 1000),
-                checkpoint(Uuid::from_u128(701), 5, 7, 0.4, 1000),
+            .record_subscription_quota_samples(&[
+                sample(upstream, 50, 5, 0.4, 1000),
+                sample(upstream, 50, 6, 0.5, 1000),
+                sample(Uuid::from_u128(701), 5, 7, 0.4, 1000),
             ])
             .await?;
         assert_eq!(
@@ -379,10 +377,15 @@ async fn quota_poll_rejects_rotated_generation_and_deleted_upstream() -> Result<
                 .record_subscription_quota_poll(std::slice::from_ref(&original), &fence)
                 .await?
         );
-        let rotated = UpstreamStore::update_oauth_token(
+        let fence_record = UpstreamStore::get_by_id(&storage, fence.upstream_id)
+            .await?
+            .expect("poll upstream");
+        let rotated = UpstreamStore::store_oauth_tokens(
             &storage,
             fence.upstream_id,
+            fence_record.revision,
             EncryptedOAuthTokens::from_ciphertext(b"rotated".to_vec()),
+            false,
         )
         .await?;
         let replacement = api_sample(fence.upstream_id, 100, 2, 0.9);
@@ -475,10 +478,15 @@ async fn quota_fenced_headers_enforces_source_epoch_generation_and_deletion() ->
             epoch_value: Some("next".to_owned()),
             ..fence
         };
-        let rotated = UpstreamStore::update_oauth_token(
+        let next_record = UpstreamStore::get_by_id(&storage, next_fence.upstream_id)
+            .await?
+            .expect("poll upstream");
+        let rotated = UpstreamStore::store_oauth_tokens(
             &storage,
             next_fence.upstream_id,
+            next_record.revision,
             EncryptedOAuthTokens::from_ciphertext(b"rotated".to_vec()),
+            false,
         )
         .await?;
         assert!(
@@ -764,22 +772,6 @@ fn sample(
     }
 }
 
-fn checkpoint(
-    upstream_id: Uuid,
-    observed_at_unix_millis: u64,
-    sample_id: u128,
-    utilization: f64,
-    resets_at_unix_secs: u64,
-) -> SubscriptionQuotaCheckpointRecord {
-    SubscriptionQuotaCheckpointRecord::from(&sample(
-        upstream_id,
-        observed_at_unix_millis,
-        sample_id,
-        utilization,
-        resets_at_unix_secs,
-    ))
-}
-
 async fn insert_rollup(
     pool: &PgPool,
     upstream_id: Uuid,
@@ -889,24 +881,24 @@ async fn pool_history_provider_migration_preserves_legacy_anthropic() -> Result<
             SubscriptionQuotaWindow::SevenDay,
         ];
         let mut legacy = storage
-            .list_latest_pool_quota_snapshots(Provider::Anthropic, &windows)
+            .list_latest_pool_quota_snapshot_summaries(Provider::Anthropic, &windows)
             .await?;
         assert_eq!(
             legacy,
             vec![
-                expected.clone(),
-                PoolQuotaSnapshotRecord {
+                PoolQuotaSnapshotSummaryRecord::from(&expected),
+                PoolQuotaSnapshotSummaryRecord::from(&PoolQuotaSnapshotRecord {
                     snapshot_at_unix_secs: 20,
                     window: SubscriptionQuotaWindow::SevenDay,
                     utilization: None,
                     ..expected.clone()
-                },
+                }),
             ]
         );
         for provider in [Provider::Openai, Provider::Gemini] {
             assert!(
                 storage
-                    .list_latest_pool_quota_snapshots(provider, &windows)
+                    .list_latest_pool_quota_snapshot_summaries(provider, &windows)
                     .await?
                     .is_empty()
             );
@@ -934,7 +926,7 @@ async fn pool_history_provider_migration_preserves_legacy_anthropic() -> Result<
             .await?;
         assert_eq!(
             storage
-                .list_latest_pool_quota_snapshots(Provider::Anthropic, &windows)
+                .list_latest_pool_quota_snapshot_summaries(Provider::Anthropic, &windows)
                 .await?,
             legacy
         );
@@ -1024,14 +1016,14 @@ async fn pool_history_provider_split_mixed_writes_are_atomic() -> Result<()> {
         assert!(storage.record_pool_quota_snapshots(&records).await.is_err());
         assert_eq!(
             storage
-                .list_latest_pool_quota_snapshots(Provider::Anthropic, &[original.window])
+                .list_latest_pool_quota_snapshot_summaries(Provider::Anthropic, &[original.window])
                 .await?,
-            vec![original],
+            vec![PoolQuotaSnapshotSummaryRecord::from(&original)],
         );
         for record in &records[1..] {
             assert!(
                 storage
-                    .list_latest_pool_quota_snapshots(record.provider, &[record.window])
+                    .list_latest_pool_quota_snapshot_summaries(record.provider, &[record.window])
                     .await?
                     .is_empty()
             );
@@ -1046,9 +1038,14 @@ async fn pool_history_provider_split_mixed_writes_are_atomic() -> Result<()> {
         for record in records {
             assert_eq!(
                 storage
-                    .list_pool_quota_snapshots_in_range(record.provider, &[record.window], 10, 10)
+                    .list_pool_quota_snapshot_summaries_in_range(
+                        record.provider,
+                        &[record.window],
+                        10,
+                        10,
+                    )
                     .await?,
-                vec![record],
+                vec![PoolQuotaSnapshotSummaryRecord::from(&record)],
             );
         }
         Ok(())
@@ -1107,12 +1104,12 @@ async fn pool_history_provider_split_prunes_oldest_with_one_budget() -> Result<(
             });
             for (provider, window, _, _) in series {
                 let rows = storage
-                    .list_pool_quota_snapshots_in_range(provider, &[window], 0, 200)
+                    .list_pool_quota_snapshot_summaries_in_range(provider, &[window], 0, 200)
                     .await?;
                 let remaining = expected
                     .iter()
                     .filter(|record| record.provider == provider && record.window == window)
-                    .cloned()
+                    .map(PoolQuotaSnapshotSummaryRecord::from)
                     .collect::<Vec<_>>();
                 assert_eq!(
                     rows, remaining,
@@ -1185,12 +1182,12 @@ async fn pool_history_provider_split_prune_failure_rolls_back_both_tables() -> R
         );
         for (provider, window, _) in series {
             let actual = storage
-                .list_pool_quota_snapshots_in_range(provider, &[window], 0, 200)
+                .list_pool_quota_snapshot_summaries_in_range(provider, &[window], 0, 200)
                 .await?;
             let expected = records
                 .iter()
                 .filter(|record| record.provider == provider)
-                .cloned()
+                .map(PoolQuotaSnapshotSummaryRecord::from)
                 .collect::<Vec<_>>();
             assert_eq!(actual, expected);
         }
@@ -1202,11 +1199,12 @@ async fn pool_history_provider_split_prune_failure_rolls_back_both_tables() -> R
         .await?;
         assert_eq!(storage.prune_pool_quota_history_before(100, 2).await?, 2);
         for (provider, window, _) in series {
+            let expected = provider_pool_record(provider, window, 100);
             assert_eq!(
                 storage
-                    .list_pool_quota_snapshots_in_range(provider, &[window], 0, 200)
+                    .list_pool_quota_snapshot_summaries_in_range(provider, &[window], 0, 200)
                     .await?,
-                vec![provider_pool_record(provider, window, 100)],
+                vec![PoolQuotaSnapshotSummaryRecord::from(&expected)],
             );
         }
         Ok(())

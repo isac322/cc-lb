@@ -1456,7 +1456,8 @@ async fn native_websocket_observed_state(
                 .principal_view(principal_view)
                 .build(),
         );
-        lifecycle = lifecycle.with_static_limit_subject(
+        lifecycle = with_static_limit_subject(
+            lifecycle,
             LimitEngine::new(
                 Arc::new(KeyConcurrencyManager::new()),
                 state.clock.clone(),

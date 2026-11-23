@@ -115,22 +115,6 @@ impl UpstreamSubscriptionQuotaStore for PostgresStorage {
         .map_err(map_sqlx_error)?;
         rows.into_iter().map(row_to_record).collect()
     }
-
-    async fn put_subscription_quota_checkpoints(
-        &self,
-        records: &[SubscriptionQuotaCheckpointRecord],
-    ) -> StorageResult<usize> {
-        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        lock_credit_upstreams(&mut tx, records.iter().map(|record| record.upstream_id)).await?;
-        let mut inserted = 0usize;
-        for record in records {
-            if insert_checkpoint_if_changed(&mut tx, record).await? {
-                inserted += 1;
-            }
-        }
-        tx.commit().await.map_err(map_sqlx_error)?;
-        Ok(inserted)
-    }
 }
 
 #[async_trait]

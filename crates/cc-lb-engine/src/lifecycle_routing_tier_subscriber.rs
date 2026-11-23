@@ -27,7 +27,8 @@ impl RoutingTierSubscriberHandle {
     }
 }
 
-pub fn spawn_lifecycle_routing_tier_subscriber(
+#[cfg(test)]
+fn spawn_lifecycle_routing_tier_subscriber(
     rx: mpsc::Receiver<LifecycleEvent>,
     metrics: Arc<dyn EngineMetricsHook>,
 ) -> RoutingTierSubscriberHandle {

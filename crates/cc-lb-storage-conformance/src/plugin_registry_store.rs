@@ -6,8 +6,8 @@ use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_NAME,
     BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256, PluginChainConflictReason, PluginChainEntryInput,
-    PluginChainEntryUpdate, PluginRegistryStore, PluginSlotKind, PrincipalStore, StorageError,
-    UpstreamCreate, UpstreamStore, UpstreamWarmupDialectPlugin, WasmBlob, WasmRegistryEntryInput,
+    PluginRegistryStore, PluginSlotKind, PrincipalStore, StorageError, UpstreamCreate,
+    UpstreamStore, UpstreamWarmupDialectPlugin, WasmBlob, WasmRegistryEntryInput,
     default_wire_version,
     principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind},
     sparse_order,
@@ -60,11 +60,8 @@ where
     router_reorder_preserves_invariants_on_storage(storage).await?;
     shape_singleton_preserved_on_storage(storage).await?;
     refcount_increment_on_chain_insert(storage).await?;
-    update_chain_entry_bumps_revision(storage).await?;
-    update_chain_entry_stale_revision_conflicts(storage).await?;
     reorder_chain_valid_orders(storage).await?;
     reorder_chain_needs_rebalance_conflicts(storage).await?;
-    rebalance_chain_evenly_spaces(storage).await?;
     sparse_order_between_integration(storage).await?;
     delete_chain_entry_decrements_refcount(storage).await?;
     delete_chain_entry_missing_is_false(storage).await?;
@@ -78,7 +75,6 @@ where
     insert_chain_entry_rejects_unknown_principal_on_storage(storage).await?;
     insert_chain_entry_rejects_soft_deleted_principal_on_storage(storage).await?;
     reorder_chain_rejects_final_chain_gap_on_storage(storage).await?;
-    update_chain_entry_rejects_no_op_on_storage(storage).await?;
     upload_returns_existed_flag_on_storage(storage).await?;
     same_sha_metadata_mismatch_conflicts_on_storage(storage).await?;
     validate_identifier_rejects_bad_name(storage).await?;
@@ -1030,47 +1026,6 @@ pub async fn refcount_increment_on_chain_insert<S: PluginRegistryStore + Princip
     Ok(())
 }
 
-pub async fn update_chain_entry_bumps_revision<S: PluginRegistryStore + PrincipalStore>(
-    storage: &S,
-) -> Result<()> {
-    let created = one_chain(storage, 13, "plugin-update").await?;
-    let updated = storage
-        .update_chain_entry(
-            created.id,
-            created.revision,
-            PluginChainEntryUpdate {
-                config: Some(json!({"x": 1})),
-            },
-        )
-        .await?
-        .expect("updated");
-    ensure!(updated.revision == created.revision + 1, "revision bumps");
-    Ok(())
-}
-
-pub async fn update_chain_entry_stale_revision_conflicts<
-    S: PluginRegistryStore + PrincipalStore,
->(
-    storage: &S,
-) -> Result<()> {
-    let created = one_chain(storage, 14, "plugin-stale").await?;
-    let err = storage
-        .update_chain_entry(
-            created.id,
-            created.revision + 1,
-            PluginChainEntryUpdate {
-                config: Some(json!({"x": 1})),
-            },
-        )
-        .await
-        .expect_err("stale conflicts");
-    ensure!(
-        matches!(err, StorageError::StalePluginChainRevision { .. }),
-        "stale revision conflict"
-    );
-    Ok(())
-}
-
 pub async fn reorder_chain_valid_orders<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
@@ -1123,20 +1078,6 @@ pub async fn reorder_chain_needs_rebalance_conflicts<S: PluginRegistryStore + Pr
     ensure!(
         matches!(err, StorageError::Conflict { .. }),
         "tight order conflict"
-    );
-    Ok(())
-}
-
-pub async fn rebalance_chain_evenly_spaces<S: PluginRegistryStore + PrincipalStore>(
-    storage: &S,
-) -> Result<()> {
-    let first = one_chain(storage, 17, "plugin-rebalance").await?;
-    let rebalanced = storage
-        .rebalance_chain(first.principal_id, first.slot)
-        .await?;
-    ensure!(
-        rebalanced[0].order == sparse_order::STEP,
-        "rebalance starts at step"
     );
     Ok(())
 }
@@ -1536,41 +1477,6 @@ async fn reorder_chain_rejects_final_chain_gap_on_storage<
             }
         ),
         "final chain gap conflict returns typed InvalidOrderGap reason"
-    );
-    Ok(())
-}
-
-// RED until W3a
-plugin_registry_scenario!(
-    update_chain_entry_rejects_no_op,
-    update_chain_entry_rejects_no_op_on_storage
-);
-
-async fn update_chain_entry_rejects_no_op_on_storage<S: PluginRegistryStore + PrincipalStore>(
-    storage: &S,
-) -> Result<()> {
-    let created = one_chain(storage, 34, "plugin-no-op").await?;
-    let err = storage
-        .update_chain_entry(
-            created.id,
-            created.revision,
-            PluginChainEntryUpdate::default(),
-        )
-        .await
-        .expect_err("no-op chain updates are invalid");
-    ensure!(
-        matches!(err, StorageError::InvalidInput { .. }),
-        "no-op chain update reports InvalidInput"
-    );
-    let persisted = storage
-        .list_chain_for_principal(created.principal_id, created.slot)
-        .await?
-        .into_iter()
-        .find(|entry| entry.id == created.id)
-        .expect("chain entry remains after rejected no-op update");
-    ensure!(
-        persisted.revision == created.revision,
-        "rejected no-op update does not bump revision"
     );
     Ok(())
 }

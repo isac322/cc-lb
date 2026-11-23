@@ -424,7 +424,6 @@ async fn assert_gemini_poll_metadata(profile: GeminiOAuthProfile, project_only_i
             .parse()
             .expect("URL"),
         userinfo_url: format!("{root}/{cli_path}/userinfo").parse().expect("URL"),
-        ..Default::default()
     });
     let upstream = create_provider(
         &fixture,
@@ -678,7 +677,6 @@ async fn gemini_metadata_without_override_preserves_profile_config_prefix_and_us
                 .parse()
                 .expect("URL"),
             userinfo_url: format!("{root}/{cli_path}/userinfo").parse().expect("URL"),
-            ..Default::default()
         });
         let mut credential = bundle(UpstreamKind::GeminiOauth);
         credential.oauth_profile = profile;
@@ -883,7 +881,6 @@ async fn assert_gemini_explicit_destination_matrix_with_query(
             .parse()
             .expect("URL"),
         userinfo_url,
-        ..Default::default()
     });
     let upstream = create_provider(
         &fixture,

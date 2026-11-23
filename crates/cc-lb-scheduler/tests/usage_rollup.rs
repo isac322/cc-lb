@@ -148,7 +148,7 @@ mod jobs {
                 Ok(Vec::new())
             }
 
-            async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>> {
+            async fn usage_rollup_revision(&self) -> StorageResult<Option<String>> {
                 Ok(None)
             }
         }
@@ -188,7 +188,7 @@ mod jobs {
                 Ok(Vec::new())
             }
 
-            async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>> {
+            async fn usage_rollup_revision(&self) -> StorageResult<Option<String>> {
                 Ok(None)
             }
         }

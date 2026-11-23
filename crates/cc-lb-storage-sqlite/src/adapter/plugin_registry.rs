@@ -5,10 +5,9 @@ use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256,
     MAX_WASM_BLOB_BYTES, PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput,
-    PluginChainEntryUpdate, PluginRegistryStore, PluginSlotKind, StorageError, StorageResult,
-    WasmBlob, WasmBlobRecord, WasmRegistryCascadeDelete, WasmRegistryEntry, WasmRegistryEntryInput,
-    WasmRegistryReference, WasmRegistryReferenceFingerprint, WasmRegistryReferences, sparse_order,
-    validate_identifier,
+    PluginRegistryStore, PluginSlotKind, StorageError, StorageResult, WasmBlob, WasmBlobRecord,
+    WasmRegistryCascadeDelete, WasmRegistryEntry, WasmRegistryEntryInput, WasmRegistryReference,
+    WasmRegistryReferenceFingerprint, WasmRegistryReferences, validate_identifier,
 };
 use serde_json::Value;
 use sqlx::{QueryBuilder, Row, Sqlite, Transaction, sqlite::SqliteRow};
@@ -512,39 +511,6 @@ impl PluginRegistryStore for SqliteStorage {
         rows.into_iter().map(chain_from_row).collect()
     }
 
-    async fn update_chain_entry(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        update: PluginChainEntryUpdate,
-    ) -> StorageResult<Option<PluginChainEntry>> {
-        let Some(config) = update.config else {
-            return Err(StorageError::InvalidInput {
-                field: "plugin_chain.update".to_owned(),
-                reason: "empty_update".to_owned(),
-            });
-        };
-        let current = match self.get_chain_by_id(id).await? {
-            Some(current) => current,
-            None => return Ok(None),
-        };
-        if current.revision != expected_revision {
-            return Err(StorageError::StalePluginChainRevision {
-                current: current.revision,
-            });
-        }
-        let row = sqlx::query(
-            "UPDATE plugin_chains_v2 SET config = ?, revision = revision + 1, updated_at = unixepoch() WHERE id = ? AND revision = ? RETURNING *",
-        )
-        .bind(serde_json::to_string(&config)?)
-        .bind(id.to_string())
-        .bind(u64_to_i64(expected_revision, "plugin_chain.revision")?)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(map_sqlite_error)?;
-        row.map(chain_from_row).transpose()
-    }
-
     async fn reorder_chain(
         &self,
         principal_id: Uuid,
@@ -658,25 +624,6 @@ impl PluginRegistryStore for SqliteStorage {
         }
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(Some(entry))
-    }
-
-    async fn rebalance_chain(
-        &self,
-        principal_id: Uuid,
-        slot: PluginSlotKind,
-    ) -> StorageResult<Vec<PluginChainEntry>> {
-        let entries = self.list_chain_for_principal(principal_id, slot).await?;
-        let orders = sparse_order::rebalance(vec![0; entries.len()]);
-        self.reorder_chain(
-            principal_id,
-            slot,
-            entries
-                .into_iter()
-                .zip(orders)
-                .map(|(entry, order)| (entry.id, order, entry.revision))
-                .collect(),
-        )
-        .await
     }
 }
 

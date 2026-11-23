@@ -36,7 +36,6 @@ import { Select, type SelectOption } from '../components/ui/Select';
 import { SessionChip } from '../components/ui/SessionChip';
 import { TimeRangeBounds } from '../components/ui/TimeRangeBounds';
 import { TimeRangeStrip } from '../components/ui/TimeRangeStrip';
-import { useDesign } from '../designs/registry';
 import {
   eventTime,
   type RequestEvent,
@@ -90,14 +89,14 @@ type EffectiveEventKind =
   | typeof ALL_EVENT_KINDS
   | 'generation';
 /** The kind Logs lists when the URL names none: model traffic, `/v1/messages`. */
-export const DEFAULT_EVENT_KIND = 'generation' as const;
+const DEFAULT_EVENT_KIND = 'generation' as const;
 
 /**
  * The kind the list is filtered to: the URL's kind, the default kind when the
  * URL has none, `generation` for all model traffic, or `all` (every kind) for
  * the explicit opt-out.
  */
-export function effectiveEventKind(
+function effectiveEventKind(
   eventKind:
     | RequestEventKind
     | typeof ALL_EVENT_KINDS
@@ -231,7 +230,6 @@ function resetRowsScroll(el: HTMLElement | null) {
 }
 
 function LogsPage() {
-  const { LogsScopeBar } = useDesign();
   const filters = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const { session: sessionFilter } = filters;
@@ -610,7 +608,6 @@ function LogsPage() {
           </>
         }
       />
-      {LogsScopeBar ? <LogsScopeBar /> : null}
       {/* Filters and the density strip sit on the ground; only the table
           keeps a flat surface. */}
       <div className="flex flex-col gap-3 shrink-0">

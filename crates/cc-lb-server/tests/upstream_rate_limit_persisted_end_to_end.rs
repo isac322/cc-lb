@@ -12,7 +12,7 @@ use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     ManagedKeyStore, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, RateLimitKind,
     Storage as StorageTrait, UpstreamCreate, UpstreamRateLimitObservationRecord,
-    UpstreamRateLimitStateStore, UpstreamStore,
+    UpstreamRateLimitStateStore, UpstreamStore, UpstreamUpdate,
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
@@ -53,9 +53,16 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
     )
     .await?;
     let ciphertext = aead.encrypt(b"sk-ant-fixture-secret", upstream.id.as_bytes())?;
-    let upstream =
-        UpstreamStore::update_api_key_secret(storage_arc.as_ref(), upstream.id, Some(ciphertext))
-            .await?;
+    let upstream = UpstreamStore::update(
+        storage_arc.as_ref(),
+        upstream.id,
+        upstream.revision,
+        UpstreamUpdate {
+            api_key_ciphertext: Some(ciphertext),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await?;
     PrincipalStore::create(
         storage_arc.as_ref(),
         PrincipalCreate {

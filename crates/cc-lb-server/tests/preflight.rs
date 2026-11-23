@@ -6,8 +6,8 @@ use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_server::preflight::{self, PreflightReport};
 use cc_lb_storage_api::{
     MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalCreate,
-    PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob, WasmRegistryEntry,
-    WasmRegistryEntryInput,
+    PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore, UpstreamUpdate, WasmBlob,
+    WasmRegistryEntry, WasmRegistryEntryInput,
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -23,7 +23,6 @@ async fn empty_db_report() {
     let report = run_preflight(&fixture).await;
 
     assert_eq!(report.upstream_count, 0);
-    assert_eq!(report.upstream_warnings, 0);
     assert_eq!(report.principal_count, 0);
     assert_eq!(report.principal_disabled_count, 0);
     assert_eq!(report.plugin_chain_entry_count, 0);
@@ -119,7 +118,6 @@ async fn partial_state() {
     print_report(&report);
 
     assert_eq!(report.upstream_count, 3);
-    assert_eq!(report.upstream_warnings, 0);
     assert_eq!(report.principal_count, 2);
     assert_eq!(report.principal_disabled_count, 1);
     assert_eq!(report.plugin_chain_entry_count, 6);
@@ -194,7 +192,6 @@ async fn run_preflight(fixture: &Fixture) -> PreflightReport {
 fn print_report(report: &PreflightReport) {
     println!("preflight: ok");
     println!("preflight: upstream_count: {}", report.upstream_count);
-    println!("preflight: upstream_warnings: {}", report.upstream_warnings);
     println!("preflight: principal_count: {}", report.principal_count);
     println!(
         "preflight: principal_disabled_count: {}",
@@ -243,9 +240,17 @@ async fn seed_upstream(
         let ciphertext = AeadService::from_master_key([0; 32])
             .encrypt(b"sk-ant-fixture-secret", created.id.as_bytes())
             .unwrap();
-        UpstreamStore::update_api_key_secret(storage, created.id, Some(ciphertext))
-            .await
-            .unwrap();
+        UpstreamStore::update(
+            storage,
+            created.id,
+            created.revision,
+            UpstreamUpdate {
+                api_key_ciphertext: Some(ciphertext),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
     }
 }
 

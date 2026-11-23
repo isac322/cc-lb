@@ -100,13 +100,6 @@ pub trait PluginRegistryStore: Send + Sync {
         Ok(entries)
     }
 
-    async fn update_chain_entry(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        update: PluginChainEntryUpdate,
-    ) -> StorageResult<Option<PluginChainEntry>>;
-
     async fn reorder_chain(
         &self,
         principal_id: Uuid,
@@ -119,10 +112,4 @@ pub trait PluginRegistryStore: Send + Sync {
         id: Uuid,
         expected_revision: u64,
     ) -> StorageResult<Option<PluginChainEntry>>;
-
-    async fn rebalance_chain(
-        &self,
-        principal_id: Uuid,
-        slot: PluginSlotKind,
-    ) -> StorageResult<Vec<PluginChainEntry>>;
 }

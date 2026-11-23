@@ -23,7 +23,7 @@ use cc_lb_storage_api::{
     ApiKeyAccessWrite, ApiKeyCapabilities, ApiKeyClass, ApiKeyInference, ManagedKeyStore,
     MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, RemediationCode, RequestEvent,
     RequestEventStore, RequestEventStreamFilters, Storage as StorageTrait, UpstreamCreate,
-    UpstreamRecord, UpstreamStore,
+    UpstreamRecord, UpstreamStore, UpstreamUpdate,
 };
 use cc_lb_storage_sqlite::SqliteStorage;
 use fake_anthropic::{AppConfig, MessageScript, RecordedRequest, RequestRecorder, app};
@@ -115,9 +115,17 @@ impl ProxyHarness {
             .aead
             .encrypt(KEY.as_bytes(), record.id.as_bytes())
             .expect("api key encrypts");
-        UpstreamStore::update_api_key_secret(self.storage.as_ref(), record.id, Some(ciphertext))
-            .await
-            .expect("api key stored")
+        UpstreamStore::update(
+            self.storage.as_ref(),
+            record.id,
+            record.revision,
+            UpstreamUpdate {
+                api_key_ciphertext: Some(ciphertext),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("api key stored")
     }
 
     async fn oauth_upstream(&self, name: &str) -> UpstreamRecord {
@@ -651,11 +659,14 @@ async fn rdy_01_disabled_or_deleted_api_key_only_is_not_ready() {
                 .await
                 .expect("soft delete");
         } else {
-            UpstreamStore::set_enabled(
+            UpstreamStore::update(
                 harness.storage.as_ref(),
                 upstream.id,
                 upstream.revision,
-                false,
+                UpstreamUpdate {
+                    enabled: Some(false),
+                    ..UpstreamUpdate::default()
+                },
             )
             .await
             .expect("disable");
@@ -702,9 +713,17 @@ async fn rdy_03_undecryptable_api_key_is_not_ready_alone() {
         let foreign = AeadService::from_master_key([9; 32])
             .encrypt(KEY.as_bytes(), broken.id.as_bytes())
             .expect("foreign ciphertext");
-        UpstreamStore::update_api_key_secret(harness.storage.as_ref(), broken.id, Some(foreign))
-            .await
-            .expect("corrupt ciphertext stored");
+        UpstreamStore::update(
+            harness.storage.as_ref(),
+            broken.id,
+            broken.revision,
+            UpstreamUpdate {
+                api_key_ciphertext: Some(foreign),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("corrupt ciphertext stored");
         if with_usable {
             harness
                 .api_key_upstream("usable-key", None, None, harness.fake_url.clone())

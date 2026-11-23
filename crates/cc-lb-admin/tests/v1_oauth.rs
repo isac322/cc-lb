@@ -644,7 +644,14 @@ async fn complete_with_stale_revision_returns_409() {
     assert_eq!(status, StatusCode::OK);
     fixture
         .storage
-        .set_enabled(upstream.id, upstream.revision, false)
+        .update(
+            upstream.id,
+            upstream.revision,
+            cc_lb_storage_api::UpstreamUpdate {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
         .await
         .expect("bump revision");
     let code = authorize_code(start["authorize_url"].as_str().expect("authorize_url")).await;
@@ -1183,7 +1190,14 @@ async fn oauth_reconnect_seeds_refresh_at_granted_expiry_and_preserves_disabled_
     let seeded = fixture.seed_expired_credentials(&upstream).await;
     let disabled = fixture
         .storage
-        .set_enabled(seeded.id, seeded.revision, false)
+        .update(
+            seeded.id,
+            seeded.revision,
+            cc_lb_storage_api::UpstreamUpdate {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
         .await
         .expect("disable upstream");
 

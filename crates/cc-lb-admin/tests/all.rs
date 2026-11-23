@@ -94,8 +94,6 @@ mod v1_plugins;
 mod v1_principals;
 #[path = "v1_provider_oauth.rs"]
 mod v1_provider_oauth;
-#[path = "v1_router_preview.rs"]
-mod v1_router_preview;
 #[path = "v1_router_terminal.rs"]
 mod v1_router_terminal;
 #[path = "v1_status.rs"]

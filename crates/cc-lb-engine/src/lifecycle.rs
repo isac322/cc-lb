@@ -60,10 +60,7 @@ use cc_lb_upstream::{
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION, RETRY_AFTER};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode};
 use http_body::Body as _;
-use http_body_util::{BodyExt, Full};
-use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::TokioExecutor;
+use http_body_util::BodyExt;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 #[cfg(test)]
 use serde_json::json;
@@ -830,21 +827,6 @@ fn canonical_model_for_capability(capability: Option<ProviderCapability>, model:
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct PreviewRouteInput {
-    pub principal_id: String,
-    /// Request id exposed to routing filters through the preview `RequestContext`.
-    /// When `None`, a random `preview-<uuid>` id is generated so repeated calls do
-    /// not collide.
-    pub request_id: Option<String>,
-    pub headers: HeaderMap,
-    pub body_bytes: Bytes,
-    /// Provider scope selected by the admin caller.
-    pub provider: Option<cc_lb_domain::Provider>,
-    /// Provider-native path used to classify the request capability.
-    pub path: String,
-}
-
 #[cfg(test)]
 mod lifecycle_model_identity_tests {
     use super::{
@@ -904,23 +886,6 @@ mod lifecycle_model_identity_tests {
         );
         assert_eq!(metadata.canonical_model_id, "path-model");
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct PreviewRouteOutcome {
-    pub trace: RoutingTrace,
-    pub winner_upstream_id: Option<Uuid>,
-    pub winner_upstream_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Error)]
-pub enum PreviewRouteError {
-    #[error("principal not found: {0}")]
-    PrincipalNotFound(String),
-    #[error("router pipeline instantiation error: {0}")]
-    PipelineInstantiationError(String),
-    #[error("operation not supported for preview: {method} {path}")]
-    UnsupportedOperation { method: String, path: String },
 }
 
 #[derive(Clone, Debug)]
@@ -4141,22 +4106,6 @@ fn observe_sse_lifecycle_markers(
     }
 }
 
-struct StaticLimitSubjectProvider {
-    subject: AuthLimitSubject,
-}
-
-#[async_trait]
-impl LimitSubjectProvider for StaticLimitSubjectProvider {
-    async fn limit_subject(
-        &self,
-        _ctx: &RequestContext,
-        _principal: &Principal,
-        _authn_success: &AuthnSuccess,
-    ) -> Option<AuthLimitSubject> {
-        Some(self.subject.clone())
-    }
-}
-
 #[async_trait]
 impl LimitSubjectProvider for BuiltinAuthn {
     async fn limit_subject(
@@ -4172,33 +4121,6 @@ impl LimitSubjectProvider for BuiltinAuthn {
             key_id: authn_success.key_id.clone(),
             record,
         })
-    }
-}
-
-#[derive(Clone)]
-pub struct HyperDispatcher {
-    client: Client<HttpConnector, Full<Bytes>>,
-}
-
-impl HyperDispatcher {
-    pub fn new() -> Self {
-        let connector = HttpConnector::new();
-        Self {
-            client: Client::builder(TokioExecutor::new()).build(connector),
-        }
-    }
-}
-
-impl Default for HyperDispatcher {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl UpstreamDispatch for HyperDispatcher {
-    async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
-        crate::bulkhead::dispatch_with_client(&self.client, request).await
     }
 }
 
@@ -4473,153 +4395,6 @@ impl Lifecycle {
         }
     }
 
-    pub async fn preview_route(
-        &self,
-        input: PreviewRouteInput,
-    ) -> Result<PreviewRouteOutcome, PreviewRouteError> {
-        let view = self.dynamic_view.load();
-        let principal_spec = view
-            .principal_view
-            .get(&input.principal_id)
-            .ok_or_else(|| PreviewRouteError::PrincipalNotFound(input.principal_id.clone()))?;
-        let resolved_pipeline = principal_spec.resolved_pipeline(None);
-        if let Some(err) = &resolved_pipeline.instantiation_error {
-            return Err(PreviewRouteError::PipelineInstantiationError(
-                err.as_ref().to_owned(),
-            ));
-        }
-
-        let body_value = sonic_rs::from_slice::<Value>(&input.body_bytes).ok();
-        let method = http::Method::POST;
-        let request_capability = classify_provider_capability(&method, &input.path, input.provider)
-            .ok_or_else(|| PreviewRouteError::UnsupportedOperation {
-                method: method.to_string(),
-                path: input.path.clone(),
-            })?;
-        let request_kind = RequestKind::from(request_capability);
-        let path_model = gemini_model_from_path(&input.path);
-        let prompt_cache_analysis = match (request_capability, body_value.as_ref()) {
-            (ProviderCapability::AnthropicMessages, Some(_))
-            | (ProviderCapability::AnthropicMessages, None) => None,
-            (_, Some(_)) => Some(PromptCacheAnalysisOutput {
-                analysis: V3PromptCacheAnalysis {
-                    blocks: Vec::new(),
-                    breakpoints: Vec::new(),
-                    literal_breakpoints: Vec::new(),
-                },
-                cacheable_breakpoint_prefix_keys: Vec::new(),
-                literal_cacheable_breakpoint_prefix_keys: Vec::new(),
-                timings: PromptCacheAnalysisTimings::default(),
-            }),
-            (_, None) => None,
-        };
-        let mut cache_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
-            &input.headers,
-            body_value.as_ref(),
-            prompt_cache_analysis,
-            Some(request_capability),
-            path_model.as_deref(),
-        );
-        let cache_breakpoints = cache_metadata.plugin_cache_breakpoints();
-        let canonical_model = if request_capability.provider() == cc_lb_domain::Provider::Gemini {
-            std::mem::take(&mut cache_metadata.canonical_model_id)
-        } else {
-            path_model
-                .as_deref()
-                .map(|model| canonical_model_id(request_capability.provider(), model))
-                .unwrap_or(&cache_metadata.canonical_model_id)
-                .to_owned()
-        };
-
-        let request_id = input
-            .request_id
-            .clone()
-            .unwrap_or_else(|| format!("preview-{}", Uuid::new_v4()));
-        let ctx = RequestContext::builder()
-            .request_id(request_id)
-            .thread_id(cache_metadata.thread_id.clone())
-            .requested_service_tier(cache_metadata.requested_service_tier.clone())
-            .provider_scope(input.provider)
-            .downstream_headers(input.headers)
-            .method(method)
-            .path(input.path)
-            .query(None)
-            .body_bytes(input.body_bytes)
-            .cache_breakpoints(cache_breakpoints)
-            .canonical_model_id(canonical_model.clone())
-            .cache_pricing(cache_pricing_summary_for_model(
-                cc_lb_pricing::global_catalog(),
-                &canonical_model,
-                cache_metadata.requested_service_tier.as_deref(),
-            ))
-            .build();
-        let principal = Principal {
-            id: input.principal_id,
-            kind: PrincipalKind::InternalKey,
-        };
-
-        let warm_entries = fetch_prompt_cache_warm_entries_for_bundles(
-            &view,
-            &principal.id,
-            request_kind,
-            &ctx.canonical_model_id,
-            &cache_metadata.bundles,
-            &*self.clock,
-        )
-        .await;
-        let native_cache_scores = fetch_provider_native_cache_scores(
-            &view,
-            &principal.id,
-            request_kind,
-            &ctx.canonical_model_id,
-            cache_metadata.native_cache.as_ref(),
-            &*self.clock,
-        )
-        .await;
-        let candidates = build_candidates_with_native_cache_for_bundles(
-            &view,
-            &principal.id,
-            request_kind,
-            &ctx.cache_breakpoints,
-            &warm_entries,
-            Some(&cache_metadata.bundles),
-            &native_cache_scores,
-            &*self.clock,
-        )
-        .0;
-        let pipeline_result = execute_filter_pipeline(
-            resolved_pipeline.filters_for(request_capability.provider()),
-            &ctx,
-            &principal,
-            candidates,
-        );
-        let terminal_decision = self.select_terminal_upstream(
-            resolved_pipeline.terminal.clone(),
-            &pipeline_result.candidates,
-        );
-        let winner_upstream_id = terminal_decision.upstream_id;
-        let winner_upstream_name = winner_upstream_id.and_then(|id| {
-            pipeline_result
-                .candidates
-                .iter()
-                .find(|candidate| candidate.upstream_id == id)
-                .map(|candidate| candidate.name.clone())
-                .or_else(|| {
-                    view.upstreams_snapshot()
-                        .iter()
-                        .find(|record| record.id == id)
-                        .map(|record| record.name.clone())
-                })
-        });
-        let trace = pipeline_result.routing_trace(terminal_decision);
-
-        Ok(PreviewRouteOutcome {
-            trace,
-            winner_upstream_id,
-            winner_upstream_name,
-        })
-    }
-
     async fn resolve_request_affinities(
         &self,
         keys: &[UpstreamAffinityKey],
@@ -4695,25 +4470,6 @@ impl Lifecycle {
             owner_epoch: owner_epoch.expect("resolved affinity has a matching binding"),
             pending_keys,
         }))
-    }
-
-    pub fn with_static_limit_subject(
-        self,
-        limit_engine: Arc<LimitEngine>,
-        principal_id: String,
-        key_id: String,
-        record: StoredApiKeyRecord,
-    ) -> Self {
-        self.with_limit_engine(
-            limit_engine,
-            Arc::new(StaticLimitSubjectProvider {
-                subject: AuthLimitSubject {
-                    principal_id,
-                    key_id,
-                    record,
-                },
-            }),
-        )
     }
 
     /// Authenticate a request before doing anything else with it. Reads only
@@ -14460,15 +14216,13 @@ impl AttemptTimings {
     }
 }
 
-pub fn parse_request_cache_breakpoints(headers: &HeaderMap, body: &Bytes) -> Vec<CacheBreakpoint> {
-    request_cache_metadata(headers, body).plugin_cache_breakpoints()
-}
-
+#[cfg(test)]
 fn request_cache_metadata(headers: &HeaderMap, body: &Bytes) -> RequestCacheMetadata {
     let value = sonic_rs::from_slice::<Value>(body).ok();
     request_cache_metadata_from_value(headers, value.as_ref())
 }
 
+#[cfg(test)]
 fn request_cache_metadata_from_value(
     headers: &HeaderMap,
     value: Option<&Value>,
@@ -16185,10 +15939,7 @@ fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapshot {
         cache_write_input_tokens_30m: u.cache_write_input_tokens_30m,
         cache_write_input_tokens_12h: u.cache_write_input_tokens_12h,
         thinking_tokens: u.thinking_tokens,
-        web_search_requests: u.web_search_requests,
-        web_fetch_requests: u.web_fetch_requests,
         service_tier: u.service_tier.clone(),
-        inference_geo: u.inference_geo.clone(),
         iterations: u.iterations.clone(),
     }
 }
@@ -17482,7 +17233,8 @@ mod tests {
         let body = Bytes::from(format!(
             r#"{{"model":"{TEST_MODEL}","system":[{{"type":"text","text":"{lorem}","cache_control":{{"type":"ephemeral","ttl":"1h"}}}}],"messages":[{{"role":"user","content":"hi"}}],"max_tokens":16}}"#
         ));
-        let breakpoints = parse_request_cache_breakpoints(&HeaderMap::new(), &body);
+        let breakpoints =
+            request_cache_metadata(&HeaderMap::new(), &body).plugin_cache_breakpoints();
         assert_eq!(breakpoints.len(), 1);
         let prefix_hash = breakpoints[0].prefix_hash.clone();
         let prefix_token_count = breakpoints[0].prefix_bytes.get();
@@ -22439,14 +22191,27 @@ mod tests {
                 Arc::new(cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
                 Arc::new(cc_lb_clock::SystemClock),
             );
+            struct StaticTestLimitSubjectProvider(AuthLimitSubject);
+            #[async_trait]
+            impl LimitSubjectProvider for StaticTestLimitSubjectProvider {
+                async fn limit_subject(
+                    &self,
+                    _ctx: &RequestContext,
+                    _principal: &Principal,
+                    _authn_success: &AuthnSuccess,
+                ) -> Option<AuthLimitSubject> {
+                    Some(self.0.clone())
+                }
+            }
             let fixture = failure_key_fixture();
-            let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus)
-                .with_static_limit_subject(
-                    limit_engine,
-                    "principal-test".to_owned(),
-                    fixture.key_id.clone(),
-                    fixture.record.clone(),
-                );
+            let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus).with_limit_engine(
+                limit_engine,
+                Arc::new(StaticTestLimitSubjectProvider(AuthLimitSubject {
+                    principal_id: "principal-test".to_owned(),
+                    key_id: fixture.key_id.clone(),
+                    record: fixture.record.clone(),
+                })),
+            );
             let mut request = failure_request(Bytes::from_static(body));
             *request.uri_mut() = path.parse().expect("provider path");
             request
@@ -23674,7 +23439,11 @@ mod tests {
                 &clock,
             );
             observer.mark_authn_reached();
-            let response = crate::authn_rail::reject_unauthenticated(&error, Some(&observer));
+            let response = crate::authn_rail::reject_unauthenticated_for_provider(
+                &error,
+                None,
+                Some(&observer),
+            );
             assert_eq!(response.status(), expected_status);
             let (_status, body) = collect_response_body(response).await;
             assert_eq!(

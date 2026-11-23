@@ -2,8 +2,8 @@ use std::{error::Error, path::Path, str::FromStr, sync::Arc};
 
 use cc_lb_clock::SystemClock;
 use cc_lb_storage_api::{
-    MetaStore, SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaSource,
-    SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
+    MetaStore, PoolQuotaSnapshotSummaryRecord, SubscriptionQuotaCheckpointRangeQuery,
+    SubscriptionQuotaSource, SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
     UpstreamSubscriptionQuotaStore,
 };
 use cc_lb_storage_sqlite::open_sqlite;
@@ -203,24 +203,24 @@ async fn pool_history_provider_migration_preserves_legacy_anthropic() -> Result<
         SubscriptionQuotaWindow::SevenDay,
     ];
     let legacy = storage
-        .list_latest_pool_quota_snapshots(Provider::Anthropic, &windows)
+        .list_latest_pool_quota_snapshot_summaries(Provider::Anthropic, &windows)
         .await?;
     assert_eq!(
         legacy,
         vec![
-            expected.clone(),
-            PoolQuotaSnapshotRecord {
+            PoolQuotaSnapshotSummaryRecord::from(&expected),
+            PoolQuotaSnapshotSummaryRecord::from(&PoolQuotaSnapshotRecord {
                 snapshot_at_unix_secs: 20,
                 window: SubscriptionQuotaWindow::SevenDay,
                 utilization: None,
                 ..expected.clone()
-            },
+            }),
         ]
     );
     for provider in [Provider::Openai, Provider::Gemini] {
         assert!(
             storage
-                .list_latest_pool_quota_snapshots(provider, &windows)
+                .list_latest_pool_quota_snapshot_summaries(provider, &windows)
                 .await?
                 .is_empty()
         );
@@ -234,7 +234,7 @@ async fn pool_history_provider_migration_preserves_legacy_anthropic() -> Result<
         .await?;
     assert_eq!(
         storage
-            .list_latest_pool_quota_snapshots(Provider::Anthropic, &windows)
+            .list_latest_pool_quota_snapshot_summaries(Provider::Anthropic, &windows)
             .await?,
         legacy
     );

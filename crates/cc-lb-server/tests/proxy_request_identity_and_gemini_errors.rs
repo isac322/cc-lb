@@ -20,7 +20,7 @@ use cc_lb_server::app::build_app_with_storage;
 use cc_lb_storage_api::{
     MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, RequestEvent, RequestEventKind,
     RequestEventStore, RequestEventStreamFilters, StorageResult, UpstreamCreate, UpstreamKind,
-    UpstreamStore,
+    UpstreamStore, UpstreamUpdate,
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
 use futures_util::{SinkExt, StreamExt};
@@ -201,8 +201,16 @@ impl Harness {
             )
             .await?;
             let ciphertext = aead.encrypt(b"provider-fixture-secret", upstream.id.as_bytes())?;
-            UpstreamStore::update_api_key_secret(storage.as_ref(), upstream.id, Some(ciphertext))
-                .await?;
+            UpstreamStore::update(
+                storage.as_ref(),
+                upstream.id,
+                upstream.revision,
+                UpstreamUpdate {
+                    api_key_ciphertext: Some(ciphertext),
+                    ..UpstreamUpdate::default()
+                },
+            )
+            .await?;
         }
         PrincipalStore::create(
             storage.as_ref(),

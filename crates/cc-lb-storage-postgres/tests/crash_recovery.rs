@@ -228,7 +228,12 @@ impl CrashFixture {
     }
 
     async fn consistency(&self) -> Result<Consistency, Box<dyn std::error::Error>> {
-        let checkpoint = self.storage.usage_rollup_checkpoint().await?;
+        let checkpoint = sqlx::query_scalar::<_, i64>(
+            "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'",
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|value| u64::try_from(value).expect("non-negative usage rollup checkpoint"));
         let mut rollups = Vec::new();
         for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
             rollups.extend(
@@ -478,7 +483,12 @@ fn live_classification_checkpoint_failure_rolls_back_counts_and_resumes() {
             .await
             .unwrap();
         fixture.wait_for_events_eligible().await.unwrap();
-        let checkpoint = fixture.storage.usage_rollup_checkpoint().await.unwrap();
+        let checkpoint: Option<i64> = sqlx::query_scalar(
+            "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'",
+        )
+        .fetch_optional(&fixture.pool)
+        .await
+        .unwrap();
         sqlx::raw_sql(
             "CREATE FUNCTION fail_live_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$
              BEGIN
@@ -506,7 +516,15 @@ fn live_classification_checkpoint_failure_rolls_back_counts_and_resumes() {
                 .contains("injected crash after live delta before checkpoint commit"),
             "unexpected error: {err}"
         );
-        assert_eq!(fixture.storage.usage_rollup_checkpoint().await.unwrap(), checkpoint);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = 'high_water'",
+            )
+            .fetch_optional(&fixture.pool)
+            .await
+            .unwrap(),
+            checkpoint
+        );
         assert_eq!(fixture.storage.usage_rollup_revision().await.unwrap(), revision);
         let classified: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(priced_event_count + unpriced_event_count + unmetered_event_count), 0)::BIGINT

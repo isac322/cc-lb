@@ -27,7 +27,7 @@ const DEFAULT_OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/cod
 const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/";
 const OPENAI_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-const GEMINI_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+use cc_lb_oauth_protocol::GEMINI_OAUTH_TOKEN_URL;
 const GEMINI_OAUTH_CLIENT_ID: &str =
     "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
 const GEMINI_OAUTH_CLIENT_SECRET: &str = "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";

@@ -159,8 +159,6 @@ export interface UpstreamUsageData {
   quotaError: boolean;
   creditHistory?: CreditHistoryResponse;
   creditHistoryPending?: boolean;
-  /** Rows carrying a reconnect nudge (warn or danger). */
-  reconnectCount: number;
   coupons?: ReadonlyMap<string, CouponInventory>;
   couponsLoading?: boolean;
 }
@@ -310,7 +308,6 @@ export function useUpstreamUsageData(
     quotaError: latestQ.isError,
     creditHistory: creditQ.data,
     creditHistoryPending: creditQ.isPending,
-    reconnectCount: rows.filter((r) => r.nudge != null).length,
   };
 }
 

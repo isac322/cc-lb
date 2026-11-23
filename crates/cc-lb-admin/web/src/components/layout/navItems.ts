@@ -49,14 +49,3 @@ export const NAV_GROUPS: readonly NavGroup[] = [
 ];
 
 export const NAV_ITEMS: readonly NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
-
-/** The nav item whose page contains `pathname`, or null for unknown routes. */
-export function navItemForPath(pathname: string): NavItem | null {
-  return (
-    NAV_ITEMS.find((item) =>
-      item.path === '/'
-        ? pathname === '/'
-        : pathname === item.path || pathname.startsWith(`${item.path}/`),
-    ) ?? null
-  );
-}

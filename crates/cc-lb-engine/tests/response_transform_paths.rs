@@ -1415,16 +1415,16 @@ async fn non_json_relay_with_hook_preserves_local_limit_headers() {
             "x-ratelimit-limit-requests",
             HeaderValue::from_static("999999"),
         );
-        let lifecycle = lifecycle_with_record(
-            with_hook.then(|| transform.clone() as Arc<dyn ResponseTransformHook>),
-            Arc::new(ChunkedDispatch {
-                status: StatusCode::OK,
-                headers,
-                chunks: vec![body.slice(..7), body.slice(7..)],
-            }),
-            upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
-        )
-        .with_static_limit_subject(
+        let lifecycle = common::with_static_limit_subject(
+            lifecycle_with_record(
+                with_hook.then(|| transform.clone() as Arc<dyn ResponseTransformHook>),
+                Arc::new(ChunkedDispatch {
+                    status: StatusCode::OK,
+                    headers,
+                    chunks: vec![body.slice(..7), body.slice(7..)],
+                }),
+                upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
+            ),
             LimitEngine::new(
                 Arc::new(KeyConcurrencyManager::new()),
                 Arc::new(cc_lb_clock::SystemClock),
@@ -3402,16 +3402,16 @@ async fn non_sse_gzip_decode_failure_skips_sse_transform() -> Result<(), Box<dyn
     let storage = Arc::new(sqlite_storage(&dir, "non-sse-gzip.sqlite").await?);
     let mut test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
-    let lifecycle = lifecycle_with_transforms(
-        None,
-        Some(transform.clone()),
-        Arc::new(FixedDispatch {
-            status: StatusCode::OK,
-            headers,
-            body: body.clone(),
-        }),
-    )
-    .with_static_limit_subject(
+    let lifecycle = common::with_static_limit_subject(
+        lifecycle_with_transforms(
+            None,
+            Some(transform.clone()),
+            Arc::new(FixedDispatch {
+                status: StatusCode::OK,
+                headers,
+                body: body.clone(),
+            }),
+        ),
         LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
             Arc::new(cc_lb_clock::SystemClock),
@@ -4731,7 +4731,8 @@ impl cc_lb_upstream::Signer for ScrubbingSigner {
 }
 
 fn with_test_limit_subject(lifecycle: Lifecycle) -> Lifecycle {
-    lifecycle.with_static_limit_subject(
+    common::with_static_limit_subject(
+        lifecycle,
         LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
             Arc::new(cc_lb_clock::SystemClock),

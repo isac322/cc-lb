@@ -262,40 +262,6 @@ impl cc_lb_storage_api::UpstreamStore for TestUpstreamStore {
         unsupported_store_operation()
     }
 
-    async fn set_enabled(
-        &self,
-        _id: Uuid,
-        _expected_revision: u64,
-        _enabled: bool,
-    ) -> cc_lb_storage_api::StorageResult<UpstreamRecord> {
-        unsupported_store_operation()
-    }
-
-    async fn update_spec(
-        &self,
-        _id: Uuid,
-        _expected_revision: u64,
-        _update: cc_lb_storage_api::UpstreamUpdate,
-    ) -> cc_lb_storage_api::StorageResult<UpstreamRecord> {
-        unsupported_store_operation()
-    }
-
-    async fn update_api_key_secret(
-        &self,
-        _id: Uuid,
-        _api_key_ciphertext: Option<Vec<u8>>,
-    ) -> cc_lb_storage_api::StorageResult<UpstreamRecord> {
-        unsupported_store_operation()
-    }
-
-    async fn update_oauth_token(
-        &self,
-        _id: Uuid,
-        _tokens: cc_lb_aead::EncryptedOAuthTokens,
-    ) -> cc_lb_storage_api::StorageResult<UpstreamRecord> {
-        unsupported_store_operation()
-    }
-
     async fn set_status(
         &self,
         _id: Uuid,

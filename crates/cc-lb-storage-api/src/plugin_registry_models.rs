@@ -163,11 +163,6 @@ pub struct PluginChainEntry {
     pub revision: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct PluginChainEntryUpdate {
-    pub config: Option<Value>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WasmRegistryReferenceFingerprint([u8; 32]);
 

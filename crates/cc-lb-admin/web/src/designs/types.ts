@@ -41,8 +41,5 @@ export interface Design {
   label: string;
   navItems: (installation: Installation) => readonly NavGroup[];
   OverviewPage: FC;
-  UpstreamsListAddon?: { groupBy: 'provider' | 'none'; Header?: FC };
-  LogsScopeBar?: FC;
   PrincipalsActivity?: FC<{ principalId: string }>;
-  SystemWideNotice?: FC;
 }

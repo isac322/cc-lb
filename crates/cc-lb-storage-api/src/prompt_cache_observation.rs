@@ -95,23 +95,6 @@ pub trait PromptCacheObservationStore: Send + Sync + 'static {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn list_active_provider_observations(
-        &self,
-        _upstream_id: Uuid,
-        _provider: &str,
-        _canonical_model_id: &str,
-        _mode: &str,
-        _isolation_scope: &str,
-        _identity_hash: &str,
-        _not_expired_at_unix_secs: u64,
-    ) -> StorageResult<Vec<ProviderPromptCacheObservationRecord>> {
-        Err(StorageError::Unavailable {
-            message:
-                "PromptCacheObservationStore::list_active_provider_observations is not implemented"
-                    .to_owned(),
-        })
-    }
     /// Batch lookup of active provider-native observations for one request's
     /// bounded routing candidates (`upstream_ids` is bounded by
     /// [`MAX_PROVIDER_NATIVE_CANDIDATES`]). Every candidate must match the exact

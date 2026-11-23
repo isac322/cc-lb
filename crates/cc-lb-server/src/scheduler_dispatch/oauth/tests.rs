@@ -340,7 +340,7 @@ async fn failed_provider_usage_polls_preserve_observation_age_and_stale_snapshot
         let upstream = scoped_refresh_probe_record(&fixture, kind, true)
             .await
             .unwrap();
-        UpstreamStore::update_spec(
+        UpstreamStore::update(
             fixture.storage.as_ref(),
             upstream.id,
             upstream.revision,
@@ -426,7 +426,7 @@ async fn failed_provider_usage_polls_preserve_observation_age_and_stale_snapshot
                     .await
                     .unwrap()
                     .unwrap();
-                UpstreamStore::update_spec(
+                UpstreamStore::update(
                     fixture.storage.as_ref(),
                     upstream.id,
                     current.revision,
@@ -1262,42 +1262,6 @@ impl UpstreamStore for CountingUpstreamStore {
         self.inner.update(id, expected_revision, update).await
     }
 
-    async fn set_enabled(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        enabled: bool,
-    ) -> StorageResult<UpstreamRecord> {
-        self.inner.set_enabled(id, expected_revision, enabled).await
-    }
-
-    async fn update_spec(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        update: UpstreamUpdate,
-    ) -> StorageResult<UpstreamRecord> {
-        self.inner.update_spec(id, expected_revision, update).await
-    }
-
-    async fn update_api_key_secret(
-        &self,
-        id: Uuid,
-        api_key_ciphertext: Option<Vec<u8>>,
-    ) -> StorageResult<UpstreamRecord> {
-        self.inner
-            .update_api_key_secret(id, api_key_ciphertext)
-            .await
-    }
-
-    async fn update_oauth_token(
-        &self,
-        id: Uuid,
-        tokens: EncryptedOAuthTokens,
-    ) -> StorageResult<UpstreamRecord> {
-        self.inner.update_oauth_token(id, tokens).await
-    }
-
     async fn set_status(&self, id: Uuid, status: UpstreamStatusUpdate) -> StorageResult<()> {
         self.inner.set_status(id, status).await
     }
@@ -1548,7 +1512,7 @@ async fn poll_usage_persists_quota_and_cedar_ember_from_one_response() {
     let fixture = DispatchFixture::new().await;
     let upstream = fixture.oauth_upstream(true).await;
     // Point the upstream at the loopback provider.
-    UpstreamStore::update_spec(
+    UpstreamStore::update(
         fixture.storage.as_ref(),
         upstream.id,
         upstream.revision,
@@ -1747,7 +1711,7 @@ async fn poll_usage_uses_latest_fallback_before_first_compat_refresh() {
 
     let fixture = DispatchFixture::new().await;
     let upstream = fixture.oauth_upstream(true).await;
-    UpstreamStore::update_spec(
+    UpstreamStore::update(
         fixture.storage.as_ref(),
         upstream.id,
         upstream.revision,
@@ -1861,7 +1825,7 @@ async fn poll_usage_skips_live_fence_and_recovers_expired_fence_before_request()
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve loopback");
     });
-    UpstreamStore::update_spec(
+    UpstreamStore::update(
         fixture.storage.as_ref(),
         upstream.id,
         upstream.revision,

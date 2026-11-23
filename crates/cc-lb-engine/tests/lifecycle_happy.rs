@@ -362,8 +362,7 @@ async fn native_openai_opaque_cache_extensions_remain_neutral_and_unchanged()
     }))?);
     // Positive control: a generic Anthropic analysis would produce cache
     // metadata from this payload. These extensions stay opaque on Responses.
-    let hypothetical_anthropic =
-        cc_lb_engine::parse_request_cache_breakpoints(&http::HeaderMap::new(), &body);
+    let hypothetical_anthropic = common::test_parse_cache_breakpoints(&body);
     assert!(!hypothetical_anthropic.is_empty());
 
     let state = TestState::default();
@@ -435,14 +434,14 @@ async fn requested_service_tier_reaches_limit_cost_estimator_before_dispatch() {
         Arc::new(KeyConcurrencyManager::new()),
         Arc::new(cc_lb_clock::SystemClock),
     );
-    let lifecycle = lifecycle_with(
-        TestAuthn::new(state.clone()),
-        MockDispatch {
-            state,
-            mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
-        },
-    )
-    .with_static_limit_subject(
+    let lifecycle = common::with_static_limit_subject(
+        lifecycle_with(
+            TestAuthn::new(state.clone()),
+            MockDispatch {
+                state,
+                mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
+            },
+        ),
         limit_engine,
         "principal-test".to_owned(),
         "key-test".to_owned(),
@@ -502,17 +501,17 @@ async fn oauth_db_record_drives_route_pricing_and_rejection_audit_identity() {
         Arc::new(KeyConcurrencyManager::new()),
         Arc::new(cc_lb_clock::SystemClock),
     );
-    let lifecycle = Lifecycle::new_with_dynamic_view(
-        authn.authn.clone(),
-        Arc::new(DynamicViewHolder::new(view)),
-        Arc::new(MockDispatch {
-            state: state.clone(),
-            mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
-        }),
-        LifecycleConfig::default(),
-        Arc::new(cc_lb_clock::SystemClock),
-    )
-    .with_static_limit_subject(
+    let lifecycle = common::with_static_limit_subject(
+        Lifecycle::new_with_dynamic_view(
+            authn.authn.clone(),
+            Arc::new(DynamicViewHolder::new(view)),
+            Arc::new(MockDispatch {
+                state: state.clone(),
+                mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
+            }),
+            LifecycleConfig::default(),
+            Arc::new(cc_lb_clock::SystemClock),
+        ),
         limit_engine,
         "principal-test".to_owned(),
         "key-test".to_owned(),
@@ -594,7 +593,7 @@ async fn invalid_key_is_rejected_at_the_authentication_boundary() {
     let Err(error) = lifecycle.authenticate(request.headers()).await else {
         panic!("invalid key fails authentication");
     };
-    let response = cc_lb_engine::reject_unauthenticated(&error, None);
+    let response = cc_lb_engine::reject_unauthenticated_for_provider(&error, None, None);
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let body = response
@@ -666,17 +665,17 @@ async fn oauth_compat_tier_reaches_limit_cost_estimator_as_sent() {
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![openai_oauth_upstream_record()])
         .build();
-    let lifecycle = Lifecycle::new_with_dynamic_view(
-        authn.authn.clone(),
-        Arc::new(DynamicViewHolder::new(view)),
-        Arc::new(MockDispatch {
-            state,
-            mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
-        }),
-        LifecycleConfig::default(),
-        Arc::new(cc_lb_clock::SystemClock),
-    )
-    .with_static_limit_subject(
+    let lifecycle = common::with_static_limit_subject(
+        Lifecycle::new_with_dynamic_view(
+            authn.authn.clone(),
+            Arc::new(DynamicViewHolder::new(view)),
+            Arc::new(MockDispatch {
+                state,
+                mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
+            }),
+            LifecycleConfig::default(),
+            Arc::new(cc_lb_clock::SystemClock),
+        ),
         LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
             Arc::new(cc_lb_clock::SystemClock),
@@ -2174,19 +2173,19 @@ fn limited_lifecycle_at(
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![record])
         .build();
-    Lifecycle::new_with_dynamic_view(
-        authn.authn.clone(),
-        Arc::new(DynamicViewHolder::new(view)),
-        dispatch.unwrap_or_else(|| {
-            Arc::new(MockDispatch {
-                state: state.clone(),
-                mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
-            })
-        }),
-        LifecycleConfig::default(),
-        Arc::new(cc_lb_clock::SystemClock),
-    )
-    .with_static_limit_subject(
+    common::with_static_limit_subject(
+        Lifecycle::new_with_dynamic_view(
+            authn.authn.clone(),
+            Arc::new(DynamicViewHolder::new(view)),
+            dispatch.unwrap_or_else(|| {
+                Arc::new(MockDispatch {
+                    state: state.clone(),
+                    mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
+                })
+            }),
+            LifecycleConfig::default(),
+            Arc::new(cc_lb_clock::SystemClock),
+        ),
         LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
             Arc::new(cc_lb_clock::SystemClock),
@@ -2381,24 +2380,24 @@ async fn local_limit_retryability_held_windows_and_concurrent_slot_release() {
             Arc::new(KeyConcurrencyManager::new()),
             Arc::new(cc_lb_clock::SystemClock),
         );
-        let lifecycle = limited_lifecycle(
-            StorageUpstreamKind::AnthropicApiKey,
-            vec![Limit {
-                kind,
-                window_secs: if kind == LimitKind::Concurrent { 0 } else { 60 },
-                cap_micros: cap,
-            }],
-            &state,
-            Some(Arc::new(GatedAdmissionDispatch {
-                inner: MockDispatch {
-                    state: state.clone(),
-                    mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
-                },
-                entered: Arc::clone(&entered),
-                release: Arc::clone(&release),
-            })),
-        )
-        .with_static_limit_subject(
+        let lifecycle = common::with_static_limit_subject(
+            limited_lifecycle(
+                StorageUpstreamKind::AnthropicApiKey,
+                vec![Limit {
+                    kind,
+                    window_secs: if kind == LimitKind::Concurrent { 0 } else { 60 },
+                    cap_micros: cap,
+                }],
+                &state,
+                Some(Arc::new(GatedAdmissionDispatch {
+                    inner: MockDispatch {
+                        state: state.clone(),
+                        mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
+                    },
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                })),
+            ),
             limit_engine.clone(),
             "principal-test".to_owned(),
             "key-test".to_owned(),
@@ -3563,7 +3562,7 @@ async fn admission_image_fix_preserves_forwarded_bytes_and_routing_prefix_units(
         }]}]
     });
     let bytes = Bytes::from(serde_json::to_vec_pretty(&body).expect("pretty request JSON"));
-    let before = cc_lb_engine::parse_request_cache_breakpoints(&http::HeaderMap::new(), &bytes);
+    let before = common::test_parse_cache_breakpoints(&bytes);
     let prefix = before.first().expect("native image breakpoint");
     assert!(
         prefix.prefix_bytes.get() > 1_000_000,
@@ -3601,7 +3600,7 @@ async fn admission_image_fix_preserves_forwarded_bytes_and_routing_prefix_units(
     let captured = bodies.lock().expect("captured body lock");
     let forwarded = captured.first().expect("one dispatched body");
     assert_eq!(forwarded, &bytes, "admission must not rewrite the payload");
-    let after = cc_lb_engine::parse_request_cache_breakpoints(&http::HeaderMap::new(), forwarded);
+    let after = common::test_parse_cache_breakpoints(forwarded);
     assert_eq!(
         serde_json::to_value(&after).expect("breakpoints serialize"),
         serde_json::to_value(&before).expect("breakpoints serialize")
@@ -3669,9 +3668,7 @@ async fn admission_unresolved_empty_marker_retains_opaque_fallback() {
         "messages":[]
     });
     let bytes = Bytes::from(serde_json::to_vec(&body).expect("request JSON"));
-    assert!(
-        cc_lb_engine::parse_request_cache_breakpoints(&http::HeaderMap::new(), &bytes).is_empty()
-    );
+    assert!(common::test_parse_cache_breakpoints(&bytes).is_empty());
     // Empty automatic input cannot resolve a local block. Preserve the
     // existing 1,048,576-token opaque gross bound, plus 10 output micros.
     assert_anthropic_limit_boundary("unresolved marker", &body, LimitKind::CostUsd, 1_048_586)
@@ -3828,10 +3825,7 @@ async fn admission_over_limit_and_unsupported_markers_keep_opaque_fallback() {
     ];
     for body in bodies {
         let bytes = Bytes::from(serde_json::to_vec(&body).expect("request JSON"));
-        assert!(
-            cc_lb_engine::parse_request_cache_breakpoints(&http::HeaderMap::new(), &bytes)
-                .is_empty()
-        );
+        assert!(common::test_parse_cache_breakpoints(&bytes).is_empty());
         assert_anthropic_limit_boundary(
             "unresolved invalid marker",
             &body,

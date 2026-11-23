@@ -37,7 +37,7 @@ use cc_lb_storage_api::{
     WarmupPermanentFailureReason, WarmupTransientFailureReason,
 };
 
-use crate::ports::{RoutePreviewPort, SubscriptionQuotaIngestionPort, WarmupPort};
+use crate::ports::{SubscriptionQuotaIngestionPort, WarmupPort};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -166,7 +166,6 @@ pub trait DynamicViewRebinder: Send + Sync {
 
 #[derive(Clone, Default)]
 pub struct AdminPorts {
-    pub route_preview: Option<Arc<dyn RoutePreviewPort>>,
     pub warmup: Option<Arc<dyn WarmupPort>>,
     pub subscription_quota_ingestion: Option<Arc<dyn SubscriptionQuotaIngestionPort>>,
     pub replica_identity: Option<ReplicaIdentity>,

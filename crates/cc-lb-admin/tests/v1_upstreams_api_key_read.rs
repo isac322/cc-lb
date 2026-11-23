@@ -992,7 +992,14 @@ async fn usg_provider_api_keys_use_local_estimated_request_events() {
             .encrypt(b"provider-key", created.id.as_bytes())
             .expect("seal provider API key");
         h.storage
-            .update_api_key_secret(created.id, Some(ciphertext))
+            .update(
+                created.id,
+                created.revision,
+                cc_lb_storage_api::UpstreamUpdate {
+                    api_key_ciphertext: Some(ciphertext),
+                    ..Default::default()
+                },
+            )
             .await
             .expect("store provider API key");
         let mut event = usage_event(created.id, NOW - 600, &format!("provider-{index}"), 73);

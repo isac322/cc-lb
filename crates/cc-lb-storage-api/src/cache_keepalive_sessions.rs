@@ -272,12 +272,6 @@ pub struct CacheKeepaliveOrderMeta {
 
 #[async_trait]
 pub trait CacheKeepaliveSessionStore: Send + Sync {
-    /// Returns the row image produced by this mutation, even if a later write supersedes it.
-    async fn replace_from_real_request(
-        &self,
-        request: &CacheKeepaliveReplaceRequest,
-    ) -> StorageResult<CacheKeepaliveSessionRecord>;
-
     /// Allocates a durable real-request ordering ticket.
     ///
     /// Allocate at request start and retain it through completion. Requests
@@ -307,10 +301,7 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
         &self,
         request: &CacheKeepaliveReplaceRequest,
         expected_ticket: Option<CacheKeepaliveCompletionTicket>,
-    ) -> StorageResult<Option<CacheKeepaliveSessionRecord>> {
-        let _ = expected_ticket;
-        self.replace_from_real_request(request).await.map(Some)
-    }
+    ) -> StorageResult<Option<CacheKeepaliveSessionRecord>>;
 
     /// Retires active keepalive work while a real request is in flight.
     ///

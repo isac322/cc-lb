@@ -160,7 +160,7 @@ impl storage_api::UsageRollupStore for TestStorage {
         Ok(Vec::new())
     }
 
-    async fn usage_rollup_checkpoint(&self) -> storage_api::StorageResult<Option<u64>> {
+    async fn usage_rollup_revision(&self) -> storage_api::StorageResult<Option<String>> {
         Ok(None)
     }
 }

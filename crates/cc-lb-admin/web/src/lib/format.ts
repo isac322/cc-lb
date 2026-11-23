@@ -124,15 +124,6 @@ export function fmtUsdCents(micros: number | null | undefined): string {
   return formatUsdAmount(micros / 1_000_000);
 }
 
-export function formatBigInteger(
-  n: number | null | undefined,
-  _maxSafeDigits = 15,
-): string {
-  if (n == null || !Number.isFinite(n)) return DASH;
-  if (n > Number.MAX_SAFE_INTEGER) return DASH;
-  return EN_US_NUMBER.format(n === 0 ? 0 : n);
-}
-
 export function formatCostMicros(micros?: number | null): string {
   if (micros == null || !Number.isFinite(micros) || micros < 0) return DASH;
   if (micros > Number.MAX_SAFE_INTEGER) return DASH;

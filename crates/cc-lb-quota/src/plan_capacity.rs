@@ -24,14 +24,6 @@ pub enum TierKey {
 }
 
 impl TierKey {
-    pub const ALL: [TierKey; 5] = [
-        TierKey::Pro,
-        TierKey::TeamStandard,
-        TierKey::Max5x,
-        TierKey::TeamPremium,
-        TierKey::Max20x,
-    ];
-
     pub const fn as_str(self) -> &'static str {
         match self {
             TierKey::Pro => "pro",

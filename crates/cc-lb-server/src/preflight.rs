@@ -21,7 +21,6 @@ use crate::tls;
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PreflightReport {
     pub upstream_count: usize,
-    pub upstream_warnings: usize,
     pub principal_count: usize,
     pub principal_disabled_count: usize,
     pub plugin_chain_entry_count: usize,

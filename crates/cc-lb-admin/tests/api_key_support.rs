@@ -319,7 +319,14 @@ impl ApiKeyHarness {
             .encrypt(key.as_bytes(), created.id.as_bytes())
             .expect("seal key");
         self.storage
-            .update_api_key_secret(created.id, Some(ciphertext))
+            .update(
+                created.id,
+                created.revision,
+                cc_lb_storage_api::UpstreamUpdate {
+                    api_key_ciphertext: Some(ciphertext),
+                    ..Default::default()
+                },
+            )
             .await
             .expect("store key")
     }
