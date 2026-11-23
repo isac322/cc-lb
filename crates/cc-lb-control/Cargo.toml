@@ -19,6 +19,7 @@ bytes.workspace = true
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-lifecycle = { workspace = true }
+cc-lb-quota.workspace = true
 cc-lb-request-log.workspace = true
 cc-lb-domain.workspace = true
 cc-lb-routing.workspace = true

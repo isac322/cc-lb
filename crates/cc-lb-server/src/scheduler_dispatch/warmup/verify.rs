@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use cc_lb_admin::{WarmupWindowCheck, WarmupWindowVerifier};
+use cc_lb_control::{WarmupWindowCheck, WarmupWindowVerifier};
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollObservation;
 use cc_lb_storage_api::{SubscriptionQuotaWindow, UpstreamRecord, WarmupLane};
 

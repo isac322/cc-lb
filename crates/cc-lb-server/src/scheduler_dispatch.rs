@@ -99,8 +99,8 @@ pub(crate) fn build_scheduler_ctx(
     deps: SchedulerDispatchDeps,
 ) -> (
     SchedulerCtx,
-    Arc<dyn cc_lb_admin::LimitResetUsageRefreshPort>,
-    Arc<dyn cc_lb_admin::WarmupWindowVerifier>,
+    Arc<dyn cc_lb_control::LimitResetUsageRefreshPort>,
+    Arc<dyn cc_lb_control::WarmupWindowVerifier>,
 ) {
     let dispatch = SchedulerDispatch::new(deps);
     let ctx = SchedulerCtx::new(

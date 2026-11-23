@@ -54,7 +54,7 @@ pub(super) fn post_warmup_window_check(
     snapshots: &[SubscriptionQuotaCandidateSnapshot],
     previous_resets: &[(SubscriptionQuotaWindow, i64)],
     request_completed_at_unix_secs: i64,
-) -> cc_lb_admin::WarmupWindowCheck {
+) -> cc_lb_control::WarmupWindowCheck {
     let mut observations = Vec::new();
     let mut not_started = Vec::new();
     let mut advanced = 0usize;
@@ -116,13 +116,13 @@ pub(super) fn post_warmup_window_check(
         }
     }
     if !not_started.is_empty() {
-        cc_lb_admin::WarmupWindowCheck::NotStarted {
+        cc_lb_control::WarmupWindowCheck::NotStarted {
             windows: not_started,
         }
     } else if advanced > 0 && !unknown {
-        cc_lb_admin::WarmupWindowCheck::Started { observations }
+        cc_lb_control::WarmupWindowCheck::Started { observations }
     } else {
-        cc_lb_admin::WarmupWindowCheck::Unknown
+        cc_lb_control::WarmupWindowCheck::Unknown
     }
 }
 

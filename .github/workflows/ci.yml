@@ -138,10 +138,11 @@ jobs:
         run: bash scripts/lint-audit-redaction.sh
       - name: Integration-test consolidation guard
         run: bash scripts/check-integration-test-consolidation.sh
-      - name: Validate coverage partitions and helpers
+      - name: Validate coverage partitions, proxy/admin boundary, and helpers
         run: |
           node scripts/check-cov-partitions.mjs
-          node --test scripts/test-cov-partitions.mjs scripts/test-ws-mtimes.mjs scripts/test-prune-rust-target.mjs scripts/test-export-merged-lcov.mjs scripts/test-cd-deps-hash.mjs
+          node scripts/check-proxy-admin-boundary.mjs
+          node --test scripts/test-cov-partitions.mjs scripts/test-proxy-admin-boundary.mjs scripts/test-ws-mtimes.mjs scripts/test-prune-rust-target.mjs scripts/test-export-merged-lcov.mjs scripts/test-cd-deps-hash.mjs
 
   guard-crate-versions:
     name: guard crate versions

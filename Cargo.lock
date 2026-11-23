@@ -745,6 +745,7 @@ dependencies = [
  "cc-lb-clock",
  "cc-lb-domain",
  "cc-lb-lifecycle",
+ "cc-lb-quota",
  "cc-lb-request-log",
  "cc-lb-routing",
  "cc-lb-storage-api",
