@@ -12,8 +12,8 @@ pub use completion_observer::{
 };
 pub use instrumented_connector::InstrumentedHttpsConnector;
 pub use request_timing::{
-    DnsResolutionOutcome, DnsSnapshot, REQUEST_STAGE_TIMINGS, RequestStageTimings,
-    dns_snapshot, finalize_connection_reused_if_unset, mark_connector_called,
-    record_bulkhead_wait, record_connect, record_dns, with_timings,
+    DnsResolutionOutcome, DnsSnapshot, REQUEST_STAGE_TIMINGS, RequestStageTimings, dns_snapshot,
+    finalize_connection_reused_if_unset, mark_connector_called, record_bulkhead_wait,
+    record_connect, record_dns, with_timings,
 };
 pub use trace_context::inject_current_trace_context;

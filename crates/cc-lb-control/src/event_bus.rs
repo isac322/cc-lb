@@ -449,10 +449,7 @@ fn fanout_lifecycle_event(inner: &Arc<InMemoryBusInner>, event: LifecycleEvent) 
             let _ = inner.lifecycle_broadcast_tx.send(event.clone());
         }
         let targets = [
-            (
-                subs.writer_tx.as_ref(),
-                "lifecycle_writer_activity_dropped",
-            ),
+            (subs.writer_tx.as_ref(), "lifecycle_writer_activity_dropped"),
             (
                 subs.assembler_tx.as_ref(),
                 "lifecycle_assembler_activity_dropped",
@@ -971,7 +968,10 @@ mod tests {
         for idx in 0..6 {
             let expected = format!("evt-disp-{idx}");
             assert_eq!(
-                assembler_rx.try_recv().expect("assembler drained").event_id(),
+                assembler_rx
+                    .try_recv()
+                    .expect("assembler drained")
+                    .event_id(),
                 &expected
             );
             assert_eq!(

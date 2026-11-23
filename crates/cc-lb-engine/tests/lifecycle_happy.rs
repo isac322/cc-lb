@@ -2465,8 +2465,8 @@ async fn local_limit_retryability_held_windows_and_concurrent_slot_release() {
                 reconcile_rx,
                 limit_engine,
             )
-                .shutdown()
-                .await;
+            .shutdown()
+            .await;
         }
     }
 }

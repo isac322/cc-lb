@@ -1358,16 +1358,17 @@ async fn build_app_with_storage_inner(
     } else {
         cc_lb_event_pipeline::RequestDiagnosticsOptions::default()
     };
-    let lifecycle_event_assembler_handle = cc_lb_event_pipeline::lifecycle_event_assembler::spawn_with_ttls(
-        lifecycle_assembler_rx,
-        storage.clone(),
-        Some(event_bus.clone()),
-        Arc::clone(&metrics_hook),
-        cc_lb_event_pipeline::lifecycle_event_assembler::DEFAULT_ASSEMBLER_MAP_CAP,
-        cc_lb_event_pipeline::lifecycle_event_assembler::DEFAULT_ASSEMBLER_TTL,
-        lifecycle_max_ttl,
-        diagnostics,
-    );
+    let lifecycle_event_assembler_handle =
+        cc_lb_event_pipeline::lifecycle_event_assembler::spawn_with_ttls(
+            lifecycle_assembler_rx,
+            storage.clone(),
+            Some(event_bus.clone()),
+            Arc::clone(&metrics_hook),
+            cc_lb_event_pipeline::lifecycle_event_assembler::DEFAULT_ASSEMBLER_MAP_CAP,
+            cc_lb_event_pipeline::lifecycle_event_assembler::DEFAULT_ASSEMBLER_TTL,
+            lifecycle_max_ttl,
+            diagnostics,
+        );
     let lifecycle_pricing_subscriber_handle =
         cc_lb_pricing::lifecycle_pricing_subscriber::spawn_with_ttls(
             lifecycle_pricing_rx,
