@@ -520,7 +520,7 @@ fn materialize_and_validate(
                 valid: false,
                 issues: Vec::new(),
             },
-            filesystem: filesystem_capability_issues(&snapshot.info),
+            filesystem: validation_filesystem_capability_issues(state, &snapshot.info),
             overrides: Vec::new(),
         };
         return Ok(MaterializedDraft {
@@ -539,7 +539,7 @@ fn materialize_and_validate(
     let (mut effective_validation, effective_config) =
         validate_effective_config(&toml, &state.startup_config_overrides);
     normalize_unknown_recurring_job_issues(&mut effective_validation, &draft_recurring_job_issues);
-    let mut filesystem = filesystem_capability_issues(&snapshot.info);
+    let mut filesystem = validation_filesystem_capability_issues(state, &snapshot.info);
     if let Some(config) = effective_config.as_ref() {
         filesystem.extend(config_filesystem_issues(config));
     }
@@ -976,6 +976,17 @@ fn apply_startup_overrides(config: &mut Config, startup: &StartupConfigOverrides
 
 fn special_env_runtime_data_dir() -> Option<PathBuf> {
     std::env::var(DATA_DIR_ENV).ok().map(PathBuf::from)
+}
+
+fn validation_filesystem_capability_issues(
+    state: &AdminState,
+    info: &ConfigFileInfo,
+) -> Vec<ConfigValidationIssue> {
+    if state.startup_config_overrides.split_mode_read_only_config {
+        Vec::new()
+    } else {
+        filesystem_capability_issues(info)
+    }
 }
 
 fn filesystem_capability_issues(info: &ConfigFileInfo) -> Vec<ConfigValidationIssue> {

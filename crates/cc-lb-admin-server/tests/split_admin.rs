@@ -218,6 +218,41 @@ mod sqlite_tests {
             .await
             .expect("validate response");
         assert_eq!(validate_resp.status(), StatusCode::OK);
+        let validate_json: Value = serde_json::from_slice(
+            &validate_resp
+                .into_body()
+                .collect()
+                .await
+                .expect("validate body")
+                .to_bytes(),
+        )
+        .expect("validate json");
+        assert_eq!(validate_json["file"]["valid"], true);
+        assert_eq!(validate_json["effective"]["valid"], true);
+        assert_eq!(validate_json["filesystem"], json!([]));
+
+        let editor_after_resp = app
+            .admin_router
+            .clone()
+            .oneshot(
+                Request::get("/admin/v1/config/editor")
+                    .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
+                    .body(Body::empty())
+                    .expect("editor after request"),
+            )
+            .await
+            .expect("editor after response");
+        assert_eq!(editor_after_resp.status(), StatusCode::OK);
+        let editor_after_json: Value = serde_json::from_slice(
+            &editor_after_resp
+                .into_body()
+                .collect()
+                .await
+                .expect("editor after body")
+                .to_bytes(),
+        )
+        .expect("editor after json");
+        assert_eq!(editor_after_json["last_validated_revision"], revision);
 
         let save_resp = app
             .admin_router

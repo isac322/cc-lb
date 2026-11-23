@@ -6,7 +6,7 @@ slug: docs/getting-started/install
 
 After the [binary or container setup](/docs/getting-started/), cc-lb keeps upstreams, principals, proxy keys, and plugin chains in database-backed runtime state. The admin API is authenticated with the Bearer token configured at startup.
 
-The examples below use `http://127.0.0.1:9090` for the admin API and `http://127.0.0.1:8080` for the proxy. For a container deployment, use the host address and published ports you selected.
+The examples below use `http://127.0.0.1:9090` for the admin API and `http://127.0.0.1:8080` for the proxy. For a container deployment, use the host address and published ports you selected. In a [split deployment](/docs/getting-started/#split-control-plane-and-data-plane-deployment), `cc-lb-admin` serves `:9090` and `cc-lb-proxy` (`--role proxy-worker` or `--role proxy`) serves `:8080` (and replica proxy ports) against the shared PostgreSQL database; all resource and proxy calls below follow the same contracts, except `POST /admin/v1/config/save` stays read-only (`409 file_not_writable`) on `cc-lb-admin` in favor of draft validation and TOML download.
 
 The complete Anthropic API-key flow is shown first; the same admin create endpoint also accepts the OpenAI and Gemini API-key kinds below.
 
