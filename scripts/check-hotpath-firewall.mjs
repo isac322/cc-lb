@@ -412,73 +412,156 @@ function collectTomlStatements(raw) {
   return statements;
 }
 
+function stripTomlQuotes(raw) {
+  const s = raw.trim();
+  if (
+    s.length >= 2 &&
+    ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith('\'') && s.endsWith('\'')))
+  ) {
+    return s.slice(1, -1);
+  }
+  return s;
+}
+
+function splitTomlPath(pathStr) {
+  const parts = [];
+  let cur = '';
+  let quote = null;
+  let escaped = false;
+  for (let i = 0; i < pathStr.length; i += 1) {
+    const ch = pathStr[i];
+    if (escaped) {
+      cur += ch;
+      escaped = false;
+      continue;
+    }
+    if (quote === '"') {
+      cur += ch;
+      if (ch === '\\') escaped = true;
+      else if (ch === '"') quote = null;
+      continue;
+    }
+    if (quote === '\'') {
+      cur += ch;
+      if (ch === '\'') quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === '\'') {
+      quote = ch;
+      cur += ch;
+    } else if (ch === '.') {
+      parts.push(cur.trim());
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.trim()) {
+    parts.push(cur.trim());
+  }
+  return parts.map(stripTomlQuotes).filter(Boolean);
+}
+
 // Classify a TOML `[header]` as:
 // - `{ kind: 'normal-dep', subpkg?: string }`
 // - `{ kind: 'features' }`
 // - `{ kind: 'other' }`
 function classifyHeader(header) {
-  const name = header.trim();
-  if (name === 'features') {
+  const segments = splitTomlPath(header);
+  if (segments.length === 1 && segments[0] === 'features') {
     return { kind: 'features' };
   }
-  if (name === 'dependencies') {
-    return { kind: 'normal-dep', subpkg: null };
-  }
-  if (name.startsWith('dependencies.')) {
-    return { kind: 'normal-dep', subpkg: name.slice('dependencies.'.length).trim() };
+  if (segments[0] === 'dependencies') {
+    if (segments.length === 1) {
+      return { kind: 'normal-dep', subpkg: null };
+    }
+    if (segments.length === 2) {
+      return { kind: 'normal-dep', subpkg: segments[1] };
+    }
+    return { kind: 'other' };
   }
   // Matches `[target.<cfg>.dependencies]` or `[target.<cfg>.dependencies.<pkg>]`
   // while excluding `dev-dependencies` and `build-dependencies`.
-  const targetDeps = /^target\.(?:.+?)\.(dependencies(?:\.([A-Za-z0-9_-]+))?)$/.exec(name);
-  if (targetDeps) {
-    return { kind: 'normal-dep', subpkg: targetDeps[2] ?? null };
+  if (segments[0] === 'target' && segments.length >= 3) {
+    if (segments[segments.length - 1] === 'dependencies') {
+      return { kind: 'normal-dep', subpkg: null };
+    }
+    if (segments.length >= 4 && segments[segments.length - 2] === 'dependencies') {
+      return { kind: 'normal-dep', subpkg: segments[segments.length - 1] };
+    }
   }
   return { kind: 'other' };
 }
 
 function classifyWorkspaceHeader(header) {
-  const name = header.trim();
-  if (name === 'workspace.dependencies') {
+  const segments = splitTomlPath(header);
+  if (segments.length === 2 && segments[0] === 'workspace' && segments[1] === 'dependencies') {
     return { kind: 'workspace-dep', subpkg: null };
   }
-  if (name.startsWith('workspace.dependencies.')) {
-    return {
-      kind: 'workspace-dep',
-      subpkg: name.slice('workspace.dependencies.'.length).trim(),
-    };
+  if (segments.length === 3 && segments[0] === 'workspace' && segments[1] === 'dependencies') {
+    return { kind: 'workspace-dep', subpkg: segments[2] };
   }
   return { kind: 'other' };
 }
 
 function updateDepRecordFromStatement(record, rhsOrSubkey, rhsValue) {
   if (rhsOrSubkey === 'package') {
-    const strMatch = /^"([A-Za-z0-9_-]+)"$/.exec(rhsValue.trim());
-    if (strMatch) record.explicitPackage = strMatch[1];
+    const strMatch = /^(['"])([A-Za-z0-9_-]+)\1$/.exec(rhsValue.trim());
+    if (strMatch) record.explicitPackage = strMatch[2];
   } else if (rhsOrSubkey === 'path') {
-    const strMatch = /^"([^"]+)"$/.exec(rhsValue.trim());
-    if (strMatch) record.path = strMatch[1];
+    const strMatch = /^(['"])([^'"]+)\1$/.exec(rhsValue.trim());
+    if (strMatch) record.path = strMatch[2];
   } else if (rhsOrSubkey === 'workspace') {
     if (/^true\b/.test(rhsValue.trim())) record.usesWorkspace = true;
   } else if (rhsOrSubkey === 'optional') {
     if (/^true\b/.test(rhsValue.trim())) record.optional = true;
   } else if (rhsOrSubkey === null) {
-    const pkgMatch = /\bpackage\s*=\s*"([A-Za-z0-9_-]+)"/.exec(rhsValue);
-    if (pkgMatch) record.explicitPackage = pkgMatch[1];
-    const pathMatch = /\bpath\s*=\s*"([^"]+)"/.exec(rhsValue);
-    if (pathMatch) record.path = pathMatch[1];
+    const pkgMatch = /\bpackage\s*=\s*(['"])([A-Za-z0-9_-]+)\1/.exec(rhsValue);
+    if (pkgMatch) record.explicitPackage = pkgMatch[2];
+    const pathMatch = /\bpath\s*=\s*(['"])([^'"]+)\1/.exec(rhsValue);
+    if (pathMatch) record.path = pathMatch[2];
     if (/\bworkspace\s*=\s*true\b/.test(rhsValue)) record.usesWorkspace = true;
     if (/\boptional\s*=\s*true\b/.test(rhsValue)) record.optional = true;
   }
 }
 
 function parseDottedAssignment(text) {
-  const eqIdx = text.indexOf('=');
+  let eqIdx = -1;
+  let quote = null;
+  let escaped = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '\\') escaped = true;
+      else if (ch === '"') quote = null;
+      continue;
+    }
+    if (quote === '\'') {
+      if (ch === '\'') quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === '\'') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '=') {
+      eqIdx = i;
+      break;
+    }
+  }
   if (eqIdx === -1) return null;
   const lhs = text.slice(0, eqIdx).trim();
   const rhs = text.slice(eqIdx + 1).trim();
-  const match = /^([A-Za-z0-9_-]+)(?:\.([A-Za-z0-9_-]+))?$/.exec(lhs);
-  if (!match) return null;
-  return { key: match[1], subkey: match[2] ?? null, rhs };
+  const segments = splitTomlPath(lhs);
+  if (segments.length !== 1 && segments.length !== 2) return null;
+  for (const seg of segments) {
+    if (!/^[A-Za-z0-9_-]+$/.test(seg)) return null;
+  }
+  return { key: segments[0], subkey: segments[1] ?? null, rhs };
 }
 
 function extractWorkspaceDepAliases(rootDir) {
@@ -535,7 +618,14 @@ function extractWorkspaceDepAliases(rootDir) {
   return aliases;
 }
 
-function checkManifest(relPath, raw, forbiddenSet, workspaceAliases, violations) {
+function checkManifest(
+  relPath,
+  raw,
+  forbiddenSet,
+  workspaceAliases,
+  metadataNormalDeps,
+  violations,
+) {
   const isEngine = relPath === 'crates/cc-lb-engine/Cargo.toml';
   if (isEngine) {
     for (const stmt of collectTomlStatements(raw)) {
@@ -548,14 +638,28 @@ function checkManifest(relPath, raw, forbiddenSet, workspaceAliases, violations)
     }
   }
 
+  const reportedDirect = new Set();
   for (const dep of extractNormalDeps(raw, workspaceAliases)) {
     if (forbiddenSet.has(dep.name)) {
+      reportedDirect.add(dep.name);
       const aliasNote = dep.rawKey !== dep.name ? ` (aliased as \`${dep.rawKey}\`)` : '';
       violations.push(
         `${relPath}:${dep.line}: forbidden normal dependency \`${dep.name}\`${aliasNote}`,
       );
     }
   }
+
+  const pkgName = extractPackageName(raw, path.basename(path.dirname(relPath)));
+  for (const depName of metadataNormalDeps?.get(pkgName) ?? []) {
+    if (forbiddenSet.has(depName) && !reportedDirect.has(depName)) {
+      reportedDirect.add(depName);
+      violations.push(
+        `${relPath}:1: forbidden normal dependency \`${depName}\` (discovered via cargo metadata)`,
+      );
+    }
+  }
+
+  return reportedDirect;
 }
 
 function extractPackageName(raw, fallbackName) {
@@ -671,32 +775,94 @@ function loadCargoMetadataNormalDeps(rootDir) {
   return map;
 }
 
-function checkTransitiveDeps(rootDir, workspaceAliases, violations) {
-  const cratesDir = path.join(rootDir, 'crates');
-  if (!existsSync(cratesDir)) return;
+function discoverWorkspaceManifestRelPaths(rootDir) {
+  const manifests = new Set();
+  for (const parentRel of ['crates', 'tools', 'plugins']) {
+    const parentDir = path.join(rootDir, parentRel);
+    if (!existsSync(parentDir)) continue;
+    for (const entry of readdirSync(parentDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const candidate = path.posix.join(parentRel, entry.name, 'Cargo.toml');
+      if (existsSync(path.join(rootDir, candidate))) {
+        manifests.add(candidate);
+      }
+    }
+  }
+
+  const rootManifestPath = path.join(rootDir, 'Cargo.toml');
+  if (existsSync(rootManifestPath)) {
+    const rootRaw = readFileSync(rootManifestPath, 'utf8');
+    for (const stmt of collectTomlStatements(rootRaw)) {
+      if (stmt.kind === 'entry' && stmt.header.trim() === 'workspace') {
+        const membersMatch = /^members\s*=\s*\[([\s\S]*)\]$/.exec(stmt.text);
+        if (membersMatch) {
+          for (const itemMatch of membersMatch[1].matchAll(/(['"])([^'"]+)\1/g)) {
+            const pattern = itemMatch[2].replace(/\/+$/, '');
+            if (pattern.endsWith('/*')) {
+              const baseRel = pattern.slice(0, -2);
+              const baseDir = path.join(rootDir, baseRel);
+              if (!existsSync(baseDir)) continue;
+              for (const entry of readdirSync(baseDir, { withFileTypes: true })) {
+                if (!entry.isDirectory()) continue;
+                const candidate = path.posix.join(baseRel, entry.name, 'Cargo.toml');
+                if (existsSync(path.join(rootDir, candidate))) {
+                  manifests.add(candidate);
+                }
+              }
+            } else {
+              const candidate = path.posix.join(pattern, 'Cargo.toml');
+              if (existsSync(path.join(rootDir, candidate))) {
+                manifests.add(candidate);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  for (const relPath of FORBIDDEN_NORMAL_DEPS.keys()) {
+    if (existsSync(path.join(rootDir, relPath))) manifests.add(relPath);
+  }
+  for (const relPath of FORBIDDEN_TRANSITIVE_NORMAL_DEPS.keys()) {
+    if (existsSync(path.join(rootDir, relPath))) manifests.add(relPath);
+  }
+
+  return Array.from(manifests);
+}
+
+function checkTransitiveDeps(
+  rootDir,
+  workspaceAliases,
+  metadataNormalDeps,
+  reportedDirectByRel,
+  violations,
+) {
+  const relPaths = discoverWorkspaceManifestRelPaths(rootDir);
 
   const depsByCrate = new Map();
   const relByCrate = new Map();
   const crateByRel = new Map();
 
-  for (const entry of readdirSync(cratesDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const relPath = `crates/${entry.name}/Cargo.toml`;
+  for (const relPath of relPaths) {
     const absPath = path.join(rootDir, relPath);
-    if (!existsSync(absPath)) continue;
     const raw = readFileSync(absPath, 'utf8');
-    const pkgName = extractPackageName(raw, entry.name);
+    const pkgName = extractPackageName(raw, path.basename(path.dirname(relPath)));
     depsByCrate.set(pkgName, extractNormalDeps(raw, workspaceAliases));
     relByCrate.set(pkgName, relPath);
     crateByRel.set(relPath, pkgName);
   }
 
-  // Enrich with `cargo metadata` when a full locked workspace and `cargo` are available.
-  const metadataNormalDeps = loadCargoMetadataNormalDeps(rootDir);
+  // Enrich with `cargo metadata` for every workspace package returned by Cargo
+  // (including non-`crates/` packages such as `tools/workspace-hack`), while
+  // keeping starting points scoped to FORBIDDEN_TRANSITIVE_NORMAL_DEPS.
   if (metadataNormalDeps) {
     for (const [pkgName, metaDeps] of metadataNormalDeps.entries()) {
-      const existing = depsByCrate.get(pkgName);
-      if (!existing) continue;
+      let existing = depsByCrate.get(pkgName);
+      if (!existing) {
+        existing = [];
+        depsByCrate.set(pkgName, existing);
+      }
       const seen = new Set(existing.map((d) => d.name));
       for (const depName of metaDeps) {
         if (!seen.has(depName)) {
@@ -711,7 +877,7 @@ function checkTransitiveDeps(rootDir, workspaceAliases, violations) {
     const startCrate = crateByRel.get(relPath);
     if (!startCrate) continue;
     const directDeps = depsByCrate.get(startCrate) ?? [];
-    const directForbidden = FORBIDDEN_NORMAL_DEPS.get(relPath) ?? new Set();
+    const reportedDirect = reportedDirectByRel.get(relPath) ?? new Set();
     const visited = new Set([startCrate]);
     const reported = new Set();
     const queue = [];
@@ -727,8 +893,14 @@ function checkTransitiveDeps(rootDir, workspaceAliases, violations) {
         violations.push(
           `${relPath}:${directLine}: forbidden transitive normal dependency \`${crate}\` via \`${chain.join(' -> ')}\``,
         );
-      } else if (chain.length === 2 && !directForbidden.has(crate) && forbiddenSet.has(crate)) {
-        // Caught if forbiddenSet is stricter than direct FORBIDDEN_NORMAL_DEPS.
+      } else if (
+        chain.length === 2 &&
+        !reportedDirect.has(crate) &&
+        forbiddenSet.has(crate) &&
+        !reported.has(crate)
+      ) {
+        reported.add(crate);
+        // Caught if forbiddenSet is stricter than direct FORBIDDEN_NORMAL_DEPS or discovered via metadata.
         violations.push(
           `${relPath}:${directLine}: forbidden normal dependency \`${crate}\` via \`${chain.join(' -> ')}\``,
         );
@@ -745,6 +917,8 @@ function checkTransitiveDeps(rootDir, workspaceAliases, violations) {
 export function checkHotpathFirewall(rootDir = ROOT) {
   const violations = [];
   const workspaceAliases = extractWorkspaceDepAliases(rootDir);
+  const metadataNormalDeps = loadCargoMetadataNormalDeps(rootDir);
+  const reportedDirectByRel = new Map();
 
   for (const [relPath, forbiddenSet] of FORBIDDEN_NORMAL_DEPS.entries()) {
     let raw;
@@ -753,10 +927,18 @@ export function checkHotpathFirewall(rootDir = ROOT) {
     } catch {
       continue;
     }
-    checkManifest(relPath, raw, forbiddenSet, workspaceAliases, violations);
+    const reportedDirect = checkManifest(
+      relPath,
+      raw,
+      forbiddenSet,
+      workspaceAliases,
+      metadataNormalDeps,
+      violations,
+    );
+    reportedDirectByRel.set(relPath, reportedDirect);
   }
 
-  checkTransitiveDeps(rootDir, workspaceAliases, violations);
+  checkTransitiveDeps(rootDir, workspaceAliases, metadataNormalDeps, reportedDirectByRel, violations);
 
   const eventBusRel = 'crates/cc-lb-control/src/event_bus.rs';
   try {

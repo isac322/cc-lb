@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -209,5 +210,49 @@ test('resolves Cargo workspace aliases for direct and transitive exclusions', ()
     assert.match(joined, /cc-lb-provider-gemini\/Cargo\.toml:3:.*cc-lb-storage-api.*cc-lb-control -> cc-lb-storage-api/);
   } finally {
     rmSync(subtableAndMultilineDir, { recursive: true, force: true });
+  }
+});
+
+test('rejects quoted dependency keys and transitive edges through non-crates workspace members', () => {
+  const dir = makeTempRepo({
+    'Cargo.toml':
+      '[workspace]\nmembers = ["crates/*", "tools/workspace-hack", "packages/custom-helper"]\n[workspace.dependencies]\ncc-lb-workspace-hack = { path = "tools/workspace-hack" }\n',
+    'tools/workspace-hack/Cargo.toml':
+      '[package]\nname = "cc-lb-workspace-hack"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nsqlx = { path = "../../crates/stub-sqlx" }\n',
+    'tools/workspace-hack/src/lib.rs': '',
+    'packages/custom-helper/Cargo.toml':
+      '[package]\nname = "custom-helper"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\naxum = { path = "../../crates/stub-axum" }\n',
+    'packages/custom-helper/src/lib.rs': '',
+    'crates/stub-sqlx/Cargo.toml':
+      '[package]\nname = "sqlx"\nversion = "0.1.0"\nedition = "2021"\n',
+    'crates/stub-sqlx/src/lib.rs': '',
+    'crates/stub-axum/Cargo.toml':
+      '[package]\nname = "axum"\nversion = "0.1.0"\nedition = "2021"\n',
+    'crates/stub-axum/src/lib.rs': '',
+    'crates/cc-lb-provider-gemini/Cargo.toml':
+      '[package]\nname = "cc-lb-provider-gemini"\nversion = "0.1.0"\nedition = "2021"\n',
+    'crates/cc-lb-provider-gemini/src/lib.rs': '',
+    'crates/cc-lb-provider-openai/Cargo.toml':
+      '[package]\nname = "cc-lb-provider-openai"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\n\'cc-lb-provider-gemini\' = { path = "../cc-lb-provider-gemini" }\ncc-lb-workspace-hack.workspace = true\ncustom-helper = { path = "../../packages/custom-helper" }\n',
+    'crates/cc-lb-provider-openai/src/lib.rs': '',
+  });
+  try {
+    // Exercise the offline Cargo metadata enrichment path when Cargo.lock exists.
+    const lockRes = spawnSync('cargo', ['generate-lockfile', '--offline', '--manifest-path', path.join(dir, 'Cargo.toml')], {
+      encoding: 'utf8',
+    });
+    assert.equal(lockRes.status, 0, `cargo generate-lockfile failed: ${lockRes.stderr}`);
+
+    const result = checkHotpathFirewall(dir);
+    assert.equal(result.ok, false, 'Expected quoted direct and non-crates transitive violations');
+    const joined = result.violations.join('\n');
+    const geminiDirect = result.violations.filter((v) =>
+      /cc-lb-provider-openai\/Cargo\.toml:.*forbidden normal dependency `cc-lb-provider-gemini`/.test(v),
+    );
+    assert.equal(geminiDirect.length, 1, `Expected deduplicated direct report, got:\n${joined}`);
+    assert.match(joined, /cc-lb-provider-openai\/Cargo\.toml:.*forbidden transitive normal dependency `sqlx` via `cc-lb-provider-openai -> cc-lb-workspace-hack -> sqlx`/);
+    assert.match(joined, /cc-lb-provider-openai\/Cargo\.toml:.*forbidden transitive normal dependency `axum` via `cc-lb-provider-openai -> custom-helper -> axum`/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
