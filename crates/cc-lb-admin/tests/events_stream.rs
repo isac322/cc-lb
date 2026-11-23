@@ -9,11 +9,12 @@ use axum::{
 };
 use cc_lb_config::Config;
 use cc_lb_control::{InMemoryBus, RequestEventBus};
-use cc_lb_domain::{InternalError, RoutingTrace};
+use cc_lb_domain::InternalError;
 use cc_lb_request_log::{
     RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestDiagnostics, RequestEventKind,
     RequestEventPartial, RequestEventUpdate, StorageTailUpdate,
 };
+use cc_lb_routing_trace::RoutingTrace;
 use cc_lb_storage_api::{
     RequestEvent, RequestEventStore, UpstreamCreate, UpstreamKind, UpstreamStore,
 };

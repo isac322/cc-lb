@@ -1,7 +1,6 @@
+use cc_lb_domain::SubscriptionTier;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-use crate::SubscriptionTier;
 
 /// Per-candidate subscription urgency, cache, and cost signal.
 #[derive(Clone, Debug, Serialize, Deserialize)]

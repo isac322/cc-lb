@@ -44,9 +44,9 @@ const FIVE_HOUR_RESET_SECS: u64 = 18_000;
 const SEVEN_DAY_RESET_SECS: u64 = 604_800;
 
 fn candidate_urgency_for(
-    trace: &cc_lb_domain::SubscriptionPreferenceTrace,
+    trace: &cc_lb_routing_trace::SubscriptionPreferenceTrace,
     upstream_id: Uuid,
-) -> &cc_lb_domain::CandidateUrgency {
+) -> &cc_lb_routing_trace::CandidateUrgency {
     trace
         .candidates
         .iter()

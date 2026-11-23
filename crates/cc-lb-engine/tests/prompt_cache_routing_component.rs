@@ -270,10 +270,10 @@ fn candidate<'a>(
 }
 
 fn trace_row<'a>(
-    rows: &'a [cc_lb_domain::CandidateUrgency],
+    rows: &'a [cc_lb_routing_trace::CandidateUrgency],
     upstream_id: Uuid,
     label: &str,
-) -> &'a cc_lb_domain::CandidateUrgency {
+) -> &'a cc_lb_routing_trace::CandidateUrgency {
     rows.iter()
         .find(|row| row.upstream_id == upstream_id)
         .unwrap_or_else(|| panic!("{label} urgency present"))

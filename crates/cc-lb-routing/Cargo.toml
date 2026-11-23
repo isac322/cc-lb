@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 bytes.workspace = true
 cc-lb-domain.workspace = true
+cc-lb-routing-trace.workspace = true
 cc-lb-upstream.workspace = true
 http.workspace = true
 serde = { workspace = true, features = ["derive"] }

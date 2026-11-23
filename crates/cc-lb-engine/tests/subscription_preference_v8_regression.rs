@@ -391,16 +391,16 @@ fn filter(candidates: &[UpstreamCandidate]) -> cc_lb_routing::FilterOutput {
 }
 
 fn candidate_tier(
-    trace: &cc_lb_domain::SubscriptionPreferenceTrace,
+    trace: &cc_lb_routing_trace::SubscriptionPreferenceTrace,
     upstream_id: Uuid,
 ) -> SubscriptionTier {
     candidate_urgency(trace, upstream_id).tier
 }
 
 fn candidate_urgency(
-    trace: &cc_lb_domain::SubscriptionPreferenceTrace,
+    trace: &cc_lb_routing_trace::SubscriptionPreferenceTrace,
     upstream_id: Uuid,
-) -> &cc_lb_domain::CandidateUrgency {
+) -> &cc_lb_routing_trace::CandidateUrgency {
     trace
         .candidates
         .iter()

@@ -70,9 +70,9 @@ use cc_lb_domain::{
     CacheLookbackPrefix, CachePricingSummary, CacheScore, CredentialKind, InternalError,
     InternalErrorKind, InternalErrorStage, NativeCachePricing, NativeCachePricingComponent,
     NativeCachePricingLifetime, NativeCachePricingProvider, NativeCachePricingRate,
-    NativeCachePricingStatus, PrefixBytes, Principal, PrincipalKind, Provider, RoutingTrace,
-    StageDecision, TerminalDecision, TerminalStrategy, TtlClass, Upstream, UpstreamCandidate,
-    UpstreamKind as CandidateUpstreamKind, WarmCacheEntry, vertex_origin,
+    NativeCachePricingStatus, PrefixBytes, Principal, PrincipalKind, Provider, TerminalStrategy,
+    TtlClass, Upstream, UpstreamCandidate, UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
+    vertex_origin,
 };
 use cc_lb_quota::build_subscription_quota_samples;
 use cc_lb_quota::rate_limit_headers::{
@@ -84,6 +84,7 @@ use cc_lb_request_log::{
     RequestCacheLookbackPrefix,
 };
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RouteDecision};
+use cc_lb_routing_trace::{RoutingTrace, StageDecision, TerminalDecision};
 use cc_lb_storage_api::{
     PrincipalKind as DbPrincipalKind, PrincipalKindLite, PromptCacheObservationRecord,
     ProviderPromptCacheObservationRecord, StoredApiKeyRecord, UpstreamAffinityBinding,

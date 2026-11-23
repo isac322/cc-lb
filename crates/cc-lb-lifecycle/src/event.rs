@@ -167,7 +167,7 @@ pub enum LifecycleEvent {
         event_id: EventId,
         result: Result<RouteInfo, RouteFailure>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        routing_trace: Option<cc_lb_domain::RoutingTrace>,
+        routing_trace: Option<cc_lb_routing_trace::RoutingTrace>,
     },
     /// Rate-limit / quota decision.
     LimitDecision {

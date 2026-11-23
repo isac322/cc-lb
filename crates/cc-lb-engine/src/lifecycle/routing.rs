@@ -54,7 +54,7 @@ impl FilterPipelineResult {
 
 pub(super) fn subscription_preference_trace(
     routing_trace: &RoutingTrace,
-) -> Option<&cc_lb_domain::SubscriptionPreferenceTrace> {
+) -> Option<&cc_lb_routing_trace::SubscriptionPreferenceTrace> {
     routing_trace
         .stages
         .iter()
@@ -64,7 +64,7 @@ pub(super) fn subscription_preference_trace(
 pub(crate) fn resolved_candidate_urgency(
     routing_trace: &RoutingTrace,
     resolved_upstream_id: Uuid,
-) -> Option<&cc_lb_domain::CandidateUrgency> {
+) -> Option<&cc_lb_routing_trace::CandidateUrgency> {
     subscription_preference_trace(routing_trace).and_then(|trace| {
         trace
             .candidates
@@ -174,7 +174,7 @@ pub(super) fn execute_filter_pipeline(
 pub(super) struct ValidatedOutput {
     pub(super) kept_upstream_ids: Vec<Uuid>,
     pub(super) reason: String,
-    pub(super) subscription_preference: Option<cc_lb_domain::SubscriptionPreferenceTrace>,
+    pub(super) subscription_preference: Option<cc_lb_routing_trace::SubscriptionPreferenceTrace>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

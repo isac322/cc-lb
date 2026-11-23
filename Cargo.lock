@@ -640,6 +640,7 @@ dependencies = [
  "cc-lb-pricing",
  "cc-lb-quota",
  "cc-lb-request-log",
+ "cc-lb-routing-trace",
  "cc-lb-runtime-wasmtime",
  "cc-lb-scheduler",
  "cc-lb-signer-anthropic-oauth",
@@ -819,6 +820,7 @@ dependencies = [
  "cc-lb-request-log",
  "cc-lb-routing",
  "cc-lb-routing-eval",
+ "cc-lb-routing-trace",
  "cc-lb-signer-anthropic-key",
  "cc-lb-signer-vertex",
  "cc-lb-storage-api",
@@ -887,6 +889,7 @@ dependencies = [
  "cc-lb-pricing",
  "cc-lb-quota",
  "cc-lb-request-log",
+ "cc-lb-routing-trace",
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
@@ -919,6 +922,7 @@ dependencies = [
  "bytes",
  "cc-lb-domain",
  "cc-lb-request-log",
+ "cc-lb-routing-trace",
  "cc-lb-workspace-hack",
  "serde",
  "serde_json",
@@ -1089,6 +1093,7 @@ name = "cc-lb-request-log"
 version = "2.2.1"
 dependencies = [
  "cc-lb-domain",
+ "cc-lb-routing-trace",
  "cc-lb-workspace-hack",
  "chrono",
  "serde",
@@ -1102,6 +1107,7 @@ version = "2.2.1"
 dependencies = [
  "bytes",
  "cc-lb-domain",
+ "cc-lb-routing-trace",
  "cc-lb-upstream",
  "cc-lb-workspace-hack",
  "http",
@@ -1117,6 +1123,7 @@ dependencies = [
  "bytes",
  "cc-lb-domain",
  "cc-lb-routing",
+ "cc-lb-routing-trace",
  "cc-lb-workspace-hack",
  "http",
  "metrics",
@@ -1127,6 +1134,17 @@ dependencies = [
  "tiktoken-rs",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "cc-lb-routing-trace"
+version = "2.2.1"
+dependencies = [
+ "cc-lb-domain",
+ "cc-lb-workspace-hack",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 
@@ -1365,6 +1383,7 @@ dependencies = [
  "cc-lb-oauth-protocol",
  "cc-lb-plugin-wire",
  "cc-lb-request-log",
+ "cc-lb-routing-trace",
  "cc-lb-storage-sqlite",
  "cc-lb-workspace-hack",
  "serde",
@@ -1438,6 +1457,7 @@ dependencies = [
  "cc-lb-clock",
  "cc-lb-domain",
  "cc-lb-plugin-wire",
+ "cc-lb-routing-trace",
  "cc-lb-storage-api",
  "cc-lb-workspace-hack",
  "metrics",

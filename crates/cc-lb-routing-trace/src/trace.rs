@@ -1,18 +1,8 @@
+use cc_lb_domain::TerminalStrategy;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::SubscriptionPreferenceTrace;
-
-/// Strategy for selecting a terminal upstream.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum TerminalStrategy {
-    /// Select first available upstream.
-    #[default]
-    FirstPick,
-    /// Select a router plugin at random.
-    Random,
-}
 
 /// Decision made at a single routing stage.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

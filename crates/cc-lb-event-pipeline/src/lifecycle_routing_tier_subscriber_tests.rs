@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use cc_lb_domain::{
-    PrincipalKindLite, RoutingTrace, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
-};
+use cc_lb_domain::{PrincipalKindLite, SubscriptionTier};
 use cc_lb_lifecycle::{EventId, LifecycleEvent, RouteFailure, RouteInfo, TerminationReason};
 use cc_lb_observability::NoopMetricsHook;
+use cc_lb_routing_trace::{RoutingTrace, StageDecision, SubscriptionPreferenceTrace};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 

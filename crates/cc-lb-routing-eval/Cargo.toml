@@ -13,6 +13,7 @@ test-utils = []
 blake3.workspace = true
 cc-lb-domain.workspace = true
 cc-lb-routing.workspace = true
+cc-lb-routing-trace.workspace = true
 metrics.workspace = true
 parking_lot = "0.13"
 serde.workspace = true
