@@ -5,14 +5,14 @@ use super::{ClientRequestKind, RequestView};
 /// Header and endpoint signals used to classify Codex CLI / Desktop / SDK
 /// traffic on `/v1/responses` and `/v1/responses/compact`.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct CodexRequestSignals<'a> {
-    pub(crate) subagent_header: Option<&'a str>,
-    pub(crate) guardian_header: bool,
-    pub(crate) has_parent_thread: bool,
-    pub(crate) originator: Option<&'a str>,
-    pub(crate) user_agent: Option<&'a str>,
-    pub(crate) has_codex_turn_metadata: bool,
-    pub(crate) is_compact_endpoint: bool,
+pub struct CodexRequestSignals<'a> {
+    pub subagent_header: Option<&'a str>,
+    pub guardian_header: bool,
+    pub has_parent_thread: bool,
+    pub originator: Option<&'a str>,
+    pub user_agent: Option<&'a str>,
+    pub has_codex_turn_metadata: bool,
+    pub is_compact_endpoint: bool,
 }
 
 fn ascii_contains_ignore_case(haystack: &str, needle: &str) -> bool {

@@ -37,7 +37,7 @@ pub(crate) fn cache_threshold_from_byte_len(
     None
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 thread_local! {
     static TOKENIZER_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -62,16 +62,12 @@ impl PrefixTokenizer {
 
     /// Count tokens in plain text.
     pub fn count_tokens(&self, text: &str) -> usize {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-utils"))]
         TOKENIZER_CALLS.with(|calls| calls.set(calls.get() + 1));
         self.encoder.encode_ordinary(text).len()
     }
 
-    pub(crate) fn meets_cache_threshold(
-        &self,
-        serialized_prefix: &[u8],
-        token_threshold: usize,
-    ) -> bool {
+    pub fn meets_cache_threshold(&self, serialized_prefix: &[u8], token_threshold: usize) -> bool {
         if let Some(decision) =
             cache_threshold_from_byte_len(prefix_bytes_of(serialized_prefix), token_threshold)
         {
@@ -111,12 +107,12 @@ impl PrefixTokenizer {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub fn tokenizer_call_count() -> u64 {
     TOKENIZER_CALLS.with(std::cell::Cell::get)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub fn reset_tokenizer_call_count() {
     TOKENIZER_CALLS.with(|calls| calls.set(0));
 }

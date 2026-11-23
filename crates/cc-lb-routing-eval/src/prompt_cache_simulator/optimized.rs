@@ -195,20 +195,20 @@ struct ExactPrefixBatch {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct PromptCacheAnalysisTimings {
-    pub(crate) cache_structure_ms: Option<f64>,
-    pub(crate) cache_token_key_ms: Option<f64>,
-    pub(crate) cache_count_lookup_ms: Option<f64>,
-    pub(crate) cache_tokenizer_queue_ms: Option<f64>,
-    pub(crate) cache_serialize_ms: Option<f64>,
-    pub(crate) cache_tokenize_ms: Option<f64>,
+pub struct PromptCacheAnalysisTimings {
+    pub cache_structure_ms: Option<f64>,
+    pub cache_token_key_ms: Option<f64>,
+    pub cache_count_lookup_ms: Option<f64>,
+    pub cache_tokenizer_queue_ms: Option<f64>,
+    pub cache_serialize_ms: Option<f64>,
+    pub cache_tokenize_ms: Option<f64>,
 }
 
-pub(crate) struct PromptCacheAnalysisOutput {
-    pub(crate) analysis: V3PromptCacheAnalysis,
-    pub(crate) cacheable_breakpoint_prefix_keys: Vec<String>,
-    pub(crate) literal_cacheable_breakpoint_prefix_keys: Vec<String>,
-    pub(crate) timings: PromptCacheAnalysisTimings,
+pub struct PromptCacheAnalysisOutput {
+    pub analysis: V3PromptCacheAnalysis,
+    pub cacheable_breakpoint_prefix_keys: Vec<String>,
+    pub literal_cacheable_breakpoint_prefix_keys: Vec<String>,
+    pub timings: PromptCacheAnalysisTimings,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -738,7 +738,7 @@ fn analysis_output(
 }
 
 #[derive(Clone)]
-pub(crate) struct PromptCacheAnalysisExecutor {
+pub struct PromptCacheAnalysisExecutor {
     semaphore: Arc<Semaphore>,
     cache: Arc<PromptTokenCountCache>,
     #[cfg(test)]
@@ -770,7 +770,7 @@ impl Default for PromptCacheAnalysisExecutor {
 }
 
 impl PromptCacheAnalysisExecutor {
-    pub(crate) async fn analyze(
+    pub async fn analyze(
         &self,
         value: Arc<Value>,
         canonical_model: String,

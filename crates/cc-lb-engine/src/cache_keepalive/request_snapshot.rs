@@ -1286,4 +1286,98 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn keepalive_preserves_adaptive_thinking_effort_and_tool_choice_prefix() {
+        let mut base = serde_json::json!({
+            "model": "claude-opus-5-5",
+            "max_tokens": 8193,
+            "stream": true,
+            "output_config": {"effort": "medium"},
+            "tool_choice": {"type": "any"},
+            "tools": [{
+                "name": "lookup",
+                "description": "lookup",
+                "input_schema": {"type": "object"},
+                "cache_control": {"type": "ephemeral"}
+            }],
+            "system": [{
+                "type": "text",
+                "text": "system",
+                "cache_control": {"type": "ephemeral"}
+            }],
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "message",
+                    "cache_control": {"type": "ephemeral"}
+                }]
+            }]
+        });
+        base["thinking"] = serde_json::json!({
+            "type": "adaptive",
+            "display": "summarized"
+        });
+
+        let snapshot = RequestSnapshot::capture(
+            "https://api.anthropic.com/v1/messages".parse().unwrap(),
+            Method::POST,
+            HeaderMap::new(),
+            Bytes::from(serde_json::to_vec(&base).unwrap()),
+            Uuid::nil(),
+            CacheTtl::Ttl5m,
+            1_000_000,
+        )
+        .unwrap();
+        let keepalive: serde_json::Value =
+            serde_json::from_slice(&snapshot.build_keepalive_body().unwrap()).unwrap();
+
+        let live = crate::prompt_cache_simulator::analyze_v3_prompt_cache(
+            &base,
+            crate::model_resolution::canonical_model_id(
+                cc_lb_domain::Provider::Anthropic,
+                "claude-opus-5-5",
+            ),
+        );
+        let renewal = crate::prompt_cache_simulator::analyze_v3_prompt_cache(
+            &keepalive,
+            crate::model_resolution::canonical_model_id(
+                cc_lb_domain::Provider::Anthropic,
+                "claude-opus-5-5",
+            ),
+        );
+        assert_eq!(
+            live.breakpoints[2].prefix_key,
+            renewal.breakpoints[2].prefix_key
+        );
+
+        let mut disabled = base.clone();
+        disabled["thinking"] = serde_json::json!({"type": "disabled"});
+        let disabled = crate::prompt_cache_simulator::analyze_v3_prompt_cache(
+            &disabled,
+            crate::model_resolution::canonical_model_id(
+                cc_lb_domain::Provider::Anthropic,
+                "claude-opus-5-5",
+            ),
+        );
+        assert_ne!(
+            live.breakpoints[2].prefix_key,
+            disabled.breakpoints[2].prefix_key
+        );
+
+        let mut changed_tool_choice = keepalive;
+        changed_tool_choice["tool_choice"] = serde_json::json!({"type": "none"});
+        let changed_tool_choice = crate::prompt_cache_simulator::analyze_v3_prompt_cache(
+            &changed_tool_choice,
+            crate::model_resolution::canonical_model_id(
+                cc_lb_domain::Provider::Anthropic,
+                "claude-opus-5-5",
+            ),
+        );
+        assert_ne!(
+            live.breakpoints[2].prefix_key,
+            changed_tool_choice.breakpoints[2].prefix_key
+        );
+    }
 }

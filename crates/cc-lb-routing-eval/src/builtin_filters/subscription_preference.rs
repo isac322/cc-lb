@@ -396,7 +396,7 @@ fn relevant_base_windows(canonical_model: &str) -> &'static [&'static str] {
 /// Whether the filter's own assessment proves this OAuth candidate unusable
 /// (base quota exhausted with no usable overage). Failover uses it so a
 /// retry never revives an account the filter already knows is exhausted.
-pub(crate) fn subscription_hard_blocked(
+pub fn subscription_hard_blocked(
     canonical_model: &str,
     candidate: &UpstreamCandidate,
 ) -> bool {

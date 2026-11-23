@@ -1,7 +1,7 @@
 use super::{ClientRequestKind, RequestView};
 
 const OMP_MAIN_SYSTEM_MARKER: &str = "operating in the Oh My Pi coding harness";
-pub(crate) const OMP_ADVISOR_SYSTEM_MARKER: &str = "You shadow the main agent as a peer programmer";
+pub const OMP_ADVISOR_SYSTEM_MARKER: &str = "You shadow the main agent as a peer programmer";
 const OMP_AUTO_THINKING_SYSTEM_PREFIX: &str = "You are a difficulty classifier for a coding agent.";
 const OMP_SUBAGENT_PROMPT_PREFIX: &str = "Complete the assignment below, thoroughly:";
 

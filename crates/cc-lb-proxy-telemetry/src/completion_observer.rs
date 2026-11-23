@@ -1,13 +1,38 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use crate::terminal_observer::numeric_attribute;
 use arc_swap::ArcSwapOption;
 use opentelemetry::trace::{SpanId, TraceContextExt as _, TraceId};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::sync::watch;
 use tracing::{Dispatch, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+pub enum NumericAttribute {
+    Missing,
+    Integer(i64),
+    Unsigned(u64),
+}
+
+impl NumericAttribute {
+    pub fn as_value(&self) -> &dyn tracing::field::Value {
+        match self {
+            Self::Missing => &tracing::field::Empty,
+            Self::Integer(value) => value,
+            Self::Unsigned(value) => value,
+        }
+    }
+}
+
+pub fn numeric_attribute(value: Option<u64>) -> NumericAttribute {
+    match value {
+        None => NumericAttribute::Missing,
+        Some(value) => match i64::try_from(value) {
+            Ok(value) => NumericAttribute::Integer(value),
+            Err(_) => NumericAttribute::Unsigned(value),
+        },
+    }
+}
 
 const QUEUE_FULL_REASON: &str = "stream_completion_observer_full";
 const QUEUE_CLOSED_REASON: &str = "stream_completion_observer_closed";
@@ -16,7 +41,7 @@ const WORKER_PANIC_REASON: &str = "stream_completion_observer_worker_panic";
 /// Bounded so a stalled log sink sheds latency lines instead of growing memory.
 const COMPLETION_QUEUE_CAPACITY: usize = 4096;
 
-pub(crate) struct CompletionObserver {
+pub struct CompletionObserver {
     sender: ArcSwapOption<mpsc::Sender<Option<StreamCompletionLog>>>,
     completion: watch::Receiver<bool>,
     record_drop: DropRecorder,
@@ -25,7 +50,7 @@ pub(crate) struct CompletionObserver {
 type DropRecorder = fn(&'static str, u64);
 
 impl CompletionObserver {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::spawn(COMPLETION_QUEUE_CAPACITY, record_observation_drop)
     }
 
@@ -43,10 +68,7 @@ impl CompletionObserver {
         }
     }
 
-    pub(crate) fn enqueue(
-        &self,
-        log: StreamCompletionLog,
-    ) -> Result<(), CompletionObservationDrop> {
+    pub fn enqueue(&self, log: StreamCompletionLog) -> Result<(), CompletionObservationDrop> {
         let sender = self.sender.load();
         let Some(sender) = sender.as_ref() else {
             (self.record_drop)(QUEUE_CLOSED_REASON, 1);
@@ -65,7 +87,7 @@ impl CompletionObserver {
         }
     }
 
-    pub(crate) async fn shutdown(&self) {
+    pub async fn shutdown(&self) {
         let mut completion = self.completion.clone();
         if *completion.borrow() {
             return;
@@ -86,6 +108,12 @@ impl CompletionObserver {
     }
 }
 
+impl Default for CompletionObserver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for CompletionObserver {
     fn drop(&mut self) {
         self.sender.store(None);
@@ -93,12 +121,12 @@ impl Drop for CompletionObserver {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CompletionObservationDrop {
+pub enum CompletionObservationDrop {
     Full,
     Closed,
 }
 
-pub(crate) struct StreamCompletionLog {
+pub struct StreamCompletionLog {
     request_id: String,
     trace_id: Option<TraceId>,
     span_id: Option<SpanId>,
@@ -107,7 +135,7 @@ pub(crate) struct StreamCompletionLog {
 }
 
 impl StreamCompletionLog {
-    pub(crate) fn new(
+    pub fn new(
         request_id: String,
         span: &Span,
         latency: StreamLatency,
@@ -172,33 +200,33 @@ impl StreamCompletionLog {
     }
 }
 
-pub(crate) struct StreamLatency {
-    pub(crate) status: u16,
-    pub(crate) stream_first_chunk_ms: Option<u64>,
-    pub(crate) stream_message_start_ms: Option<u64>,
-    pub(crate) stream_content_block_start_ms: Option<u64>,
-    pub(crate) stream_first_content_delta_ms: Option<u64>,
-    pub(crate) stream_last_content_delta_ms: Option<u64>,
-    pub(crate) stream_message_stop_ms: Option<u64>,
-    pub(crate) stream_last_chunk_ms: Option<u64>,
+pub struct StreamLatency {
+    pub status: u16,
+    pub stream_first_chunk_ms: Option<u64>,
+    pub stream_message_start_ms: Option<u64>,
+    pub stream_content_block_start_ms: Option<u64>,
+    pub stream_first_content_delta_ms: Option<u64>,
+    pub stream_last_content_delta_ms: Option<u64>,
+    pub stream_message_stop_ms: Option<u64>,
+    pub stream_last_chunk_ms: Option<u64>,
     /// Provider-neutral output timing. The existing SSE/content fields below
     /// retain their Anthropic semantics for HTTP streams.
-    pub(crate) stream_first_output_ms: Option<u64>,
-    pub(crate) stream_last_output_ms: Option<u64>,
-    pub(crate) stream_event_count: u64,
-    pub(crate) stream_inter_output_avg_ms: Option<u64>,
-    pub(crate) provider_session_id: Option<String>,
-    pub(crate) provider_connection_id: Option<String>,
-    pub(crate) stream_total_ms: u64,
-    pub(crate) sse_event_count: u64,
-    pub(crate) content_delta_count: u64,
-    pub(crate) ping_count: u64,
-    pub(crate) inter_token_avg_ms: Option<u64>,
-    pub(crate) total_bytes: u64,
+    pub stream_first_output_ms: Option<u64>,
+    pub stream_last_output_ms: Option<u64>,
+    pub stream_event_count: u64,
+    pub stream_inter_output_avg_ms: Option<u64>,
+    pub provider_session_id: Option<String>,
+    pub provider_connection_id: Option<String>,
+    pub stream_total_ms: u64,
+    pub sse_event_count: u64,
+    pub content_delta_count: u64,
+    pub ping_count: u64,
+    pub inter_token_avg_ms: Option<u64>,
+    pub total_bytes: u64,
 }
 
 impl StreamLatency {
-    pub(crate) fn record_on_span(&self, span: &Span) {
+    pub fn record_on_span(&self, span: &Span) {
         record_optional(span, "stream_first_chunk_ms", self.stream_first_chunk_ms);
         record_optional(
             span,

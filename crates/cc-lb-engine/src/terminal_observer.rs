@@ -952,31 +952,7 @@ impl LifecycleContext {
 
 // OTLP integers are signed. Keep unrepresentable unsigned values on tracing's
 // original decimal-string path instead of truncating or rounding them.
-pub(crate) enum NumericAttribute {
-    Missing,
-    Integer(i64),
-    Unsigned(u64),
-}
-
-impl NumericAttribute {
-    pub(crate) fn as_value(&self) -> &dyn tracing::field::Value {
-        match self {
-            Self::Missing => &tracing::field::Empty,
-            Self::Integer(value) => value,
-            Self::Unsigned(value) => value,
-        }
-    }
-}
-
-pub(crate) fn numeric_attribute(value: Option<u64>) -> NumericAttribute {
-    match value {
-        None => NumericAttribute::Missing,
-        Some(value) => match i64::try_from(value) {
-            Ok(value) => NumericAttribute::Integer(value),
-            Err(_) => NumericAttribute::Unsigned(value),
-        },
-    }
-}
+pub(crate) use cc_lb_proxy_telemetry::completion_observer::numeric_attribute;
 
 fn record_terminal_span(
     span: &tracing::Span,

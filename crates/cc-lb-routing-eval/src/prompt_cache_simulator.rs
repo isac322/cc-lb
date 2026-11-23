@@ -14,20 +14,20 @@ use std::time::{Duration, Instant};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 use std::cell::Cell;
 
 use cc_lb_domain::PrefixBytes;
 
 use crate::tokenizer::{PrefixTokenizer, cache_threshold_from_byte_len, prefix_bytes_of};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 thread_local! {
     static BLOCK_DIGEST_CALLS: Cell<u64> = const { Cell::new(0) };
 }
 
 mod optimized;
 
-pub(crate) use optimized::{
+pub use optimized::{
     PromptCacheAnalysisExecutor, PromptCacheAnalysisOutput, PromptCacheAnalysisTimings,
 };
 /// Estimator identity of every [`PrefixBytes`] value this simulator produces.
@@ -576,15 +576,15 @@ pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3Prompt
     )
     .0
 }
-#[cfg(test)]
-pub(crate) fn analyze_v3_prompt_cache_literal(
+#[cfg(any(test, feature = "test-utils"))]
+pub fn analyze_v3_prompt_cache_literal(
     value: &Value,
     canonical_model: &str,
 ) -> V3PromptCacheAnalysis {
     analyze_v3_prompt_cache_with_policy(value, canonical_model, PromptCachePolicy::Literal).0
 }
 
-pub(super) fn analyze_v3_prompt_cache_with_policy(
+pub fn analyze_v3_prompt_cache_with_policy(
     value: &Value,
     canonical_model: &str,
     policy: PromptCachePolicy,
@@ -952,7 +952,7 @@ fn cache_control_ttl(value: &Value) -> Option<&str> {
 }
 
 fn block_digest(block: &CacheBlockRef<'_>, scratch: &mut SerializationScratch) -> [u8; 32] {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     BLOCK_DIGEST_CALLS.with(|calls| calls.set(calls.get() + 1));
     let bytes = scratch.serialize(&DigestBlockSerializer(block));
     let mut hasher = blake3::Hasher::new();
@@ -985,8 +985,8 @@ fn serialized_prefix<'a>(
         blocks,
     })
 }
-#[cfg(test)]
-pub(crate) fn cacheable_breakpoint_prefix_keys(
+#[cfg(any(test, feature = "test-utils"))]
+pub fn cacheable_breakpoint_prefix_keys(
     analysis: &V3PromptCacheAnalysis,
     canonical_model: &str,
     token_threshold: usize,
@@ -1000,7 +1000,7 @@ pub(crate) fn cacheable_breakpoint_prefix_keys(
     .0
 }
 
-pub(super) fn cacheable_breakpoint_prefix_keys_with_tokenize_duration(
+pub fn cacheable_breakpoint_prefix_keys_with_tokenize_duration(
     analysis: &V3PromptCacheAnalysis,
     canonical_model: &str,
     token_threshold: usize,
@@ -1016,7 +1016,7 @@ pub(super) fn cacheable_breakpoint_prefix_keys_with_tokenize_duration(
     )
 }
 
-pub(crate) fn cacheable_breakpoint_prefix_keys_for_breakpoints_with_duration(
+pub fn cacheable_breakpoint_prefix_keys_for_breakpoints_with_duration(
     analysis: &V3PromptCacheAnalysis,
     breakpoints: &[V3PromptCacheBreakpoint],
     canonical_model: &str,
@@ -1105,13 +1105,13 @@ fn source_name(source: V3PromptCacheBlockSource) -> &'static str {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn reset_block_digest_call_count() {
+#[cfg(any(test, feature = "test-utils"))]
+pub fn reset_block_digest_call_count() {
     BLOCK_DIGEST_CALLS.with(|calls| calls.set(0));
 }
 
-#[cfg(test)]
-pub(crate) fn block_digest_call_count() -> u64 {
+#[cfg(any(test, feature = "test-utils"))]
+pub fn block_digest_call_count() -> u64 {
     BLOCK_DIGEST_CALLS.with(Cell::get)
 }
 
@@ -1485,88 +1485,6 @@ mod tests {
         assert_ne!(
             omitted.breakpoints[0].prefix_key,
             disabled.breakpoints[0].prefix_key
-        );
-    }
-
-    #[test]
-    fn keepalive_preserves_adaptive_thinking_effort_and_tool_choice_prefix() {
-        let mut base = json!({
-            "model": "claude-opus-5-5",
-            "max_tokens": 8193,
-            "stream": true,
-            "output_config": {"effort": "medium"},
-            "tool_choice": {"type": "any"},
-            "tools": [{
-                "name": "lookup",
-                "description": "lookup",
-                "input_schema": {"type": "object"},
-                "cache_control": {"type": "ephemeral"}
-            }],
-            "system": [{
-                "type": "text",
-                "text": "system",
-                "cache_control": {"type": "ephemeral"}
-            }],
-            "messages": [{
-                "role": "user",
-                "content": [{
-                    "type": "text",
-                    "text": "message",
-                    "cache_control": {"type": "ephemeral"}
-                }]
-            }]
-        });
-        base["thinking"] = json!({
-            "type": "adaptive",
-            "display": "summarized"
-        });
-
-        let snapshot = crate::cache_keepalive::RequestSnapshot::capture(
-            "https://api.anthropic.com/v1/messages".parse().unwrap(),
-            http::Method::POST,
-            http::HeaderMap::new(),
-            bytes::Bytes::from(serde_json::to_vec(&base).unwrap()),
-            uuid::Uuid::nil(),
-            cc_lb_storage_api::CacheTtl::Ttl5m,
-            1_000_000,
-        )
-        .unwrap();
-        let keepalive: serde_json::Value =
-            serde_json::from_slice(&snapshot.build_keepalive_body().unwrap()).unwrap();
-
-        let live = analyze_v3_prompt_cache(
-            &base,
-            canonical_model_id(Provider::Anthropic, "claude-opus-5-5"),
-        );
-        let renewal = analyze_v3_prompt_cache(
-            &keepalive,
-            canonical_model_id(Provider::Anthropic, "claude-opus-5-5"),
-        );
-        assert_eq!(
-            live.breakpoints[2].prefix_key,
-            renewal.breakpoints[2].prefix_key
-        );
-
-        let mut disabled = base.clone();
-        disabled["thinking"] = json!({"type": "disabled"});
-        let disabled = analyze_v3_prompt_cache(
-            &disabled,
-            canonical_model_id(Provider::Anthropic, "claude-opus-5-5"),
-        );
-        assert_ne!(
-            live.breakpoints[2].prefix_key,
-            disabled.breakpoints[2].prefix_key
-        );
-
-        let mut changed_tool_choice = keepalive;
-        changed_tool_choice["tool_choice"] = json!({"type": "none"});
-        let changed_tool_choice = analyze_v3_prompt_cache(
-            &changed_tool_choice,
-            canonical_model_id(Provider::Anthropic, "claude-opus-5-5"),
-        );
-        assert_ne!(
-            live.breakpoints[2].prefix_key,
-            changed_tool_choice.breakpoints[2].prefix_key
         );
     }
 

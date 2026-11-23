@@ -374,7 +374,7 @@ fn codex_usage_and_header_credit_observations_drive_routing_and_keep_poll_restri
     use cc_lb_domain::{
         Principal, PrincipalKind, SubscriptionQuotaDataState, SubscriptionTier, UpstreamCandidate,
     };
-    use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
+    use cc_lb_routing_eval::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
     use cc_lb_routing::{FilterPlugin, RoutingContext};
 
     const OBSERVED: u64 = 1_700_000_000_000;

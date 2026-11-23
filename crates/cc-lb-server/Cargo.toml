@@ -63,6 +63,7 @@ cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-plugin-wire = { workspace = true, features = ["std"] }
 cc-lb-routing.workspace = true
+cc-lb-routing-eval.workspace = true
 cc-lb-quota.workspace = true
 cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-runtime-wasmtime = { workspace = true }

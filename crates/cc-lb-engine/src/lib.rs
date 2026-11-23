@@ -8,7 +8,7 @@ pub mod authn_rail;
 #[cfg(not(loom))]
 mod body_io_timing;
 #[cfg(not(loom))]
-pub mod builtin_filters;
+pub use cc_lb_routing_eval::builtin_filters;
 #[cfg(not(loom))]
 mod bulkhead;
 #[cfg(not(loom))]
@@ -18,7 +18,7 @@ mod circuit_breaker;
 #[cfg(not(loom))]
 mod codex_quota_observation;
 #[cfg(not(loom))]
-mod completion_observer;
+pub use cc_lb_proxy_telemetry::completion_observer;
 #[cfg(not(loom))]
 mod dns_cache;
 #[cfg(not(loom))]
@@ -32,7 +32,7 @@ mod gemini_oauth_catalog;
 #[cfg(not(loom))]
 mod hop_by_hop;
 #[cfg(not(loom))]
-pub mod instrumented_connector;
+pub use cc_lb_proxy_telemetry::instrumented_connector;
 #[cfg(not(loom))]
 pub mod lifecycle;
 pub mod lifecycle_api_key_metrics_subscriber;
@@ -50,13 +50,13 @@ pub mod lifecycle_subscription_quota_subscriber;
 mod limit_input_estimate;
 pub mod metrics_labels;
 #[cfg(not(loom))]
-pub mod model_resolution;
+pub use cc_lb_routing_eval::model_resolution;
 #[cfg(not(loom))]
 pub mod openai_compat;
 #[cfg(not(loom))]
 pub mod pg_notify_fanout;
 #[cfg(not(loom))]
-pub mod prompt_cache_simulator;
+pub use cc_lb_routing_eval::prompt_cache_simulator;
 #[cfg(not(loom))]
 mod provider_cache;
 pub(crate) mod provider_capability;
@@ -65,7 +65,7 @@ mod provider_image_tokens;
 #[cfg(not(loom))]
 mod provider_input_estimate;
 #[cfg(not(loom))]
-mod request_classification;
+pub use cc_lb_routing_eval::request_classification;
 pub mod request_context;
 #[cfg(not(loom))]
 pub use request_context::{CodexBackendSurface, ProviderScope, RequestContext};
@@ -73,7 +73,7 @@ pub use request_context::{CodexBackendSurface, ProviderScope, RequestContext};
 pub mod realtime_websocket;
 pub mod request_diagnostics_sink;
 #[cfg(not(loom))]
-pub mod request_timing;
+pub use cc_lb_proxy_telemetry::request_timing;
 #[cfg(not(loom))]
 pub(crate) mod response_transform;
 #[cfg(not(loom))]
@@ -87,7 +87,7 @@ pub mod subscription_quota_events;
 #[cfg(not(loom))]
 mod terminal_observer;
 #[cfg(not(loom))]
-pub mod tokenizer;
+pub use cc_lb_routing_eval::tokenizer;
 #[cfg(not(loom))]
 pub(crate) mod upstream_affinity;
 #[cfg(not(loom))]

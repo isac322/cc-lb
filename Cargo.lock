@@ -813,9 +813,11 @@ dependencies = [
  "cc-lb-oauth-protocol",
  "cc-lb-observability",
  "cc-lb-pricing",
+ "cc-lb-proxy-telemetry",
  "cc-lb-quota",
  "cc-lb-request-log",
  "cc-lb-routing",
+ "cc-lb-routing-eval",
  "cc-lb-signer-anthropic-key",
  "cc-lb-signer-vertex",
  "cc-lb-storage-api",
@@ -856,7 +858,6 @@ dependencies = [
  "syn 3.0.9",
  "tempfile",
  "thiserror 2.0.21",
- "tiktoken-rs",
  "tokio",
  "tokio-util",
  "tower",
@@ -1016,6 +1017,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-lb-proxy-telemetry"
+version = "2.2.1"
+dependencies = [
+ "arc-swap",
+ "cc-lb-observability",
+ "cc-lb-workspace-hack",
+ "http",
+ "opentelemetry",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
+]
+
+[[package]]
 name = "cc-lb-quota"
 version = "2.2.1"
 dependencies = [
@@ -1049,6 +1065,27 @@ dependencies = [
  "cc-lb-workspace-hack",
  "http",
  "serde",
+ "uuid",
+]
+
+[[package]]
+name = "cc-lb-routing-eval"
+version = "2.2.1"
+dependencies = [
+ "blake3",
+ "bytes",
+ "cc-lb-domain",
+ "cc-lb-routing",
+ "cc-lb-workspace-hack",
+ "http",
+ "metrics",
+ "parking_lot 0.13.0",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tiktoken-rs",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -1152,6 +1189,7 @@ dependencies = [
  "cc-lb-quota",
  "cc-lb-request-log",
  "cc-lb-routing",
+ "cc-lb-routing-eval",
  "cc-lb-runtime-wasmtime",
  "cc-lb-scheduler",
  "cc-lb-signer-anthropic-key",

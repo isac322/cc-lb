@@ -7,7 +7,7 @@ use std::time::Duration;
 /// Recorded explicitly so failure paths never have to infer "DNS ran" from
 /// `dns_ms` being non-zero or non-None.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DnsResolutionOutcome {
+pub enum DnsResolutionOutcome {
     /// The resolver returned at least one address.
     Resolved,
     /// The resolver returned an error; no TCP connect was attempted.
@@ -21,16 +21,16 @@ pub struct RequestStageTimings {
     pub connect_ms: Option<u64>,
     pub connection_reused: Option<bool>,
     /// Outcome of the most recent DNS resolution in this scope, if any ran.
-    pub(crate) dns_outcome: Option<DnsResolutionOutcome>,
+    pub dns_outcome: Option<DnsResolutionOutcome>,
     /// Number of DNS resolutions recorded in this scope. The connector diffs
     /// this counter around its inner call to attribute `dns_ms`/`dns_outcome`
     /// to the current connect attempt instead of a stale earlier resolution.
-    pub(crate) dns_attempts: u64,
+    pub dns_attempts: u64,
 }
 
 /// Point-in-time view of the DNS fields of [`RequestStageTimings`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct DnsSnapshot {
+pub struct DnsSnapshot {
     pub ms: Option<u64>,
     pub outcome: Option<DnsResolutionOutcome>,
     pub attempts: u64,
@@ -58,7 +58,7 @@ pub fn record_bulkhead_wait(elapsed: Duration) {
     });
 }
 
-pub(crate) fn record_dns(elapsed: Duration, outcome: DnsResolutionOutcome) {
+pub fn record_dns(elapsed: Duration, outcome: DnsResolutionOutcome) {
     let elapsed_ms = duration_to_ms(elapsed);
     update_current_timing(|timings| {
         timings.dns_ms = Some(elapsed_ms);
@@ -70,7 +70,7 @@ pub(crate) fn record_dns(elapsed: Duration, outcome: DnsResolutionOutcome) {
 /// Snapshot of the DNS fields of the current scope's timings.
 ///
 /// Outside a [`with_timings`] scope this returns the default (empty) snapshot.
-pub(crate) fn dns_snapshot() -> DnsSnapshot {
+pub fn dns_snapshot() -> DnsSnapshot {
     REQUEST_STAGE_TIMINGS
         .try_with(|ctx| {
             let timings = ctx.lock().unwrap();

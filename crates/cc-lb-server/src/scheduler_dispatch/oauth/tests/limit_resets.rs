@@ -6,7 +6,7 @@ use cc_lb_control::openai_limit_resets::{
 };
 use cc_lb_control::{LimitResetUsageRefresh, LimitResetUsageRefreshPort};
 use cc_lb_domain::{Principal, PrincipalKind, UpstreamCandidate};
-use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
+use cc_lb_routing_eval::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_routing::{FilterPlugin, RoutingContext};
 use cc_lb_storage_api::UpstreamSubscriptionQuotaStore;
 use serde_json::{Value, json};

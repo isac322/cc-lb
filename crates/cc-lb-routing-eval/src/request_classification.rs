@@ -5,16 +5,16 @@
 
 pub(crate) mod aside;
 pub(crate) mod claude_code;
-pub(crate) mod codex;
+pub mod codex;
 pub(crate) mod hermes;
-pub(crate) mod omp;
+pub mod omp;
 pub(crate) mod opencode;
 pub(crate) mod senpi;
 
 use serde_json::Value;
 
 /// Maximum number of bytes inspected from each system or user text block.
-pub(crate) const CLASSIFIER_TEXT_LIMIT: usize = 4_096;
+pub const CLASSIFIER_TEXT_LIMIT: usize = 4_096;
 
 /// Claude Code and OMP both send this attribution block in the inbound system prompt.
 const BILLING_TAG_PREFIX: &str = "x-anthropic-billing-header:";
@@ -291,8 +291,8 @@ const FAMILY_CLASSIFIERS: [FamilyClassifier; 6] = [
     claude_code::classify,
 ];
 
-#[cfg(test)]
-pub(crate) fn classify_client_request_kind(
+#[cfg(any(test, feature = "test-utils"))]
+pub fn classify_client_request_kind(
     value: Option<&Value>,
     observed_session_id: Option<&str>,
     parent_session_id: Option<&str>,
@@ -334,8 +334,8 @@ fn classify_explicit_request_class(raw: &str) -> Option<Option<ClientRequestKind
     .find_map(|(class, kind)| raw.eq_ignore_ascii_case(class).then_some(kind))
 }
 
-#[cfg(test)]
-pub(crate) fn classify_client_request_kind_with_class(
+#[cfg(any(test, feature = "test-utils"))]
+pub fn classify_client_request_kind_with_class(
     value: Option<&Value>,
     observed_session_id: Option<&str>,
     parent_session_id: Option<&str>,
@@ -352,7 +352,7 @@ pub(crate) fn classify_client_request_kind_with_class(
     )
 }
 
-pub(crate) fn classify_client_request_kind_with_signals(
+pub fn classify_client_request_kind_with_signals(
     value: Option<&Value>,
     observed_session_id: Option<&str>,
     parent_session_id: Option<&str>,
@@ -405,7 +405,7 @@ pub(crate) fn classify_client_request_kind_with_signals(
 
     (view.has_provenance() || explicit_class.is_some()).then(|| ClientRequestKind::Unknown.as_str())
 }
-pub(crate) fn is_thread_sticky_subagent_seed(
+pub fn is_thread_sticky_subagent_seed(
     value: &Value,
     observed_session_id: Option<&str>,
     parent_session_id: Option<&str>,

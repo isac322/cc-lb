@@ -1,0 +1,22 @@
+[package]
+name = "cc-lb-proxy-telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+arc-swap.workspace = true
+cc-lb-observability = { path = "../cc-lb-observability" }
+http.workspace = true
+opentelemetry.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tower.workspace = true
+tracing.workspace = true
+tracing-opentelemetry.workspace = true
+
+[dev-dependencies]
+cc-lb-workspace-hack.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util", "time"] }
+tower = { workspace = true, features = ["util"] }
