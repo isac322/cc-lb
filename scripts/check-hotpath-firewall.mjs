@@ -5,6 +5,7 @@
 // 2. `cc-lb-engine` must never re-introduce a `postgres` feature.
 // 3. `InMemoryBus` (`crates/cc-lb-control/src/event_bus.rs`) must never
 //    re-introduce `Mutex<Option<mpsc::Sender<LifecycleEvent>>>`.
+import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -328,6 +329,89 @@ function stripRustLineComment(line) {
   return idx === -1 ? line : line.slice(0, idx);
 }
 
+function countDelimiterBalance(text) {
+  let braceDepth = 0;
+  let bracketDepth = 0;
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inDouble) {
+      if (ch === '\\') escaped = true;
+      else if (ch === '"') inDouble = false;
+      continue;
+    }
+    if (inSingle) {
+      if (ch === '\'') inSingle = false;
+      continue;
+    }
+    if (ch === '\'') inSingle = true;
+    else if (ch === '"') inDouble = true;
+    else if (ch === '{') braceDepth += 1;
+    else if (ch === '}') braceDepth = Math.max(0, braceDepth - 1);
+    else if (ch === '[') bracketDepth += 1;
+    else if (ch === ']') bracketDepth = Math.max(0, bracketDepth - 1);
+  }
+  return { braceDepth, bracketDepth };
+}
+
+function collectTomlStatements(raw) {
+  const lines = raw.split(/\r?\n/);
+  const statements = [];
+  let sectionHeader = '';
+  let pending = null;
+  let braceDepth = 0;
+  let bracketDepth = 0;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const code = stripTomlComment(lines[i]).trim();
+    if (!code) continue;
+
+    if (!pending) {
+      if (code.startsWith('[') && !code.startsWith('[[')) {
+        const end = code.indexOf(']');
+        if (end !== -1) {
+          sectionHeader = code.slice(1, end).trim();
+          statements.push({ kind: 'header', header: sectionHeader, text: code, line: i + 1 });
+          continue;
+        }
+      }
+      pending = { header: sectionHeader, text: code, line: i + 1 };
+    } else {
+      pending.text = `${pending.text} ${code}`;
+    }
+
+    const balance = countDelimiterBalance(pending.text);
+    braceDepth = balance.braceDepth;
+    bracketDepth = balance.bracketDepth;
+    if (braceDepth === 0 && bracketDepth === 0) {
+      statements.push({
+        kind: 'entry',
+        header: pending.header,
+        text: pending.text,
+        line: pending.line,
+      });
+      pending = null;
+    }
+  }
+
+  if (pending) {
+    statements.push({
+      kind: 'entry',
+      header: pending.header,
+      text: pending.text,
+      line: pending.line,
+    });
+  }
+
+  return statements;
+}
+
 // Classify a TOML `[header]` as:
 // - `{ kind: 'normal-dep', subpkg?: string }`
 // - `{ kind: 'features' }`
@@ -352,58 +436,124 @@ function classifyHeader(header) {
   return { kind: 'other' };
 }
 
-function checkManifest(relPath, raw, forbiddenSet, violations) {
-  const lines = raw.split(/\r?\n/);
-  let section = { kind: 'other' };
-  let isEngine = relPath === 'crates/cc-lb-engine/Cargo.toml';
+function classifyWorkspaceHeader(header) {
+  const name = header.trim();
+  if (name === 'workspace.dependencies') {
+    return { kind: 'workspace-dep', subpkg: null };
+  }
+  if (name.startsWith('workspace.dependencies.')) {
+    return {
+      kind: 'workspace-dep',
+      subpkg: name.slice('workspace.dependencies.'.length).trim(),
+    };
+  }
+  return { kind: 'other' };
+}
 
-  for (let i = 0; i < lines.length; i += 1) {
-    const code = stripTomlComment(lines[i]).trim();
-    if (!code) continue;
+function updateDepRecordFromStatement(record, rhsOrSubkey, rhsValue) {
+  if (rhsOrSubkey === 'package') {
+    const strMatch = /^"([A-Za-z0-9_-]+)"$/.exec(rhsValue.trim());
+    if (strMatch) record.explicitPackage = strMatch[1];
+  } else if (rhsOrSubkey === 'path') {
+    const strMatch = /^"([^"]+)"$/.exec(rhsValue.trim());
+    if (strMatch) record.path = strMatch[1];
+  } else if (rhsOrSubkey === 'workspace') {
+    if (/^true\b/.test(rhsValue.trim())) record.usesWorkspace = true;
+  } else if (rhsOrSubkey === 'optional') {
+    if (/^true\b/.test(rhsValue.trim())) record.optional = true;
+  } else if (rhsOrSubkey === null) {
+    const pkgMatch = /\bpackage\s*=\s*"([A-Za-z0-9_-]+)"/.exec(rhsValue);
+    if (pkgMatch) record.explicitPackage = pkgMatch[1];
+    const pathMatch = /\bpath\s*=\s*"([^"]+)"/.exec(rhsValue);
+    if (pathMatch) record.path = pathMatch[1];
+    if (/\bworkspace\s*=\s*true\b/.test(rhsValue)) record.usesWorkspace = true;
+    if (/\boptional\s*=\s*true\b/.test(rhsValue)) record.optional = true;
+  }
+}
 
-    if (code.startsWith('[') && !code.startsWith('[[')) {
-      const end = code.indexOf(']');
-      if (end !== -1) {
-        section = classifyHeader(code.slice(1, end));
-        if (section.kind === 'normal-dep' && section.subpkg && forbiddenSet.has(section.subpkg)) {
-          violations.push(
-            `${relPath}:${i + 1}: forbidden normal dependency table [..dependencies.${section.subpkg}]`,
-          );
-        }
-        continue;
-      }
+function parseDottedAssignment(text) {
+  const eqIdx = text.indexOf('=');
+  if (eqIdx === -1) return null;
+  const lhs = text.slice(0, eqIdx).trim();
+  const rhs = text.slice(eqIdx + 1).trim();
+  const match = /^([A-Za-z0-9_-]+)(?:\.([A-Za-z0-9_-]+))?$/.exec(lhs);
+  if (!match) return null;
+  return { key: match[1], subkey: match[2] ?? null, rhs };
+}
+
+function extractWorkspaceDepAliases(rootDir) {
+  const rootManifestPath = path.join(rootDir, 'Cargo.toml');
+  if (!existsSync(rootManifestPath)) return new Map();
+
+  const raw = readFileSync(rootManifestPath, 'utf8');
+  const statements = collectTomlStatements(raw);
+  const byAlias = new Map();
+
+  const ensureRecord = (alias, line) => {
+    if (!byAlias.has(alias)) {
+      byAlias.set(alias, {
+        alias,
+        line,
+        explicitPackage: null,
+        path: null,
+      });
     }
+    return byAlias.get(alias);
+  };
 
-    if (section.kind === 'features' && isEngine) {
-      const keyMatch = /^([A-Za-z0-9_-]+)\s*=/.exec(code);
-      if (keyMatch && keyMatch[1] === 'postgres') {
-        violations.push(`${relPath}:${i + 1}: forbidden feature \`postgres\` in cc-lb-engine`);
-      }
+  for (const stmt of statements) {
+    const ws = classifyWorkspaceHeader(stmt.header);
+    if (ws.kind !== 'workspace-dep') continue;
+    if (stmt.kind === 'header') {
+      if (ws.subpkg) ensureRecord(ws.subpkg, stmt.line);
       continue;
     }
+    const parsed = parseDottedAssignment(stmt.text);
+    if (!parsed) continue;
+    if (ws.subpkg) {
+      const record = ensureRecord(ws.subpkg, stmt.line);
+      if (parsed.subkey === null) {
+        updateDepRecordFromStatement(record, parsed.key, parsed.rhs);
+      }
+    } else {
+      const record = ensureRecord(parsed.key, stmt.line);
+      updateDepRecordFromStatement(record, parsed.subkey, parsed.rhs);
+    }
+  }
 
-    if (section.kind === 'normal-dep') {
-      if (section.subpkg) {
-        const pkgMatch = /\bpackage\s*=\s*"([A-Za-z0-9_-]+)"/.exec(code);
-        if (pkgMatch && forbiddenSet.has(pkgMatch[1])) {
-          violations.push(
-            `${relPath}:${i + 1}: forbidden normal dependency package \`${pkgMatch[1]}\``,
-          );
+  const aliases = new Map();
+  for (const [alias, record] of byAlias.entries()) {
+    let resolved = record.explicitPackage;
+    if (!resolved && record.path) {
+      const targetManifest = path.join(rootDir, record.path, 'Cargo.toml');
+      if (existsSync(targetManifest)) {
+        resolved = extractPackageName(readFileSync(targetManifest, 'utf8'), alias);
+      }
+    }
+    aliases.set(alias, resolved ?? alias);
+  }
+  return aliases;
+}
+
+function checkManifest(relPath, raw, forbiddenSet, workspaceAliases, violations) {
+  const isEngine = relPath === 'crates/cc-lb-engine/Cargo.toml';
+  if (isEngine) {
+    for (const stmt of collectTomlStatements(raw)) {
+      if (stmt.kind === 'entry' && classifyHeader(stmt.header).kind === 'features') {
+        const keyMatch = /^([A-Za-z0-9_-]+)\s*=/.exec(stmt.text);
+        if (keyMatch && keyMatch[1] === 'postgres') {
+          violations.push(`${relPath}:${stmt.line}: forbidden feature \`postgres\` in cc-lb-engine`);
         }
-        continue;
       }
-      const depMatch = /^([A-Za-z0-9_-]+)(?:\.[A-Za-z0-9_.-]+)?\s*=/.exec(code);
-      if (depMatch && forbiddenSet.has(depMatch[1])) {
-        violations.push(
-          `${relPath}:${i + 1}: forbidden normal dependency \`${depMatch[1]}\``,
-        );
-      }
-      const renamedMatch = /\bpackage\s*=\s*"([A-Za-z0-9_-]+)"/.exec(code);
-      if (renamedMatch && forbiddenSet.has(renamedMatch[1])) {
-        violations.push(
-          `${relPath}:${i + 1}: forbidden renamed normal dependency \`${renamedMatch[1]}\``,
-        );
-      }
+    }
+  }
+
+  for (const dep of extractNormalDeps(raw, workspaceAliases)) {
+    if (forbiddenSet.has(dep.name)) {
+      const aliasNote = dep.rawKey !== dep.name ? ` (aliased as \`${dep.rawKey}\`)` : '';
+      violations.push(
+        `${relPath}:${dep.line}: forbidden normal dependency \`${dep.name}\`${aliasNote}`,
+      );
     }
   }
 }
@@ -427,46 +577,101 @@ function extractPackageName(raw, fallbackName) {
   return fallbackName;
 }
 
-function extractNormalDeps(raw) {
-  const lines = raw.split(/\r?\n/);
-  let section = { kind: 'other' };
-  const deps = [];
+function extractNormalDeps(raw, workspaceAliases = new Map()) {
+  const statements = collectTomlStatements(raw);
+  const byKey = new Map();
+  const order = [];
 
-  for (let i = 0; i < lines.length; i += 1) {
-    const code = stripTomlComment(lines[i]).trim();
-    if (!code) continue;
-
-    if (code.startsWith('[') && !code.startsWith('[[')) {
-      const end = code.indexOf(']');
-      if (end !== -1) {
-        section = classifyHeader(code.slice(1, end));
-        if (section.kind === 'normal-dep' && section.subpkg) {
-          deps.push({ name: section.subpkg, line: i + 1, subtable: true });
-        }
-        continue;
-      }
+  const ensureRecord = (rawKey, line) => {
+    if (!byKey.has(rawKey)) {
+      const record = {
+        rawKey,
+        line,
+        explicitPackage: null,
+        usesWorkspace: false,
+        optional: false,
+      };
+      byKey.set(rawKey, record);
+      order.push(record);
     }
+    return byKey.get(rawKey);
+  };
 
+  for (const stmt of statements) {
+    const section = classifyHeader(stmt.header);
     if (section.kind !== 'normal-dep') continue;
-    if (section.subpkg) {
-      const pkgMatch = /\bpackage\s*=\s*"([A-Za-z0-9_-]+)"/.exec(code);
-      if (pkgMatch) {
-        const last = deps.at(-1);
-        if (last && last.subtable) last.name = pkgMatch[1];
+
+    if (stmt.kind === 'header') {
+      if (section.subpkg) {
+        ensureRecord(section.subpkg, stmt.line);
       }
       continue;
     }
 
-    const depMatch = /^([A-Za-z0-9_-]+)(?:\.[A-Za-z0-9_.-]+)?\s*=/.exec(code);
-    if (depMatch) {
-      const renamedMatch = /\bpackage\s*=\s*"([A-Za-z0-9_-]+)"/.exec(code);
-      deps.push({ name: renamedMatch ? renamedMatch[1] : depMatch[1], line: i + 1 });
+    const parsed = parseDottedAssignment(stmt.text);
+    if (!parsed) continue;
+    if (section.subpkg) {
+      const record = ensureRecord(section.subpkg, stmt.line);
+      if (parsed.subkey === null) {
+        updateDepRecordFromStatement(record, parsed.key, parsed.rhs);
+      }
+    } else {
+      const record = ensureRecord(parsed.key, stmt.line);
+      updateDepRecordFromStatement(record, parsed.subkey, parsed.rhs);
     }
   }
-  return deps;
+
+  return order.map((record) => {
+    let resolvedName = record.rawKey;
+    if (record.explicitPackage) {
+      resolvedName = record.explicitPackage;
+    } else if (record.usesWorkspace && workspaceAliases.has(record.rawKey)) {
+      resolvedName = workspaceAliases.get(record.rawKey);
+    }
+    return {
+      name: resolvedName,
+      rawKey: record.rawKey,
+      line: record.line,
+      optional: record.optional,
+      usesWorkspace: record.usesWorkspace,
+    };
+  });
 }
 
-function checkTransitiveDeps(rootDir, violations) {
+function loadCargoMetadataNormalDeps(rootDir) {
+  const manifestPath = path.join(rootDir, 'Cargo.toml');
+  const lockPath = path.join(rootDir, 'Cargo.lock');
+  if (!existsSync(manifestPath) || !existsSync(lockPath)) {
+    return null;
+  }
+  const result = spawnSync(
+    'cargo',
+    ['metadata', '--no-deps', '--offline', '--format-version', '1', '--manifest-path', manifestPath],
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+  );
+  if (result.error || result.status !== 0 || !result.stdout) {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    return null;
+  }
+  const map = new Map();
+  for (const pkg of parsed.packages ?? []) {
+    const normal = [];
+    for (const dep of pkg.dependencies ?? []) {
+      if (dep.kind === null || dep.kind === undefined) {
+        normal.push(dep.name);
+      }
+    }
+    map.set(pkg.name, normal);
+  }
+  return map;
+}
+
+function checkTransitiveDeps(rootDir, workspaceAliases, violations) {
   const cratesDir = path.join(rootDir, 'crates');
   if (!existsSync(cratesDir)) return;
 
@@ -481,9 +686,25 @@ function checkTransitiveDeps(rootDir, violations) {
     if (!existsSync(absPath)) continue;
     const raw = readFileSync(absPath, 'utf8');
     const pkgName = extractPackageName(raw, entry.name);
-    depsByCrate.set(pkgName, extractNormalDeps(raw));
+    depsByCrate.set(pkgName, extractNormalDeps(raw, workspaceAliases));
     relByCrate.set(pkgName, relPath);
     crateByRel.set(relPath, pkgName);
+  }
+
+  // Enrich with `cargo metadata` when a full locked workspace and `cargo` are available.
+  const metadataNormalDeps = loadCargoMetadataNormalDeps(rootDir);
+  if (metadataNormalDeps) {
+    for (const [pkgName, metaDeps] of metadataNormalDeps.entries()) {
+      const existing = depsByCrate.get(pkgName);
+      if (!existing) continue;
+      const seen = new Set(existing.map((d) => d.name));
+      for (const depName of metaDeps) {
+        if (!seen.has(depName)) {
+          seen.add(depName);
+          existing.push({ name: depName, rawKey: depName, line: 1, optional: false, usesWorkspace: false });
+        }
+      }
+    }
   }
 
   for (const [relPath, forbiddenSet] of FORBIDDEN_TRANSITIVE_NORMAL_DEPS.entries()) {
@@ -523,6 +744,7 @@ function checkTransitiveDeps(rootDir, violations) {
 
 export function checkHotpathFirewall(rootDir = ROOT) {
   const violations = [];
+  const workspaceAliases = extractWorkspaceDepAliases(rootDir);
 
   for (const [relPath, forbiddenSet] of FORBIDDEN_NORMAL_DEPS.entries()) {
     let raw;
@@ -531,10 +753,10 @@ export function checkHotpathFirewall(rootDir = ROOT) {
     } catch {
       continue;
     }
-    checkManifest(relPath, raw, forbiddenSet, violations);
+    checkManifest(relPath, raw, forbiddenSet, workspaceAliases, violations);
   }
 
-  checkTransitiveDeps(rootDir, violations);
+  checkTransitiveDeps(rootDir, workspaceAliases, violations);
 
   const eventBusRel = 'crates/cc-lb-control/src/event_bus.rs';
   try {
