@@ -6,6 +6,7 @@ ROOT_DIR=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 EVIDENCE_DIR="$ROOT_DIR/target/test-evidence/multi-replica"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-task37-${RANDOM}}"
+MULTI_REPLICA_MODE="${CC_LB_MULTI_REPLICA_MODE:-monolith}"
 POSTGRES_URL="${CC_LB_MULTI_REPLICA_POSTGRES_URL:-}"
 ADMIN_TOKEN="00000000-0000-4000-8000-000000000037"
 MASTER_KEY="0000000000000000000000000000000000000000000000000000000000000000"
@@ -19,9 +20,11 @@ METRICS_A_PORT=8003
 PROXY_B_PORT=8889
 ADMIN_B_PORT=8002
 METRICS_B_PORT=8004
+ADMIN_METRICS_PORT=8005
 FAKE_PORT=18888
 A_PID=''
 B_PID=''
+ADMIN_PID=''
 FAKE_PID=''
 TMP_DIR=''
 
@@ -55,16 +58,21 @@ capture_evidence() {
   if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
     cp "$TMP_DIR/A.log" "$EVIDENCE_DIR/A.log" 2>/dev/null || true
     cp "$TMP_DIR/B.log" "$EVIDENCE_DIR/B.log" 2>/dev/null || true
+    cp "$TMP_DIR/admin.log" "$EVIDENCE_DIR/admin.log" 2>/dev/null || true
     cp "$TMP_DIR/fake-anthropic.log" "$EVIDENCE_DIR/fake-anthropic.log" 2>/dev/null || true
   fi
   curl -fsS "http://127.0.0.1:$METRICS_A_PORT/metrics" > "$EVIDENCE_DIR/A-final-metrics.txt" 2>/dev/null || true
   curl -fsS "http://127.0.0.1:$METRICS_B_PORT/metrics" > "$EVIDENCE_DIR/B-final-metrics.txt" 2>/dev/null || true
+  if [ "$MULTI_REPLICA_MODE" = "split" ]; then
+    curl -fsS "http://127.0.0.1:$ADMIN_METRICS_PORT/metrics" > "$EVIDENCE_DIR/admin-final-metrics.txt" 2>/dev/null || true
+  fi
 }
 
 cleanup() {
   capture_evidence
   cleanup_pid_tree "$A_PID"
   cleanup_pid_tree "$B_PID"
+  cleanup_pid_tree "$ADMIN_PID"
   cleanup_pid_tree "$FAKE_PID"
   DOCKER_HOST=tcp://localhost:2375 docker compose -f "$COMPOSE_FILE" -p "$COMPOSE_PROJECT" down -v >/dev/null 2>&1 || true
   if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
@@ -72,6 +80,10 @@ cleanup() {
   fi
 }
 trap cleanup EXIT INT TERM
+
+if [ "$MULTI_REPLICA_MODE" != "monolith" ] && [ "$MULTI_REPLICA_MODE" != "split" ]; then
+  fail "CC_LB_MULTI_REPLICA_MODE must be 'monolith' or 'split', got '$MULTI_REPLICA_MODE'"
+fi
 
 if [ -z "$POSTGRES_URL" ]; then
   warn_skip "CC_LB_MULTI_REPLICA_POSTGRES_URL not set"
@@ -117,10 +129,11 @@ for raw in sys.argv[1:]:
 PY
 }
 
-wait_for_healthz() {
+wait_for_http_ok() {
   local port=$1
   local name=$2
-  python3 - "$port" "$name" <<'PY'
+  local path=$3
+  python3 - "$port" "$name" "$path" <<'PY'
 import sys
 import time
 import urllib.error
@@ -128,22 +141,31 @@ import urllib.request
 
 port = int(sys.argv[1])
 name = sys.argv[2]
-url = f"http://127.0.0.1:{port}/healthz"
+path = sys.argv[3]
+url = f"http://127.0.0.1:{port}{path}"
 deadline = time.time() + 60
 last = None
 while time.time() < deadline:
     try:
         with urllib.request.urlopen(url, timeout=1) as response:
             if response.status == 200:
-                print(f"{name} healthz ok on :{port}")
+                print(f"{name} {path} ok on :{port}")
                 sys.exit(0)
             last = f"HTTP {response.status}"
     except (OSError, urllib.error.URLError) as exc:
         last = exc
     time.sleep(0.25)
-print(f"{name} healthz failed on :{port}: {last}", file=sys.stderr)
+print(f"{name} {path} failed on :{port}: {last}", file=sys.stderr)
 sys.exit(1)
 PY
+}
+
+wait_for_admin_health() {
+  wait_for_http_ok "$1" "$2" "/admin/health"
+}
+
+wait_for_healthz() {
+  wait_for_http_ok "$1" "$2" "/healthz"
 }
 
 wait_for_postgres() {
@@ -327,26 +349,56 @@ sys.exit(1)
 PY
 }
 
-start_replica_a() {
+start_split_admin() {
   CC_LB_MASTER_KEY="$MASTER_KEY" \
   CC_LB_ADMIN_TOKEN="$ADMIN_TOKEN" \
-  CC_LB_CLUSTER_TOKEN="$CLUSTER_TOKEN" \
-  CC_LB_DATA_DIR="$TMP_DIR/A-data" \
+  CC_LB_DATA_DIR="$TMP_DIR/admin-data" \
   RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
-  cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$TMP_DIR/A.toml" --data-dir "$TMP_DIR/A-data" \
-    > "$TMP_DIR/A.log" 2>&1 &
-  A_PID=$!
+  cargo run -q -p cc-lb-admin-server --no-default-features --features postgres -- serve --config "$TMP_DIR/admin.toml" --data-dir "$TMP_DIR/admin-data" \
+    > "$TMP_DIR/admin.log" 2>&1 &
+  ADMIN_PID=$!
+}
+
+start_replica_a() {
+  if [ "$MULTI_REPLICA_MODE" = "split" ]; then
+    CC_LB_MASTER_KEY="$MASTER_KEY" \
+    CC_LB_CLUSTER_TOKEN="$CLUSTER_TOKEN" \
+    CC_LB_DATA_DIR="$TMP_DIR/A-data" \
+    RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
+    cargo run -q -p cc-lb-proxy --no-default-features --features postgres -- serve --config "$TMP_DIR/A.toml" --data-dir "$TMP_DIR/A-data" --role proxy-worker \
+      > "$TMP_DIR/A.log" 2>&1 &
+    A_PID=$!
+  else
+    CC_LB_MASTER_KEY="$MASTER_KEY" \
+    CC_LB_ADMIN_TOKEN="$ADMIN_TOKEN" \
+    CC_LB_CLUSTER_TOKEN="$CLUSTER_TOKEN" \
+    CC_LB_DATA_DIR="$TMP_DIR/A-data" \
+    RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
+    cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$TMP_DIR/A.toml" --data-dir "$TMP_DIR/A-data" \
+      > "$TMP_DIR/A.log" 2>&1 &
+    A_PID=$!
+  fi
 }
 
 start_replica_b() {
-  CC_LB_MASTER_KEY="$MASTER_KEY" \
-  CC_LB_ADMIN_TOKEN="$ADMIN_TOKEN" \
-  CC_LB_CLUSTER_TOKEN="$CLUSTER_TOKEN" \
-  CC_LB_DATA_DIR="$TMP_DIR/B-data" \
-  RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
-  cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$TMP_DIR/B.toml" --data-dir "$TMP_DIR/B-data" \
-    > "$TMP_DIR/B.log" 2>&1 &
-  B_PID=$!
+  if [ "$MULTI_REPLICA_MODE" = "split" ]; then
+    CC_LB_MASTER_KEY="$MASTER_KEY" \
+    CC_LB_CLUSTER_TOKEN="$CLUSTER_TOKEN" \
+    CC_LB_DATA_DIR="$TMP_DIR/B-data" \
+    RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
+    cargo run -q -p cc-lb-proxy --no-default-features --features postgres -- serve --config "$TMP_DIR/B.toml" --data-dir "$TMP_DIR/B-data" --role proxy \
+      > "$TMP_DIR/B.log" 2>&1 &
+    B_PID=$!
+  else
+    CC_LB_MASTER_KEY="$MASTER_KEY" \
+    CC_LB_ADMIN_TOKEN="$ADMIN_TOKEN" \
+    CC_LB_CLUSTER_TOKEN="$CLUSTER_TOKEN" \
+    CC_LB_DATA_DIR="$TMP_DIR/B-data" \
+    RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
+    cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$TMP_DIR/B.toml" --data-dir "$TMP_DIR/B-data" \
+      > "$TMP_DIR/B.log" 2>&1 &
+    B_PID=$!
+  fi
 }
 
 create_principal() {
@@ -424,9 +476,13 @@ PY
 
 assert_upstream_active_on_b() {
   local output="$TMP_DIR/status-b.json"
+  local status_port="$ADMIN_B_PORT"
+  if [ "$MULTI_REPLICA_MODE" = "split" ]; then
+    status_port="$ADMIN_A_PORT"
+  fi
   local code
-  code=$(request_with_retry GET "http://127.0.0.1:$ADMIN_B_PORT/admin/v1/status" '' "$output") || true
-  assert_status_200 "$code" "B status"
+  code=$(request_with_retry GET "http://127.0.0.1:$status_port/admin/v1/status" '' "$output") || true
+  assert_status_200 "$code" "status on :$status_port"
   python3 - "$output" "$UPSTREAM_NAME" <<'PY'
 import json
 import sys
@@ -468,17 +524,28 @@ assert_audit_entries_landed() {
 }
 
 mkdir -p "$EVIDENCE_DIR"
-ensure_port_free "$PROXY_A_PORT" "$ADMIN_A_PORT" "$METRICS_A_PORT" "$PROXY_B_PORT" "$ADMIN_B_PORT" "$METRICS_B_PORT" "$FAKE_PORT"
+ensure_port_free "$PROXY_A_PORT" "$ADMIN_A_PORT" "$METRICS_A_PORT" "$PROXY_B_PORT" "$ADMIN_B_PORT" "$METRICS_B_PORT" "$ADMIN_METRICS_PORT" "$FAKE_PORT"
 DOCKER_HOST=tcp://localhost:2375 docker compose -f "$COMPOSE_FILE" -p "$COMPOSE_PROJECT" up -d postgres
 wait_for_postgres
 psql_exec 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
 
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cc-lb-multi-replica.XXXXXX")
-mkdir -p "$TMP_DIR/A-data" "$TMP_DIR/B-data"
+mkdir -p "$TMP_DIR/A-data" "$TMP_DIR/B-data" "$TMP_DIR/admin-data"
 write_config "$TMP_DIR/A.toml" "$PROXY_A_PORT" "$ADMIN_A_PORT" "$METRICS_A_PORT" "$TMP_DIR/A-data"
 write_config "$TMP_DIR/B.toml" "$PROXY_B_PORT" "$ADMIN_B_PORT" "$METRICS_B_PORT" "$TMP_DIR/B-data"
+if [ "$MULTI_REPLICA_MODE" = "split" ]; then
+  write_config "$TMP_DIR/admin.toml" "$PROXY_A_PORT" "$ADMIN_A_PORT" "$ADMIN_METRICS_PORT" "$TMP_DIR/admin-data"
+fi
 
 start_fake_anthropic
+if [ "$MULTI_REPLICA_MODE" = "split" ]; then
+  start_split_admin
+  if ! wait_for_admin_health "$ADMIN_A_PORT" "split admin"; then
+    printf '%s\n' '--- split admin log ---' >&2
+    cat "$TMP_DIR/admin.log" >&2 || true
+    fail "split admin did not become healthy"
+  fi
+fi
 start_replica_a
 start_replica_b
 if ! wait_for_healthz "$PROXY_A_PORT" "replica A"; then

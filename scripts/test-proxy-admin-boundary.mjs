@@ -60,3 +60,19 @@ test('rejects cc_lb_admin reference inside non-allowlisted server file cron.rs',
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('rejects forbidden cc-lb-admin dependency in split proxy and runtime-sync crates', () => {
+  for (const crate of ['cc-lb-proxy', 'cc-lb-runtime-sync']) {
+    const dir = makeTempRepo({
+      [`crates/${crate}/Cargo.toml`]: `[package]\nname = "${crate}"\n[dependencies]\ncc-lb-admin = { path = "../cc-lb-admin" }\n`,
+      'crates/cc-lb-server/src/app.rs': 'use cc_lb_admin::{AdminState, router};\n',
+    });
+    try {
+      const result = checkBoundary(dir);
+      assert.equal(result.ok, false);
+      assert.match(result.violations[0], new RegExp(`crates/${crate}/Cargo\\.toml`));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});

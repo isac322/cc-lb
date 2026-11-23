@@ -29,6 +29,8 @@ const FORBIDDEN_CARGO_CRATES = [
   'cc-lb-storage-api',
   'cc-lb-storage-sqlite',
   'cc-lb-storage-postgres',
+  'cc-lb-proxy',
+  'cc-lb-runtime-sync',
 ];
 
 const SERVER_ADMIN_COMPOSITION_FILES = new Set([

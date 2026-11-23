@@ -1,20 +1,26 @@
 # syntax=docker/dockerfile:1
 #
-# Multi-stage, multi-arch, cross-compiling build for the `cc-lb` server binary.
+# Multi-stage, multi-arch, cross-compiling build for cc-lb binaries:
+#   * `distroless` (default): monolith `cc-lb` binary (proxy + scheduler + admin/SPA)
+#   * `proxy`: split data-plane `cc-lb-proxy` binary (no admin server, no SPA)
+#   * `admin`: split control-plane `cc-lb-admin` binary (DB-only admin API + optional SPA)
+#   * `smoke`: runs `/usr/local/bin/cc-lb --version` on Alpine in BuildKit
 #
 # Design:
 #   * tonistiigi/xx drives Rust cross-compilation. The compiler always runs on
 #     the native BUILDPLATFORM and cross-compiles to TARGETPLATFORM — no QEMU
 #     emulation of the toolchain, so `linux/amd64,linux/arm64` builds are fast.
-#   * The builder is Alpine (musl-native), so `cc-lb` links a fully static musl
-#     binary that runs on `scratch`/distroless-static with zero shared libs.
-#   * The dashboard SPA is built once on BUILDPLATFORM, then copied into every
-#     Rust target build for validation and embedding by `cc-lb-admin/build.rs`.
+#   * The builder is Alpine (musl-native), so binaries link statically with zero
+#     shared libraries and run on distroless-static.
+#   * The dashboard SPA is built once on BUILDPLATFORM, then copied only into
+#     the stages that embed it (`builder` and `builder-admin`, never `builder-proxy`).
 #   * TLS uses rustls + webpki-roots (CA roots compiled into the binary), so the
-#     final image needs no system CA certificates.
+#     final images need no system CA certificates.
 #
 # Build (single arch, load locally):
 #   docker buildx build --load --build-arg GIT_SHA=$(git rev-parse HEAD) -t cc-lb .
+#   docker buildx build --load --target proxy --build-arg GIT_SHA=$(git rev-parse HEAD) -t cc-lb-proxy .
+#   docker buildx build --load --target admin --build-arg GIT_SHA=$(git rev-parse HEAD) -t cc-lb-admin .
 # Build (multi-arch, push — requires a docker-container builder):
 #   docker buildx build --platform linux/amd64,linux/arm64 \
 #     --build-arg GIT_SHA=$(git rev-parse HEAD) -t <registry>/cc-lb:<tag> --push .
@@ -51,8 +57,8 @@ RUN if [ "${SKIP_SPA}" != "1" ]; then \
       VITE_CC_LB_VERSION="${cc_lb_version}" bun run --shell=bun build; \
     fi
 
-# ---- Builder: cross toolchain, source, and the compile ----
-FROM --platform=$BUILDPLATFORM rust:1.99.1-alpine AS builder
+# ---- Shared Rust cross-compilation base (no admin SPA assets) ----
+FROM --platform=$BUILDPLATFORM rust:1.99.1-alpine AS builder-base
 SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 
 # clang/lld: xx uses clang as the cross linker driver for every target
@@ -75,40 +81,13 @@ ARG TARGETPLATFORM
 # (ring, zstd, brotli, libsqlite3-sys).
 RUN xx-apk add --no-cache musl-dev gcc
 
-# The cross target is installed alongside the compile below. That gives Cargo
-# and sccache the same immutable Rust toolchain snapshot.
 WORKDIR /src
 
 # Keep Cargo's package-cache lock in the same shared mount as its registry and
 # git data. /usr/local/cargo/bin remains on PATH; this only relocates CARGO_HOME.
 ENV CARGO_HOME=/cargo-home
 
-# Build-time metadata / knobs.
-ARG GIT_SHA=""
-ARG BUILD_TIME_EPOCH=""
-ARG SOURCE_DATE_EPOCH=""
-# The default ships BOTH storage backends in one binary; the backend is chosen at
-# runtime via `[storage] kind` ("sqlite" or "postgres"). Override to slim, e.g.
-# `--build-arg FEATURES=sqlite`.
-# Optional Cargo parallelism override; unset lets Cargo size itself to the builder.
-ARG CARGO_BUILD_JOBS
-ARG FEATURES="sqlite,postgres"
-# Set to 1 to build without embedding the dashboard SPA (drops `embed-spa`).
-ARG SKIP_SPA="0"
-# sccache BuildKit cache mount backend. Hosted CI and release builds pass
-# SCCACHE_LOCAL_MOUNT=1 and REQUIRE_SCCACHE=1 so cache failures are visible;
-# standalone builds retain an explicit uncached fallback.
-ARG SCCACHE_LOCAL_MOUNT="0"
-ARG REQUIRE_SCCACHE="0"
-ARG CARGO_PROFILE_RELEASE_OPT_LEVEL=""
-ARG CARGO_PROFILE_RELEASE_LTO=""
-ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS=""
-
 COPY . .
-
-# The BUILDPLATFORM SPA is a target-independent input. BuildKit evaluates its
-# stage once, then reuses this dist tree across the multi-platform Rust fan-out.
-COPY --link --from=admin-spa /src/web/dist /src/web/dist
 
 # The repository's x86_64-musl linker is for standalone Cargo builds. When an
 # x86_64 Alpine builder also targets linux/amd64, Cargo applies that target
@@ -125,15 +104,17 @@ RUN config=.cargo/config.toml; \
     fi; \
     ! grep -q '^\[target\.x86_64-unknown-linux-musl\]$' "$config"
 
-# Cargo's package-cache lock lives at $CARGO_HOME/.package-cache. Mounting the
-# whole CARGO_HOME lets Cargo serialize only registry/git mutation while the
-# four target builds compile concurrently. This cache contains target-neutral
-# package sources; target-specific compiler output remains in sccache.
-# The target dir is intentionally NOT cache-mounted: the prebuilt SPA is copied
-# into the fresh source tree before each compile, avoiding stale build-script
-# fingerprints that could omit its embedded assets.
-RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
-    --mount=type=cache,id=sccache,sharing=shared,target=/sccache <<'EOF'
+# Shared parameterized Cargo + sccache cross-compile driver invoked by the
+# per-binary builder stages below.
+RUN <<'EOF'
+cat <<'SCRIPT' > /usr/local/bin/docker-cargo-build.sh
+#!/bin/ash
+set -exuo pipefail
+
+target_pkg="$1"
+target_bin="$2"
+spa_mode="$3"
+
 if [ -n "${GIT_SHA:-}" ]; then
   CC_LB_GIT_SHA="$(printf '%s' "${GIT_SHA}" | cut -c1-7)"
 else
@@ -175,17 +156,21 @@ if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
 else
   export CARGO_BUILD_JOBS
 fi
+
 effective_features="${FEATURES}"
-if [ "${SKIP_SPA}" = "1" ]; then
-  rm -rf /src/web/dist
-  export CC_LB_ADMIN_SKIP_SPA=1
-else
-  export CC_LB_ADMIN_PREBUILT_SPA=1
-  case ",${effective_features}," in
-    *,embed-spa,*) ;;
-    *) effective_features="${effective_features:+${effective_features},}embed-spa" ;;
-  esac
+if [ "${spa_mode}" = "spa" ]; then
+  if [ "${SKIP_SPA:-0}" = "1" ]; then
+    rm -rf /src/web/dist
+    export CC_LB_ADMIN_SKIP_SPA=1
+  else
+    export CC_LB_ADMIN_PREBUILT_SPA=1
+    case ",${effective_features}," in
+      *,embed-spa,*) ;;
+      *) effective_features="${effective_features:+${effective_features},}embed-spa" ;;
+    esac
+  fi
 fi
+
 # Install and verify the target in the same snapshot Cargo uses. Resolve rustc
 # to its concrete binary before sccache receives it: the daemon must not
 # re-execute rustup's cwd-sensitive proxy outside /src.
@@ -195,21 +180,12 @@ sysroot="$(rustc --print sysroot)"
 test -n "$(find "$sysroot/lib/rustlib/$target/lib" -maxdepth 1 -type f -name 'libcore-*.rlib' -print -quit)"
 RUSTC="$(rustup which rustc)"
 export RUSTC
-# The `cc` crate canonicalises the Rust triple before putting it in CFLAGS:
-# armv7-unknown-linux-musleabihf becomes --target=arm-unknown-linux-musleabihf.
-# That later flag overrides the one in xx's clang .cfg, and Alpine's clang 22
-# then looks for the gcc runtime under the arm-* triple and misses the armv7
-# sysroot copy, so anything that *links* during a build script dies with
-# "cannot open crtbeginS.o" / "unable to find library -lgcc". tikv-jemalloc-sys
-# hits this because its autotools configure link-tests the compiler. cc appends
-# CFLAGS_<triple> after its own flags, so re-stating the real triple there wins.
-# No-op on targets whose Rust and LLVM triples already agree.
+# Re-state the full triple in CFLAGS_<triple> so Alpine clang finds armv7 gcc runtime.
 export "CFLAGS_$(echo "$target" | tr '-' '_')=--target=$target"
 if [ "${SCCACHE_LOCAL_MOUNT:-0}" = "1" ]; then
   export SCCACHE_DIR=/sccache
   export SCCACHE_CACHE_SIZE="1G"
   export RUSTC_WRAPPER=sccache SCCACHE_IDLE_TIMEOUT=0 CARGO_INCREMENTAL=0
-  # Keep the daemon isolated from every other target container and its sysroot.
   export SCCACHE_SERVER_UDS=/tmp/sccache.sock
   export SCCACHE_LOG=warn SCCACHE_ERROR_LOG=/tmp/sccache-error.log
   mkdir -p "${SCCACHE_DIR}"
@@ -218,19 +194,19 @@ if [ "${SCCACHE_LOCAL_MOUNT:-0}" = "1" ]; then
   echo "sccache: local BuildKit mount backend enabled (dir=${SCCACHE_DIR})"
 else
   echo "sccache: disabled - compiling uncached"
-  if [ "${REQUIRE_SCCACHE}" = "1" ]; then
+  if [ "${REQUIRE_SCCACHE:-0}" = "1" ]; then
     echo "sccache is required for this build" >&2
     exit 1
   fi
 fi
+
 build_status=0
 xx-cargo build --release --locked \
-  -p cc-lb-server \
+  -p "${target_pkg}" --bin "${target_bin}" \
   --no-default-features --features "${effective_features}" \
   --config 'target."cfg(all())".rustflags = ["-C", "link-arg=-Wl,--threads=2"]' \
   --target-dir /src/target || build_status=$?
- # Finish all asynchronous S3 writes before the container exits. Bound the flush
- # so a cold-cache backlog fails this build instead of consuming the CI cap.
+
 cache_status=0
 if [ -n "${RUSTC_WRAPPER:-}" ]; then
   if ! sccache --show-stats; then
@@ -243,22 +219,10 @@ if [ -n "${RUSTC_WRAPPER:-}" ]; then
   if [ "${cache_timeouts:-0}" -gt 0 ]; then
     echo "::warning::sccache reported ${cache_timeouts} cache timeouts; affected compilations fell back to local compilation"
   fi
-  # Generic "Cache errors" is deliberately NOT gated. It counts compile requests
-  # whose hash-key preprocessing exited non-zero (sccache server.rs returns
-  # CompileResult::Error only from the generate_hash_key ProcessError arm), and
-  # every occurrence here is an autoconf feature probe: instrumented runs
-  # 35638161308 and 35641747730 captured exactly 8 per target on all four
-  # targets, every one of them compiling `conftest.c` with jemalloc's
-  # `-Werror -herror_on_warning` configure flags. Those probes are supposed to
-  # fail. They are counted in neither hits nor misses, which is why
-  # "Cache hits rate (C/C++)" stays at 100%. Gating them would fail every build.
-  # Storage faults are a different counter and stay fail-closed below. See #565.
   cache_errors="$(awk '$1 == "Cache" && $2 == "errors" && $3 ~ /^[0-9]+$/ { print $3; exit }' /tmp/sccache-stats.txt)"
   dump_error_log=0
   if [ "${cache_errors:-0}" -gt 8 ]; then
     echo "::warning::sccache reported ${cache_errors} cache errors on ${target}, above the 8 expected autoconf conftest probes"
-    # The individual entries log at debug only, so the dump below shows them
-    # only after SCCACHE_LOG above is raised to warn,sccache::server=debug.
     dump_error_log=1
   fi
   if grep -Eq '^Cache (read errors|write errors)[[:space:]]+[1-9][0-9]*$' /tmp/sccache-stats.txt; then
@@ -273,10 +237,72 @@ if [ -n "${RUSTC_WRAPPER:-}" ]; then
 fi
 if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi
 if [ "$cache_status" -ne 0 ]; then exit "$cache_status"; fi
-triple="$target"
-install -Dm0755 "/src/target/${triple}/release/cc-lb" /out/cc-lb
-xx-verify --static /out/cc-lb
+install -Dm0755 "/src/target/${target}/release/${target_bin}" "/out/${target_bin}"
+xx-verify --static "/out/${target_bin}"
+SCRIPT
+chmod 0755 /usr/local/bin/docker-cargo-build.sh
 EOF
+
+# ---- Builder: monolith `cc-lb` server (preserves `builder` target for CI) ----
+FROM builder-base AS builder
+SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
+
+ARG GIT_SHA=""
+ARG BUILD_TIME_EPOCH=""
+ARG SOURCE_DATE_EPOCH=""
+ARG CARGO_BUILD_JOBS
+ARG FEATURES="sqlite,postgres"
+ARG SKIP_SPA="0"
+ARG SCCACHE_LOCAL_MOUNT="0"
+ARG REQUIRE_SCCACHE="0"
+ARG CARGO_PROFILE_RELEASE_OPT_LEVEL=""
+ARG CARGO_PROFILE_RELEASE_LTO=""
+ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS=""
+
+COPY --link --from=admin-spa /src/web/dist /src/web/dist
+RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
+    --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
+    /usr/local/bin/docker-cargo-build.sh cc-lb-server cc-lb spa
+
+# ---- Builder: split `cc-lb-proxy` data-plane binary (never receives SPA assets) ----
+FROM builder-base AS builder-proxy
+SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
+
+ARG GIT_SHA=""
+ARG BUILD_TIME_EPOCH=""
+ARG SOURCE_DATE_EPOCH=""
+ARG CARGO_BUILD_JOBS
+ARG FEATURES="sqlite,postgres"
+ARG SCCACHE_LOCAL_MOUNT="0"
+ARG REQUIRE_SCCACHE="0"
+ARG CARGO_PROFILE_RELEASE_OPT_LEVEL=""
+ARG CARGO_PROFILE_RELEASE_LTO=""
+ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS=""
+
+RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
+    --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
+    /usr/local/bin/docker-cargo-build.sh cc-lb-proxy cc-lb-proxy no-spa
+
+# ---- Builder: split `cc-lb-admin` control-plane binary ----
+FROM builder-base AS builder-admin
+SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
+
+ARG GIT_SHA=""
+ARG BUILD_TIME_EPOCH=""
+ARG SOURCE_DATE_EPOCH=""
+ARG CARGO_BUILD_JOBS
+ARG FEATURES="sqlite,postgres"
+ARG SKIP_SPA="0"
+ARG SCCACHE_LOCAL_MOUNT="0"
+ARG REQUIRE_SCCACHE="0"
+ARG CARGO_PROFILE_RELEASE_OPT_LEVEL=""
+ARG CARGO_PROFILE_RELEASE_LTO=""
+ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS=""
+
+COPY --link --from=admin-spa /src/web/dist /src/web/dist
+RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
+    --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
+    /usr/local/bin/docker-cargo-build.sh cc-lb-admin-server cc-lb-admin spa
 
 # ---- CI smoke: run the static binary on BuildKit without a local Docker daemon ----
 FROM alpine:3.24 AS smoke
@@ -288,13 +314,26 @@ RUN /usr/local/bin/cc-lb --version && \
       /usr/local/bin/cc-lb --version | grep -Fq "$EXPECTED_VERSION"; \
     fi
 
-# ---- Final base: distroless static runtime metadata ----
-# Ships passwd/group metadata, /tmp, and CA certificates in a small operational
-# base around the static binary. Digest-pinned for reproducible builds
-# (:nonroot is a rolling tag); bump alongside the other base images
-# (freshen-deps).
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS distroless-base
+# ---- Shared distroless nonroot runtime image ----
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS distroless-runtime
 USER 65532:65532
+
+# ---- Split runtime target: proxy/worker data plane ----
+FROM distroless-runtime AS proxy
+EXPOSE 8080 9091
+COPY --link --from=builder-proxy /out/cc-lb-proxy /usr/local/bin/cc-lb-proxy
+ENTRYPOINT ["/usr/local/bin/cc-lb-proxy"]
+CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
+
+# ---- Split runtime target: admin control plane ----
+FROM distroless-runtime AS admin
+EXPOSE 9090 9091
+COPY --link --from=builder-admin /out/cc-lb-admin /usr/local/bin/cc-lb-admin
+ENTRYPOINT ["/usr/local/bin/cc-lb-admin"]
+CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
+
+# ---- Final base: distroless monolith runtime metadata ----
+FROM distroless-runtime AS distroless-base
 EXPOSE 8080 9090 9091
 ENTRYPOINT ["/usr/local/bin/cc-lb"]
 CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
@@ -303,6 +342,6 @@ CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
 FROM distroless-base AS distroless-prebuilt
 COPY --link cc-lb /usr/local/bin/cc-lb
 
-# ---- Final: distroless static (DEFAULT target) ----
+# ---- Final: distroless static monolith (DEFAULT target) ----
 FROM distroless-base AS distroless
 COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb

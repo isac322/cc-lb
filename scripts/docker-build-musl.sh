@@ -60,7 +60,7 @@ PY
 )
 
 # Parse base image versions from Dockerfile so rust-toolchain bumps update once.
-rust_version="$(sed -n -E 's/^FROM .* rust:([0-9]+\.[0-9]+\.[0-9]+)-alpine AS builder$/\1/p' "$repo_root/Dockerfile")"
+rust_version="$(sed -n -E 's/^FROM .* rust:([0-9]+\.[0-9]+\.[0-9]+)-alpine AS builder(-base)?$/\1/p' "$repo_root/Dockerfile")"
 xx_version="$(sed -n -E 's/^FROM .* tonistiigi\/xx:([^[:space:]]+) AS xx$/\1/p' "$repo_root/Dockerfile")"
 toolchain_version="$(sed -n -E 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$repo_root/rust-toolchain.toml")"
 
