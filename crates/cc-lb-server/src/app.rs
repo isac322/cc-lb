@@ -1275,6 +1275,8 @@ async fn build_app_with_storage_inner(
     let lifecycle_routing_tier_rx = in_memory_bus.attach_lifecycle_routing_tier(
         cc_lb_control::event_bus::DEFAULT_LIFECYCLE_ROUTING_TIER_CAPACITY,
     );
+    let lifecycle_dispatcher_handle = in_memory_bus
+        .spawn_lifecycle_dispatcher(cc_lb_control::event_bus::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY);
     let (event_fanout_shutdown_tx, event_fanout_shutdown_rx) = watch::channel(false);
     let mut event_fanout_tasks = Vec::new();
     // Shared with AdminState so the SSE handler subscribes to the same broadcast
@@ -1428,6 +1430,9 @@ async fn build_app_with_storage_inner(
             cc_lb_engine::lifecycle_routing_tier_subscriber::DEFAULT_ROUTING_TIER_TTL,
             lifecycle_max_ttl,
         );
+    let lifecycle_dispatcher_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_control::LifecycleDispatcherHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(Some(lifecycle_dispatcher_handle)));
     let lifecycle_event_logger_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::LifecycleEventLoggerHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(lifecycle_event_logger_handle)));
@@ -1550,6 +1555,19 @@ async fn build_app_with_storage_inner(
         Duration::from_secs(config.timeouts.drain_secs),
         sighup_handler(reload_tls_state),
     );
+    {
+        // Drain the single-channel bus dispatcher before downstream subscribers/assembler shut down.
+        let dispatcher_slot = lifecycle_dispatcher_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let dispatcher_slot = dispatcher_slot.clone();
+            async move {
+                let mut guard = dispatcher_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
     {
         let logger_slot = lifecycle_event_logger_slot.clone();
         signals.add_shutdown_hook(move || {

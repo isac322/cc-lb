@@ -27,7 +27,8 @@ pub use dynamic_view::{
     UpstreamStatusEntry, UpstreamStatusSnapshot,
 };
 pub use event_bus::{
-    DEFAULT_LIFECYCLE_BROADCAST_CAPACITY, InMemoryBus, RequestEventBus, new_in_memory_bus,
+    DEFAULT_LIFECYCLE_BROADCAST_CAPACITY, InMemoryBus, LifecycleDispatcherHandle, RequestEventBus,
+    new_in_memory_bus,
 };
 pub use openai_org_api::{
     OpenAiBucketWidth, OpenAiCostAmount, OpenAiCostResult, OpenAiCostsBucket, OpenAiCostsPage,
