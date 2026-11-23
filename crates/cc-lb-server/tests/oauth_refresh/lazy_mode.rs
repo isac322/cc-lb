@@ -560,7 +560,9 @@ impl TokenEndpoint {
     }
 }
 
-async fn scripted_reply(State(state): State<EndpointState>) -> Response {
+// Drain the request body before replying so closing `Connection: close` does not
+// leave unread bytes in SO_RCVBUF and trigger a TCP RST (`ECONNRESET`) under load.
+async fn scripted_reply(State(state): State<EndpointState>, _body: Bytes) -> Response {
     let calls = state.calls.fetch_add(1, Ordering::SeqCst) + 1;
     let reply = state
         .replies

@@ -951,12 +951,16 @@ async fn pf_03_slow_org_probes_stay_in_budget_and_leave_the_proxy_alone() {
             statuses.push(stack.send(0, &[]).await);
         }
         let in_flight = stack.fake().org.in_flight();
+        // Fast-forward past the 8 s fake delay, then resume real time before
+        // the 20 concurrent preflights write audit rows through the 8-conn
+        // SqlitePool so paused auto-advance cannot trip sqlx's acquire_timeout.
         tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(8).saturating_sub(started.elapsed())).await;
+        tokio::time::resume();
         (statuses, in_flight)
     };
     let (replies, (proxy_statuses, in_flight_after_proxy)) =
         tokio::join!(preflights, proxy_while_probing);
-    tokio::time::resume();
     let elapsed = started.elapsed();
 
     assert!(elapsed <= BUDGET, "preflights took {elapsed:?}");
