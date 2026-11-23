@@ -1,12 +1,15 @@
 use std::collections::{HashMap, VecDeque};
-use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+use cc_lb_runtime_sync::admin_http::{
+    RequestIdState, compression_layer as admin_compression_layer, request_id_middleware,
+    with_browser_security_headers,
+};
 
 use async_trait::async_trait;
 use axum::Extension;
@@ -2461,7 +2464,7 @@ fn admin_router(admin_state: AdminState) -> Router {
         // bodies streaming and skip CPU on the hot data plane. ETagged
         // static assets skip dynamic compression to keep strong ETags valid.
         // Defaults (gzip 6, brotli 4) are deliberate; avoid Best/level 11.
-        .layer(crate::admin_compression::layer())
+        .layer(admin_compression_layer())
         // Reuse the existing request-id seam on the separate admin listener so
         // admin spans and responses carry the same correlation identifier.
         .layer(middleware::from_fn_with_state(
@@ -2469,7 +2472,7 @@ fn admin_router(admin_state: AdminState) -> Router {
             request_id_middleware,
         ));
 
-    crate::admin_security::with_browser_security_headers(admin_router)
+    with_browser_security_headers(admin_router)
 }
 
 fn app_router(state: ProxyState, timeout_secs: u64) -> Router {
@@ -4332,88 +4335,6 @@ fn json_response(status: StatusCode, value: impl Serialize) -> Response<Body> {
     }
 }
 
-#[derive(Clone)]
-struct RequestIdState {
-    generator: RequestIdGenerator,
-    prefix: &'static str,
-}
-
-#[derive(Clone)]
-enum RequestIdGenerator {
-    UuidV7,
-    Counter(Arc<AtomicU64>),
-}
-
-impl RequestIdState {
-    fn uuid_v7(prefix: &'static str) -> Self {
-        Self {
-            generator: RequestIdGenerator::UuidV7,
-            prefix,
-        }
-    }
-
-    fn counter(prefix: &'static str) -> Self {
-        Self {
-            generator: RequestIdGenerator::Counter(Arc::new(AtomicU64::new(0))),
-            prefix,
-        }
-    }
-
-    fn generate(&self) -> String {
-        let mut request_id = String::with_capacity(self.prefix.len() + 36);
-        request_id.push_str(self.prefix);
-        match &self.generator {
-            RequestIdGenerator::UuidV7 => {
-                let _ = write!(&mut request_id, "{}", uuid::Uuid::now_v7());
-            }
-            RequestIdGenerator::Counter(counter) => {
-                let _ = write!(
-                    &mut request_id,
-                    "{}",
-                    counter.fetch_add(1, Ordering::Relaxed)
-                );
-            }
-        }
-        request_id
-    }
-}
-
-async fn request_id_middleware(
-    State(state): State<RequestIdState>,
-    mut request: Request<Body>,
-    next: Next,
-) -> Response<Body> {
-    let valid_request_id = |value: &&HeaderValue| {
-        value
-            .to_str()
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    let request_id = request
-        .headers()
-        .get("request-id")
-        .filter(valid_request_id)
-        .or_else(|| {
-            request
-                .headers()
-                .get("x-request-id")
-                .filter(valid_request_id)
-        })
-        .cloned()
-        .unwrap_or_else(|| {
-            HeaderValue::try_from(state.generate())
-                .expect("generated ASCII request id is valid header value")
-        });
-    request
-        .headers_mut()
-        .insert(HeaderName::from_static("request-id"), request_id.clone());
-    let mut response = next.run(request).await;
-    response
-        .headers_mut()
-        .insert(HeaderName::from_static("request-id"), request_id);
-    response
-}
-
 async fn lifecycle_middleware(
     State(state): State<ProxyState>,
     mut request: Request<Body>,
@@ -4505,12 +4426,14 @@ pub async fn open_storage(
     config: &Config,
     clock: ClockHandle,
 ) -> Result<OpenStorageParts, BuildError> {
-    let key_hex =
-        std::env::var(&config.aead.key_env).map_err(|_| BuildError::StorageKeyMissing {
-            env: config.aead.key_env.clone(),
-        })?;
-    let key = decode_hex_key(&key_hex)?;
-    let aead = Arc::new(AeadService::from_master_key(key));
+    let aead = cc_lb_runtime_sync::aead_key::load_aead_from_env(&config.aead.key_env).map_err(
+        |error| match error {
+            cc_lb_runtime_sync::aead_key::AeadKeyError::Missing { env } => {
+                BuildError::StorageKeyMissing { env }
+            }
+            cc_lb_runtime_sync::aead_key::AeadKeyError::Invalid => BuildError::InvalidStorageKey,
+        },
+    )?;
     let opened = storage_factory::open_storage(&config.storage, clock.clone()).await?;
     let opened_scheduler =
         crate::scheduler_factory::open_scheduler_storage(&config.storage, &config.scheduler, clock)
@@ -4524,28 +4447,6 @@ pub async fn open_storage(
         lazy_refresh_claim_guard,
         opened_scheduler,
     ))
-}
-
-fn decode_hex_key(value: &str) -> Result<[u8; 32], BuildError> {
-    if value.len() != 64 {
-        return Err(BuildError::InvalidStorageKey);
-    }
-    let mut key = [0_u8; 32];
-    for (index, chunk) in value.as_bytes().chunks(2).enumerate() {
-        let high = hex_nibble(chunk[0])?;
-        let low = hex_nibble(chunk[1])?;
-        key[index] = (high << 4) | low;
-    }
-    Ok(key)
-}
-
-fn hex_nibble(byte: u8) -> Result<u8, BuildError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(BuildError::InvalidStorageKey),
-    }
 }
 
 fn dispatcher(
@@ -4608,6 +4509,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::convert::Infallible;
     use std::io;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, LazyLock};
 
     use axum::body::Body;

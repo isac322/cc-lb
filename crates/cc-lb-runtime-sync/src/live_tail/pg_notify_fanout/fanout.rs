@@ -1,7 +1,7 @@
 use tokio::sync::{broadcast, mpsc};
 
 use super::metrics::record_notify_dropped;
-use crate::metrics_labels::NotifyDropReason;
+use crate::live_tail::metrics_labels::NotifyDropReason;
 use cc_lb_control::event_bus::{InMemoryBus, RequestEventBus, RequestEventUpdate};
 use cc_lb_lifecycle::LifecycleEvent;
 

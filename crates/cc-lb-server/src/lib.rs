@@ -5,9 +5,7 @@
 // 1: generic fatal / unhandled error
 // 2: startup validation/preflight/storage kind fatal errors
 
-pub(crate) mod admin_compression;
 pub(crate) mod admin_ports;
-pub(crate) mod admin_security;
 pub mod app;
 pub mod build_meta;
 pub(crate) mod cache_keepalive_enqueuer;
@@ -21,13 +19,14 @@ pub mod preflight;
 pub mod prompt_cache_observation_sink;
 pub mod reconcile;
 pub mod refresh;
-pub mod replica;
+pub use cc_lb_runtime_sync::replica;
 pub(crate) mod revision_hash;
 pub(crate) mod scheduler_dispatch;
-pub mod scheduler_factory;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use cc_lb_runtime_sync::scheduler_factory;
 pub mod signal;
 pub mod state_machine;
-pub mod storage_factory;
+pub use cc_lb_runtime_sync::storage_factory;
 pub mod subscription_quota_cache;
 pub mod tls;
 pub mod validate;

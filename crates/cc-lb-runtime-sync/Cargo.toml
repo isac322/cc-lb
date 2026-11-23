@@ -1,0 +1,64 @@
+[package]
+name = "cc-lb-runtime-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+build = "build.rs"
+autotests = false
+
+[features]
+default = ["sqlite"]
+live-tail-pg = ["dep:sqlx", "sqlx/postgres"]
+sqlite = [
+    "cc-lb-scheduler/default",
+    "cc-lb-scheduler/sqlite",
+    "dep:apalis-sqlite",
+    "dep:cc-lb-scheduler",
+    "dep:cc-lb-storage-sqlite",
+    "dep:sqlx",
+    "sqlx/sqlite",
+]
+postgres = [
+    "live-tail-pg",
+    "cc-lb-scheduler/postgres",
+    "dep:apalis-postgres",
+    "dep:cc-lb-scheduler",
+    "dep:cc-lb-storage-postgres",
+    "dep:sqlx",
+    "sqlx/postgres",
+]
+
+[dependencies]
+apalis-postgres = { version = "1.0.0", optional = true }
+apalis-sqlite = { version = "1.0.0", optional = true }
+axum = { workspace = true }
+cc-lb-aead = { path = "../cc-lb-aead" }
+cc-lb-clock = { path = "../cc-lb-clock" }
+cc-lb-config = { path = "../cc-lb-config" }
+cc-lb-control = { path = "../cc-lb-control" }
+cc-lb-lifecycle.workspace = true
+cc-lb-request-log.workspace = true
+cc-lb-scheduler = { path = "../cc-lb-scheduler", optional = true, default-features = false }
+cc-lb-storage-api = { path = "../cc-lb-storage-api" }
+cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres", optional = true }
+cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite", optional = true }
+metrics.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sqlx = { workspace = true, optional = true }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+tokio-util.workspace = true
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["compression-br", "compression-gzip", "set-header"] }
+tracing.workspace = true
+url.workspace = true
+uuid = { workspace = true, features = ["v4", "v7", "serde"] }
+
+[dev-dependencies]
+cc-lb-workspace-hack.workspace = true
+metrics-exporter-prometheus.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

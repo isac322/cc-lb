@@ -1,14 +1,5 @@
-use crate::build_meta::BuildMeta;
-
-pub fn format_version() -> String {
-    let meta = BuildMeta::current();
-    format!(
-        "{}\nCommit: {}\nBuilt: {} (rustc {})\nFeatures: {}\nTarget: {}",
-        meta.version, meta.git_sha, meta.build_time, meta.rustc, meta.features, meta.target
-    )
-}
+pub use cc_lb_runtime_sync::build_meta::format_version;
 
 pub fn compact_version() -> String {
-    let meta = BuildMeta::current();
-    format!("cc-lb {} ({})", meta.version, meta.git_sha)
+    cc_lb_runtime_sync::build_meta::compact_version("cc-lb")
 }

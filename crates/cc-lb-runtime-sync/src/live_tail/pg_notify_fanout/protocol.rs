@@ -1,6 +1,6 @@
 use cc_lb_control::event_bus::RequestEventUpdate;
-
 use serde::{Deserialize, Serialize};
+
 #[derive(Serialize)]
 pub struct InlinePartialNotify<'a> {
     #[serde(flatten)]

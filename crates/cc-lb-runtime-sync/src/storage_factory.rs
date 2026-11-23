@@ -1,5 +1,4 @@
-//! Storage factory — the ONLY place in cc-lb-server that contains
-//! #[cfg(feature = "postgres")] blocks.
+//! Storage factory — shared backend opening & Postgres pool configuration.
 
 #[cfg(all(test, feature = "postgres"))]
 mod pool_metrics_tests {
@@ -58,7 +57,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use cc_lb_config::StorageConfig;
-use cc_lb_storage_api::{ManagedKeyStore, MetaStore, Storage};
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use cc_lb_storage_api::MetaStore;
+use cc_lb_storage_api::{ManagedKeyStore, Storage};
 #[cfg(feature = "postgres")]
 const PG_FANOUT_MAX_CONNECTIONS: u32 = 2;
 
@@ -126,6 +127,7 @@ pub async fn open_pg_fanout_pool(
     }
 }
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 fn init_error(error: cc_lb_storage_api::StorageError) -> StorageFactoryError {
     StorageFactoryError::InitFailed {
         message: error.to_string(),
@@ -266,7 +268,7 @@ async fn open_postgres_pool(
 }
 
 #[cfg(feature = "postgres")]
-pub(crate) fn postgres_connect_options(
+pub fn postgres_connect_options(
     url: &str,
     sslmode: Option<&str>,
 ) -> Result<sqlx::postgres::PgConnectOptions, StorageFactoryError> {
@@ -342,6 +344,7 @@ async fn probe_postgres_connection_impl(
         }),
     }
 }
+
 /// Extract only the host from a connection URL to avoid leaking credentials in logs.
 #[cfg(feature = "postgres")]
 fn host_only(url: &str) -> String {
