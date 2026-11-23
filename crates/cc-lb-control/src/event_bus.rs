@@ -22,7 +22,7 @@ use cc_lb_lifecycle::LifecycleEvent;
 #[cfg(test)]
 use cc_lb_request_log::{RequestEvent, RequestEventPartial};
 pub use cc_lb_request_log::{RequestEventPhase, RequestEventUpdate};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc};
 use tokio::task::JoinHandle;
 
 /// Default capacity for the lifecycle-event broadcast channel.
@@ -100,6 +100,22 @@ struct LifecycleSubscribers {
     routing_tier_tx: Option<mpsc::Sender<LifecycleEvent>>,
 }
 
+struct DispatcherItem {
+    event: LifecycleEvent,
+    /// Permit from `DispatcherChannel::base_permits` while occupying base
+    /// (non-reserved) capacity. Row-bearing overflow events carry `None` and
+    /// consume the dedicated reserved FIFO headroom.
+    _base_permit: Option<OwnedSemaphorePermit>,
+}
+
+struct DispatcherChannel {
+    tx: mpsc::Sender<DispatcherItem>,
+    /// Atomic base-capacity permit pool (`base_capacity` permits). Non-row
+    /// events must acquire a permit or shed immediately so concurrent
+    /// publishers can never encroach on `MAX_ASSEMBLER_OVERFLOW_TASKS`.
+    base_permits: Arc<Semaphore>,
+}
+
 struct InMemoryBusInner {
     broadcast_tx: broadcast::Sender<RequestEventUpdate>,
     lifecycle_broadcast_tx: broadcast::Sender<LifecycleEvent>,
@@ -107,7 +123,7 @@ struct InMemoryBusInner {
     /// Serializes `attach_lifecycle_*` copy-on-write updates; never acquired on `publish_lifecycle`.
     attach_lock: Mutex<()>,
     /// Optional single-channel ingest queue draining into a background fanout worker.
-    dispatcher_tx: ArcSwapOption<mpsc::Sender<LifecycleEvent>>,
+    dispatcher: ArcSwapOption<DispatcherChannel>,
     /// Detached overflow tasks currently parked on a full assembler channel. Bounded
     /// by [`MAX_ASSEMBLER_OVERFLOW_TASKS`].
     assembler_overflow_in_flight: AtomicUsize,
@@ -116,7 +132,7 @@ struct InMemoryBusInner {
 /// Handle to the background fanout dispatcher spawned by [`InMemoryBus::spawn_lifecycle_dispatcher`].
 pub struct LifecycleDispatcherHandle {
     inner: Arc<InMemoryBusInner>,
-    sender: mpsc::Sender<LifecycleEvent>,
+    sender: mpsc::Sender<DispatcherItem>,
     task: JoinHandle<()>,
 }
 
@@ -124,7 +140,7 @@ impl LifecycleDispatcherHandle {
     /// Detach the single-channel dispatcher, drain all queued events through
     /// the subscriber channels, and await completion.
     pub async fn shutdown(self) {
-        self.inner.dispatcher_tx.store(None);
+        self.inner.dispatcher.store(None);
         drop(self.sender);
         let _ = self.task.await;
     }
@@ -147,7 +163,7 @@ impl InMemoryBus {
                 lifecycle_broadcast_tx,
                 subscribers: ArcSwap::from_pointee(LifecycleSubscribers::default()),
                 attach_lock: Mutex::new(()),
-                dispatcher_tx: ArcSwapOption::empty(),
+                dispatcher: ArcSwapOption::empty(),
                 assembler_overflow_in_flight: AtomicUsize::new(0),
             }),
         }
@@ -156,17 +172,31 @@ impl InMemoryBus {
     /// Spawn a background worker that receives `LifecycleEvent`s from a single
     /// lock-free ingest MPSC channel and fans them out off the request thread.
     ///
-    /// Allocates `capacity.max(1) + MAX_ASSEMBLER_OVERFLOW_TASKS` FIFO slots so
-    /// row-bearing events have dedicated headroom without ever spawning
-    /// reordering detached tasks; non-row events shed once free capacity falls
-    /// to or below `MAX_ASSEMBLER_OVERFLOW_TASKS`.
+    /// Allocates `capacity.max(1) + MAX_ASSEMBLER_OVERFLOW_TASKS` FIFO slots
+    /// backed by an atomic `Semaphore(capacity.max(1))` base-capacity pool:
+    /// non-row events must acquire a base permit (and therefore can never consume
+    /// the reserved `MAX_ASSEMBLER_OVERFLOW_TASKS` row headroom under concurrent
+    /// saturation), while row-bearing events acquire a base permit best-effort
+    /// and enqueue into the dedicated FIFO reserve when base capacity is full.
     pub fn spawn_lifecycle_dispatcher(&self, capacity: usize) -> LifecycleDispatcherHandle {
-        let total_capacity = capacity.max(1).saturating_add(MAX_ASSEMBLER_OVERFLOW_TASKS);
-        let (tx, mut rx) = mpsc::channel(total_capacity);
-        self.inner.dispatcher_tx.store(Some(Arc::new(tx.clone())));
+        let base_capacity = capacity.max(1);
+        let total_capacity = base_capacity.saturating_add(MAX_ASSEMBLER_OVERFLOW_TASKS);
+        let (tx, mut rx) = mpsc::channel::<DispatcherItem>(total_capacity);
+        let base_permits = Arc::new(Semaphore::new(base_capacity));
+        self.inner
+            .dispatcher
+            .store(Some(Arc::new(DispatcherChannel {
+                tx: tx.clone(),
+                base_permits,
+            })));
         let inner = Arc::clone(&self.inner);
         let task = tokio::spawn(async move {
-            while let Some(event) = rx.recv().await {
+            while let Some(item) = rx.recv().await {
+                let DispatcherItem {
+                    event,
+                    _base_permit,
+                } = item;
+                drop(_base_permit);
                 fanout_lifecycle_event(&inner, event);
             }
         });
@@ -605,20 +635,29 @@ impl RequestEventBus for InMemoryBus {
     }
 
     fn publish_lifecycle(&self, event: LifecycleEvent) {
-        if let Some(dispatcher_tx) = self.inner.dispatcher_tx.load_full() {
+        if let Some(dispatcher) = self.inner.dispatcher.load_full() {
             let carries_row = Self::carries_request_row(&event);
-            if !carries_row && dispatcher_tx.capacity() <= MAX_ASSEMBLER_OVERFLOW_TASKS {
-                record_dropped_events_by("lifecycle_dispatcher_full", 1);
-                tracing::debug!(
-                    kind = event.kind(),
-                    event_id = %event.event_id(),
-                    "lifecycle dispatcher mpsc at non-row capacity; dropping non-row event",
-                );
-                return;
-            }
-            match dispatcher_tx.try_send(event) {
+            let base_permit = match Arc::clone(&dispatcher.base_permits).try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) if !carries_row => {
+                    record_dropped_events_by("lifecycle_dispatcher_full", 1);
+                    tracing::debug!(
+                        kind = event.kind(),
+                        event_id = %event.event_id(),
+                        "lifecycle dispatcher mpsc at non-row capacity; dropping non-row event",
+                    );
+                    return;
+                }
+                Err(_) => None,
+            };
+            match dispatcher.tx.try_send(DispatcherItem {
+                event,
+                _base_permit: base_permit,
+            }) {
                 Ok(()) => return,
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
+                    drop(dropped._base_permit);
+                    let dropped = dropped.event;
                     record_dropped_events_by("lifecycle_dispatcher_full", 1);
                     if carries_row {
                         tracing::error!(
@@ -636,7 +675,8 @@ impl RequestEventBus for InMemoryBus {
                     return;
                 }
                 Err(mpsc::error::TrySendError::Closed(returned)) => {
-                    fanout_lifecycle_event(&self.inner, returned);
+                    drop(returned._base_permit);
+                    fanout_lifecycle_event(&self.inner, returned.event);
                     return;
                 }
             }
@@ -1030,5 +1070,127 @@ mod tests {
             activity_count < 8,
             "expected non-row activity events to shed past base capacity, got {activity_count}"
         );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_dispatcher_row_reserve_holds_under_concurrent_non_row_flood() {
+        const BASE_CAPACITY: usize = 4;
+        const FLOOD_THREADS: usize = 4;
+        const FLOOD_EVENTS_PER_THREAD: usize = 256;
+        const ROW_THREADS: usize = 2;
+        const ROW_PAIRS_PER_THREAD: usize = 100;
+
+        let bus = InMemoryBus::new();
+        let mut assembler_rx = bus.attach_lifecycle_assembler(2048);
+        let dispatcher = bus.spawn_lifecycle_dispatcher(BASE_CAPACITY);
+
+        let barrier = Arc::new(std::sync::Barrier::new(FLOOD_THREADS + ROW_THREADS + 1));
+        let mut handles = Vec::with_capacity(FLOOD_THREADS + ROW_THREADS);
+
+        for thread_idx in 0..FLOOD_THREADS {
+            let bus = bus.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for seq in 0..FLOOD_EVENTS_PER_THREAD {
+                    bus.publish_lifecycle(LifecycleEvent::RequestActivity {
+                        event_id: format!("flood-{thread_idx}-{seq}"),
+                    });
+                }
+            }));
+        }
+
+        for thread_idx in 0..ROW_THREADS {
+            let bus = bus.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for seq in 0..ROW_PAIRS_PER_THREAD {
+                    let req = format!("t{thread_idx}-req-{seq}");
+                    let evt = format!("evt-{req}");
+                    bus.publish_lifecycle(sample_lifecycle_event(&req));
+                    bus.publish_lifecycle(LifecycleEvent::RequestTerminated {
+                        event_id: evt,
+                        reason: cc_lb_lifecycle::TerminationReason::Success,
+                        client_status: 200,
+                        duration_ms: 1,
+                        request_body_read_ms: None,
+                        request_body_bytes: None,
+                        proxy_setup_ms: None,
+                        setup_timings: cc_lb_lifecycle::RequestSetupTimings::default(),
+                        io_timings: cc_lb_lifecycle::RequestIoTimings::default(),
+                        upstream_ttfb_ms: None,
+                        upstream_body_ms: None,
+                        dns_ms: None,
+                        connect_ms: None,
+                        connection_reused: None,
+                        first_content_delta_ms: None,
+                        first_body_chunk_ms: None,
+                        finalize_ms: None,
+                        internal_errors: Vec::new(),
+                        event_kind: None,
+                        funding_ambiguous: false,
+                        protocol: None,
+                    });
+                }
+            }));
+        }
+
+        // Release all OS threads before yielding to the current-thread runtime so
+        // the dispatcher worker has not drained a single item during contention.
+        barrier.wait();
+        for handle in handles {
+            handle.join().expect("publisher thread panicked");
+        }
+
+        assert_eq!(
+            bus.inner
+                .dispatcher
+                .load()
+                .as_ref()
+                .expect("dispatcher attached")
+                .base_permits
+                .available_permits(),
+            0,
+            "base permits must be exhausted under concurrent non-row flood"
+        );
+
+        dispatcher.shutdown().await;
+
+        let mut per_request_events: std::collections::HashMap<String, Vec<&'static str>> =
+            std::collections::HashMap::new();
+        let mut activity_count = 0usize;
+        while let Ok(event) = assembler_rx.try_recv() {
+            match event {
+                LifecycleEvent::RequestStarted { event_id, .. } => {
+                    per_request_events
+                        .entry(event_id)
+                        .or_default()
+                        .push("start");
+                }
+                LifecycleEvent::RequestTerminated { event_id, .. } => {
+                    per_request_events.entry(event_id).or_default().push("term");
+                }
+                LifecycleEvent::RequestActivity { .. } => {
+                    activity_count += 1;
+                }
+                other => panic!("unexpected event variant: {}", other.kind()),
+            }
+        }
+
+        assert!(
+            activity_count <= BASE_CAPACITY,
+            "non-row flood exceeded atomic base permit cap: {activity_count} > {BASE_CAPACITY}"
+        );
+        for thread_idx in 0..ROW_THREADS {
+            for seq in 0..ROW_PAIRS_PER_THREAD {
+                let evt = format!("evt-t{thread_idx}-req-{seq}");
+                assert_eq!(
+                    per_request_events.get(&evt).map(Vec::as_slice),
+                    Some(&["start", "term"][..]),
+                    "missing or reordered row lifecycle events for {evt}"
+                );
+            }
+        }
     }
 }
