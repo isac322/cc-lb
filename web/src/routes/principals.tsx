@@ -21,7 +21,7 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import * as z from 'zod';
 import { PrincipalsListEmpty } from '../components/onboarding/ListEmptyStates';
@@ -1512,7 +1512,7 @@ function useFlipReorder(
     }
 
     if (measurements.length === 0) return;
-    requestAnimationFrame(() => {
+    const rafId = requestAnimationFrame(() => {
       for (const { child, oldRect } of measurements) {
         child.style.transform = '';
         if (oldRect) {
@@ -1524,6 +1524,7 @@ function useFlipReorder(
         child.style.transition = 'all 220ms cubic-bezier(0.4, 0, 0.2, 1)';
       }
     });
+    return () => cancelAnimationFrame(rafId);
   }, [items]);
 }
 
@@ -1690,6 +1691,26 @@ export function RouterSlotEditor({
     isComplex ? 'advanced' : 'basic',
   );
   const [showMobileNotice, setShowMobileNotice] = useState(false);
+  const mobileNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+
+  const clearMobileNoticeTimer = () => {
+    if (mobileNoticeTimerRef.current !== null) {
+      clearTimeout(mobileNoticeTimerRef.current);
+      mobileNoticeTimerRef.current = null;
+    }
+  };
+
+  useEffect(
+    () => () => {
+      if (mobileNoticeTimerRef.current !== null) {
+        clearTimeout(mobileNoticeTimerRef.current);
+        mobileNoticeTimerRef.current = null;
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     if (isComplex && activeTab === 'basic') {
@@ -1806,9 +1827,14 @@ export function RouterSlotEditor({
   const handleTabClick = (tab: 'basic' | 'advanced') => {
     if (tab === 'basic' && isComplex) {
       setShowMobileNotice(true);
-      setTimeout(() => setShowMobileNotice(false), 4000);
+      clearMobileNoticeTimer();
+      mobileNoticeTimerRef.current = setTimeout(() => {
+        mobileNoticeTimerRef.current = null;
+        setShowMobileNotice(false);
+      }, 4000);
       return;
     }
+    clearMobileNoticeTimer();
     setActiveTab(tab);
     setShowMobileNotice(false);
   };
@@ -1929,7 +1955,10 @@ export function RouterSlotEditor({
             <IconButton
               label="Dismiss"
               className="shrink-0"
-              onClick={() => setShowMobileNotice(false)}
+              onClick={() => {
+                clearMobileNoticeTimer();
+                setShowMobileNotice(false);
+              }}
             >
               <X className="w-3.5 h-3.5" aria-hidden="true" />
             </IconButton>
