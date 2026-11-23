@@ -366,3 +366,60 @@ fn invalid_provider_header_returns_build_error() {
         }) if provider_id == "cf" && header == "Cf Access Jwt"
     ));
 }
+
+#[cfg(not(feature = "embed-spa"))]
+#[tokio::test]
+async fn api_only_mode_omits_spa_routes_and_keeps_health_and_auth() {
+    let app = router(test_state());
+
+    let root_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(root_res.status(), StatusCode::NOT_FOUND);
+
+    let fallback_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/dashboard")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fallback_res.status(), StatusCode::NOT_FOUND);
+
+    let health_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(health_res.status(), StatusCode::OK);
+
+    let unauth_res = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/v1/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauth_res.status(), StatusCode::UNAUTHORIZED);
+}
