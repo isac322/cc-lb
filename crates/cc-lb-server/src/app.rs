@@ -596,6 +596,7 @@ pub async fn run_serve(
     let mut config = Config::load(config_path)?;
     let startup_config_overrides = StartupConfigOverrides {
         runtime_data_dir: data_dir.map(Path::to_path_buf),
+        ..Default::default()
     };
     if let Some(data_dir) = startup_config_overrides.runtime_data_dir.as_ref() {
         config.runtime.data_dir = Some(data_dir.clone());

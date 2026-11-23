@@ -58,7 +58,11 @@ pub async fn add_dynamic_rebind_headers(response: &mut Response, state: &AdminSt
             }
         }
         Err(error) => {
-            tracing::error!(error = %error, "admin v1 dynamic view rebind deferred after mutation");
+            if state.dynamic_view_rebinder.is_none() {
+                tracing::debug!(error = %error, "admin v1 dynamic view rebind deferred in DB-only split mode");
+            } else {
+                tracing::error!(error = %error, "admin v1 dynamic view rebind deferred after mutation");
+            }
             response.headers_mut().insert(
                 CC_LB_REBIND_STATUS_HEADER,
                 HeaderValue::from_static("deferred"),

@@ -192,7 +192,7 @@ struct MaterializedDraft {
 
 pub async fn editor_response(state: &AdminState) -> Result<ConfigEditorResponse, SettingsError> {
     let storage = config_storage(state)?;
-    let snapshot = file_snapshot(state.config_path.as_deref())?;
+    let snapshot = file_snapshot_for_state(state)?;
     let raw_toml = snapshot_text(&snapshot)?;
     let mut file_config = partial_file_json(raw_toml)?;
     redact_storage_url(&mut file_config);
@@ -341,6 +341,15 @@ pub async fn write_config_file(
         .ok_or(SettingsError::StorageUnavailable)?;
     let draft_state = storage.get_config_draft().await?;
     ensure_revision(&draft_state, request.expected_revision)?;
+    if state.startup_config_overrides.split_mode_read_only_config {
+        let snapshot = file_snapshot_for_state(state)?;
+        return Err(SettingsError::FileNotWritable(
+            snapshot
+                .info
+                .reason
+                .unwrap_or_else(|| "atomic replacement is unavailable".to_owned()),
+        ));
+    }
     if draft_state.last_validated_revision != Some(request.expected_revision) {
         return Err(SettingsError::DraftNotValidated);
     }
@@ -351,7 +360,7 @@ pub async fn write_config_file(
         .config_path
         .as_deref()
         .ok_or(SettingsError::ConfigPathMissing)?;
-    let before = file_snapshot(Some(path))?;
+    let before = file_snapshot_for_state(state)?;
     ensure_expected_fingerprint(&before.info, request.expected_fingerprint.as_deref())?;
     if before.info.mode != ConfigFileMode::Writable {
         return Err(SettingsError::FileNotWritable(
@@ -498,7 +507,7 @@ fn materialize_and_validate(
     storage_url_replacement: Option<&str>,
 ) -> Result<MaterializedDraft, SettingsError> {
     normalize_unset(&mut draft);
-    let snapshot = file_snapshot(state.config_path.as_deref())?;
+    let snapshot = file_snapshot_for_state(state)?;
     let current_file = partial_file_json(snapshot_text(&snapshot)?)?;
     if let Err(issue) = restore_storage_url(&mut draft, &current_file, storage_url_replacement) {
         let report = ConfigValidationReport {
@@ -1072,6 +1081,18 @@ fn check_writable_file_path(issues: &mut Vec<ConfigValidationIssue>, field: &str
         )),
         _ => {}
     }
+}
+
+fn file_snapshot_for_state(state: &AdminState) -> Result<FileSnapshot, SettingsError> {
+    let mut snapshot = file_snapshot(state.config_path.as_deref())?;
+    if state.startup_config_overrides.split_mode_read_only_config {
+        snapshot.info.mode = ConfigFileMode::ReadOnly;
+        snapshot.info.reason = Some(
+            "split admin server cannot write proxy config files directly; download TOML instead"
+                .to_owned(),
+        );
+    }
+    Ok(snapshot)
 }
 
 fn file_snapshot(path: Option<&Path>) -> Result<FileSnapshot, SettingsError> {
