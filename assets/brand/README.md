@@ -18,7 +18,7 @@ wordmark and tagline. To change the mark, edit that file and rebuild (below).
 | Standalone mark | `mark/cc-lb-mark-on-{dark,light}.svg` |
 | Mark under 24px / favicons | `mark/cc-lb-mark-16-on-{dark,light}.svg` (geometry snapped to a 16-unit grid) |
 | Favicon set | `favicon/favicon.svg` (adapts to `prefers-color-scheme`), `favicon/favicon.ico` (16/32/48), `favicon/apple-touch-icon.png` (180px, opaque — iOS rounds it) |
-| Favicon wiring | The admin web copies of these three live in `crates/cc-lb-admin/web/public/` and are linked from `crates/cc-lb-admin/web/index.html`:<br>`<link rel="icon" href="/favicon.ico" sizes="32x32">`<br>`<link rel="icon" href="/favicon.svg" type="image/svg+xml">`<br>`<link rel="apple-touch-icon" href="/apple-touch-icon.png">` |
+| Favicon wiring | The admin web copies of these three live in `web/public/` and are linked from `web/index.html`:<br>`<link rel="icon" href="/favicon.ico" sizes="32x32">`<br>`<link rel="icon" href="/favicon.svg" type="image/svg+xml">`<br>`<link rel="apple-touch-icon" href="/apple-touch-icon.png">` |
 | App icon / PWA | `app-icon/cc-lb-app-icon-{dark,light}.svg`, `app-icon/cc-lb-app-icon-maskable.svg` (mark inside the maskable safe zone); PNG renders in `app-icon/png/` (16–512px, maskable at 192/512) |
 | Social preview / `og:image` | `social/cc-lb-social-preview.svg`, `social/cc-lb-social-preview.png` (1280×640) |
 | In-app inline mark | `mark/cc-lb-mark-currentcolor.svg` — fills use `currentColor`, so it inherits `color` from its context. In the admin web, use `BrandMark` (`src/components/layout/Sidebar.tsx`) instead: brackets fill `var(--color-text)`, the lane fills `var(--color-accent)` |
@@ -60,9 +60,9 @@ assets/brand/tools/build_all.sh
 ```
 
 Runs the generators in order: `build_marks.py` (mark, app-icon and favicon
-SVGs, PNG renders, `favicon.ico`, and copies into `crates/cc-lb-admin/web/public/`)
+SVGs, PNG renders, `favicon.ico`, and copies into `web/public/`)
 then `build_compositions.py` (lockups, README hero, social preview). The
 generators are Python 3 stdlib only; PNG rendering goes through
 `tools/render_png.mjs` with playwright's headless Chromium from
-`crates/cc-lb-admin/web/node_modules` (install the web package deps first if
+`web/node_modules` (install the web package deps first if
 needed). `favicon.ico` is packed from PNGs by `tools/build_ico.py`.

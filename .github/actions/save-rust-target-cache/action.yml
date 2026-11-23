@@ -56,10 +56,10 @@ runs:
         fi
         if [ -d "$TARGET_DIR_INPUT" ]; then
           node scripts/prune-rust-target.mjs --target-dir "$TARGET_DIR_INPUT" "${prune_flags[@]}"
-          node scripts/ws-mtimes.mjs record --out "${TARGET_DIR_INPUT}/.ws-mtimes.json" --extra-dir crates/cc-lb-admin/web/dist
-          if [ -d "crates/cc-lb-admin/web/dist" ]; then
+          node scripts/ws-mtimes.mjs record --out "${TARGET_DIR_INPUT}/.ws-mtimes.json" --extra-dir web/dist
+          if [ -d "web/dist" ]; then
             rm -rf "${TARGET_DIR_INPUT}/.admin-web-dist"
-            cp -a crates/cc-lb-admin/web/dist "${TARGET_DIR_INPUT}/.admin-web-dist"
+            cp -a web/dist "${TARGET_DIR_INPUT}/.admin-web-dist"
           fi
         fi
         if [ -n "$EXTRA_PATHS_INPUT" ]; then

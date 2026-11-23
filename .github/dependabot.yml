@@ -61,7 +61,7 @@ updates:
         update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "bun"
-    directory: "/crates/cc-lb-admin/web"
+    directory: "/web"
     schedule:
       interval: "weekly"
       day: "monday"

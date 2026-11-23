@@ -120,7 +120,7 @@ function isProductionUiSource(file, name) {
 }
 
 function discoverUiSources() {
-  const root = path.join(repoRoot, 'crates/cc-lb-admin/web/src');
+  const root = path.join(repoRoot, 'web/src');
   return walkFiles(root, isProductionUiSource).map((file) => ({
     path: file,
     sha256: sha256(fs.readFileSync(path.join(repoRoot, file))),
@@ -130,7 +130,7 @@ function discoverUiSources() {
 function discoverUiRoutes(sourceFiles) {
   return sourceFiles
     .filter(({ path: file }) =>
-      /^crates\/cc-lb-admin\/web\/src\/routes\/[^/]+\.tsx$/.test(file),
+      /^web\/src\/routes\/[^/]+\.tsx$/.test(file),
     )
     .map(({ path: file, sha256: hash }) => {
       const text = fs.readFileSync(path.join(repoRoot, file), 'utf8');

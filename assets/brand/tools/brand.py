@@ -17,7 +17,7 @@ SMALL_LEFT = "M1 3H6V5H3V11H6V13H1Z"
 SMALL_RIGHT = "M15 3H10V5H13V11H10V13H15Z"
 SMALL_BAR = (7, 1, 2, 14)
 
-# Graphite palette, matching crates/cc-lb-admin/web/src/index.css.
+# Graphite palette, matching web/src/index.css.
 DARK = {
     "bg": "#161719",
     "panel": "#1c1e20",

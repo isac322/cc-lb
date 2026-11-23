@@ -134,9 +134,9 @@ runs:
           echo "lock_cache_hit=false" >> "$GITHUB_OUTPUT"
         fi
         if [ -d "${TARGET_DIR_INPUT}/.admin-web-dist" ]; then
-          mkdir -p crates/cc-lb-admin/web
-          rm -rf crates/cc-lb-admin/web/dist
-          cp -a "${TARGET_DIR_INPUT}/.admin-web-dist" crates/cc-lb-admin/web/dist
+          mkdir -p web
+          rm -rf web/dist
+          cp -a "${TARGET_DIR_INPUT}/.admin-web-dist" web/dist
         fi
         if [ "$RESTORE_MTIMES" = "true" ]; then
           node scripts/ws-mtimes.mjs restore --in "${TARGET_DIR_INPUT}/.ws-mtimes.json"
