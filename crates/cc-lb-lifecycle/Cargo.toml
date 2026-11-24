@@ -10,6 +10,7 @@ publish = false
 bytes = { workspace = true, features = ["serde"] }
 cc-lb-domain.workspace = true
 cc-lb-request-log.workspace = true
+cc-lb-routing-trace.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 uuid.workspace = true

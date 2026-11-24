@@ -21,7 +21,7 @@ pub const REQUEST_DIAGNOSTICS_SCHEMA: &str = "cc_lb.request_diagnostics.v1";
 pub struct RequestDiagnostics {
     pub cache_breakpoints: Vec<RequestCacheBreakpoint>,
     pub cache_control_message_indices: Vec<u64>,
-    pub routing_trace: Option<cc_lb_domain::RoutingTrace>,
+    pub routing_trace: Option<cc_lb_routing_trace::RoutingTrace>,
     pub iterations: Option<JsonValue>,
     pub internal_errors: Vec<cc_lb_domain::InternalError>,
     pub matched_v3_cache_key: Option<String>,
@@ -133,7 +133,7 @@ pub struct RequestDiagnosticsRecord {
     pub native_cache: Option<crate::RequestNativeCacheObservation>,
     pub cache_breakpoints: Vec<RequestCacheBreakpoint>,
     pub cache_control_message_indices: Vec<u64>,
-    pub routing_trace: Option<cc_lb_domain::RoutingTrace>,
+    pub routing_trace: Option<cc_lb_routing_trace::RoutingTrace>,
     pub iterations: Option<JsonValue>,
     pub internal_errors: Vec<cc_lb_domain::InternalError>,
 }
@@ -226,7 +226,8 @@ pub fn render_request_diagnostics_line(
 
 #[cfg(test)]
 mod tests {
-    use cc_lb_domain::{InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace};
+    use cc_lb_domain::{InternalError, InternalErrorKind, InternalErrorStage};
+    use cc_lb_routing_trace::RoutingTrace;
     use serde_json::{Map, json};
 
     use super::*;

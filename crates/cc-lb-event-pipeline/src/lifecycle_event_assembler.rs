@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cc_lb_control::RequestEventBus;
-use cc_lb_domain::{InternalError, RoutingTrace};
+use cc_lb_domain::InternalError;
 use cc_lb_lifecycle::{
     AuthInfo, EventId, LifecycleEvent, ParseInfo, RequestIoTimings, RouteInfo, TerminationReason,
     UpstreamStreamDiagnostics, UsageSnapshot,
@@ -14,6 +14,7 @@ use cc_lb_request_log::{
     RequestDiagnosticsRecord, RequestDiagnosticsSource, RequestEventKind, RequestEventPartial,
     RequestEventUpdate, RequestProtocol,
 };
+use cc_lb_routing_trace::RoutingTrace;
 use cc_lb_storage_api::{CacheKeepaliveEvidenceRow, RequestEvent, RequestEventStore};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};

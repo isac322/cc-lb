@@ -1,4 +1,5 @@
-use cc_lb_domain::{Principal, SubscriptionPreferenceTrace, UpstreamCandidate};
+use cc_lb_domain::{Principal, UpstreamCandidate};
+use cc_lb_routing_trace::SubscriptionPreferenceTrace;
 use uuid::Uuid;
 
 use crate::{PerCandidateReason, RoutingContext};

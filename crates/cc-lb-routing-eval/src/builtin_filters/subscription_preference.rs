@@ -232,7 +232,7 @@ fn evaluate(
         }
     }
 
-    let all_assessments: Vec<cc_lb_domain::CandidateUrgency> = buckets
+    let all_assessments: Vec<cc_lb_routing_trace::CandidateUrgency> = buckets
         .iter()
         .flat_map(|bucket| {
             let max_cache_value_micros =
@@ -252,7 +252,7 @@ fn evaluate(
                 )
                 .unwrap_or(0);
                 let cache_savings_ratio = cache_read_savings_ratio(a.candidate, &ctx.cache_pricing);
-                cc_lb_domain::CandidateUrgency {
+                cc_lb_routing_trace::CandidateUrgency {
                     upstream_id: a.candidate.upstream_id,
                     tier: tier_to_plugin_api(a.tier),
                     quota_urgency: tier_urgency,
@@ -311,7 +311,7 @@ fn evaluate(
         let chosen_tier = tier_to_plugin_api(formula_winner.tier);
         let kept_upstream_id = formula_winner.candidate.upstream_id;
 
-        let trace = cc_lb_domain::SubscriptionPreferenceTrace {
+        let trace = cc_lb_routing_trace::SubscriptionPreferenceTrace {
             chosen_tier,
             candidates: all_assessments,
             formula_version: Some(COST_FIRST_FORMULA_VERSION.to_owned()),

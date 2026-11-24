@@ -12,7 +12,10 @@ test-utils = []
 [dependencies]
 blake3.workspace = true
 cc-lb-domain.workspace = true
+cc-lb-provider-spi.workspace = true
+cc-lb-providers.workspace = true
 cc-lb-routing.workspace = true
+cc-lb-routing-trace.workspace = true
 metrics.workspace = true
 parking_lot = "0.13"
 serde.workspace = true

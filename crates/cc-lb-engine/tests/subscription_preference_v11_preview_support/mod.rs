@@ -10,11 +10,12 @@ use cc_lb_control::{
     DynamicViewBuilder, DynamicViewHolder, InMemoryBus, RequestEventBus, SubscriptionQuotaCacheLike,
 };
 use cc_lb_domain::{
-    RoutingTrace, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, TerminalStrategy,
+    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, TerminalStrategy,
 };
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_engine::{Body, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
 use cc_lb_lifecycle::LifecycleEvent;
+use cc_lb_routing_trace::RoutingTrace;
 use cc_lb_storage_api::SubscriptionQuotaSample;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use cc_lb_upstream::SignedRequest;

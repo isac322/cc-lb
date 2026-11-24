@@ -1,10 +1,8 @@
 #![cfg(feature = "dto-roundtrip")]
 
-use cc_lb_domain::{
-    InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace, StageDecision,
-    TerminalDecision, TerminalStrategy,
-};
+use cc_lb_domain::{InternalError, InternalErrorKind, InternalErrorStage, TerminalStrategy};
 use cc_lb_request_log::{CostBreakdown, RequestCacheLookbackPrefix, RequestEventUpdate};
+use cc_lb_routing_trace::{RoutingTrace, StageDecision, TerminalDecision};
 use cc_lb_storage_api::principal::{Limit, LimitKind};
 use cc_lb_storage_api::{
     AuditEntry, BackendKind, CacheKeepaliveConfig, CacheKeepaliveConfigSnapshot,

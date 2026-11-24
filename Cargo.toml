@@ -32,6 +32,13 @@ rust-version = "1.99.1"
 
 [workspace.dependencies]
 cc-lb-domain = { path = "crates/cc-lb-domain", version = "2.2.1" }
+cc-lb-provider-spi = { path = "crates/cc-lb-provider-spi", version = "2.2.1" }
+cc-lb-provider-anthropic = { path = "crates/cc-lb-provider-anthropic", version = "2.2.1" }
+cc-lb-provider-openai = { path = "crates/cc-lb-provider-openai", version = "2.2.1" }
+cc-lb-provider-gemini = { path = "crates/cc-lb-provider-gemini", version = "2.2.1" }
+cc-lb-provider-vertex = { path = "crates/cc-lb-provider-vertex", version = "2.2.1" }
+cc-lb-providers = { path = "crates/cc-lb-providers", version = "2.2.1" }
+cc-lb-routing-trace = { path = "crates/cc-lb-routing-trace", version = "2.2.1" }
 cc-lb-vertex-auth = { path = "crates/cc-lb-vertex-auth", version = "2.2.1" }
 cc-lb-signer-vertex = { path = "crates/cc-lb-signer-vertex", version = "2.2.1" }
 cc-lb-lifecycle = { path = "crates/cc-lb-lifecycle", version = "2.2.1" }

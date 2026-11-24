@@ -5,10 +5,11 @@ use axum::{
     http::{StatusCode, Uri, header},
 };
 use cc_lb_config::Config;
-use cc_lb_domain::{InternalError, RoutingTrace};
+use cc_lb_domain::InternalError;
 use cc_lb_request_log::{
     RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestDiagnostics, RequestEventKind,
 };
+use cc_lb_routing_trace::RoutingTrace;
 use cc_lb_storage_api::{AuditQueryScope, AuditStore, RequestEvent, RequestEventStore};
 use config_admin_common::{app, authed_bytes, authed_json, temp_storage, test_state};
 use serde_json::Value;

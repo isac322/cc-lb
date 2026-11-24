@@ -1,7 +1,8 @@
 use crate::common;
 mod subscription_preference_v11_preview_support;
 
-use cc_lb_domain::{CandidateUrgency, SubscriptionPreferenceTrace, SubscriptionTier};
+use cc_lb_domain::SubscriptionTier;
+use cc_lb_routing_trace::{CandidateUrgency, SubscriptionPreferenceTrace};
 use http::StatusCode;
 use uuid::Uuid;
 

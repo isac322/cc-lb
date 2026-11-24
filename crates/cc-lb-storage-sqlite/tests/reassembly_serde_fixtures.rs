@@ -1,8 +1,10 @@
 use std::{fs, path::Path, sync::Arc};
 
 use cc_lb_domain::{
-    InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace, StageDecision,
-    SubscriptionPreferenceTrace, SubscriptionTier, TerminalDecision, TerminalStrategy,
+    InternalError, InternalErrorKind, InternalErrorStage, SubscriptionTier, TerminalStrategy,
+};
+use cc_lb_routing_trace::{
+    RoutingTrace, StageDecision, SubscriptionPreferenceTrace, TerminalDecision,
 };
 use cc_lb_storage_api::{KeyStatus, MetaStore, PluginSlotKind, RequestEvent, RequestEventStore};
 use uuid::Uuid;

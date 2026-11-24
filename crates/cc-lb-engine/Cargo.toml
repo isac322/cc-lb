@@ -23,6 +23,7 @@ cc-lb-domain.workspace = true
 cc-lb-quota.workspace = true
 cc-lb-request-log.workspace = true
 cc-lb-routing.workspace = true
+cc-lb-routing-trace.workspace = true
 cc-lb-upstream.workspace = true
 cc-lb-signer-vertex.workspace = true
 serde = { workspace = true, features = ["derive"] }
@@ -38,6 +39,8 @@ cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-lifecycle = { workspace = true }
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
+cc-lb-provider-spi.workspace = true
+cc-lb-providers.workspace = true
 cc-lb-proxy-telemetry.workspace = true
 cc-lb-routing-eval.workspace = true
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }

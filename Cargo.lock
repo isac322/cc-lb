@@ -638,8 +638,11 @@ dependencies = [
  "cc-lb-oauth-protocol",
  "cc-lb-plugin-wire",
  "cc-lb-pricing",
+ "cc-lb-provider-spi",
+ "cc-lb-providers",
  "cc-lb-quota",
  "cc-lb-request-log",
+ "cc-lb-routing-trace",
  "cc-lb-runtime-wasmtime",
  "cc-lb-scheduler",
  "cc-lb-signer-anthropic-oauth",
@@ -814,11 +817,14 @@ dependencies = [
  "cc-lb-oauth-protocol",
  "cc-lb-observability",
  "cc-lb-pricing",
+ "cc-lb-provider-spi",
+ "cc-lb-providers",
  "cc-lb-proxy-telemetry",
  "cc-lb-quota",
  "cc-lb-request-log",
  "cc-lb-routing",
  "cc-lb-routing-eval",
+ "cc-lb-routing-trace",
  "cc-lb-signer-anthropic-key",
  "cc-lb-signer-vertex",
  "cc-lb-storage-api",
@@ -887,6 +893,7 @@ dependencies = [
  "cc-lb-pricing",
  "cc-lb-quota",
  "cc-lb-request-log",
+ "cc-lb-routing-trace",
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
@@ -919,6 +926,7 @@ dependencies = [
  "bytes",
  "cc-lb-domain",
  "cc-lb-request-log",
+ "cc-lb-routing-trace",
  "cc-lb-workspace-hack",
  "serde",
  "serde_json",
@@ -1058,6 +1066,85 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-lb-provider-anthropic"
+version = "2.2.1"
+dependencies = [
+ "bytes",
+ "cc-lb-domain",
+ "cc-lb-provider-spi",
+ "cc-lb-workspace-hack",
+ "http",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "cc-lb-provider-gemini"
+version = "2.2.1"
+dependencies = [
+ "bytes",
+ "cc-lb-domain",
+ "cc-lb-provider-spi",
+ "cc-lb-workspace-hack",
+ "http",
+ "serde_json",
+]
+
+[[package]]
+name = "cc-lb-provider-openai"
+version = "2.2.1"
+dependencies = [
+ "bytes",
+ "cc-lb-domain",
+ "cc-lb-provider-spi",
+ "cc-lb-workspace-hack",
+ "http",
+ "serde_json",
+]
+
+[[package]]
+name = "cc-lb-provider-spi"
+version = "2.2.1"
+dependencies = [
+ "bytes",
+ "cc-lb-domain",
+ "cc-lb-workspace-hack",
+ "http",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "url",
+]
+
+[[package]]
+name = "cc-lb-provider-vertex"
+version = "2.2.1"
+dependencies = [
+ "bytes",
+ "cc-lb-domain",
+ "cc-lb-provider-spi",
+ "cc-lb-workspace-hack",
+ "http",
+ "serde_json",
+]
+
+[[package]]
+name = "cc-lb-providers"
+version = "2.2.1"
+dependencies = [
+ "bytes",
+ "cc-lb-domain",
+ "cc-lb-provider-anthropic",
+ "cc-lb-provider-gemini",
+ "cc-lb-provider-openai",
+ "cc-lb-provider-spi",
+ "cc-lb-provider-vertex",
+ "cc-lb-workspace-hack",
+ "http",
+ "serde_json",
+]
+
+[[package]]
 name = "cc-lb-proxy-telemetry"
 version = "2.2.1"
 dependencies = [
@@ -1089,6 +1176,7 @@ name = "cc-lb-request-log"
 version = "2.2.1"
 dependencies = [
  "cc-lb-domain",
+ "cc-lb-routing-trace",
  "cc-lb-workspace-hack",
  "chrono",
  "serde",
@@ -1102,6 +1190,7 @@ version = "2.2.1"
 dependencies = [
  "bytes",
  "cc-lb-domain",
+ "cc-lb-routing-trace",
  "cc-lb-upstream",
  "cc-lb-workspace-hack",
  "http",
@@ -1116,7 +1205,10 @@ dependencies = [
  "blake3",
  "bytes",
  "cc-lb-domain",
+ "cc-lb-provider-spi",
+ "cc-lb-providers",
  "cc-lb-routing",
+ "cc-lb-routing-trace",
  "cc-lb-workspace-hack",
  "http",
  "metrics",
@@ -1127,6 +1219,17 @@ dependencies = [
  "tiktoken-rs",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "cc-lb-routing-trace"
+version = "2.2.1"
+dependencies = [
+ "cc-lb-domain",
+ "cc-lb-workspace-hack",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 
@@ -1228,6 +1331,7 @@ dependencies = [
  "cc-lb-observability",
  "cc-lb-plugin-wire",
  "cc-lb-pricing",
+ "cc-lb-providers",
  "cc-lb-quota",
  "cc-lb-request-log",
  "cc-lb-routing",
@@ -1365,6 +1469,7 @@ dependencies = [
  "cc-lb-oauth-protocol",
  "cc-lb-plugin-wire",
  "cc-lb-request-log",
+ "cc-lb-routing-trace",
  "cc-lb-storage-sqlite",
  "cc-lb-workspace-hack",
  "serde",
@@ -1438,6 +1543,7 @@ dependencies = [
  "cc-lb-clock",
  "cc-lb-domain",
  "cc-lb-plugin-wire",
+ "cc-lb-routing-trace",
  "cc-lb-storage-api",
  "cc-lb-workspace-hack",
  "metrics",

@@ -1,0 +1,16 @@
+[package]
+name = "cc-lb-routing-trace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+cc-lb-domain.workspace = true
+serde = { workspace = true, features = ["derive"] }
+uuid = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+cc-lb-workspace-hack.workspace = true
+serde_json.workspace = true

@@ -40,6 +40,8 @@ cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-scheduler = { path = "../cc-lb-scheduler", default-features = false }
 cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire", features = ["std"] }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
+cc-lb-provider-spi.workspace = true
+cc-lb-providers.workspace = true
 cc-lb-upstream.workspace = true
 cc-lb-runtime-wasmtime = { workspace = true }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
@@ -71,6 +73,7 @@ uuid = { workspace = true, features = ["v5"] }
 mime_guess = "2.0.5"
 
 [dev-dependencies]
+cc-lb-routing-trace.workspace = true
 cc-lb-workspace-hack.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }

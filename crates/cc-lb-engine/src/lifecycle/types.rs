@@ -61,13 +61,6 @@ pub(super) fn push_buffered_data(
 
 pub(super) const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 pub(super) const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
-pub(super) const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
-pub(super) const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/";
-pub(super) const DEFAULT_OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
-pub(super) const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/";
-pub(super) const DEFAULT_GEMINI_CODE_ASSIST_BASE_URL: &str =
-    "https://cloudcode-pa.googleapis.com/v1internal";
-pub(super) const DEFAULT_VERTEX_BASE_URL: &str = "https://aiplatform.googleapis.com/";
 pub(crate) const DEFAULT_MAX_INPUT_ESTIMATE: i64 = 4000;
 pub(super) static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 

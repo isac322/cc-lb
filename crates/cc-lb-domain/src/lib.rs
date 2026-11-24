@@ -36,10 +36,7 @@ pub use quota::{
     RateLimitKind, RateLimitObservation, SubscriptionQuotaCandidateSnapshot,
     SubscriptionQuotaCredits, SubscriptionQuotaDataState, SubscriptionTier,
 };
-pub use routing::{
-    CandidateUrgency, MAX_ERROR_MESSAGE_LEN, MAX_ROUTING_TRACE_STAGES, MAX_STAGE_NAME_LEN,
-    RoutingTrace, StageDecision, SubscriptionPreferenceTrace, TerminalDecision, TerminalStrategy,
-};
+pub use routing::{MAX_ERROR_MESSAGE_LEN, TerminalStrategy};
 pub use upstream::{
     ANTHROPIC_IDENTITY_HEADERS, ANTHROPIC_WORKSPACE_ID_HEADER, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
     BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, CredentialKind, Provider, Upstream, UpstreamCandidate,

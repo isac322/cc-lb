@@ -1338,7 +1338,7 @@ async fn usage_is_unchanged_when_diagnostics_are_taken_before_storage() {
         event.cost_cache_creation_5m_micros = Some(0);
         event.cost_cache_creation_1h_micros = Some(0);
         event.cost_cache_read_micros = Some(cost * 7);
-        event.routing_trace = Some(cc_lb_domain::RoutingTrace::default());
+        event.routing_trace = Some(cc_lb_routing_trace::RoutingTrace::default());
         event.cache_control_message_indices = vec![1, 3];
         event.iterations = Some(serde_json::json!([{ "input_tokens": age }]));
         event.internal_errors = vec![cc_lb_domain::InternalError::default()];

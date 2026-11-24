@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -93,6 +94,164 @@ test('rejects Mutex<Option<mpsc::Sender<LifecycleEvent>>> regression in event_bu
     const result = checkHotpathFirewall(dir);
     assert.equal(result.ok, false);
     assert.match(result.violations.join('\n'), /event_bus\.rs:1/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('enforces Phase-3 provider and domain isolation rules', () => {
+  const cases = [
+    [
+      'crates/cc-lb-domain/Cargo.toml',
+      '[package]\nname = "cc-lb-domain"\n[dependencies]\ncc-lb-routing-trace.workspace = true\n',
+      /cc-lb-routing-trace/,
+    ],
+    [
+      'crates/cc-lb-domain/Cargo.toml',
+      '[package]\nname = "cc-lb-domain"\n[dependencies]\ncc-lb-provider-spi.workspace = true\n',
+      /cc-lb-provider-spi/,
+    ],
+    [
+      'crates/cc-lb-provider-spi/Cargo.toml',
+      '[package]\nname = "cc-lb-provider-spi"\n[dependencies]\ncc-lb-provider-anthropic.workspace = true\n',
+      /cc-lb-provider-anthropic/,
+    ],
+    [
+      'crates/cc-lb-provider-openai/Cargo.toml',
+      '[package]\nname = "cc-lb-provider-openai"\n[dependencies]\ncc-lb-provider-anthropic.workspace = true\ncc-lb-quota.workspace = true\n',
+      /cc-lb-quota/,
+    ],
+    [
+      'crates/cc-lb-providers/Cargo.toml',
+      '[package]\nname = "cc-lb-providers"\n[dependencies]\ncc-lb-storage-api = { path = "../cc-lb-storage-api" }\n',
+      /cc-lb-storage-api/,
+    ],
+  ];
+
+  for (const [file, manifest, expected] of cases) {
+    const dir = makeTempRepo({ [file]: manifest });
+    try {
+      const result = checkHotpathFirewall(dir);
+      assert.equal(result.ok, false, `Expected failure for ${file}`);
+      assert.match(result.violations.join('\n'), expected);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('rejects indirect normal dependency into storage-api and quota via cc-lb-control', () => {
+  const dir = makeTempRepo({
+    'crates/cc-lb-control/Cargo.toml':
+      '[package]\nname = "cc-lb-control"\n[dependencies]\ncc-lb-quota.workspace = true\ncc-lb-storage-api = { path = "../cc-lb-storage-api" }\n',
+    'crates/cc-lb-provider-openai/Cargo.toml':
+      '[package]\nname = "cc-lb-provider-openai"\n[dependencies]\ncc-lb-control = { path = "../cc-lb-control" }\n',
+    'crates/cc-lb-providers/Cargo.toml':
+      '[package]\nname = "cc-lb-providers"\n[dependencies]\ncc-lb-provider-openai = { path = "../cc-lb-provider-openai" }\n',
+    'crates/cc-lb-routing-eval/Cargo.toml':
+      '[package]\nname = "cc-lb-routing-eval"\n[dependencies]\ncc-lb-providers = { path = "../cc-lb-providers" }\n',
+  });
+  try {
+    const result = checkHotpathFirewall(dir);
+    assert.equal(result.ok, false, 'Expected indirect control -> quota/storage-api violation');
+    const joined = result.violations.join('\n');
+    assert.match(joined, /cc-lb-provider-openai\/Cargo\.toml.*cc-lb-quota.*cc-lb-control -> cc-lb-quota/);
+    assert.match(joined, /cc-lb-provider-openai\/Cargo\.toml.*cc-lb-storage-api.*cc-lb-control -> cc-lb-storage-api/);
+    assert.match(joined, /cc-lb-routing-eval\/Cargo\.toml.*cc-lb-control/);
+    assert.match(joined, /cc-lb-routing-eval\/Cargo\.toml.*cc-lb-storage-api.*cc-lb-control -> cc-lb-storage-api/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resolves Cargo workspace aliases for direct and transitive exclusions', () => {
+  const dottedAliasDir = makeTempRepo({
+    'Cargo.toml':
+      '[workspace.dependencies]\ncontrol-ports = { package = "cc-lb-control", path = "crates/cc-lb-control" }\nsqlx-alias = { package = "sqlx", version = "0.9" }\n',
+    'crates/cc-lb-control/Cargo.toml':
+      '[package]\nname = "cc-lb-control"\n[dependencies]\ncc-lb-quota.workspace = true\ncc-lb-storage-api = { path = "../cc-lb-storage-api" }\n',
+    'crates/cc-lb-provider-openai/Cargo.toml':
+      '[package]\nname = "cc-lb-provider-openai"\n[dependencies]\ncontrol-ports.workspace = true\n',
+    'crates/cc-lb-providers/Cargo.toml':
+      '[package]\nname = "cc-lb-providers"\n[dependencies]\ncc-lb-provider-openai = { path = "../cc-lb-provider-openai" }\n',
+    'crates/cc-lb-routing-eval/Cargo.toml':
+      '[package]\nname = "cc-lb-routing-eval"\n[dependencies]\ncc-lb-providers = { path = "../cc-lb-providers" }\n',
+    'crates/cc-lb-engine/Cargo.toml':
+      '[package]\nname = "cc-lb-engine"\n[dependencies]\nsqlx-alias.workspace = true\n',
+  });
+  try {
+    const result = checkHotpathFirewall(dottedAliasDir);
+    assert.equal(result.ok, false, 'Expected workspace alias violations');
+    const joined = result.violations.join('\n');
+    assert.match(joined, /cc-lb-engine\/Cargo\.toml:.*forbidden normal dependency `sqlx` \(aliased as `sqlx-alias`\)/);
+    assert.match(joined, /cc-lb-provider-openai\/Cargo\.toml:.*cc-lb-quota.*cc-lb-control -> cc-lb-quota/);
+    assert.match(joined, /cc-lb-provider-openai\/Cargo\.toml:.*cc-lb-storage-api.*cc-lb-control -> cc-lb-storage-api/);
+    assert.match(joined, /cc-lb-routing-eval\/Cargo\.toml:.*cc-lb-control/);
+    assert.match(joined, /cc-lb-routing-eval\/Cargo\.toml:.*cc-lb-storage-api.*cc-lb-control -> cc-lb-storage-api/);
+  } finally {
+    rmSync(dottedAliasDir, { recursive: true, force: true });
+  }
+
+  const subtableAndMultilineDir = makeTempRepo({
+    'Cargo.toml':
+      '[workspace.dependencies.control-ports]\npackage = "cc-lb-control"\npath = "crates/cc-lb-control"\n',
+    'crates/cc-lb-control/Cargo.toml':
+      '[package]\nname = "cc-lb-control"\n[dependencies]\ncc-lb-quota.workspace = true\ncc-lb-storage-api = { path = "../cc-lb-storage-api" }\n',
+    'crates/cc-lb-provider-openai/Cargo.toml':
+      '[package]\nname = "cc-lb-provider-openai"\n[dependencies]\ncontrol-ports = {\n  workspace = true,\n}\n',
+    'crates/cc-lb-provider-gemini/Cargo.toml':
+      '[package]\nname = "cc-lb-provider-gemini"\n[dependencies.control-ports]\nworkspace = true\n',
+  });
+  try {
+    const result = checkHotpathFirewall(subtableAndMultilineDir);
+    assert.equal(result.ok, false, 'Expected subtable and multiline workspace alias violations');
+    const joined = result.violations.join('\n');
+    assert.match(joined, /cc-lb-provider-openai\/Cargo\.toml:4:.*cc-lb-quota.*cc-lb-control -> cc-lb-quota/);
+    assert.match(joined, /cc-lb-provider-gemini\/Cargo\.toml:3:.*cc-lb-storage-api.*cc-lb-control -> cc-lb-storage-api/);
+  } finally {
+    rmSync(subtableAndMultilineDir, { recursive: true, force: true });
+  }
+});
+
+test('rejects quoted dependency keys and transitive edges through non-crates workspace members', () => {
+  const dir = makeTempRepo({
+    'Cargo.toml':
+      '[workspace]\nmembers = ["crates/*", "tools/workspace-hack", "packages/custom-helper"]\n[workspace.dependencies]\ncc-lb-workspace-hack = { path = "tools/workspace-hack" }\n',
+    'tools/workspace-hack/Cargo.toml':
+      '[package]\nname = "cc-lb-workspace-hack"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nsqlx = { path = "../../crates/stub-sqlx" }\n',
+    'tools/workspace-hack/src/lib.rs': '',
+    'packages/custom-helper/Cargo.toml':
+      '[package]\nname = "custom-helper"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\naxum = { path = "../../crates/stub-axum" }\n',
+    'packages/custom-helper/src/lib.rs': '',
+    'crates/stub-sqlx/Cargo.toml':
+      '[package]\nname = "sqlx"\nversion = "0.1.0"\nedition = "2021"\n',
+    'crates/stub-sqlx/src/lib.rs': '',
+    'crates/stub-axum/Cargo.toml':
+      '[package]\nname = "axum"\nversion = "0.1.0"\nedition = "2021"\n',
+    'crates/stub-axum/src/lib.rs': '',
+    'crates/cc-lb-provider-gemini/Cargo.toml':
+      '[package]\nname = "cc-lb-provider-gemini"\nversion = "0.1.0"\nedition = "2021"\n',
+    'crates/cc-lb-provider-gemini/src/lib.rs': '',
+    'crates/cc-lb-provider-openai/Cargo.toml':
+      '[package]\nname = "cc-lb-provider-openai"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\n\'cc-lb-provider-gemini\' = { path = "../cc-lb-provider-gemini" }\ncc-lb-workspace-hack.workspace = true\ncustom-helper = { path = "../../packages/custom-helper" }\n',
+    'crates/cc-lb-provider-openai/src/lib.rs': '',
+  });
+  try {
+    // Exercise the offline Cargo metadata enrichment path when Cargo.lock exists.
+    const lockRes = spawnSync('cargo', ['generate-lockfile', '--offline', '--manifest-path', path.join(dir, 'Cargo.toml')], {
+      encoding: 'utf8',
+    });
+    assert.equal(lockRes.status, 0, `cargo generate-lockfile failed: ${lockRes.stderr}`);
+
+    const result = checkHotpathFirewall(dir);
+    assert.equal(result.ok, false, 'Expected quoted direct and non-crates transitive violations');
+    const joined = result.violations.join('\n');
+    const geminiDirect = result.violations.filter((v) =>
+      /cc-lb-provider-openai\/Cargo\.toml:.*forbidden normal dependency `cc-lb-provider-gemini`/.test(v),
+    );
+    assert.equal(geminiDirect.length, 1, `Expected deduplicated direct report, got:\n${joined}`);
+    assert.match(joined, /cc-lb-provider-openai\/Cargo\.toml:.*forbidden transitive normal dependency `sqlx` via `cc-lb-provider-openai -> cc-lb-workspace-hack -> sqlx`/);
+    assert.match(joined, /cc-lb-provider-openai\/Cargo\.toml:.*forbidden transitive normal dependency `axum` via `cc-lb-provider-openai -> custom-helper -> axum`/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

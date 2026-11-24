@@ -71,10 +71,6 @@ const STORE_PAGE_LIMIT: usize = 1000;
 const METADATA_REFRESH_LOOKAHEAD_SECS: u64 = 60;
 const METADATA_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 const FIRE_NOW_REQUEST_TIMEOUT_SECS: u64 = 30;
-const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
-const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/";
-const DEFAULT_GEMINI_OAUTH_BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com/";
-const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/";
 
 fn vertex_preflight_failure_code(
     outcome: &cc_lb_control::anthropic_api_key::PreflightOutcome,
@@ -2484,30 +2480,17 @@ pub(super) fn upstream_base_url(upstream: &UpstreamRecord) -> Result<Url, Upstre
     if let Some(base_url) = upstream.base_url.as_ref() {
         return Ok(base_url.clone());
     }
-    if matches!(
-        upstream.kind,
-        UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential
-    ) {
-        return upstream
-            .vertex
-            .as_ref()
-            .map(|config| {
-                Url::parse(&cc_lb_domain::vertex_origin(&config.target))
-                    .map_err(|error| invalid_warmup_state(&error.to_string()))
-            })
-            .unwrap_or_else(|| {
-                Url::parse(DEFAULT_GEMINI_BASE_URL).map_err(|error| {
-                    invalid_warmup_state(&format!("invalid default warmup URL: {error}"))
-                })
-            });
+    let descriptor = cc_lb_providers::builtin_provider_registry()
+        .auth_kind_for_upstream_kind(upstream.kind)
+        .ok_or_else(|| invalid_warmup_state("unknown upstream kind"))?;
+    if descriptor.requires_vertex_config
+        && let Some(config) = upstream.vertex.as_ref()
+    {
+        return Url::parse(&cc_lb_domain::vertex_origin(&config.target))
+            .map_err(|error| invalid_warmup_state(&error.to_string()));
     }
-    let default = match upstream.kind {
-        UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth => DEFAULT_ANTHROPIC_BASE_URL,
-        UpstreamKind::OpenaiApiKey | UpstreamKind::OpenaiOauth => DEFAULT_OPENAI_BASE_URL,
-        UpstreamKind::GeminiApiKey | UpstreamKind::GeminiOauth => DEFAULT_GEMINI_BASE_URL,
-        UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential => unreachable!(),
-    };
-    Url::parse(default)
+    descriptor
+        .control_base_url_parsed()
         .map_err(|error| invalid_warmup_state(&format!("invalid default warmup URL: {error}")))
 }
 
@@ -2519,15 +2502,11 @@ pub(super) fn effective_base_url(
     if let Some(base_url) = base_url {
         return Ok(base_url.clone());
     }
-    let default = match kind {
-        UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth => DEFAULT_ANTHROPIC_BASE_URL,
-        UpstreamKind::OpenaiApiKey | UpstreamKind::OpenaiOauth => DEFAULT_OPENAI_BASE_URL,
-        UpstreamKind::GeminiApiKey => DEFAULT_GEMINI_BASE_URL,
-        UpstreamKind::GeminiOauth | UpstreamKind::VertexApiKey | UpstreamKind::VertexCredential => {
-            DEFAULT_GEMINI_OAUTH_BASE_URL
-        }
-    };
-    Url::parse(default)
+    let descriptor = cc_lb_providers::builtin_provider_registry()
+        .auth_kind_for_upstream_kind(kind)
+        .ok_or_else(|| invalid_warmup_state("unknown upstream kind"))?;
+    descriptor
+        .preflight_base_url_parsed()
         .map_err(|error| invalid_warmup_state(&format!("invalid default preflight URL: {error}")))
 }
 
