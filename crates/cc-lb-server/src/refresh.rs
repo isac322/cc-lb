@@ -94,6 +94,39 @@ pub(crate) struct OAuthRefreshLease {
     pub(crate) token: String,
 }
 
+fn oauth_refresh_lease_token(generation: u64, holder: &str, now_unix_secs: u64) -> String {
+    let expires_at = now_unix_secs.saturating_add(OAUTH_REFRESH_LEASE_TTL_SECS);
+    format!("held:{generation}:{holder}:{expires_at}")
+}
+
+fn normalized_lease_holder(holder: &str) -> String {
+    if holder.is_empty() || holder.contains(':') {
+        Uuid::new_v4().to_string()
+    } else {
+        holder.to_owned()
+    }
+}
+
+async fn reconcile_exact_oauth_refresh_lease(
+    meta: &dyn MetaStore,
+    upstream_id: Uuid,
+    attempted_token: &str,
+    final_generation: u64,
+) -> StorageResult<()> {
+    let key = oauth_refresh_lease_meta_key(upstream_id);
+    let Some(existing) = meta.get_meta_value(&key).await? else {
+        return Ok(());
+    };
+    if existing != attempted_token {
+        return Ok(());
+    }
+    let idle = format!("idle:{final_generation}");
+    let _ = meta
+        .compare_and_put_meta_value(&key, Some(attempted_token), &idle)
+        .await?;
+    Ok(())
+}
+
 /// Acquire a short-lived shared CAS lease in `MetaStore` for `upstream_id` at
 /// `generation`. Shared across scheduled refreshes (expiry-key and watchdog
 /// bootstrap jobs) and in-process lazy recovery fallbacks.
@@ -103,7 +136,27 @@ pub(crate) async fn try_acquire_oauth_refresh_lease(
     generation: u64,
     now_unix_secs: u64,
 ) -> StorageResult<Option<OAuthRefreshLease>> {
+    let holder = Uuid::new_v4().to_string();
+    try_acquire_oauth_refresh_lease_with_holder(
+        meta,
+        upstream_id,
+        generation,
+        &holder,
+        now_unix_secs,
+    )
+    .await
+}
+
+pub(crate) async fn try_acquire_oauth_refresh_lease_with_holder(
+    meta: &dyn MetaStore,
+    upstream_id: Uuid,
+    generation: u64,
+    holder: &str,
+    now_unix_secs: u64,
+) -> StorageResult<Option<OAuthRefreshLease>> {
     let key = oauth_refresh_lease_meta_key(upstream_id);
+    let holder = normalized_lease_holder(holder);
+    let token = oauth_refresh_lease_token(generation, &holder, now_unix_secs);
     for _ in 0..OAUTH_REFRESH_LEASE_CAS_ATTEMPTS {
         let existing = meta.get_meta_value(&key).await?;
         match existing.as_deref().and_then(parse_oauth_refresh_lease) {
@@ -121,13 +174,27 @@ pub(crate) async fn try_acquire_oauth_refresh_lease(
             }
             _ => {}
         }
-        let expires_at = now_unix_secs.saturating_add(OAUTH_REFRESH_LEASE_TTL_SECS);
-        let token = format!("held:{generation}:{}:{expires_at}", Uuid::new_v4());
-        if meta
+        match meta
             .compare_and_put_meta_value(&key, existing.as_deref(), &token)
-            .await?
+            .await
         {
-            return Ok(Some(OAuthRefreshLease { upstream_id, token }));
+            Ok(true) => {
+                return Ok(Some(OAuthRefreshLease { upstream_id, token }));
+            }
+            Ok(false) => continue,
+            Err(error) => {
+                if let Err(reconcile_error) =
+                    reconcile_exact_oauth_refresh_lease(meta, upstream_id, &token, generation).await
+                {
+                    tracing::warn!(
+                        error = %reconcile_error,
+                        upstream_id = %upstream_id,
+                        generation,
+                        "failed to reconcile ambiguous oauth refresh lease commit",
+                    );
+                }
+                return Err(error);
+            }
         }
     }
     Ok(None)
@@ -957,15 +1024,16 @@ impl LazyRefreshClaimGuard for ApalisLazyRefreshClaimGuard {
     async fn try_claim_fallback(
         &self,
         upstream_id: Uuid,
-        _holder: &str,
+        holder: &str,
         _idempotency_key: &str,
         generation: u64,
         now_unix_secs: u64,
     ) -> StorageResult<Option<LazyRefreshFallbackLease>> {
-        Ok(try_acquire_oauth_refresh_lease(
+        Ok(try_acquire_oauth_refresh_lease_with_holder(
             self.meta.as_ref(),
             upstream_id,
             generation,
+            holder,
             now_unix_secs,
         )
         .await?
@@ -1119,7 +1187,6 @@ impl Drop for FallbackClaimWaiterGuard {
 
 async fn try_claim_fallback_cancellation_safe(
     target: FallbackClaimTarget,
-    holder: &str,
     now_unix_secs: u64,
 ) -> Result<Option<LazyRefreshFallbackLease>, LazyRefreshError> {
     let handoff = Arc::new(std::sync::Mutex::new(FallbackClaimHandoff::Pending));
@@ -1131,14 +1198,19 @@ async fn try_claim_fallback_cancellation_safe(
     // Pass only a completion signal through the oneshot so cancelling before
     // `rx.await` polls never drops the lease inside an unread channel buffer.
     let (tx, rx) = tokio::sync::oneshot::channel::<StorageResult<Option<()>>>();
-    let task_holder = holder.to_owned();
+    let attempt_holder = Uuid::new_v4().to_string();
+    let proposed_lease = LazyRefreshFallbackLease::from_token(oauth_refresh_lease_token(
+        target.generation,
+        &attempt_holder,
+        now_unix_secs,
+    ));
     let task_handoff = Arc::clone(&handoff);
     tokio::spawn(async move {
         let result = target
             .claim_guard
             .try_claim_fallback(
                 target.upstream_id,
-                &task_holder,
+                &attempt_holder,
                 &target.idempotency_key,
                 target.generation,
                 now_unix_secs,
@@ -1168,6 +1240,7 @@ async fn try_claim_fallback_cancellation_safe(
                 let _ = tx.send(Ok(None));
             }
             Err(error) => {
+                release_abandoned_fallback_lease(target, proposed_lease).await;
                 let _ = tx.send(Err(error));
             }
         }
@@ -1501,7 +1574,6 @@ impl LazyRefresher {
                     WaitGenerationOutcome::JobTerminalFailure { reason } => {
                         self.run_exclusive_in_process_fallback(
                             upstream_id,
-                            &holder,
                             &idempotency_key,
                             starting_generation,
                             &reason,
@@ -1512,7 +1584,6 @@ impl LazyRefresher {
                     WaitGenerationOutcome::JobDoneWithoutAdvance => {
                         self.run_exclusive_in_process_fallback(
                             upstream_id,
-                            &holder,
                             &idempotency_key,
                             starting_generation,
                             "oauth refresh job completed without advancing generation",
@@ -1523,7 +1594,6 @@ impl LazyRefresher {
                     WaitGenerationOutcome::TimedOut { reason } => {
                         self.run_exclusive_in_process_fallback(
                             upstream_id,
-                            &holder,
                             &idempotency_key,
                             starting_generation,
                             &reason,
@@ -1540,7 +1610,6 @@ impl LazyRefresher {
     async fn run_exclusive_in_process_fallback(
         self,
         upstream_id: Uuid,
-        holder: &str,
         idempotency_key: &str,
         starting_generation: u64,
         contended_reason: &str,
@@ -1596,7 +1665,6 @@ impl LazyRefresher {
                         idempotency_key: idempotency_key.to_owned(),
                         generation: starting_generation,
                     },
-                    holder,
                     unix_secs(self.clock.now()),
                 )
                 .await?
@@ -1682,23 +1750,35 @@ impl LazyRefresher {
             starting_generation,
         );
 
-        if let Some(current_generation) = self
+        match self
             .stores
             .upstreams
             .read_oauth_token_generation(upstream_id)
             .await
-            .map_err(lazy_error)?
-            && current_generation > starting_generation
         {
-            if let Err(error) = active_lease.release(current_generation).await {
-                tracing::warn!(
-                    error = %error,
-                    upstream_id = %upstream_id,
-                    idempotency_key = %idempotency_key,
-                    "failed to release oauth refresh fallback lease",
-                );
+            Ok(Some(current_generation)) if current_generation > starting_generation => {
+                if let Err(error) = active_lease.release(current_generation).await {
+                    tracing::warn!(
+                        error = %error,
+                        upstream_id = %upstream_id,
+                        idempotency_key = %idempotency_key,
+                        "failed to release oauth refresh fallback lease",
+                    );
+                }
+                return Ok(());
             }
-            return Ok(());
+            Ok(_) => {}
+            Err(read_error) => {
+                if let Err(error) = active_lease.release(starting_generation).await {
+                    tracing::warn!(
+                        error = %error,
+                        upstream_id = %upstream_id,
+                        idempotency_key = %idempotency_key,
+                        "failed to release oauth refresh fallback lease after post-claim generation read error",
+                    );
+                }
+                return Err(lazy_error(read_error));
+            }
         }
 
         tracing::warn!(
@@ -4772,7 +4852,6 @@ mod tests {
                 idempotency_key: "k3".to_owned(),
                 generation: gen3,
             },
-            "waiter-3",
             cc_lb_clock::unix_secs(fixture3.clock.now()),
         ));
         assert!(claim_fut3.as_mut().poll(&mut cx3).is_pending());
@@ -4814,6 +4893,838 @@ mod tests {
         healthy3
             .finish_fallback_claim(upstream3, &healthy_lease3, gen3)
             .await?;
+        Ok(())
+    }
+
+    async fn setup_killed_oauth_job_fixture()
+    -> Result<(LazyRefreshFixture, Uuid, u64), Box<dyn std::error::Error>> {
+        let fixture = LazyRefreshFixture::new(Duration::ZERO).await;
+        let upstream_id = fixture.create_oauth_upstream().await;
+        let record = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream_id)
+            .await?
+            .ok_or("missing upstream")?;
+        let bundle = super::oauth_token_bundle(&record, fixture.aead.as_ref())
+            .map_err(|e| format!("{e}"))?;
+        let now = cc_lb_clock::unix_secs(fixture.clock.now());
+        let job = cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob::for_credential(
+            upstream_id,
+            record.oauth_token_generation,
+            bundle.expires_at_unix_secs,
+        );
+        let key = job
+            .generation_idempotency_key(record.oauth_token_generation, bundle.expires_at_unix_secs);
+        fixture
+            .scheduler_backend
+            .push_adaptive_task(cc_lb_scheduler::worker::SchedulerPushTask {
+                args: cc_lb_scheduler::worker::AdaptiveJob::OAuthRefresh(job),
+                idempotency_key: Some(key.clone()),
+                run_at_unix_secs: Some(now),
+                max_attempts: None,
+            })
+            .await?;
+        sqlx::query("UPDATE Jobs SET status = 'Killed', done_at = ?1 WHERE idempotency_key = ?2")
+            .bind(i64::try_from(now)?)
+            .bind(&key)
+            .execute(&fixture.scheduler_pool)
+            .await?;
+        Ok((fixture, upstream_id, record.oauth_token_generation))
+    }
+
+    #[tokio::test]
+    async fn oauth_refresh_lease_reconciles_exact_claim_after_lost_commit_ack()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::sync::watch;
+
+        struct LostCommitAckMetaStore {
+            inner: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+            fail_next_put: AtomicBool,
+        }
+
+        #[async_trait::async_trait]
+        impl MetaStore for LostCommitAckMetaStore {
+            async fn initialize(&self) -> StorageResult<()> {
+                self.inner.initialize().await
+            }
+
+            async fn backend_kind(&self) -> StorageResult<cc_lb_storage_api::BackendKind> {
+                self.inner.backend_kind().await
+            }
+
+            async fn get_meta_value(&self, key: &str) -> StorageResult<Option<String>> {
+                self.inner.get_meta_value(key).await
+            }
+
+            async fn put_meta_value(&self, key: &str, value: &str) -> StorageResult<()> {
+                self.inner.put_meta_value(key, value).await
+            }
+
+            async fn compare_and_put_meta_value(
+                &self,
+                key: &str,
+                expected: Option<&str>,
+                value: &str,
+            ) -> StorageResult<bool> {
+                let applied = self
+                    .inner
+                    .compare_and_put_meta_value(key, expected, value)
+                    .await?;
+                if self.fail_next_put.swap(false, Ordering::SeqCst) {
+                    return Err(cc_lb_storage_api::StorageError::Transient {
+                        retryable: true,
+                        source: Box::new(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionReset,
+                            "simulated lost COMMIT ack",
+                        )),
+                    });
+                }
+                Ok(applied)
+            }
+
+            async fn verify_schema_current(&self) -> StorageResult<()> {
+                self.inner.verify_schema_current().await
+            }
+        }
+
+        struct LostAckAfterCommitClaimGuard {
+            inner: super::ApalisLazyRefreshClaimGuard,
+            calls: AtomicUsize,
+            pause_on_call_index: usize,
+            committed: watch::Sender<bool>,
+            allow_return: watch::Receiver<bool>,
+            released: watch::Sender<bool>,
+        }
+
+        #[async_trait::async_trait]
+        impl super::LazyRefreshClaimGuard for LostAckAfterCommitClaimGuard {
+            async fn begin_refresh(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                expires_at_unix_secs: u64,
+                now_unix_secs: u64,
+            ) -> StorageResult<super::LazyRefreshClaim> {
+                self.inner
+                    .begin_refresh(upstream_id, holder, expires_at_unix_secs, now_unix_secs)
+                    .await
+            }
+
+            async fn begin_refresh_for_generation(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                expires_at_unix_secs: u64,
+                expected_generation: u64,
+                now_unix_secs: u64,
+            ) -> StorageResult<super::LazyRefreshClaim> {
+                self.inner
+                    .begin_refresh_for_generation(
+                        upstream_id,
+                        holder,
+                        expires_at_unix_secs,
+                        expected_generation,
+                        now_unix_secs,
+                    )
+                    .await
+            }
+
+            async fn complete_and_bump_generation(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+                _generation: u64,
+            ) -> StorageResult<bool> {
+                Ok(false)
+            }
+
+            async fn release_if_holder(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+            ) -> StorageResult<bool> {
+                Ok(false)
+            }
+
+            async fn task_state(
+                &self,
+                idempotency_key: &str,
+            ) -> StorageResult<super::LazyRefreshTaskState> {
+                self.inner.task_state(idempotency_key).await
+            }
+
+            async fn try_claim_fallback(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                idempotency_key: &str,
+                generation: u64,
+                now_unix_secs: u64,
+            ) -> StorageResult<Option<super::LazyRefreshFallbackLease>> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) < self.pause_on_call_index {
+                    return Ok(None);
+                }
+                let committed = self
+                    .inner
+                    .try_claim_fallback(
+                        upstream_id,
+                        holder,
+                        idempotency_key,
+                        generation,
+                        now_unix_secs,
+                    )
+                    .await?;
+                assert!(
+                    committed.is_some(),
+                    "inner SQLite MetaStore claim must commit before simulating lost ack"
+                );
+                self.committed.send_replace(true);
+                let mut allow_return = self.allow_return.clone();
+                let _ = allow_return.wait_for(|&go| go).await;
+                Err(cc_lb_storage_api::StorageError::Transient {
+                    retryable: true,
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "simulated lost COMMIT ack after wrapper delay",
+                    )),
+                })
+            }
+
+            async fn renew_fallback_claim(
+                &self,
+                upstream_id: Uuid,
+                lease: &super::LazyRefreshFallbackLease,
+                now_unix_secs: u64,
+            ) -> StorageResult<Option<super::LazyRefreshFallbackLease>> {
+                self.inner
+                    .renew_fallback_claim(upstream_id, lease, now_unix_secs)
+                    .await
+            }
+
+            fn fallback_lease_meta_key(&self, upstream_id: Uuid) -> Option<String> {
+                self.inner.fallback_lease_meta_key(upstream_id)
+            }
+
+            async fn finish_fallback_claim(
+                &self,
+                upstream_id: Uuid,
+                lease: &super::LazyRefreshFallbackLease,
+                final_generation: u64,
+            ) -> StorageResult<()> {
+                let res = self
+                    .inner
+                    .finish_fallback_claim(upstream_id, lease, final_generation)
+                    .await;
+                self.released.send_replace(true);
+                res
+            }
+        }
+
+        // Sub-case A: `try_acquire_oauth_refresh_lease` commits in SQLite before returning Err and
+        // reconciles its own proposed lease token back to `idle:{gen}`.
+        let (fixture_a, upstream_a, gen_a) = setup_killed_oauth_job_fixture().await?;
+        let lease_key_a = super::oauth_refresh_lease_meta_key(upstream_a);
+        let lost_ack_meta_a = Arc::new(LostCommitAckMetaStore {
+            inner: fixture_a.storage.clone(),
+            fail_next_put: AtomicBool::new(true),
+        });
+        let now_a = cc_lb_clock::unix_secs(fixture_a.clock.now());
+        let err_a = super::try_acquire_oauth_refresh_lease(
+            lost_ack_meta_a.as_ref(),
+            upstream_a,
+            gen_a,
+            now_a,
+        )
+        .await
+        .expect_err("lost commit ack must surface error");
+        assert!(matches!(
+            err_a,
+            cc_lb_storage_api::StorageError::Transient { .. }
+        ));
+        assert_eq!(
+            fixture_a
+                .storage
+                .get_meta_value(&lease_key_a)
+                .await?
+                .as_deref(),
+            Some(format!("idle:{gen_a}").as_str())
+        );
+        let healthy_lease_a = super::try_acquire_oauth_refresh_lease(
+            fixture_a.storage.as_ref(),
+            upstream_a,
+            gen_a,
+            now_a,
+        )
+        .await?
+        .ok_or("healthy worker A must immediately acquire reconciled lease")?;
+        super::release_oauth_refresh_lease(
+            fixture_a.storage.as_ref(),
+            upstream_a,
+            &healthy_lease_a.token,
+            gen_a,
+        )
+        .await?;
+
+        // Sub-case B1: Through `LazyRefresher::refresh_one` using `ApalisLazyRefreshClaimGuard` +
+        // `LostCommitAckMetaStore`, the fallback lease is reconciled before returning Err.
+        let (fixture_b1, upstream_b1, gen_b1) = setup_killed_oauth_job_fixture().await?;
+        let lease_key_b1 = super::oauth_refresh_lease_meta_key(upstream_b1);
+        let lost_ack_meta_b1 = Arc::new(LostCommitAckMetaStore {
+            inner: fixture_b1.storage.clone(),
+            fail_next_put: AtomicBool::new(true),
+        });
+        let refresher_b1 = fixture_b1.lazy_refresher(
+            Arc::new(super::ApalisLazyRefreshClaimGuard::new(
+                fixture_b1.scheduler_backend.clone(),
+                lost_ack_meta_b1,
+            )),
+            LazyRefreshContentionConfig::for_tests(
+                Duration::from_secs(5),
+                Duration::from_millis(5),
+            ),
+        );
+        let err_b1 = refresher_b1
+            .refresh_one(upstream_b1)
+            .await
+            .expect_err("lost commit ack in fallback claim must return error");
+        assert!(matches!(err_b1, super::LazyRefreshError::Failed { .. }));
+        assert_eq!(
+            fixture_b1
+                .storage
+                .get_meta_value(&lease_key_b1)
+                .await?
+                .as_deref(),
+            Some(format!("idle:{gen_b1}").as_str())
+        );
+        let healthy_b1 = super::ApalisLazyRefreshClaimGuard::new(
+            fixture_b1.scheduler_backend.clone(),
+            fixture_b1.storage.clone(),
+        );
+        let healthy_lease_b1 = healthy_b1
+            .try_claim_fallback(
+                upstream_b1,
+                "healthy-worker-b1",
+                "kb1",
+                gen_b1,
+                cc_lb_clock::unix_secs(fixture_b1.clock.now()),
+            )
+            .await?
+            .ok_or("healthy worker B1 must immediately acquire reconciled fallback lease")?;
+        healthy_b1
+            .finish_fallback_claim(upstream_b1, &healthy_lease_b1, gen_b1)
+            .await?;
+        assert_eq!(fixture_b1.refresh_call_count(), 0);
+
+        // Sub-case B2: Waiter cancels while claim guard commits to SQLite and then fails with an
+        // ambiguous Err; the claim owner retains the proposed token and releases the exact lease.
+        let (fixture_b2, upstream_b2, gen_b2) = setup_killed_oauth_job_fixture().await?;
+        let lease_key_b2 = super::oauth_refresh_lease_meta_key(upstream_b2);
+        let (committed_tx_b2, mut committed_rx_b2) = watch::channel(false);
+        let (allow_tx_b2, allow_rx_b2) = watch::channel(false);
+        let (released_tx_b2, mut released_rx_b2) = watch::channel(false);
+        let cancel_b2 = CancellationToken::new();
+        let refresher_b2 = super::LazyRefresher::new_with_claim_guard_for_tests(
+            LazyRefresherDeps {
+                google_config: Default::default(),
+                stores: fixture_b2.stores.clone(),
+                aead: fixture_b2.aead.clone(),
+                oauth_cfg: fixture_b2.oauth_cfg.clone(),
+                clock: fixture_b2.clock.clone(),
+            },
+            Uuid::new_v4(),
+            None,
+            cancel_b2.clone(),
+            Arc::new(LostAckAfterCommitClaimGuard {
+                inner: super::ApalisLazyRefreshClaimGuard::new(
+                    fixture_b2.scheduler_backend.clone(),
+                    fixture_b2.storage.clone(),
+                ),
+                calls: AtomicUsize::new(0),
+                pause_on_call_index: 1,
+                committed: committed_tx_b2,
+                allow_return: allow_rx_b2,
+                released: released_tx_b2,
+            }),
+            LazyRefreshContentionConfig::for_tests(
+                Duration::from_secs(5),
+                Duration::from_millis(5),
+            ),
+            fixture_b2.scheduler_backend.clone(),
+        );
+        let handle_b2 = tokio::spawn(async move { refresher_b2.refresh_one(upstream_b2).await });
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            committed_rx_b2.wait_for(|&committed| committed),
+        )
+        .await??;
+        let held_b2 = fixture_b2
+            .storage
+            .get_meta_value(&lease_key_b2)
+            .await?
+            .ok_or("missing committed lease_b2")?;
+        assert!(held_b2.starts_with(&format!("held:{gen_b2}:")));
+        cancel_b2.cancel();
+        let err_b2 = tokio::time::timeout(Duration::from_secs(2), handle_b2)
+            .await??
+            .expect_err("cancellation must abort waiter while lost-ack commit settles");
+        assert!(matches!(
+            err_b2,
+            super::LazyRefreshError::Failed { ref reason } if reason == "oauth refresh cancelled"
+        ));
+        allow_tx_b2.send_replace(true);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            released_rx_b2.wait_for(|&released| released),
+        )
+        .await??;
+        assert_eq!(
+            fixture_b2
+                .storage
+                .get_meta_value(&lease_key_b2)
+                .await?
+                .as_deref(),
+            Some(format!("idle:{gen_b2}").as_str())
+        );
+        let healthy_b2 = super::ApalisLazyRefreshClaimGuard::new(
+            fixture_b2.scheduler_backend.clone(),
+            fixture_b2.storage.clone(),
+        );
+        let healthy_lease_b2 = healthy_b2
+            .try_claim_fallback(
+                upstream_b2,
+                "healthy-worker-b2",
+                "kb2",
+                gen_b2,
+                cc_lb_clock::unix_secs(fixture_b2.clock.now()),
+            )
+            .await?
+            .ok_or("healthy worker B2 must immediately acquire reconciled fallback lease")?;
+        healthy_b2
+            .finish_fallback_claim(upstream_b2, &healthy_lease_b2, gen_b2)
+            .await?;
+        assert_eq!(fixture_b2.refresh_call_count(), 0);
+
+        // Sub-case C: Another holder owns an active lease when a failing claim errors without
+        // committing; reconciliation must check the exact token and leave the other holder untouched.
+        struct FailBeforeCommitClaimGuard(super::ApalisLazyRefreshClaimGuard);
+
+        #[async_trait::async_trait]
+        impl super::LazyRefreshClaimGuard for FailBeforeCommitClaimGuard {
+            async fn begin_refresh(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                expires_at_unix_secs: u64,
+                now_unix_secs: u64,
+            ) -> StorageResult<super::LazyRefreshClaim> {
+                self.0
+                    .begin_refresh(upstream_id, holder, expires_at_unix_secs, now_unix_secs)
+                    .await
+            }
+
+            async fn complete_and_bump_generation(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+                _generation: u64,
+            ) -> StorageResult<bool> {
+                Ok(false)
+            }
+
+            async fn release_if_holder(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+            ) -> StorageResult<bool> {
+                Ok(false)
+            }
+
+            async fn try_claim_fallback(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+                _idempotency_key: &str,
+                _generation: u64,
+                _now_unix_secs: u64,
+            ) -> StorageResult<Option<super::LazyRefreshFallbackLease>> {
+                Err(cc_lb_storage_api::StorageError::Unavailable {
+                    message: "transient error before write".to_owned(),
+                })
+            }
+
+            async fn finish_fallback_claim(
+                &self,
+                upstream_id: Uuid,
+                lease: &super::LazyRefreshFallbackLease,
+                final_generation: u64,
+            ) -> StorageResult<()> {
+                self.0
+                    .finish_fallback_claim(upstream_id, lease, final_generation)
+                    .await
+            }
+        }
+
+        let (fixture_c, upstream_c, gen_c) = setup_killed_oauth_job_fixture().await?;
+        let lease_key_c = super::oauth_refresh_lease_meta_key(upstream_c);
+        let apalis_c = super::ApalisLazyRefreshClaimGuard::new(
+            fixture_c.scheduler_backend.clone(),
+            fixture_c.storage.clone(),
+        );
+        let now_c = cc_lb_clock::unix_secs(fixture_c.clock.now());
+        let other_holder = Uuid::new_v4().to_string();
+        let other_lease = apalis_c
+            .try_claim_fallback(upstream_c, &other_holder, "kc", gen_c, now_c)
+            .await?
+            .ok_or("healthy worker C must hold initial lease")?;
+        let failing_guard: Arc<dyn LazyRefreshClaimGuard> =
+            Arc::new(FailBeforeCommitClaimGuard(apalis_c.clone()));
+        let err_c = super::try_claim_fallback_cancellation_safe(
+            super::FallbackClaimTarget {
+                claim_guard: failing_guard,
+                stores: fixture_c.stores.clone(),
+                upstream_id: upstream_c,
+                idempotency_key: "kc".to_owned(),
+                generation: gen_c,
+            },
+            now_c,
+        )
+        .await
+        .expect_err("failing guard must propagate error");
+        assert!(matches!(
+            err_c,
+            super::LazyRefreshError::Failed { ref reason }
+                if reason.contains("transient error before write")
+        ));
+        assert_eq!(
+            fixture_c
+                .storage
+                .get_meta_value(&lease_key_c)
+                .await?
+                .as_deref(),
+            Some(other_lease.token())
+        );
+        apalis_c
+            .finish_fallback_claim(upstream_c, &other_lease, gen_c)
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lazy_refresher_releases_fallback_lease_when_post_claim_generation_read_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct FailPostClaimGenerationReadStore {
+            inner: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+            fail_reads: Arc<AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl UpstreamStore for FailPostClaimGenerationReadStore {
+            async fn create(
+                &self,
+                create: UpstreamCreate,
+            ) -> StorageResult<cc_lb_storage_api::UpstreamRecord> {
+                self.inner.create(create).await
+            }
+
+            async fn get_by_name(
+                &self,
+                name: &str,
+            ) -> StorageResult<Option<cc_lb_storage_api::UpstreamRecord>> {
+                self.inner.get_by_name(name).await
+            }
+
+            async fn get_by_id(
+                &self,
+                id: Uuid,
+            ) -> StorageResult<Option<cc_lb_storage_api::UpstreamRecord>> {
+                self.inner.get_by_id(id).await
+            }
+
+            async fn list(
+                &self,
+                after: Option<Uuid>,
+                limit: usize,
+            ) -> StorageResult<Vec<cc_lb_storage_api::UpstreamRecord>> {
+                self.inner.list(after, limit).await
+            }
+
+            async fn update(
+                &self,
+                id: Uuid,
+                expected_revision: u64,
+                update: cc_lb_storage_api::UpstreamUpdate,
+            ) -> StorageResult<cc_lb_storage_api::UpstreamRecord> {
+                self.inner.update(id, expected_revision, update).await
+            }
+
+            async fn set_status(
+                &self,
+                id: Uuid,
+                status: cc_lb_storage_api::UpstreamStatusUpdate,
+            ) -> StorageResult<()> {
+                self.inner.set_status(id, status).await
+            }
+
+            async fn store_oauth_tokens(
+                &self,
+                id: Uuid,
+                expected_revision: u64,
+                tokens: EncryptedOAuthTokens,
+                never_refresh: bool,
+            ) -> StorageResult<cc_lb_storage_api::UpstreamRecord> {
+                self.inner
+                    .store_oauth_tokens(id, expected_revision, tokens, never_refresh)
+                    .await
+            }
+
+            async fn complete_refresh(
+                &self,
+                id: Uuid,
+                holder: Uuid,
+                tokens: EncryptedOAuthTokens,
+            ) -> StorageResult<cc_lb_storage_api::UpstreamRecord> {
+                self.inner.complete_refresh(id, holder, tokens).await
+            }
+
+            async fn complete_refresh_fenced(
+                &self,
+                id: Uuid,
+                holder: Uuid,
+                tokens: EncryptedOAuthTokens,
+                fence: &cc_lb_storage_api::OAuthRefreshFence,
+            ) -> StorageResult<cc_lb_storage_api::UpstreamRecord> {
+                self.inner
+                    .complete_refresh_fenced(id, holder, tokens, fence)
+                    .await
+            }
+
+            async fn read_oauth_token_generation(&self, id: Uuid) -> StorageResult<Option<u64>> {
+                if self.fail_reads.load(Ordering::SeqCst) {
+                    return Err(cc_lb_storage_api::StorageError::Unavailable {
+                        message: "transient post-claim generation read failure".to_owned(),
+                    });
+                }
+                self.inner.read_oauth_token_generation(id).await
+            }
+
+            async fn set_last_apply_error(
+                &self,
+                id: Uuid,
+                error: Option<String>,
+            ) -> StorageResult<()> {
+                self.inner.set_last_apply_error(id, error).await
+            }
+
+            async fn soft_delete(&self, id: Uuid, expected_revision: u64) -> StorageResult<()> {
+                self.inner.soft_delete(id, expected_revision).await
+            }
+
+            async fn hard_delete(&self, id: Uuid) -> StorageResult<()> {
+                self.inner.hard_delete(id).await
+            }
+
+            async fn clear_warmup_dialect_plugin(
+                &self,
+                id: Uuid,
+                expected_revision: u64,
+            ) -> StorageResult<Option<cc_lb_storage_api::UpstreamRecord>> {
+                self.inner
+                    .clear_warmup_dialect_plugin(id, expected_revision)
+                    .await
+            }
+        }
+
+        struct ArmFailureAfterClaimGuard {
+            inner: super::ApalisLazyRefreshClaimGuard,
+            fail_reads: Arc<AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl super::LazyRefreshClaimGuard for ArmFailureAfterClaimGuard {
+            async fn begin_refresh(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                expires_at_unix_secs: u64,
+                now_unix_secs: u64,
+            ) -> StorageResult<super::LazyRefreshClaim> {
+                self.inner
+                    .begin_refresh(upstream_id, holder, expires_at_unix_secs, now_unix_secs)
+                    .await
+            }
+
+            async fn begin_refresh_for_generation(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                expires_at_unix_secs: u64,
+                expected_generation: u64,
+                now_unix_secs: u64,
+            ) -> StorageResult<super::LazyRefreshClaim> {
+                self.inner
+                    .begin_refresh_for_generation(
+                        upstream_id,
+                        holder,
+                        expires_at_unix_secs,
+                        expected_generation,
+                        now_unix_secs,
+                    )
+                    .await
+            }
+
+            async fn complete_and_bump_generation(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+                _generation: u64,
+            ) -> StorageResult<bool> {
+                Ok(false)
+            }
+
+            async fn release_if_holder(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+            ) -> StorageResult<bool> {
+                Ok(false)
+            }
+
+            async fn task_state(
+                &self,
+                idempotency_key: &str,
+            ) -> StorageResult<super::LazyRefreshTaskState> {
+                self.inner.task_state(idempotency_key).await
+            }
+
+            async fn try_claim_fallback(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                idempotency_key: &str,
+                generation: u64,
+                now_unix_secs: u64,
+            ) -> StorageResult<Option<super::LazyRefreshFallbackLease>> {
+                let lease = self
+                    .inner
+                    .try_claim_fallback(
+                        upstream_id,
+                        holder,
+                        idempotency_key,
+                        generation,
+                        now_unix_secs,
+                    )
+                    .await?;
+                if lease.is_some() {
+                    // Arm only after acquiring the fallback lease so earlier scheduler wait
+                    // polls and the claim acquisition itself proceed normally.
+                    self.fail_reads.store(true, Ordering::SeqCst);
+                }
+                Ok(lease)
+            }
+
+            async fn renew_fallback_claim(
+                &self,
+                upstream_id: Uuid,
+                lease: &super::LazyRefreshFallbackLease,
+                now_unix_secs: u64,
+            ) -> StorageResult<Option<super::LazyRefreshFallbackLease>> {
+                self.inner
+                    .renew_fallback_claim(upstream_id, lease, now_unix_secs)
+                    .await
+            }
+
+            fn fallback_lease_meta_key(&self, upstream_id: Uuid) -> Option<String> {
+                self.inner.fallback_lease_meta_key(upstream_id)
+            }
+
+            async fn finish_fallback_claim(
+                &self,
+                upstream_id: Uuid,
+                lease: &super::LazyRefreshFallbackLease,
+                final_generation: u64,
+            ) -> StorageResult<()> {
+                self.inner
+                    .finish_fallback_claim(upstream_id, lease, final_generation)
+                    .await
+            }
+        }
+
+        let (fixture, upstream_id, starting_gen) = setup_killed_oauth_job_fixture().await?;
+        let lease_key = super::oauth_refresh_lease_meta_key(upstream_id);
+        let fail_reads = Arc::new(AtomicBool::new(false));
+        let failing_stores = Arc::new(crate::dynamic_view_builder::Stores {
+            upstreams: Arc::new(FailPostClaimGenerationReadStore {
+                inner: fixture.storage.clone(),
+                fail_reads: Arc::clone(&fail_reads),
+            }),
+            vertex_state: Arc::new(crate::dynamic_view_builder::VertexState::new(
+                fixture.storage.clone(),
+            )),
+            principals: fixture.storage.clone(),
+            plugin_registry: fixture.storage.clone(),
+            upstream_rate_limits: fixture.storage.clone(),
+            upstream_subscription_quotas: fixture.storage.clone(),
+            upstream_subscription_metadata: fixture.storage.clone(),
+            organization_metadata: fixture.storage.clone(),
+            plan_tiers: fixture.storage.clone(),
+            prompt_cache_observations: fixture.storage.clone(),
+            anthropic_compatibility_kv: fixture.storage.clone(),
+            audit: Some(fixture.storage.clone()),
+        });
+        let refresher = super::LazyRefresher::new_with_claim_guard_for_tests(
+            LazyRefresherDeps {
+                google_config: Default::default(),
+                stores: failing_stores,
+                aead: fixture.aead.clone(),
+                oauth_cfg: fixture.oauth_cfg.clone(),
+                clock: fixture.clock.clone(),
+            },
+            Uuid::new_v4(),
+            None,
+            CancellationToken::new(),
+            Arc::new(ArmFailureAfterClaimGuard {
+                inner: super::ApalisLazyRefreshClaimGuard::new(
+                    fixture.scheduler_backend.clone(),
+                    fixture.storage.clone(),
+                ),
+                fail_reads,
+            }),
+            LazyRefreshContentionConfig::for_tests(
+                Duration::from_secs(5),
+                Duration::from_millis(5),
+            ),
+            fixture.scheduler_backend.clone(),
+        );
+
+        let err = refresher
+            .refresh_one(upstream_id)
+            .await
+            .expect_err("post-claim generation read error must propagate to caller");
+        assert!(matches!(
+            err,
+            super::LazyRefreshError::Failed { ref reason }
+                if reason.contains("transient post-claim generation read failure")
+        ));
+        assert_eq!(
+            fixture.storage.get_meta_value(&lease_key).await?.as_deref(),
+            Some(format!("idle:{starting_gen}").as_str())
+        );
+        let healthy = super::ApalisLazyRefreshClaimGuard::new(
+            fixture.scheduler_backend.clone(),
+            fixture.storage.clone(),
+        );
+        let healthy_lease = healthy
+            .try_claim_fallback(
+                upstream_id,
+                "healthy-worker-post-claim",
+                "k-post-claim",
+                starting_gen,
+                cc_lb_clock::unix_secs(fixture.clock.now()),
+            )
+            .await?
+            .ok_or("healthy worker must immediately acquire released fallback lease")?;
+        healthy
+            .finish_fallback_claim(upstream_id, &healthy_lease, starting_gen)
+            .await?;
+        assert_eq!(fixture.refresh_call_count(), 0);
         Ok(())
     }
 
