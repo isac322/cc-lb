@@ -375,3 +375,225 @@ async fn websocket_handshake_responses_same_host_breakers_are_scoped_to_upstream
     failing_task.abort();
     healthy_task.abort();
 }
+
+#[tokio::test]
+async fn websocket_handshake_candidate_loop_caps_attempts_at_three_and_skips_open_breakers() {
+    let mut failing_tasks = Vec::new();
+    let mut failing_requests = Vec::new();
+    let mut upstreams = Vec::new();
+    for idx in 1..=5_u128 {
+        let (url, reqs, task) = spawn_http_error_provider(
+            500,
+            r#"{"error":{"code":"provider_server_error","message":"provider-body-secret"}}"#
+                .to_owned(),
+        )
+        .await;
+        failing_requests.push(reqs);
+        failing_tasks.push(task);
+        upstreams.push(websocket_upstream(
+            idx,
+            &format!("failing-{idx}"),
+            url,
+        ));
+    }
+
+    let router = websocket_test_router(upstreams.clone(), TerminalStrategy::FirstPick).await;
+    let (proxy_address, proxy_task) = spawn_proxy_router(router).await;
+    let (mut client, response) = connect_async(websocket_request(proxy_address))
+        .await
+        .expect("downstream handshake succeeds");
+    assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+
+    client
+        .send(UpstreamMessage::Text(RESPONSE_CREATE.into()))
+        .await
+        .expect("response.create sends");
+    let error = receive_error(&mut client).await;
+    assert_eq!(error["status"], 500);
+    assert_eq!(error["error"]["code"], "upstream_unavailable");
+
+    let counts: Vec<usize> = failing_requests
+        .iter()
+        .map(|reqs| reqs.load(Ordering::SeqCst))
+        .collect();
+    assert_eq!(
+        counts,
+        vec![1, 1, 1, 0, 0],
+        "single dispatch must attempt at most 3 distinct upstreams"
+    );
+
+    let _ = client.close(None).await;
+    proxy_task.abort();
+    for task in failing_tasks {
+        task.abort();
+    }
+
+    // Now test open-breaker skipping: trip local breakers on upstreams 1..=3, keep 4th healthy.
+    let (healthy_url, healthy_requests, healthy_task) = spawn_responses_success_provider().await;
+    let (dead_url, dead_requests, dead_task) = spawn_http_error_provider(
+        500,
+        r#"{"error":{"code":"provider_server_error","message":"provider-body-secret"}}"#
+            .to_owned(),
+    )
+    .await;
+    let state = websocket_test_state(
+        vec![
+            websocket_upstream(101, "tripped-1", dead_url.clone()),
+            websocket_upstream(102, "tripped-2", dead_url.clone()),
+            websocket_upstream(103, "tripped-3", dead_url),
+            websocket_upstream(104, "healthy-4", healthy_url),
+        ],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    for id in [101_u128, 102, 103] {
+        let breaker = state.breaker_registry.breaker(
+            responses_websocket::websocket_breaker_key(Uuid::from_u128(id)),
+            state.breaker_config,
+            state.clock.clone(),
+        );
+        for _ in 0..state.breaker_config.failures_to_open {
+            if let Ok(permit) = breaker.permit() {
+                permit.record_failure();
+            }
+        }
+    }
+    let router = proxy_router(state, 30);
+    let (proxy_address, proxy_task) = spawn_proxy_router(router).await;
+    let (mut client, _) = connect_async(websocket_request(proxy_address))
+        .await
+        .expect("downstream handshake succeeds");
+    client
+        .send(UpstreamMessage::Text(RESPONSE_CREATE.into()))
+        .await
+        .expect("response.create sends");
+    let message = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .expect("healthy 4th candidate responds after skipping open breakers")
+        .expect("downstream stays open")
+        .expect("response decodes");
+    assert_eq!(
+        message,
+        UpstreamMessage::Text(
+            r#"{"type":"response.created","response":{"id":"healthy","store":false}}"#.into(),
+        )
+    );
+    assert_eq!(
+        dead_requests.load(Ordering::SeqCst),
+        0,
+        "open-breaker candidates must be skipped without contacting upstream"
+    );
+    assert_eq!(healthy_requests.load(Ordering::SeqCst), 1);
+
+    let _ = client.close(None).await;
+    proxy_task.abort();
+    dead_task.abort();
+    healthy_task.abort();
+}
+
+#[tokio::test]
+async fn websocket_handshake_candidate_loop_enforces_total_connect_budget() {
+    let mut listeners = Vec::new();
+    let mut upstreams = Vec::new();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let mut accept_tasks = Vec::new();
+    for idx in 1..=3_u128 {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("hanging listener binds");
+        let addr = listener.local_addr().expect("addr");
+        let accepted_clone = accepted.clone();
+        let (tx_hold, rx_hold) = tokio::sync::oneshot::channel::<()>();
+        listeners.push(tx_hold);
+        accept_tasks.push(tokio::spawn(async move {
+            let Ok((socket, _)) = listener.accept().await else {
+                return;
+            };
+            accepted_clone.fetch_add(1, Ordering::SeqCst);
+            let _ = rx_hold.await;
+            drop(socket);
+        }));
+        upstreams.push(websocket_upstream(
+            idx,
+            &format!("hanging-{idx}"),
+            Url::parse(&format!("http://{addr}/")).expect("url"),
+        ));
+    }
+
+    let state = websocket_test_state(
+        upstreams,
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let headers = {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-api-key",
+            HeaderValue::from_str(TEST_KEY.plaintext.as_str())
+                .expect("fixture key is a valid header value"),
+        );
+        h
+    };
+    let auth = state
+        .lifecycle
+        .authenticate(&headers)
+        .await
+        .expect("fixture key authenticates");
+    let mut gateway = cc_lb_engine::responses_websocket::ResponsesWebSocketGateway::new(
+        state.lifecycle.clone(),
+        &auth,
+        headers,
+        state.body_caps.messages,
+        8,
+    );
+    let dispatch = gateway
+        .client_message(auth, Bytes::from_static(RESPONSE_CREATE.as_bytes()))
+        .await
+        .expect("client message admits")
+        .expect("dispatch returned");
+    assert_eq!(dispatch.candidates.len(), 3);
+
+    let (events, _event_rx) = tokio::sync::mpsc::channel(8);
+    let mut connections = HashMap::new();
+    let mut next_connection_id = 1;
+    let started = std::time::Instant::now();
+    let (_ready, errors) = responses_websocket::dispatch_responses_websocket_with_limits(
+        &mut gateway,
+        dispatch,
+        &state,
+        &mut connections,
+        &events,
+        &mut next_connection_id,
+        8,
+        Duration::from_millis(250),
+        Duration::from_millis(450),
+        3,
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].status, 504);
+    assert_eq!(errors[0].code, "upstream_unavailable");
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "total connect budget must bound aggregate latency, took {elapsed:?}"
+    );
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        2,
+        "third candidate must not be attempted once total connect budget expires"
+    );
+
+    drop(listeners);
+    for task in accept_tasks {
+        task.abort();
+    }
+}

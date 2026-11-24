@@ -713,7 +713,7 @@ impl Lifecycle {
                 });
             }
             let route_started = Instant::now();
-            let (ctx, mut pipeline_result, unknown_reasoning_plan) = self
+            let (ctx, mut pipeline_result, unknown_reasoning_plan, fallback_candidates) = self
                 .websocket_routing(
                     &view,
                     auth,
@@ -879,7 +879,8 @@ impl Lifecycle {
                     },
                 });
             }
-            let mut candidates = Vec::with_capacity(pipeline_result.candidates.len());
+            let mut candidates =
+                Vec::with_capacity(pipeline_result.candidates.len() + fallback_candidates.len());
             candidates.push(WebSocketCandidate {
                 upstream_id: selected_id,
                 upstream_name: record.name.clone(),
@@ -889,6 +890,7 @@ impl Lifecycle {
                 pipeline_result
                     .candidates
                     .into_iter()
+                    .chain(fallback_candidates)
                     .filter(|candidate| candidate.upstream_id != selected_id)
                     .map(|candidate| WebSocketCandidate {
                         upstream_id: candidate.upstream_id,
@@ -982,8 +984,15 @@ impl Lifecycle {
         owner: Option<Uuid>,
         request_id: String,
         codex_backend: bool,
-    ) -> Result<(RequestContext, FilterPipelineResult, WsUnknownReasoningPlan), WebSocketError>
-    {
+    ) -> Result<
+        (
+            RequestContext,
+            FilterPipelineResult,
+            WsUnknownReasoningPlan,
+            Vec<UpstreamCandidate>,
+        ),
+        WebSocketError,
+    > {
         use cc_lb_control::api_keys::principal_view::PrincipalStatus;
         enum WsUnknownReasoningRecovery {
             None,
@@ -1201,12 +1210,14 @@ impl Lifecycle {
         if let Some(target) = target {
             candidates.retain(|candidate| candidate.upstream_id == target);
         }
-        let mut result = execute_filter_pipeline(
-            pipeline.filters_for(cc_lb_domain::Provider::Openai),
-            &ctx,
-            &principal,
-            candidates,
-        );
+        let filters = pipeline.filters_for(cc_lb_domain::Provider::Openai);
+        let pre_filter_candidates = (target.is_none()
+            && candidates.len() > 1
+            && filters
+                .iter()
+                .any(|filter| filter.plugin_id() == BUILTIN_SUBSCRIPTION_PREFERENCE_ID))
+        .then(|| candidates.clone());
+        let mut result = execute_filter_pipeline(filters, &ctx, &principal, candidates);
         if let Some(target) = target {
             result
                 .candidates
@@ -1226,6 +1237,44 @@ impl Lifecycle {
                     "no upstream candidates remain after routing filters"
                 },
             ));
+        }
+        // Built-in `subscription-preference` returns a single winner per filter pass;
+        // precompute ordered fallback candidates (matching HTTP failover) so initial
+        // WebSocket handshake failures can still fail over across eligible upstreams.
+        const MAX_WS_FALLBACK_CANDIDATES: usize = 16;
+        let mut fallback_candidates = Vec::new();
+        if let Some(pool) = pre_filter_candidates
+            && result.candidates.len() == 1
+        {
+            let mut excluded = vec![result.candidates[0].upstream_id];
+            while fallback_candidates.len() < MAX_WS_FALLBACK_CANDIDATES {
+                let remaining: Vec<UpstreamCandidate> = pool
+                    .iter()
+                    .filter(|candidate| !excluded.contains(&candidate.upstream_id))
+                    .cloned()
+                    .collect();
+                if remaining.is_empty() {
+                    break;
+                }
+                let next_result = execute_filter_pipeline(filters, &ctx, &principal, remaining);
+                let terminal = self
+                    .select_terminal_upstream(pipeline.terminal.clone(), &next_result.candidates);
+                let Some(next_id) = terminal.upstream_id else {
+                    break;
+                };
+                let Some(next_candidate) = next_result
+                    .candidates
+                    .into_iter()
+                    .find(|candidate| candidate.upstream_id == next_id)
+                else {
+                    break;
+                };
+                if subscription_hard_blocked(ctx.canonical_model_id.as_str(), &next_candidate) {
+                    break;
+                }
+                excluded.push(next_id);
+                fallback_candidates.push(next_candidate);
+            }
         }
         let plan = match recovery {
             WsUnknownReasoningRecovery::None => WsUnknownReasoningPlan::None,
@@ -1255,7 +1304,7 @@ impl Lifecycle {
                 pending_keys,
             },
         };
-        Ok((ctx, result, plan))
+        Ok((ctx, result, plan, fallback_candidates))
     }
 
     /// Shape one WebSocket frame for its selected upstream.

@@ -8145,6 +8145,204 @@ async fn responses_websocket_applies_filters_after_owner_constraint_and_revalida
 }
 
 #[tokio::test]
+async fn responses_websocket_subscription_preference_provides_ordered_fallbacks_without_reviving_exhausted_or_breaking_owner()
+ {
+    struct StaticQuotaCache {
+        snapshots: Mutex<HashMap<Uuid, Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot>>>,
+    }
+
+    impl cc_lb_control::SubscriptionQuotaCacheLike for StaticQuotaCache {
+        fn upsert_observation(&self, _record: &cc_lb_storage_api::SubscriptionQuotaSample) {}
+
+        fn snapshot_for_upstream(
+            &self,
+            upstream_id: Uuid,
+            _now_unix_millis: u64,
+            _max_staleness_secs: u64,
+        ) -> Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot> {
+            self.snapshots
+                .lock()
+                .expect("quota cache lock")
+                .get(&upstream_id)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    const NOW_SECS: u64 = 1_700_000_000;
+    let quota_snapshot = |window: &str, utilization: f64, status: &str, reset: u64| {
+        cc_lb_domain::SubscriptionQuotaCandidateSnapshot {
+            window: window.to_owned(),
+            state: cc_lb_domain::SubscriptionQuotaDataState::Fresh,
+            source: Some("ws-fallback-test".to_owned()),
+            utilization: Some(utilization),
+            status: Some(status.to_owned()),
+            resets_at_unix_secs: Some(reset),
+            surpassed_threshold: None,
+            representative_claim: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            credits: None,
+            observed_at_unix_millis: Some(NOW_SECS * 1_000),
+            max_staleness_secs: 60,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+        }
+    };
+
+    let first_id = Uuid::from_u128(101);
+    let second_id = Uuid::from_u128(102);
+    let filter: Arc<dyn FilterPlugin> = Arc::new(
+        crate::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::new(),
+    );
+    let pipeline = Arc::new(RouterPipelineCache {
+        user_filters: vec![filter],
+        terminal: TerminalStrategy::FirstPick,
+        instantiation_error: None,
+        provider_filters: None,
+    });
+    let principal_view = failure_principal_view(
+        "principal-test",
+        (
+            Some(pipeline),
+            cc_lb_control::api_keys::principal_view::DialectCache::Inherit,
+        ),
+    );
+    let upstreams = vec![
+        UpstreamRecord {
+            id: first_id,
+            name: "codex-oauth-1".to_owned(),
+            kind: StorageRecordKind::OpenaiOauth,
+            enabled: true,
+            ..Default::default()
+        },
+        UpstreamRecord {
+            id: second_id,
+            name: "codex-oauth-2".to_owned(),
+            kind: StorageRecordKind::OpenaiOauth,
+            enabled: true,
+            ..Default::default()
+        },
+    ];
+    let quota_cache = Arc::new(StaticQuotaCache {
+        snapshots: Mutex::new(HashMap::new()),
+    });
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(TestSignerFactory))
+        .principal_view(principal_view)
+        .subscription_quota_cache(quota_cache.clone())
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(upstreams)
+        .build();
+    let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        failure_authn(),
+        Arc::new(DynamicViewHolder::new(view)),
+        Arc::new(QueueDispatch::new(Vec::new())),
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::TestClock::new_at_secs(NOW_SECS)),
+    )
+    .with_event_bus(bus);
+
+    let frame = Bytes::from_static(br#"{"model":"gpt-6.2-sol","store":false}"#);
+    let body = Arc::new(serde_json::from_slice::<Value>(&frame).expect("frame parses"));
+    let request = failure_request(Bytes::new());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("request authenticates");
+
+    // Case A: fresh turn (owner = None) keeps both healthy OAuth upstreams in ordered fallback list.
+    let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
+    let fresh_turn = lifecycle
+        .prepare_websocket_turn_with_surface(
+            &auth,
+            WebSocketIngress {
+                headers: request.headers(),
+                frame: &frame,
+                query: None,
+            },
+            body.clone(),
+            None,
+            observer,
+            &request_id,
+            true,
+        )
+        .await
+        .expect("fresh turn prepares");
+    let fresh_ids: HashSet<Uuid> = fresh_turn
+        .candidates
+        .iter()
+        .map(|candidate| candidate.upstream_id)
+        .collect();
+    assert_eq!(fresh_turn.candidates.len(), 2);
+    assert_eq!(fresh_ids, HashSet::from([first_id, second_id]));
+
+    // Case B: owned continuation (owner = Some(first_id)) stays pinned to first_id with no fallback.
+    let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
+    let owned_turn = lifecycle
+        .prepare_websocket_turn_with_surface(
+            &auth,
+            WebSocketIngress {
+                headers: request.headers(),
+                frame: &frame,
+                query: None,
+            },
+            body.clone(),
+            Some(first_id),
+            observer,
+            &request_id,
+            true,
+        )
+        .await
+        .expect("owned turn prepares");
+    assert_eq!(owned_turn.candidates.len(), 1);
+    assert_eq!(owned_turn.candidates[0].upstream_id, first_id);
+
+    // Case C: quota-exhausted upstream is excluded by subscription_hard_blocked and not revived.
+    {
+        let mut snapshots = quota_cache.snapshots.lock().expect("quota cache lock");
+        snapshots.insert(
+            first_id,
+            vec![
+                quota_snapshot("5h", 0.1, "allowed", NOW_SECS + 1_800),
+                quota_snapshot("7d", 0.2, "allowed", NOW_SECS + 86_400),
+            ],
+        );
+        snapshots.insert(
+            second_id,
+            vec![
+                quota_snapshot("5h", 0.0, "allowed", NOW_SECS + 1_800),
+                quota_snapshot("7d", 1.0, "rejected", NOW_SECS + 86_400),
+            ],
+        );
+    }
+    let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
+    let filtered_turn = lifecycle
+        .prepare_websocket_turn_with_surface(
+            &auth,
+            WebSocketIngress {
+                headers: request.headers(),
+                frame: &frame,
+                query: None,
+            },
+            body,
+            None,
+            observer,
+            &request_id,
+            true,
+        )
+        .await
+        .expect("healthy upstream prepares while exhausted peer is excluded");
+    assert_eq!(filtered_turn.candidates.len(), 1);
+    assert_eq!(filtered_turn.candidates[0].upstream_id, first_id);
+}
+
+#[tokio::test]
 async fn responses_websocket_signs_native_codex_connection_urls() {
     for (base_url, expected) in [
         (None, "wss://chatgpt.com/backend-api/codex/responses"),

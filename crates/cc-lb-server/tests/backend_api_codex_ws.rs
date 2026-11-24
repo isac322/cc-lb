@@ -1603,3 +1603,393 @@ async fn public_responses_websocket_interrupt_enforces_lane_and_reports_unknown_
         recorded[0]
     );
 }
+
+#[tokio::test]
+async fn backend_codex_websocket_forwards_response_failed_after_in_response_error_and_recovers_after_disconnect()
+ {
+    use axum::routing::get;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    // Upstream 1: turn 1 sends response.created -> in_progress -> statusless `error` (seq=3)
+    // -> responsesapi.websocket_timing -> `response.failed` (seq=4), then closes WS.
+    // Once `reject_after_disconnect` is armed, new handshakes return 503.
+    let reject_u1 = Arc::new(AtomicBool::new(false));
+    let u1_ws_calls = Arc::new(AtomicUsize::new(0));
+    let reject_u1_clone = reject_u1.clone();
+    let u1_calls_clone = u1_ws_calls.clone();
+    let u1_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let u1_addr = u1_listener.local_addr().unwrap();
+    let _u1_task = tokio::spawn(async move {
+        let router = Router::new().route(
+            "/backend-api/codex/responses",
+            get(move |ws: WebSocketUpgrade| {
+                let reject = reject_u1_clone.load(Ordering::SeqCst);
+                let calls = u1_calls_clone.clone();
+                async move {
+                    if reject {
+                        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "overloaded")
+                            .into_response();
+                    }
+                    ws.on_upgrade(move |mut socket: AxumWebSocket| async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        while let Some(Ok(AxumMessage::Text(create))) = socket.recv().await {
+                            let req: Value = serde_json::from_str(&create).unwrap();
+                            if req["input"].as_str() == Some("drop-me") {
+                                let created = r#"{"type":"response.created","sequence_number":0,"response":{"id":"resp_u1_drop","object":"response","status":"in_progress","store":false,"output":[]}}"#;
+                                let _ = socket.send(AxumMessage::Text(created.into())).await;
+                                let _ = socket.close().await;
+                                return;
+                            }
+                            let frames = [
+                                r#"{"type":"response.created","sequence_number":0,"response":{"id":"resp_u1_overload","object":"response","status":"in_progress","store":false,"output":[]}}"#,
+                                r#"{"type":"response.in_progress","sequence_number":2,"response":{"id":"resp_u1_overload","object":"response","status":"in_progress","store":false,"output":[]}}"#,
+                                r#"{"type":"error","sequence_number":3,"response_id":"resp_u1_overload","error":{"message":"Our servers are currently overloaded. Please try again later.","type":"service_unavailable_error","param":null,"code":"server_is_overloaded","headers":{"retry-after":"360","retry-after-ms":"360000"}}}"#,
+                                r#"{"type":"responsesapi.websocket_timing","timing_metrics":{"execute_duration_ms":42}}"#,
+                                r#"{"type":"response.failed","sequence_number":4,"response":{"id":"resp_u1_overload","object":"response","status":"failed","output":[],"error":{"type":"service_unavailable_error","param":null,"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}"#,
+                            ];
+                            for frame in frames {
+                                if socket.send(AxumMessage::Text(frame.into())).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    })
+                    .into_response()
+                }
+            }),
+        );
+        let _ = axum::serve(u1_listener, router).await;
+    });
+
+    // Upstream 2: healthy OAuth WS upstream.
+    let u2_ws_calls = Arc::new(AtomicUsize::new(0));
+    let u2_calls_clone = u2_ws_calls.clone();
+    let u2_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let u2_addr = u2_listener.local_addr().unwrap();
+    let _u2_task = tokio::spawn(async move {
+        let router = Router::new().route(
+            "/backend-api/codex/responses",
+            get(move |ws: WebSocketUpgrade| {
+                let calls = u2_calls_clone.clone();
+                async move {
+                    ws.on_upgrade(move |mut socket: AxumWebSocket| async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        while let Some(Ok(AxumMessage::Text(_))) = socket.recv().await {
+                            let created = r#"{"type":"response.created","sequence_number":0,"response":{"id":"resp_u2_ok","object":"response","status":"in_progress","store":false,"output":[]}}"#;
+                            let completed = r#"{"type":"response.completed","sequence_number":1,"response":{"id":"resp_u2_ok","object":"response","status":"completed","output":[],"usage":{"input_tokens":12,"output_tokens":4,"total_tokens":16}}}"#;
+                            if socket
+                                .send(AxumMessage::Text(created.into()))
+                                .await
+                                .is_err()
+                                || socket
+                                    .send(AxumMessage::Text(completed.into()))
+                                    .await
+                                    .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    })
+                }
+            }),
+        );
+        let _ = axum::serve(u2_listener, router).await;
+    });
+
+    let server = common::spawn_test_server_with_openai_budget("").await;
+    let client = Client::new();
+    let (_, ups, _) = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::GET,
+        "/admin/v1/upstreams",
+        None,
+        None,
+    )
+    .await;
+    for u in ups["upstreams"].as_array().unwrap() {
+        let id = u["id"].as_str().unwrap();
+        let (_, _, etag) = crate::openai_oauth_public_compat::admin(
+            &client,
+            &server,
+            reqwest::Method::GET,
+            &format!("/admin/v1/upstreams/{id}"),
+            None,
+            None,
+        )
+        .await;
+        let _ = crate::openai_oauth_public_compat::admin(
+            &client,
+            &server,
+            reqwest::Method::PATCH,
+            &format!("/admin/v1/upstreams/{id}"),
+            Some(json!({ "enabled": false })),
+            etag.as_deref(),
+        )
+        .await;
+    }
+    crate::backend_api_codex::add_oauth_upstream(
+        &client,
+        &server,
+        "oauth-overloaded-1",
+        &format!("http://{u1_addr}/backend-api/codex"),
+        "acct-u1",
+    )
+    .await;
+    // Keep u2 disabled via PATCH during Turn 1 / Turn 1b so UUID ordering cannot route Turn 1 to u2
+    // (POST ignores `enabled`).
+    let (st_u2, u2_body, _) = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::POST,
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "oauth-healthy-2",
+            "kind": "openai_oauth",
+            "base_url": format!("http://{u2_addr}/backend-api/codex"),
+            "oauth_tokens": {
+                "access_token": "access-acct-u2",
+                "refresh_token": "",
+                "expires_at_unix_secs": 4102444800u64,
+                "account_id": "acct-u2",
+                "scopes": [],
+                "never_refresh": true
+            },
+            "warmup_enabled": false,
+            "skip_preflight": true
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(st_u2, 201, "{u2_body}");
+    let u2_id = u2_body["id"].as_str().unwrap().to_owned();
+    let (_, _, u2_init_etag) = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::GET,
+        &format!("/admin/v1/upstreams/{u2_id}"),
+        None,
+        None,
+    )
+    .await;
+    let (st_disable, disabled_body, _) = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::PATCH,
+        &format!("/admin/v1/upstreams/{u2_id}"),
+        Some(json!({ "enabled": false })),
+        u2_init_etag.as_deref(),
+    )
+    .await;
+    assert_eq!(st_disable, 200, "{disabled_body}");
+    assert_eq!(disabled_body["enabled"], false);
+    let principals = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::GET,
+        "/admin/v1/principals",
+        None,
+        None,
+    )
+    .await
+    .1;
+    let principal_id = principals["principals"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (_, _, etag) = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::GET,
+        &format!("/admin/v1/principals/{principal_id}"),
+        None,
+        None,
+    )
+    .await;
+    let (st, _, _) = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::PUT,
+        &format!("/admin/v1/principals/{principal_id}/router-terminal"),
+        Some(json!({"strategy": "first-pick"})),
+        etag.as_deref(),
+    )
+    .await;
+    assert_eq!(st, 200);
+
+    // Subscribe to admin events SSE before running Turn 1 so we wait deterministically
+    // without sleeps for Turn 1's persisted request_event row.
+    let mut sse_response = client
+        .get(format!(
+            "http://{}/admin/v1/events/stream",
+            server.admin_addr
+        ))
+        .bearer_auth("admin-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sse_response.status(), 200);
+    let mut sse_buf = String::new();
+    let sse_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !sse_buf.contains("event: cursor") {
+        let chunk = tokio::time::timeout_at(sse_deadline, sse_response.chunk())
+            .await
+            .expect("initial cursor SSE arrives")
+            .unwrap()
+            .expect("SSE stream open");
+        sse_buf.push_str(&String::from_utf8_lossy(&chunk));
+    }
+
+    let key = &server.managed_key.plaintext;
+    let mut request = format!(
+        "ws://{}/openai/backend-api/codex/responses",
+        server.proxy_addr
+    )
+    .into_client_request()
+    .unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {key}").parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+
+    // Turn 1: receives all 5 frames including BOTH `error` and `response.failed`.
+    socket
+        .send(Message::Text(
+            r#"{"type":"response.create","model":"gpt-6.2-sol","store":false,"input":"turn-1"}"#
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let expected_types = [
+        "response.created",
+        "response.in_progress",
+        "error",
+        "responsesapi.websocket_timing",
+        "response.failed",
+    ];
+    for expected in expected_types {
+        let frame: Value = serde_json::from_str(&recv_text(&mut socket).await).unwrap();
+        assert_eq!(
+            frame["type"], expected,
+            "expected {expected} frame, got {frame}"
+        );
+    }
+
+    // Wait for Turn 1's finalized event on SSE and inspect persisted classification.
+    sse_buf.clear();
+    let final_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !sse_buf.contains("upstream_stream_error") {
+        let chunk = tokio::time::timeout_at(final_deadline, sse_response.chunk())
+            .await
+            .expect("final request event arrives on SSE")
+            .unwrap()
+            .expect("SSE stream open");
+        sse_buf.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    let recent = client
+        .get(format!(
+            "http://{}/admin/v1/events/recent?limit=10",
+            server.admin_addr
+        ))
+        .bearer_auth("admin-token")
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let turn1_event = recent["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|ev| ev["error_code"].as_str() == Some("upstream_stream_error"))
+        .expect("Turn 1 event recorded as upstream_stream_error");
+    assert!(
+        turn1_event["internal_errors"]
+            .as_array()
+            .is_none_or(|errs| errs.is_empty()),
+        "upstream WS error must not record InternalFailure: {turn1_event}"
+    );
+    assert_eq!(
+        turn1_event["upstream_error_type"].as_str(),
+        Some("server_is_overloaded")
+    );
+
+    // Turn 1b: verify connection_closed executes deterministically before Turn 2 by
+    // having upstream 1 send response.created and immediately drop the WebSocket.
+    reject_u1.store(true, Ordering::SeqCst);
+    socket
+        .send(Message::Text(
+            r#"{"type":"response.create","model":"gpt-6.2-sol","store":false,"input":"drop-me"}"#
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let drop_created: Value = serde_json::from_str(&recv_text(&mut socket).await).unwrap();
+    assert_eq!(drop_created["type"], "response.created");
+    assert_eq!(drop_created["response"]["id"], "resp_u1_drop");
+    let drop_closed_err: Value = serde_json::from_str(&recv_text(&mut socket).await).unwrap();
+    assert_eq!(drop_closed_err["type"], "error");
+    assert_eq!(
+        drop_closed_err["error"]["code"],
+        "upstream_connection_closed"
+    );
+
+    // Confirm a stale previous_response_id still fails closed (proving `session_oauth`
+    // remains true even after `session_upstream` clears).
+    socket
+        .send(Message::Text(
+            r#"{"type":"response.create","model":"gpt-6.2-sol","store":false,"previous_response_id":"resp_u1_drop","input":"stale"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let stale_err: Value = serde_json::from_str(&recv_text(&mut socket).await).unwrap();
+    assert_eq!(stale_err["type"], "error");
+    assert_eq!(stale_err["status"], 400);
+    assert_eq!(stale_err["error"]["code"], "previous_response_not_found");
+
+    // Enable healthy upstream 2 while upstream 1 stays enabled (returning 503 on new WS
+    // upgrades): if `session_upstream` stayed stuck on upstream 1, Turn 2 would never reach u2.
+    let (_, u2_get, u2_etag) = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::GET,
+        &format!("/admin/v1/upstreams/{u2_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(u2_get["enabled"], false);
+    let (st_enable, enable_body, _) = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::PATCH,
+        &format!("/admin/v1/upstreams/{u2_id}"),
+        Some(json!({ "enabled": true })),
+        u2_etag.as_deref(),
+    )
+    .await;
+    assert_eq!(st_enable, 200, "{enable_body}");
+
+    // Turn 2: independent full-history turn on the SAME downstream WebSocket must NOT
+    // stay pinned to dead/failing upstream 1; it must route/failover to healthy upstream 2!
+    socket
+        .send(Message::Text(
+            r#"{"type":"response.create","model":"gpt-6.2-sol","store":false,"input":"turn-2"}"#
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let t2_created: Value = serde_json::from_str(&recv_text(&mut socket).await).unwrap();
+    assert_eq!(
+        t2_created["type"], "response.created",
+        "expected Turn 2 response.created, got {t2_created}"
+    );
+    assert_eq!(t2_created["response"]["id"], "resp_u2_ok");
+    let t2_completed: Value = serde_json::from_str(&recv_text(&mut socket).await).unwrap();
+    assert_eq!(t2_completed["type"], "response.completed");
+    assert_eq!(u1_ws_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(u2_ws_calls.load(Ordering::SeqCst), 1);
+}

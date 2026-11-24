@@ -64,7 +64,7 @@ pub(super) async fn responses_websocket_handler(
 type WsProviderSink =
     futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, UpstreamMessage>;
 
-struct WsProviderConnection {
+pub(super) struct WsProviderConnection {
     upstream_id: uuid::Uuid,
     upstream_name: String,
     sink: WsProviderSink,
@@ -79,7 +79,7 @@ impl Drop for WsProviderConnection {
     }
 }
 
-enum WsProviderEvent {
+pub(super) enum WsProviderEvent {
     Frame {
         connection_id: u64,
         bytes: Bytes,
@@ -116,6 +116,24 @@ pub(super) struct WsConnectTimings {
     pub(super) connect_ms: Option<u64>,
 }
 
+fn acquire_websocket_breaker_permit(
+    state: &ProxyState,
+    upstream_id: uuid::Uuid,
+) -> Result<cc_lb_engine::Permit, WebSocketError> {
+    let breaker = state.breaker_registry.breaker(
+        websocket_breaker_key(upstream_id),
+        state.breaker_config,
+        state.clock.clone(),
+    );
+    breaker.permit().map_err(|_| {
+        WebSocketError::new(
+            502,
+            "upstream_unavailable",
+            "provider WebSocket connection is unavailable",
+        )
+    })
+}
+
 pub(super) async fn connect_provider_websocket(
     state: &ProxyState,
     upstream_id: uuid::Uuid,
@@ -130,18 +148,32 @@ pub(super) async fn connect_provider_websocket(
     ),
     WebSocketError,
 > {
-    let breaker = state.breaker_registry.breaker(
-        websocket_breaker_key(upstream_id),
-        state.breaker_config,
-        state.clock.clone(),
-    );
-    let permit = breaker.permit().map_err(|_| {
-        WebSocketError::new(
-            502,
-            "upstream_unavailable",
-            "provider WebSocket connection is unavailable",
-        )
-    })?;
+    let permit = acquire_websocket_breaker_permit(state, upstream_id)?;
+    connect_provider_websocket_with_permit(
+        permit,
+        state.body_caps.messages,
+        request,
+        bulkhead_guard,
+        WS_PROVIDER_CONNECT_TIMEOUT,
+    )
+    .await
+}
+
+async fn connect_provider_websocket_with_permit(
+    permit: cc_lb_engine::Permit,
+    message_cap: usize,
+    request: http::Request<()>,
+    bulkhead_guard: cc_lb_engine::OwnedBulkheadGuard,
+    connect_timeout: Duration,
+) -> Result<
+    (
+        WebSocketStream<MaybeTlsStream<TcpStream>>,
+        HeaderMap,
+        cc_lb_engine::OwnedBulkheadGuard,
+        WsConnectTimings,
+    ),
+    WebSocketError,
+> {
     let Some(host) = request.uri().host().map(str::to_owned) else {
         drop(permit);
         return Err(WebSocketError::new(
@@ -157,8 +189,8 @@ pub(super) async fn connect_provider_websocket(
             80
         }
     });
-    let ws_config = responses_websocket_config(state.body_caps.messages);
-    let result = tokio::time::timeout(WS_PROVIDER_CONNECT_TIMEOUT, async move {
+    let ws_config = responses_websocket_config(message_cap);
+    let result = tokio::time::timeout(connect_timeout, async move {
         let mut connect_timings = WsConnectTimings::default();
         let ip_literal = host
             .trim_start_matches('[')
@@ -249,10 +281,14 @@ pub(super) async fn connect_provider_websocket(
         }
     }
 }
-pub(super) const WS_PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const WS_PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+pub(super) const WS_DISPATCH_CONNECT_BUDGET: Duration = Duration::from_secs(30);
+pub(super) const WS_MAX_UPSTREAM_ATTEMPTS: usize = 3;
 
-struct ResponsesProviderParams<'a> {
-    state: &'a ProxyState,
+struct ResponsesProviderParams {
+    message_cap: usize,
+    permit: cc_lb_engine::Permit,
+    connect_timeout: Duration,
     request: http::Request<()>,
     connection_id: u64,
     upstream_id: uuid::Uuid,
@@ -263,10 +299,12 @@ struct ResponsesProviderParams<'a> {
 }
 
 async fn start_responses_provider(
-    params: ResponsesProviderParams<'_>,
+    params: ResponsesProviderParams,
 ) -> Result<(WsProviderConnection, WsConnectTimings), WebSocketError> {
     let ResponsesProviderParams {
-        state,
+        message_cap,
+        permit,
+        connect_timeout,
         request,
         connection_id,
         upstream_id,
@@ -276,7 +314,14 @@ async fn start_responses_provider(
         events,
     } = params;
     let (upstream, _response_headers, bulkhead_guard, connect_timings) =
-        connect_provider_websocket(state, upstream_id, request, bulkhead_guard).await?;
+        connect_provider_websocket_with_permit(
+            permit,
+            message_cap,
+            request,
+            bulkhead_guard,
+            connect_timeout,
+        )
+        .await?;
     let (sink, mut stream) = upstream.split();
     let task = tokio::spawn(async move {
         let reason = loop {
@@ -493,6 +538,34 @@ async fn dispatch_responses_websocket(
     next_connection_id: &mut u64,
     connection_capacity: usize,
 ) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
+    dispatch_responses_websocket_with_limits(
+        gateway,
+        dispatch,
+        state,
+        connections,
+        events,
+        next_connection_id,
+        connection_capacity,
+        WS_PROVIDER_CONNECT_TIMEOUT,
+        WS_DISPATCH_CONNECT_BUDGET,
+        WS_MAX_UPSTREAM_ATTEMPTS,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn dispatch_responses_websocket_with_limits(
+    gateway: &mut ResponsesWebSocketGateway,
+    dispatch: WebSocketDispatch,
+    state: &ProxyState,
+    connections: &mut HashMap<u64, WsProviderConnection>,
+    events: &tokio::sync::mpsc::Sender<WsProviderEvent>,
+    next_connection_id: &mut u64,
+    connection_capacity: usize,
+    per_attempt_timeout: Duration,
+    connect_budget: Duration,
+    max_attempts: usize,
+) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
     if let Some(connection_id) = dispatch.connection_id {
         return send_responses_dispatch(
             gateway,
@@ -505,6 +578,8 @@ async fn dispatch_responses_websocket(
     }
 
     let mut last_error = None;
+    let mut attempts = 0usize;
+    let deadline = tokio::time::Instant::now() + connect_budget;
     for candidate in &dispatch.candidates {
         let existing = connections.iter().find_map(|(id, connection)| {
             (connection.upstream_id == candidate.upstream_id
@@ -529,6 +604,31 @@ async fn dispatch_responses_websocket(
             ));
             break;
         }
+        // Skip open circuit breakers without burning a retry slot or bulkhead/signing work.
+        let permit = match acquire_websocket_breaker_permit(state, candidate.upstream_id) {
+            Ok(permit) => permit,
+            Err(error) => {
+                last_error = Some(error);
+                continue;
+            }
+        };
+        if attempts >= max_attempts {
+            drop(permit);
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            drop(permit);
+            last_error.get_or_insert_with(|| {
+                WebSocketError::new(
+                    504,
+                    "upstream_unavailable",
+                    "provider WebSocket connection timed out",
+                )
+            });
+            break;
+        }
+        attempts += 1;
         let mut bulkhead_config = state.websocket_bulkhead_config;
         bulkhead_config.semaphore_permits = bulkhead_config.max_conns_per_upstream;
         let bulkhead = state
@@ -538,6 +638,7 @@ async fn dispatch_responses_websocket(
         let bulkhead_guard = match bulkhead.acquire_owned().await {
             Ok(guard) => guard,
             Err(error) => {
+                drop(permit);
                 last_error = Some(WebSocketError::new(
                     503,
                     "overloaded_error",
@@ -553,6 +654,7 @@ async fn dispatch_responses_websocket(
         let prepared = match gateway.prepare_connection(&dispatch, candidate).await {
             Ok(prepared) => prepared,
             Err(error) => {
+                drop(permit);
                 let authentication_failed = error.code == "authentication_error";
                 last_error = Some(error);
                 if authentication_failed {
@@ -564,11 +666,24 @@ async fn dispatch_responses_websocket(
         let request = match responses_websocket_request(prepared.0, prepared.1) {
             Ok(request) => request,
             Err(error) => {
+                drop(permit);
                 last_error = Some(WebSocketError::new(502, "upstream_unavailable", error));
                 continue;
             }
         };
+        let attempt_timeout = per_attempt_timeout
+            .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+        if attempt_timeout.is_zero() {
+            drop(permit);
+            last_error = Some(WebSocketError::new(
+                504,
+                "upstream_unavailable",
+                "provider WebSocket connection timed out",
+            ));
+            break;
+        }
         let Some(next_id) = next_connection_id.checked_add(1) else {
+            drop(permit);
             last_error = Some(WebSocketError::new(
                 503,
                 "overloaded_error",
@@ -580,7 +695,9 @@ async fn dispatch_responses_websocket(
         *next_connection_id = next_id;
         let (connection, connect_timings) =
             match start_responses_provider(ResponsesProviderParams {
-                state,
+                message_cap: state.body_caps.messages,
+                permit,
+                connect_timeout: attempt_timeout,
                 request,
                 connection_id,
                 upstream_id: candidate.upstream_id,

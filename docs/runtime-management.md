@@ -236,7 +236,9 @@ passed current client-key, principal, model, operation, owner-affinity, and quot
 checks. A revoked key or disabled principal can therefore block a later turn on
 an already-open client connection. Provider connection failures after `101`
 arrive as WebSocket errors or connection closure, not a new HTTP response.
-Responses WebSocket admission uses an upstream-scoped circuit breaker keyed by the stable upstream UUID, independent of HTTP's host-keyed breaker, with the same failure policy as HTTP requests. Provider `5xx` responses, transport failures, and timeouts count toward that WebSocket breaker; `4xx` and other non-`5xx` handshake responses do not. Handshake errors use a generic `upstream_unavailable` error code while preserving the provider HTTP status. Before upgrade, that status and safe allowlisted `Retry-After`, `x-ratelimit-*`, `anthropic-ratelimit-*`, and `ratelimit-*` headers are returned as HTTP response status and headers; after upgrade, the status is preserved in the WebSocket error, with any non-empty allowlisted headers under a top-level JSON `headers` object. An open local breaker returns a generic `502 upstream_unavailable` error. Once a provider connection owns a WebSocket, failures close it without reconnecting or failing over.
+Responses WebSocket admission uses an upstream-scoped circuit breaker keyed by the stable upstream UUID, independent of HTTP's host-keyed breaker, with the same failure policy as HTTP requests. Provider `5xx` responses, transport failures, and timeouts count toward that WebSocket breaker; `4xx` and other non-`5xx` handshake responses do not. Handshake errors use a generic `upstream_unavailable` error code while preserving the provider HTTP status. Before upgrade, that status and safe allowlisted `Retry-After`, `x-ratelimit-*`, `anthropic-ratelimit-*`, and `ratelimit-*` headers are returned as HTTP response status and headers; after upgrade, the status is preserved in the WebSocket error, with any non-empty allowlisted headers under a top-level JSON `headers` object. An open local breaker returns a generic `502 upstream_unavailable` error. Once a provider connection owns a WebSocket, failures close it without reconnecting or failing over; if all provider connections, active turns, and live response owners on an OAuth session upstream close, subsequent independent full-history turns on the downstream socket can select another eligible upstream, while continuations referencing an unavailable `previous_response_id` continue to return `400 previous_response_not_found`.
+
+Pre-dispatch Responses WebSocket candidate failover tries at most 3 distinct upstream attempts within a 30 s total connect budget (15 s per-attempt connect timeout). Candidates whose upstream-scoped local WebSocket circuit breaker is already open are skipped immediately without consuming a connect attempt slot.
 
 Ordinary `response.create` messages require an explicit, non-empty `model`.
 cc-lb does not infer a missing model from a stored prompt or an account default.
@@ -279,9 +281,8 @@ with an absent or `null` `response.error` completes the turn with
 upstream signer scrubs any non-empty `incomplete_details.reason` before redaction
 and bounding; the credential-scrubbed, redacted, bounded reason is recorded under
 `upstream_stream_warning_type="response.incomplete"` and
-`upstream_stream_warning_message`. Explicit non-null `response.error` objects
-and `response.failed` frames carrying `response.error.code` or
-`response.error.type` remain upstream provider errors.
+`upstream_stream_warning_message`. Explicit non-null `response.error` objects,
+`response.failed` frames, and attributed `type: "error"` frames (reading top-level `error.code`, `error.type`, and `error.message` with credential scrubbing) remain upstream provider errors. When an upstream emits an attributed `type: "error"` frame followed by `response.failed` for the same `response_id`, cc-lb settles the turn once on the `error` frame and still forwards the follow-up `response.failed` frame once (preserving `stream_id` and response metadata where applicable); if an upstream emits a statusless in-response `type: "error"` and closes its WebSocket before sending `response.failed`, cc-lb emits a `502 upstream_connection_closed` error frame.
 `cc_lb_stream_terminations_total` attributes turns to their assigned upstream
 name, using `"unknown"` only when a dispatched turn fails before upstream
 assignment.
