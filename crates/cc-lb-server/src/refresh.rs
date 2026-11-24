@@ -127,6 +127,7 @@ async fn reconcile_exact_oauth_refresh_lease(
 /// Acquire a short-lived shared CAS lease in `MetaStore` for `upstream_id` at
 /// `generation`. Shared across scheduled refreshes (expiry-key and watchdog
 /// bootstrap jobs) and in-process lazy recovery fallbacks.
+#[cfg(test)]
 pub(crate) async fn try_acquire_oauth_refresh_lease(
     meta: &dyn MetaStore,
     upstream_id: Uuid,
@@ -412,7 +413,7 @@ impl OAuthLeaseController for ClaimGuardLeaseController {
 
 enum LeaseHeartbeatState {
     Active(String),
-    Lost,
+    Lost { cleanup_token: String },
     Released,
 }
 
@@ -428,22 +429,78 @@ pub(crate) struct ActiveOAuthRefreshLease {
     lease_cancel: CancellationToken,
     stop_heartbeat: CancellationToken,
     heartbeat: Option<tokio::task::JoinHandle<()>>,
+    released: bool,
+}
+
+async fn take_release_token(state: &tokio::sync::Mutex<LeaseHeartbeatState>) -> Option<String> {
+    let mut guard = state.lock().await;
+    match std::mem::replace(&mut *guard, LeaseHeartbeatState::Released) {
+        LeaseHeartbeatState::Active(token)
+        | LeaseHeartbeatState::Lost {
+            cleanup_token: token,
+        } => Some(token),
+        LeaseHeartbeatState::Released => {
+            *guard = LeaseHeartbeatState::Released;
+            None
+        }
+    }
 }
 
 impl Drop for ActiveOAuthRefreshLease {
     fn drop(&mut self) {
         self.stop_heartbeat.cancel();
+        self.lease_cancel.cancel();
+        if self.released {
+            return;
+        }
+        let Some(handle) = self.heartbeat.take() else {
+            return;
+        };
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let upstream_id = self.upstream_id;
+            let expected_generation = self.expected_generation;
+            let controller = Arc::clone(&self.controller);
+            let state = Arc::clone(&self.state);
+            rt.spawn(async move {
+                let _ = handle.await;
+                if let Some(token) = take_release_token(&state).await
+                    && let Err(error) = controller
+                        .release(upstream_id, &token, expected_generation)
+                        .await
+                {
+                    tracing::warn!(
+                        error = %error,
+                        upstream_id = %upstream_id,
+                        "failed to release dropped oauth refresh lease",
+                    );
+                }
+            });
+        }
     }
 }
 
 async fn mark_lease_lost(
     state: &tokio::sync::Mutex<LeaseHeartbeatState>,
     lease_cancel: &CancellationToken,
+    pending_token: Option<String>,
 ) {
     let mut guard = state.lock().await;
-    if !matches!(&*guard, LeaseHeartbeatState::Released) {
-        *guard = LeaseHeartbeatState::Lost;
-        lease_cancel.cancel();
+    match std::mem::replace(&mut *guard, LeaseHeartbeatState::Released) {
+        LeaseHeartbeatState::Active(current_token) => {
+            *guard = LeaseHeartbeatState::Lost {
+                cleanup_token: pending_token.unwrap_or(current_token),
+            };
+            lease_cancel.cancel();
+        }
+        LeaseHeartbeatState::Lost { cleanup_token } => {
+            *guard = LeaseHeartbeatState::Lost {
+                cleanup_token: pending_token.unwrap_or(cleanup_token),
+            };
+            lease_cancel.cancel();
+        }
+        LeaseHeartbeatState::Released => {
+            *guard = LeaseHeartbeatState::Released;
+        }
     }
 }
 
@@ -596,7 +653,7 @@ impl ActiveOAuthRefreshLease {
                     _ = stop_bg.cancelled() => break,
                     _ = parent_bg.cancelled() => break,
                     () = &mut expiry_sleep => {
-                        mark_lease_lost(&state_bg, &lease_cancel_bg).await;
+                        mark_lease_lost(&state_bg, &lease_cancel_bg, None).await;
                         break;
                     }
                     () = tokio::time::sleep(renew_interval) => {}
@@ -605,21 +662,45 @@ impl ActiveOAuthRefreshLease {
                     let guard = state_bg.lock().await;
                     match &*guard {
                         LeaseHeartbeatState::Active(token) => token.clone(),
-                        LeaseHeartbeatState::Lost | LeaseHeartbeatState::Released => break,
+                        LeaseHeartbeatState::Lost { .. } | LeaseHeartbeatState::Released => break,
                     }
                 };
                 let renew_started = tokio::time::Instant::now();
                 let renew_unix = unix_secs(clock.now());
                 if renew_unix >= confirmed_expires_at {
-                    mark_lease_lost(&state_bg, &lease_cancel_bg).await;
+                    mark_lease_lost(&state_bg, &lease_cancel_bg, None).await;
                     break;
                 }
+                let pending_token = match parse_oauth_refresh_lease(&current_token) {
+                    Some(ParsedOAuthRefreshLease::Held {
+                        generation, holder, ..
+                    }) => Some(oauth_refresh_lease_token(generation, &holder, renew_unix)),
+                    _ => None,
+                };
                 let renew_result = tokio::select! {
                     biased;
-                    _ = stop_bg.cancelled() => break,
-                    _ = parent_bg.cancelled() => break,
+                    _ = stop_bg.cancelled() => {
+                        if let Some(token) = pending_token {
+                            let mut guard = state_bg.lock().await;
+                            if matches!(&*guard, LeaseHeartbeatState::Active(tok) if tok == &current_token)
+                            {
+                                *guard = LeaseHeartbeatState::Active(token);
+                            }
+                        }
+                        break;
+                    }
+                    _ = parent_bg.cancelled() => {
+                        if let Some(token) = pending_token {
+                            let mut guard = state_bg.lock().await;
+                            if matches!(&*guard, LeaseHeartbeatState::Active(tok) if tok == &current_token)
+                            {
+                                *guard = LeaseHeartbeatState::Active(token);
+                            }
+                        }
+                        break;
+                    }
                     () = &mut expiry_sleep => {
-                        mark_lease_lost(&state_bg, &lease_cancel_bg).await;
+                        mark_lease_lost(&state_bg, &lease_cancel_bg, pending_token).await;
                         break;
                     }
                     result = controller_bg.renew(upstream_id, &current_token, renew_unix) => result,
@@ -643,7 +724,7 @@ impl ActiveOAuthRefreshLease {
                             _ => u64::MAX,
                         };
                         if post_now_unix >= next_expires_at {
-                            mark_lease_lost(&state_bg, &lease_cancel_bg).await;
+                            mark_lease_lost(&state_bg, &lease_cancel_bg, None).await;
                             break;
                         }
                         let monotonic_deadline = renew_started + effective_ttl;
@@ -657,14 +738,14 @@ impl ActiveOAuthRefreshLease {
                             monotonic_deadline.min(wall_deadline)
                         };
                         if new_deadline <= post_now_instant {
-                            mark_lease_lost(&state_bg, &lease_cancel_bg).await;
+                            mark_lease_lost(&state_bg, &lease_cancel_bg, None).await;
                             break;
                         }
                         confirmed_expires_at = next_expires_at;
                         expiry_sleep.as_mut().reset(new_deadline);
                     }
                     Ok(None) => {
-                        mark_lease_lost(&state_bg, &lease_cancel_bg).await;
+                        mark_lease_lost(&state_bg, &lease_cancel_bg, None).await;
                         break;
                     }
                     Err(error) => {
@@ -674,7 +755,7 @@ impl ActiveOAuthRefreshLease {
                             "transient storage error renewing oauth refresh lease",
                         );
                         if unix_secs(clock.now()) >= confirmed_expires_at {
-                            mark_lease_lost(&state_bg, &lease_cancel_bg).await;
+                            mark_lease_lost(&state_bg, &lease_cancel_bg, None).await;
                             break;
                         }
                     }
@@ -690,6 +771,7 @@ impl ActiveOAuthRefreshLease {
             lease_cancel,
             stop_heartbeat,
             heartbeat: Some(heartbeat),
+            released: false,
         }
     }
 
@@ -698,7 +780,7 @@ impl ActiveOAuthRefreshLease {
     }
 
     pub(crate) async fn is_lost(&self) -> bool {
-        matches!(&*self.state.lock().await, LeaseHeartbeatState::Lost)
+        matches!(&*self.state.lock().await, LeaseHeartbeatState::Lost { .. })
     }
 
     pub(crate) async fn fence(&self) -> Result<Option<OAuthRefreshFence>, ()> {
@@ -712,11 +794,12 @@ impl ActiveOAuthRefreshLease {
                     lease_meta_key,
                     expected_lease_prefix: oauth_refresh_lease_fence_prefix(token),
                 })),
-            LeaseHeartbeatState::Lost | LeaseHeartbeatState::Released => Err(()),
+            LeaseHeartbeatState::Lost { .. } | LeaseHeartbeatState::Released => Err(()),
         }
     }
 
     pub(crate) async fn mark_committed_and_released(&mut self) {
+        self.released = true;
         self.stop_heartbeat.cancel();
         if let Some(handle) = self.heartbeat.take() {
             let _ = handle.await;
@@ -725,21 +808,12 @@ impl ActiveOAuthRefreshLease {
     }
 
     pub(crate) async fn release(mut self, final_generation: u64) -> StorageResult<()> {
+        self.released = true;
         self.stop_heartbeat.cancel();
         if let Some(handle) = self.heartbeat.take() {
             let _ = handle.await;
         }
-        let active_token = {
-            let mut guard = self.state.lock().await;
-            match std::mem::replace(&mut *guard, LeaseHeartbeatState::Released) {
-                LeaseHeartbeatState::Active(token) => Some(token),
-                LeaseHeartbeatState::Lost | LeaseHeartbeatState::Released => {
-                    *guard = LeaseHeartbeatState::Released;
-                    None
-                }
-            }
-        };
-        if let Some(token) = active_token {
+        if let Some(token) = take_release_token(&self.state).await {
             self.controller
                 .release(self.upstream_id, &token, final_generation)
                 .await?;
@@ -1160,11 +1234,168 @@ async fn apalis_lazy_refresh_task_state(
     }
 }
 
-enum FallbackClaimHandoff {
+enum ClaimHandoff<T> {
     Pending,
-    Delivered(LazyRefreshFallbackLease),
+    Delivered(T),
     Taken,
     WaiterAbandoned,
+}
+
+fn take_delivered_handoff<T>(handoff: &std::sync::Mutex<ClaimHandoff<T>>) -> Option<T> {
+    let mut guard = handoff
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match std::mem::replace(&mut *guard, ClaimHandoff::Taken) {
+        ClaimHandoff::Delivered(value) => Some(value),
+        other => {
+            *guard = other;
+            None
+        }
+    }
+}
+
+fn abandon_or_take_delivered_handoff<T>(handoff: &std::sync::Mutex<ClaimHandoff<T>>) -> Option<T> {
+    let mut guard = handoff
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match std::mem::replace(&mut *guard, ClaimHandoff::WaiterAbandoned) {
+        ClaimHandoff::Pending | ClaimHandoff::WaiterAbandoned => None,
+        ClaimHandoff::Delivered(value) => Some(value),
+        ClaimHandoff::Taken => {
+            *guard = ClaimHandoff::Taken;
+            None
+        }
+    }
+}
+
+fn handoff_try_deliver<T>(handoff: &std::sync::Mutex<ClaimHandoff<T>>, value: T) -> Option<T> {
+    let mut state = handoff
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match &*state {
+        ClaimHandoff::WaiterAbandoned => Some(value),
+        _ => {
+            *state = ClaimHandoff::Delivered(value);
+            None
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ScheduledLeaseTarget {
+    meta: Arc<dyn MetaStore>,
+    upstreams: Arc<dyn cc_lb_storage_api::UpstreamStore>,
+    upstream_id: Uuid,
+    generation: u64,
+}
+
+async fn release_abandoned_scheduled_lease(target: ScheduledLeaseTarget, lease_token: String) {
+    let final_generation = target
+        .upstreams
+        .read_oauth_token_generation(target.upstream_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(target.generation);
+    if let Err(error) = release_oauth_refresh_lease(
+        target.meta.as_ref(),
+        target.upstream_id,
+        &lease_token,
+        final_generation,
+    )
+    .await
+    {
+        tracing::warn!(
+            error = %error,
+            upstream_id = %target.upstream_id,
+            generation = target.generation,
+            "failed to release abandoned scheduled oauth refresh lease",
+        );
+    }
+}
+
+/// Ensures any scheduled lease committed by `try_acquire_oauth_refresh_lease_with_holder`
+/// is released immediately if a worker timeout or shutdown drops the waiter before delivery.
+struct ScheduledLeaseWaiterGuard {
+    handoff: Arc<std::sync::Mutex<ClaimHandoff<OAuthRefreshLease>>>,
+    target: ScheduledLeaseTarget,
+}
+
+impl ScheduledLeaseWaiterGuard {
+    fn take_delivered(&self) -> Option<OAuthRefreshLease> {
+        take_delivered_handoff(&self.handoff)
+    }
+}
+
+impl Drop for ScheduledLeaseWaiterGuard {
+    fn drop(&mut self) {
+        if let Some(abandoned_lease) = abandon_or_take_delivered_handoff(&self.handoff) {
+            let target = self.target.clone();
+            tokio::spawn(release_abandoned_scheduled_lease(
+                target,
+                abandoned_lease.token,
+            ));
+        }
+    }
+}
+
+pub(crate) async fn try_acquire_oauth_refresh_lease_cancellation_safe(
+    meta: Arc<dyn MetaStore>,
+    upstreams: Arc<dyn cc_lb_storage_api::UpstreamStore>,
+    upstream_id: Uuid,
+    generation: u64,
+    now_unix_secs: u64,
+) -> StorageResult<Option<OAuthRefreshLease>> {
+    let target = ScheduledLeaseTarget {
+        meta,
+        upstreams,
+        upstream_id,
+        generation,
+    };
+    let handoff = Arc::new(std::sync::Mutex::new(ClaimHandoff::Pending));
+    let guard = ScheduledLeaseWaiterGuard {
+        handoff: Arc::clone(&handoff),
+        target: target.clone(),
+    };
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<StorageResult<Option<()>>>();
+    let attempt_holder = Uuid::new_v4().to_string();
+    let proposed_token = oauth_refresh_lease_token(generation, &attempt_holder, now_unix_secs);
+    let task_handoff = Arc::clone(&handoff);
+    tokio::spawn(async move {
+        let result = try_acquire_oauth_refresh_lease_with_holder(
+            target.meta.as_ref(),
+            target.upstream_id,
+            target.generation,
+            &attempt_holder,
+            now_unix_secs,
+        )
+        .await;
+        match result {
+            Ok(Some(lease)) => {
+                if let Some(abandoned_lease) = handoff_try_deliver(&task_handoff, lease) {
+                    release_abandoned_scheduled_lease(target, abandoned_lease.token).await;
+                    return;
+                }
+                let _ = tx.send(Ok(Some(())));
+            }
+            Ok(None) => {
+                let _ = tx.send(Ok(None));
+            }
+            Err(error) => {
+                release_abandoned_scheduled_lease(target, proposed_token).await;
+                let _ = tx.send(Err(error));
+            }
+        }
+    });
+
+    let signal = rx.await.map_err(|_| StorageError::Fatal {
+        message: "scheduled oauth refresh lease claim task aborted".to_owned(),
+    })?;
+    match signal? {
+        Some(()) => Ok(guard.take_delivered()),
+        None => Ok(None),
+    }
 }
 
 #[derive(Clone)]
@@ -1206,44 +1437,19 @@ async fn release_abandoned_fallback_lease(
 /// released even if the caller's future is cancelled or dropped after the
 /// database write commits and before the waiter receives the lease token.
 struct FallbackClaimWaiterGuard {
-    handoff: Arc<std::sync::Mutex<FallbackClaimHandoff>>,
+    handoff: Arc<std::sync::Mutex<ClaimHandoff<LazyRefreshFallbackLease>>>,
     target: FallbackClaimTarget,
 }
 
 impl FallbackClaimWaiterGuard {
     fn take_delivered(&self) -> Option<LazyRefreshFallbackLease> {
-        let mut guard = self
-            .handoff
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match std::mem::replace(&mut *guard, FallbackClaimHandoff::Taken) {
-            FallbackClaimHandoff::Delivered(lease) => Some(lease),
-            other => {
-                *guard = other;
-                None
-            }
-        }
+        take_delivered_handoff(&self.handoff)
     }
 }
 
 impl Drop for FallbackClaimWaiterGuard {
     fn drop(&mut self) {
-        let abandoned_lease = {
-            let mut guard = self
-                .handoff
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match std::mem::replace(&mut *guard, FallbackClaimHandoff::WaiterAbandoned) {
-                FallbackClaimHandoff::Pending => None,
-                FallbackClaimHandoff::Delivered(lease) => Some(lease),
-                FallbackClaimHandoff::Taken => {
-                    *guard = FallbackClaimHandoff::Taken;
-                    None
-                }
-                FallbackClaimHandoff::WaiterAbandoned => None,
-            }
-        };
-        if let Some(lease) = abandoned_lease {
+        if let Some(lease) = abandon_or_take_delivered_handoff(&self.handoff) {
             let target = self.target.clone();
             tokio::spawn(release_abandoned_fallback_lease(target, lease));
         }
@@ -1254,7 +1460,7 @@ async fn try_claim_fallback_cancellation_safe(
     target: FallbackClaimTarget,
     now_unix_secs: u64,
 ) -> Result<Option<LazyRefreshFallbackLease>, LazyRefreshError> {
-    let handoff = Arc::new(std::sync::Mutex::new(FallbackClaimHandoff::Pending));
+    let handoff = Arc::new(std::sync::Mutex::new(ClaimHandoff::Pending));
     let guard = FallbackClaimWaiterGuard {
         handoff: Arc::clone(&handoff),
         target: target.clone(),
@@ -1283,19 +1489,7 @@ async fn try_claim_fallback_cancellation_safe(
             .await;
         match result {
             Ok(Some(lease)) => {
-                let release_immediately = {
-                    let mut state = task_handoff
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    match &*state {
-                        FallbackClaimHandoff::WaiterAbandoned => Some(lease),
-                        _ => {
-                            *state = FallbackClaimHandoff::Delivered(lease);
-                            None
-                        }
-                    }
-                };
-                if let Some(abandoned_lease) = release_immediately {
+                if let Some(abandoned_lease) = handoff_try_deliver(&task_handoff, lease) {
                     release_abandoned_fallback_lease(target, abandoned_lease).await;
                     return;
                 }
@@ -6354,6 +6548,574 @@ mod tests {
             .await?,
             None
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth_refresh_lease_releases_committed_pending_renewal_when_expiry_cancels_heartbeat()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::sync::watch;
+
+        type PendingMetaWrite = (String, Option<String>, String);
+
+        struct PendingRenewCommitMetaStore {
+            inner: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+            defer_visibility: bool,
+            pending: std::sync::Mutex<Option<PendingMetaWrite>>,
+            deferred_flushes: AtomicUsize,
+            hang_renew_calls: AtomicBool,
+            renew_committed: watch::Sender<bool>,
+            released: watch::Sender<bool>,
+        }
+
+        impl PendingRenewCommitMetaStore {
+            async fn flush_pending(&self) -> StorageResult<()> {
+                let pending = {
+                    let mut guard = self
+                        .pending
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    guard.take()
+                };
+                if let Some((key, expected, value)) = pending {
+                    self.deferred_flushes.fetch_add(1, Ordering::SeqCst);
+                    let _ = self
+                        .inner
+                        .compare_and_put_meta_value(&key, expected.as_deref(), &value)
+                        .await?;
+                }
+                Ok(())
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl MetaStore for PendingRenewCommitMetaStore {
+            async fn initialize(&self) -> StorageResult<()> {
+                self.inner.initialize().await
+            }
+
+            async fn backend_kind(&self) -> StorageResult<cc_lb_storage_api::BackendKind> {
+                self.inner.backend_kind().await
+            }
+
+            async fn get_meta_value(&self, key: &str) -> StorageResult<Option<String>> {
+                self.inner.get_meta_value(key).await
+            }
+
+            async fn put_meta_value(&self, key: &str, value: &str) -> StorageResult<()> {
+                self.flush_pending().await?;
+                self.inner.put_meta_value(key, value).await
+            }
+
+            async fn compare_and_put_meta_value(
+                &self,
+                key: &str,
+                expected: Option<&str>,
+                value: &str,
+            ) -> StorageResult<bool> {
+                self.flush_pending().await?;
+                if self.hang_renew_calls.load(Ordering::SeqCst) && value.starts_with("held:") {
+                    if self.defer_visibility {
+                        let mut guard = self
+                            .pending
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        *guard = Some((
+                            key.to_owned(),
+                            expected.map(str::to_owned),
+                            value.to_owned(),
+                        ));
+                    } else {
+                        let applied = self
+                            .inner
+                            .compare_and_put_meta_value(key, expected, value)
+                            .await?;
+                        assert!(applied, "pending renewal CAS commit must succeed");
+                    }
+                    self.renew_committed.send_replace(true);
+                    std::future::pending::<()>().await;
+                    return Ok(true);
+                }
+                let applied = self
+                    .inner
+                    .compare_and_put_meta_value(key, expected, value)
+                    .await?;
+                if applied && value.starts_with("idle:") {
+                    self.released.send_replace(true);
+                }
+                Ok(applied)
+            }
+
+            async fn verify_schema_current(&self) -> StorageResult<()> {
+                self.inner.verify_schema_current().await
+            }
+        }
+
+        async fn start_pending_renewal_case(
+            defer_visibility: bool,
+        ) -> Result<
+            (
+                LazyRefreshFixture,
+                Uuid,
+                u64,
+                String,
+                super::OAuthRefreshLease,
+                String,
+                Arc<PendingRenewCommitMetaStore>,
+                watch::Receiver<bool>,
+                watch::Receiver<bool>,
+                super::ActiveOAuthRefreshLease,
+                CancellationToken,
+            ),
+            Box<dyn std::error::Error>,
+        > {
+            let (fixture, upstream_id, starting_gen) = setup_killed_oauth_job_fixture().await?;
+            let lease_key = super::oauth_refresh_lease_meta_key(upstream_id);
+            let test_clock = Arc::new(TestClock::new_at_secs(1_700_000_000));
+            let initial_now = cc_lb_clock::unix_secs(test_clock.now());
+            let initial_lease = super::try_acquire_oauth_refresh_lease(
+                fixture.storage.as_ref(),
+                upstream_id,
+                starting_gen,
+                initial_now,
+            )
+            .await?
+            .ok_or("initial lease must succeed")?;
+            let holder = match super::parse_oauth_refresh_lease(&initial_lease.token) {
+                Some(super::ParsedOAuthRefreshLease::Held { holder, .. }) => holder,
+                _ => return Err("expected held initial lease".into()),
+            };
+            test_clock.advance_secs(25);
+            let renewed_token =
+                super::oauth_refresh_lease_token(starting_gen, &holder, initial_now + 25);
+            let (renew_committed_tx, renew_committed_rx) = watch::channel(false);
+            let (released_tx, released_rx) = watch::channel(false);
+            let meta = Arc::new(PendingRenewCommitMetaStore {
+                inner: fixture.storage.clone(),
+                defer_visibility,
+                pending: std::sync::Mutex::new(None),
+                deferred_flushes: AtomicUsize::new(0),
+                hang_renew_calls: AtomicBool::new(true),
+                renew_committed: renew_committed_tx,
+                released: released_tx,
+            });
+            let parent_cancel = CancellationToken::new();
+            let active = super::ActiveOAuthRefreshLease::start_with_controller_for_tests(
+                Arc::new(super::MetaStoreLeaseController(meta.clone())),
+                test_clock,
+                parent_cancel,
+                upstream_id,
+                initial_lease.token.clone(),
+                starting_gen,
+                Duration::from_millis(10),
+                Duration::from_millis(300),
+                Duration::ZERO,
+            );
+            let lease_cancel = active.cancel_token();
+            Ok((
+                fixture,
+                upstream_id,
+                starting_gen,
+                lease_key,
+                initial_lease,
+                renewed_token,
+                meta,
+                renew_committed_rx,
+                released_rx,
+                active,
+                lease_cancel,
+            ))
+        }
+
+        // Sub-case A: Pending renewal commits newer expiry to SQLite and remains unacknowledged
+        // until `expiry_sleep` marks `Lost`. `release()` retains the holder token and clears
+        // the renewed lease back to `idle:{gen}` immediately.
+        let (
+            fixture_a,
+            upstream_a,
+            gen_a,
+            lease_key_a,
+            _init_a,
+            renewed_token_a,
+            meta_a,
+            mut renew_committed_rx_a,
+            _released_rx_a,
+            active_a,
+            lease_cancel_a,
+        ) = start_pending_renewal_case(false).await?;
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            renew_committed_rx_a.wait_for(|&committed| committed),
+        )
+        .await??;
+        assert_eq!(
+            fixture_a
+                .storage
+                .get_meta_value(&lease_key_a)
+                .await?
+                .as_deref(),
+            Some(renewed_token_a.as_str())
+        );
+        tokio::time::timeout(Duration::from_secs(2), lease_cancel_a.cancelled())
+            .await
+            .map_err(|_| "expiry deadline must cancel active lease")?;
+        assert!(active_a.is_lost().await);
+        assert!(active_a.fence().await.is_err());
+        meta_a.hang_renew_calls.store(false, Ordering::SeqCst);
+        active_a.release(gen_a).await?;
+        assert_eq!(
+            fixture_a
+                .storage
+                .get_meta_value(&lease_key_a)
+                .await?
+                .as_deref(),
+            Some(format!("idle:{gen_a}").as_str())
+        );
+        let healthy_lease_a = super::try_acquire_oauth_refresh_lease(
+            fixture_a.storage.as_ref(),
+            upstream_a,
+            gen_a,
+            1_700_000_050,
+        )
+        .await?
+        .ok_or("healthy worker A must immediately acquire cleared lease")?;
+        super::release_oauth_refresh_lease(
+            fixture_a.storage.as_ref(),
+            upstream_a,
+            &healthy_lease_a.token,
+            gen_a,
+        )
+        .await?;
+
+        // Sub-case B: Releasing a Lost lease with retained holder identity still refuses to
+        // overwrite a competitor's active claim.
+        let (
+            fixture_b,
+            _upstream_b,
+            gen_b,
+            lease_key_b,
+            _init_b,
+            _renewed_token_b,
+            meta_b,
+            mut renew_committed_rx_b,
+            _released_rx_b,
+            active_b,
+            lease_cancel_b,
+        ) = start_pending_renewal_case(false).await?;
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            renew_committed_rx_b.wait_for(|&committed| committed),
+        )
+        .await??;
+        tokio::time::timeout(Duration::from_secs(2), lease_cancel_b.cancelled()).await?;
+        let competitor_b = super::oauth_refresh_lease_token(gen_b, "competitor", 1_700_000_060);
+        fixture_b
+            .storage
+            .put_meta_value(&lease_key_b, &competitor_b)
+            .await?;
+        meta_b.hang_renew_calls.store(false, Ordering::SeqCst);
+        active_b.release(gen_b).await?;
+        assert_eq!(
+            fixture_b
+                .storage
+                .get_meta_value(&lease_key_b)
+                .await?
+                .as_deref(),
+            Some(competitor_b.as_str())
+        );
+
+        // Sub-case C: Deferred commit visibility on the pending renewal (`get_meta_value` still
+        // sees `initial_token`) serializes cleanly via exact-token `compare_and_put_meta_value`.
+        let (
+            fixture_c,
+            _upstream_c,
+            gen_c,
+            lease_key_c,
+            init_c,
+            _renewed_token_c,
+            meta_c,
+            mut renew_committed_rx_c,
+            _released_rx_c,
+            active_c,
+            lease_cancel_c,
+        ) = start_pending_renewal_case(true).await?;
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            renew_committed_rx_c.wait_for(|&committed| committed),
+        )
+        .await??;
+        assert_eq!(
+            fixture_c
+                .storage
+                .get_meta_value(&lease_key_c)
+                .await?
+                .as_deref(),
+            Some(init_c.token.as_str())
+        );
+        tokio::time::timeout(Duration::from_secs(2), lease_cancel_c.cancelled()).await?;
+        meta_c.hang_renew_calls.store(false, Ordering::SeqCst);
+        active_c.release(gen_c).await?;
+        assert_eq!(meta_c.deferred_flushes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture_c
+                .storage
+                .get_meta_value(&lease_key_c)
+                .await?
+                .as_deref(),
+            Some(format!("idle:{gen_c}").as_str())
+        );
+
+        // Sub-case D: Dropping `ActiveOAuthRefreshLease` (without `.release()`) spawns background
+        // release of any held or pending-renewed lease so worker timeouts do not leak leases.
+        let (
+            fixture_d,
+            upstream_d,
+            gen_d,
+            lease_key_d,
+            _init_d,
+            _renewed_token_d,
+            meta_d,
+            mut renew_committed_rx_d,
+            mut released_rx_d,
+            active_d,
+            _lease_cancel_d,
+        ) = start_pending_renewal_case(false).await?;
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            renew_committed_rx_d.wait_for(|&committed| committed),
+        )
+        .await??;
+        meta_d.hang_renew_calls.store(false, Ordering::SeqCst);
+        drop(active_d);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            released_rx_d.wait_for(|&released| released),
+        )
+        .await??;
+        assert_eq!(
+            fixture_d
+                .storage
+                .get_meta_value(&lease_key_d)
+                .await?
+                .as_deref(),
+            Some(format!("idle:{gen_d}").as_str())
+        );
+        let healthy_lease_d = super::try_acquire_oauth_refresh_lease(
+            fixture_d.storage.as_ref(),
+            upstream_d,
+            gen_d,
+            1_700_000_050,
+        )
+        .await?
+        .ok_or("healthy worker D must immediately acquire dropped lease")?;
+        super::release_oauth_refresh_lease(
+            fixture_d.storage.as_ref(),
+            upstream_d,
+            &healthy_lease_d.token,
+            gen_d,
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scheduled_oauth_refresh_lease_acquire_releases_committed_claim_on_worker_timeout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::sync::watch;
+
+        struct DelayedScheduledAcquireMetaStore {
+            inner: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+            delay_held: AtomicBool,
+            committed: watch::Sender<bool>,
+            allow_return: watch::Receiver<bool>,
+            released: watch::Sender<bool>,
+        }
+
+        #[async_trait::async_trait]
+        impl MetaStore for DelayedScheduledAcquireMetaStore {
+            async fn initialize(&self) -> StorageResult<()> {
+                self.inner.initialize().await
+            }
+
+            async fn backend_kind(&self) -> StorageResult<cc_lb_storage_api::BackendKind> {
+                self.inner.backend_kind().await
+            }
+
+            async fn get_meta_value(&self, key: &str) -> StorageResult<Option<String>> {
+                self.inner.get_meta_value(key).await
+            }
+
+            async fn put_meta_value(&self, key: &str, value: &str) -> StorageResult<()> {
+                self.inner.put_meta_value(key, value).await
+            }
+
+            async fn compare_and_put_meta_value(
+                &self,
+                key: &str,
+                expected: Option<&str>,
+                value: &str,
+            ) -> StorageResult<bool> {
+                let applied = self
+                    .inner
+                    .compare_and_put_meta_value(key, expected, value)
+                    .await?;
+                if applied && value.starts_with("idle:") {
+                    self.released.send_replace(true);
+                }
+                if applied && value.starts_with("held:") && self.delay_held.load(Ordering::SeqCst) {
+                    self.committed.send_replace(true);
+                    let mut allow_return = self.allow_return.clone();
+                    let _ = allow_return.wait_for(|&go| go).await;
+                }
+                Ok(applied)
+            }
+
+            async fn verify_schema_current(&self) -> StorageResult<()> {
+                self.inner.verify_schema_current().await
+            }
+        }
+
+        // Case 1: Worker timeout cancels `try_acquire_oauth_refresh_lease_cancellation_safe`
+        // after SQLite commits `held:...` and before the lease is returned to the caller.
+        let (fixture1, upstream1, gen1) = setup_killed_oauth_job_fixture().await?;
+        let lease_key1 = super::oauth_refresh_lease_meta_key(upstream1);
+        let now1 = cc_lb_clock::unix_secs(fixture1.clock.now());
+        let (committed_tx1, mut committed_rx1) = watch::channel(false);
+        let (allow_tx1, allow_rx1) = watch::channel(false);
+        let (released_tx1, mut released_rx1) = watch::channel(false);
+        let delayed_meta1 = Arc::new(DelayedScheduledAcquireMetaStore {
+            inner: fixture1.storage.clone(),
+            delay_held: AtomicBool::new(true),
+            committed: committed_tx1,
+            allow_return: allow_rx1,
+            released: released_tx1,
+        });
+        tokio::select! {
+            biased;
+            res = super::try_acquire_oauth_refresh_lease_cancellation_safe(
+                delayed_meta1.clone(),
+                fixture1.storage.clone(),
+                upstream1,
+                gen1,
+                now1,
+            ) => {
+                panic!("paused scheduled lease acquisition should not complete early: {res:?}");
+            }
+            wait_res = tokio::time::timeout(
+                Duration::from_secs(2),
+                committed_rx1.wait_for(|&committed| committed),
+            ) => {
+                wait_res??;
+            }
+        }
+        let held1 = fixture1
+            .storage
+            .get_meta_value(&lease_key1)
+            .await?
+            .ok_or("missing committed scheduled lease 1")?;
+        assert!(held1.starts_with(&format!("held:{gen1}:")));
+        allow_tx1.send_replace(true);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            released_rx1.wait_for(|&released| released),
+        )
+        .await??;
+        assert_eq!(
+            fixture1
+                .storage
+                .get_meta_value(&lease_key1)
+                .await?
+                .as_deref(),
+            Some(format!("idle:{gen1}").as_str())
+        );
+        delayed_meta1.delay_held.store(false, Ordering::SeqCst);
+        let healthy_lease1 = super::try_acquire_oauth_refresh_lease_cancellation_safe(
+            delayed_meta1,
+            fixture1.storage.clone(),
+            upstream1,
+            gen1,
+            now1,
+        )
+        .await?
+        .ok_or("healthy worker 1 must immediately acquire released scheduled lease")?;
+        super::release_oauth_refresh_lease(
+            fixture1.storage.as_ref(),
+            upstream1,
+            &healthy_lease1.token,
+            gen1,
+        )
+        .await?;
+
+        // Case 2: Future dropped after `Delivered(lease)` + oneshot readiness before waiter polls.
+        struct NotifyWake(Arc<Notify>);
+        impl std::task::Wake for NotifyWake {
+            fn wake(self: Arc<Self>) {
+                self.0.notify_one();
+            }
+        }
+
+        let (fixture2, upstream2, gen2) = setup_killed_oauth_job_fixture().await?;
+        let lease_key2 = super::oauth_refresh_lease_meta_key(upstream2);
+        let now2 = cc_lb_clock::unix_secs(fixture2.clock.now());
+        let (committed_tx2, mut committed_rx2) = watch::channel(false);
+        let (allow_tx2, allow_rx2) = watch::channel(false);
+        let (released_tx2, mut released_rx2) = watch::channel(false);
+        let delayed_meta2 = Arc::new(DelayedScheduledAcquireMetaStore {
+            inner: fixture2.storage.clone(),
+            delay_held: AtomicBool::new(true),
+            committed: committed_tx2,
+            allow_return: allow_rx2,
+            released: released_tx2,
+        });
+        let notify2 = Arc::new(Notify::new());
+        let waker2 = std::task::Waker::from(Arc::new(NotifyWake(Arc::clone(&notify2))));
+        let mut cx2 = std::task::Context::from_waker(&waker2);
+        let mut acquire_fut2 = Box::pin(super::try_acquire_oauth_refresh_lease_cancellation_safe(
+            delayed_meta2.clone(),
+            fixture2.storage.clone(),
+            upstream2,
+            gen2,
+            now2,
+        ));
+        assert!(acquire_fut2.as_mut().poll(&mut cx2).is_pending());
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            committed_rx2.wait_for(|&committed| committed),
+        )
+        .await??;
+        allow_tx2.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(2), notify2.notified()).await?;
+        drop(acquire_fut2);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            released_rx2.wait_for(|&released| released),
+        )
+        .await??;
+        assert_eq!(
+            fixture2
+                .storage
+                .get_meta_value(&lease_key2)
+                .await?
+                .as_deref(),
+            Some(format!("idle:{gen2}").as_str())
+        );
+        delayed_meta2.delay_held.store(false, Ordering::SeqCst);
+        let healthy_lease2 = super::try_acquire_oauth_refresh_lease_cancellation_safe(
+            delayed_meta2,
+            fixture2.storage.clone(),
+            upstream2,
+            gen2,
+            now2,
+        )
+        .await?
+        .ok_or("healthy worker 2 must immediately acquire released scheduled lease")?;
+        super::release_oauth_refresh_lease(
+            fixture2.storage.as_ref(),
+            upstream2,
+            &healthy_lease2.token,
+            gen2,
+        )
+        .await?;
         Ok(())
     }
 

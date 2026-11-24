@@ -303,8 +303,9 @@ impl SchedulerDispatch {
             }
         }
         let starting_generation = upstream.oauth_token_generation;
-        let Some(lease) = crate::refresh::try_acquire_oauth_refresh_lease(
-            self.storage.as_ref(),
+        let Some(lease) = crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+            self.storage.clone(),
+            self.storage.clone(),
             job.upstream_id,
             starting_generation,
             unix_secs(self.clock.now()),
