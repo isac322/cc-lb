@@ -70,7 +70,8 @@ async fn postgres_idle_worker_claims_future_keepalive_job_within_poll_interval()
         wait_for_worker_count(&pool, ADAPTIVE_QUEUE, 1).await?;
         wait_for_worker_count(&pool, CACHE_KEEPALIVE_QUEUE, 1).await?;
         wait_for_worker_count(&pool, CRON_QUEUE, 1).await?;
-        wait_for_listen(&pool, 3).await?;
+        // H-01 shares a single PostgresInsertFanout LISTEN connection across all queues.
+        wait_for_listen(&pool, 1).await?;
 
         let (pre_held_tx, pre_held_rx) = tokio::sync::oneshot::channel();
         let grab_pool = worker_pool.clone();
@@ -98,13 +99,14 @@ async fn postgres_idle_worker_claims_future_keepalive_job_within_poll_interval()
              FROM pg_stat_activity
              WHERE datname = current_database()
                AND pid <> pg_backend_pid()
-               AND query ILIKE '%listen%'",
+               AND query ILIKE 'LISTEN %apalis::job::insert%'",
         )
         .fetch_all(&pool)
         .await?;
         ensure!(
-            terminated.len() >= 3 && terminated.iter().all(|terminated| *terminated),
-            "expected to terminate all three LISTEN connections"
+            terminated.len() == 1 && terminated.iter().all(|terminated| *terminated),
+            "expected to terminate the shared LISTEN connection, terminated={:?}",
+            terminated
         );
         timeout(QA_TIMEOUT, grabber)
             .await

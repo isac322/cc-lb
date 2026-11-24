@@ -32,7 +32,9 @@ use cc_lb_runtime_sync::replica::load_or_create_replica_id;
 use cc_lb_runtime_sync::storage_factory::{StorageFactoryError, open_storage};
 use cc_lb_runtime_sync::{await_or_abort, resolve_data_dir};
 use cc_lb_scheduler::admin::SchedulerAdminHandle;
-use cc_lb_scheduler::factory::{OpenedScheduler, SchedulerFactoryError, open_scheduler_storage};
+use cc_lb_scheduler::factory::{
+    OpenedScheduler, SchedulerFactoryError, SchedulerPoolRole, open_scheduler_storage_with_role,
+};
 use cc_lb_storage_api::{ManagedKeyStore, Storage};
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, Signer, SignerError, SignerFactory};
 use hyper::body::Incoming;
@@ -254,8 +256,13 @@ async fn build_admin_app_with_path_inner(
         AeadKeyError::Invalid => AdminBuildError::InvalidStorageKey,
     })?;
     let opened = open_storage(&config.storage, clock.clone()).await?;
-    let opened_scheduler =
-        open_scheduler_storage(&config.storage, &config.scheduler, clock.clone()).await?;
+    let opened_scheduler = open_scheduler_storage_with_role(
+        &config.storage,
+        &config.scheduler,
+        SchedulerPoolRole::EnqueueOnly,
+        clock.clone(),
+    )
+    .await?;
     build_admin_app_with_storage_inner(
         config,
         config_path,
@@ -278,8 +285,13 @@ pub async fn build_admin_app_with_storage(
     aead: Arc<AeadService>,
     clock: ClockHandle,
 ) -> Result<AdminApp, AdminBuildError> {
-    let opened_scheduler =
-        open_scheduler_storage(&config.storage, &config.scheduler, clock.clone()).await?;
+    let opened_scheduler = open_scheduler_storage_with_role(
+        &config.storage,
+        &config.scheduler,
+        SchedulerPoolRole::EnqueueOnly,
+        clock.clone(),
+    )
+    .await?;
     build_admin_app_with_storage_inner(
         config,
         config_path,
@@ -751,10 +763,14 @@ mod tests {
         config.runtime.data_dir = Some(dir.path().to_path_buf());
         config.event_bus.storage_tail_poll_interval_ms = 25;
 
-        let opened_scheduler =
-            open_scheduler_storage(&config.storage, &config.scheduler, clock.clone())
-                .await
-                .expect("open scheduler storage");
+        let opened_scheduler = open_scheduler_storage_with_role(
+            &config.storage,
+            &config.scheduler,
+            SchedulerPoolRole::EnqueueOnly,
+            clock.clone(),
+        )
+        .await
+        .expect("open scheduler storage");
         let synthetic_auth = Arc::new(AdminAuthenticator::new(vec![Arc::new(
             FixedTokenAuthProvider(SYNTHETIC_TOKEN),
         )]));

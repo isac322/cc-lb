@@ -24,7 +24,7 @@ const GEMINI_RECONCILIATION_ID: &str = "canonicalize_gemini_model_identity";
 pub(super) const ROLLUP_BATCH_LIMIT: i64 = 10_000;
 const MINUTE_SECS: u64 = 60;
 const HOUR_SECS: u64 = 60 * 60;
-const USAGE_ROLLUP_LOCK_KEY: i64 = 0x_CC1B_0001_0010_0001_u64 as i64;
+const USAGE_ROLLUP_LOCK_NAMESPACE: &str = "cc_lb:usage_rollup:";
 
 async fn cleanup_gemini_reconciliation_markers(
     tx: &mut Transaction<'_, Postgres>,
@@ -580,8 +580,10 @@ async fn reconcile_gemini_model_identity(
     };
 
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
-    let locked = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock($1)")
-        .bind(USAGE_ROLLUP_LOCK_KEY)
+    let locked = sqlx::query_scalar::<_, bool>(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended($1 || COALESCE(current_schema(), ''), 0))",
+    )
+    .bind(USAGE_ROLLUP_LOCK_NAMESPACE)
         .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -940,8 +942,10 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
     }
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
 
-    let locked = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock($1)")
-        .bind(USAGE_ROLLUP_LOCK_KEY)
+    let locked = sqlx::query_scalar::<_, bool>(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended($1 || COALESCE(current_schema(), ''), 0))",
+    )
+    .bind(USAGE_ROLLUP_LOCK_NAMESPACE)
         .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -1277,69 +1281,270 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
             message: "usage rollup aggregate count cannot be represented as u64".to_owned(),
         })?;
 
-    for (key, delta) in backfill_deltas {
-        if delta.cost_components_event_count == 0 {
-            continue;
+    let backfill_entries: Vec<(RollupKey, RollupDelta)> = backfill_deltas
+        .into_iter()
+        .filter(|(_, delta)| delta.cost_components_event_count > 0)
+        .collect();
+    if !backfill_entries.is_empty() {
+        let mut resolutions = Vec::with_capacity(backfill_entries.len());
+        let mut bucket_starts = Vec::with_capacity(backfill_entries.len());
+        let mut principals = Vec::with_capacity(backfill_entries.len());
+        let mut upstream_ids = Vec::with_capacity(backfill_entries.len());
+        let mut models = Vec::with_capacity(backfill_entries.len());
+        let mut cost_inputs = Vec::with_capacity(backfill_entries.len());
+        let mut cost_outputs = Vec::with_capacity(backfill_entries.len());
+        let mut cost_c5m = Vec::with_capacity(backfill_entries.len());
+        let mut cost_c1h = Vec::with_capacity(backfill_entries.len());
+        let mut cost_cr = Vec::with_capacity(backfill_entries.len());
+        let mut cost_cw30m = Vec::with_capacity(backfill_entries.len());
+        let mut cost_cw12h = Vec::with_capacity(backfill_entries.len());
+        let mut cost_counts = Vec::with_capacity(backfill_entries.len());
+
+        for (key, delta) in backfill_entries {
+            resolutions.push(key.resolution.as_str().to_owned());
+            bucket_starts.push(u64_to_i64(
+                key.bucket_start,
+                "backfill rollup bucket_start",
+            )?);
+            principals.push(key.principal);
+            upstream_ids.push(key.upstream_id);
+            models.push(key.model);
+            cost_inputs.push(u64_to_i64(
+                delta.cost_input_micros,
+                "backfill cost_input_micros",
+            )?);
+            cost_outputs.push(u64_to_i64(
+                delta.cost_output_micros,
+                "backfill cost_output_micros",
+            )?);
+            cost_c5m.push(u64_to_i64(
+                delta.cost_cache_creation_5m_micros,
+                "backfill cost_cache_creation_5m_micros",
+            )?);
+            cost_c1h.push(u64_to_i64(
+                delta.cost_cache_creation_1h_micros,
+                "backfill cost_cache_creation_1h_micros",
+            )?);
+            cost_cr.push(u64_to_i64(
+                delta.cost_cache_read_micros,
+                "backfill cost_cache_read_micros",
+            )?);
+            cost_cw30m.push(u64_to_i64(
+                delta.cost_cache_write_30m_micros,
+                "backfill cost_cache_write_30m_micros",
+            )?);
+            cost_cw12h.push(u64_to_i64(
+                delta.cost_cache_write_12h_micros,
+                "backfill cost_cache_write_12h_micros",
+            )?);
+            cost_counts.push(u64_to_i64(
+                delta.cost_components_event_count,
+                "backfill cost_components_event_count",
+            )?);
         }
+
         sqlx::query(
-            "UPDATE usage_rollups_v2 \
-             SET cost_input_micros = cost_input_micros + $1, \
-                 cost_output_micros = cost_output_micros + $2, \
-                 cost_cache_creation_5m_micros = cost_cache_creation_5m_micros + $3, \
-                 cost_cache_creation_1h_micros = cost_cache_creation_1h_micros + $4, \
-                 cost_cache_read_micros = cost_cache_read_micros + $5, \
-                 cost_cache_write_30m_micros = cost_cache_write_30m_micros + $6, \
-                 cost_cache_write_12h_micros = cost_cache_write_12h_micros + $7, \
-                 cost_components_event_count = cost_components_event_count + $8, \
+            "UPDATE usage_rollups_v2 AS u \
+             SET cost_input_micros = u.cost_input_micros + v.cost_input_micros, \
+                 cost_output_micros = u.cost_output_micros + v.cost_output_micros, \
+                 cost_cache_creation_5m_micros = u.cost_cache_creation_5m_micros + v.cost_cache_creation_5m_micros, \
+                 cost_cache_creation_1h_micros = u.cost_cache_creation_1h_micros + v.cost_cache_creation_1h_micros, \
+                 cost_cache_read_micros = u.cost_cache_read_micros + v.cost_cache_read_micros, \
+                 cost_cache_write_30m_micros = u.cost_cache_write_30m_micros + v.cost_cache_write_30m_micros, \
+                 cost_cache_write_12h_micros = u.cost_cache_write_12h_micros + v.cost_cache_write_12h_micros, \
+                 cost_components_event_count = u.cost_components_event_count + v.cost_components_event_count, \
                  updated_at = NOW() \
-             WHERE resolution = $9 AND bucket_start_unix_secs = $10 AND principal_id = $11 \
-               AND upstream_id = $12 AND model = $13",
+             FROM UNNEST($1::bigint[], $2::bigint[], $3::bigint[], $4::bigint[], $5::bigint[], $6::bigint[], $7::bigint[], $8::bigint[], $9::text[], $10::bigint[], $11::text[], $12::uuid[], $13::text[]) \
+               AS v(cost_input_micros, cost_output_micros, cost_cache_creation_5m_micros, cost_cache_creation_1h_micros, cost_cache_read_micros, cost_cache_write_30m_micros, cost_cache_write_12h_micros, cost_components_event_count, resolution, bucket_start_unix_secs, principal_id, upstream_id, model) \
+             WHERE u.resolution = v.resolution AND u.bucket_start_unix_secs = v.bucket_start_unix_secs AND u.principal_id = v.principal_id \
+               AND u.upstream_id = v.upstream_id AND u.model = v.model",
         )
-        .bind(u64_to_i64(
-            delta.cost_input_micros,
-            "backfill cost_input_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_output_micros,
-            "backfill cost_output_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_cache_creation_5m_micros,
-            "backfill cost_cache_creation_5m_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_cache_creation_1h_micros,
-            "backfill cost_cache_creation_1h_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_cache_read_micros,
-            "backfill cost_cache_read_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_cache_write_30m_micros,
-            "backfill cost_cache_write_30m_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_cache_write_12h_micros,
-            "backfill cost_cache_write_12h_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_components_event_count,
-            "backfill cost_components_event_count",
-        )?)
-        .bind(key.resolution.as_str())
-        .bind(u64_to_i64(
-            key.bucket_start,
-            "backfill rollup bucket_start",
-        )?)
-        .bind(&key.principal)
-        .bind(key.upstream_id)
-        .bind(&key.model)
+        .bind(&cost_inputs)
+        .bind(&cost_outputs)
+        .bind(&cost_c5m)
+        .bind(&cost_c1h)
+        .bind(&cost_cr)
+        .bind(&cost_cw30m)
+        .bind(&cost_cw12h)
+        .bind(&cost_counts)
+        .bind(&resolutions)
+        .bind(&bucket_starts)
+        .bind(&principals)
+        .bind(&upstream_ids)
+        .bind(&models)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
     }
-    for (key, delta) in deltas {
+
+    if !deltas.is_empty() {
+        let count = deltas.len();
+        let mut resolutions = Vec::with_capacity(count);
+        let mut bucket_starts = Vec::with_capacity(count);
+        let mut principals = Vec::with_capacity(count);
+        let mut upstream_ids = Vec::with_capacity(count);
+        let mut upstream_names = Vec::with_capacity(count);
+        let mut models = Vec::with_capacity(count);
+        let mut request_counts = Vec::with_capacity(count);
+        let mut input_tokens = Vec::with_capacity(count);
+        let mut output_tokens = Vec::with_capacity(count);
+        let mut cache_creation_input_tokens = Vec::with_capacity(count);
+        let mut cache_read_input_tokens = Vec::with_capacity(count);
+        let mut error_counts = Vec::with_capacity(count);
+        let mut latency_counts = Vec::with_capacity(count);
+        let mut latency_ms_sums = Vec::with_capacity(count);
+        let mut latency_ms_mins = Vec::with_capacity(count);
+        let mut latency_ms_maxs = Vec::with_capacity(count);
+        let mut proxy_setup_ms_counts = Vec::with_capacity(count);
+        let mut proxy_setup_ms_sums = Vec::with_capacity(count);
+        let mut shape_ms_counts = Vec::with_capacity(count);
+        let mut shape_ms_sums = Vec::with_capacity(count);
+        let mut sign_ms_counts = Vec::with_capacity(count);
+        let mut sign_ms_sums = Vec::with_capacity(count);
+        let mut upstream_ttfb_ms_counts = Vec::with_capacity(count);
+        let mut upstream_ttfb_ms_sums = Vec::with_capacity(count);
+        let mut upstream_body_ms_counts = Vec::with_capacity(count);
+        let mut upstream_body_ms_sums = Vec::with_capacity(count);
+        let mut virtual_cost_micros = Vec::with_capacity(count);
+        let mut cost_input_micros = Vec::with_capacity(count);
+        let mut cost_output_micros = Vec::with_capacity(count);
+        let mut cost_c5m = Vec::with_capacity(count);
+        let mut cost_c1h = Vec::with_capacity(count);
+        let mut cost_cr = Vec::with_capacity(count);
+        let mut cost_cw30m = Vec::with_capacity(count);
+        let mut cost_cw12h = Vec::with_capacity(count);
+        let mut cost_components_event_counts = Vec::with_capacity(count);
+        let mut cache_write_input_tokens = Vec::with_capacity(count);
+        let mut cache_write_input_tokens_30m = Vec::with_capacity(count);
+        let mut cache_write_input_tokens_12h = Vec::with_capacity(count);
+        let mut priced_event_counts = Vec::with_capacity(count);
+        let mut unpriced_event_counts = Vec::with_capacity(count);
+        let mut unmetered_event_counts = Vec::with_capacity(count);
+        let mut effective_cw_tokens = Vec::with_capacity(count);
+
+        for (key, delta) in deltas {
+            resolutions.push(key.resolution.as_str().to_owned());
+            bucket_starts.push(u64_to_i64(key.bucket_start, "usage rollup bucket_start")?);
+            principals.push(key.principal);
+            upstream_ids.push(key.upstream_id);
+            upstream_names.push(key.upstream_name);
+            models.push(key.model);
+            request_counts.push(u64_to_i64(delta.request_count, "rollup request_count")?);
+            input_tokens.push(u64_to_i64(delta.input_tokens, "rollup input_tokens")?);
+            output_tokens.push(u64_to_i64(delta.output_tokens, "rollup output_tokens")?);
+            cache_creation_input_tokens.push(u64_to_i64(
+                delta.cache_creation_input_tokens,
+                "rollup cache_creation_input_tokens",
+            )?);
+            cache_read_input_tokens.push(u64_to_i64(
+                delta.cache_read_input_tokens,
+                "rollup cache_read_input_tokens",
+            )?);
+            error_counts.push(u64_to_i64(delta.error_count, "rollup error_count")?);
+            latency_counts.push(u64_to_i64(delta.latency_count, "rollup latency_count")?);
+            latency_ms_sums.push(u64_to_i64(delta.latency_ms_sum, "rollup latency_ms_sum")?);
+            latency_ms_mins.push(option_u64_to_i64(
+                delta.latency_ms_min,
+                "rollup latency_ms_min",
+            )?);
+            latency_ms_maxs.push(option_u64_to_i64(
+                delta.latency_ms_max,
+                "rollup latency_ms_max",
+            )?);
+            proxy_setup_ms_counts.push(u64_to_i64(
+                delta.proxy_setup_ms_count,
+                "rollup proxy_setup_ms_count",
+            )?);
+            proxy_setup_ms_sums.push(u64_to_i64(
+                delta.proxy_setup_ms_sum,
+                "rollup proxy_setup_ms_sum",
+            )?);
+            shape_ms_counts.push(u64_to_i64(delta.shape_ms_count, "rollup shape_ms_count")?);
+            shape_ms_sums.push(u64_to_i64(delta.shape_ms_sum, "rollup shape_ms_sum")?);
+            sign_ms_counts.push(u64_to_i64(delta.sign_ms_count, "rollup sign_ms_count")?);
+            sign_ms_sums.push(u64_to_i64(delta.sign_ms_sum, "rollup sign_ms_sum")?);
+            upstream_ttfb_ms_counts.push(u64_to_i64(
+                delta.upstream_ttfb_ms_count,
+                "rollup upstream_ttfb_ms_count",
+            )?);
+            upstream_ttfb_ms_sums.push(u64_to_i64(
+                delta.upstream_ttfb_ms_sum,
+                "rollup upstream_ttfb_ms_sum",
+            )?);
+            upstream_body_ms_counts.push(u64_to_i64(
+                delta.upstream_body_ms_count,
+                "rollup upstream_body_ms_count",
+            )?);
+            upstream_body_ms_sums.push(u64_to_i64(
+                delta.upstream_body_ms_sum,
+                "rollup upstream_body_ms_sum",
+            )?);
+            virtual_cost_micros.push(u64_to_i64(
+                delta.virtual_cost_micros,
+                "rollup virtual_cost_micros",
+            )?);
+            cost_input_micros.push(u64_to_i64(
+                delta.cost_input_micros,
+                "rollup cost_input_micros",
+            )?);
+            cost_output_micros.push(u64_to_i64(
+                delta.cost_output_micros,
+                "rollup cost_output_micros",
+            )?);
+            cost_c5m.push(u64_to_i64(
+                delta.cost_cache_creation_5m_micros,
+                "rollup cost_cache_creation_5m_micros",
+            )?);
+            cost_c1h.push(u64_to_i64(
+                delta.cost_cache_creation_1h_micros,
+                "rollup cost_cache_creation_1h_micros",
+            )?);
+            cost_cr.push(u64_to_i64(
+                delta.cost_cache_read_micros,
+                "rollup cost_cache_read_micros",
+            )?);
+            cost_cw30m.push(u64_to_i64(
+                delta.cost_cache_write_30m_micros,
+                "rollup cost_cache_write_30m_micros",
+            )?);
+            cost_cw12h.push(u64_to_i64(
+                delta.cost_cache_write_12h_micros,
+                "rollup cost_cache_write_12h_micros",
+            )?);
+            cost_components_event_counts.push(u64_to_i64(
+                delta.cost_components_event_count,
+                "rollup cost_components_event_count",
+            )?);
+            cache_write_input_tokens.push(option_u64_to_i64(
+                delta.cache_write_input_tokens,
+                "rollup cache_write_input_tokens",
+            )?);
+            cache_write_input_tokens_30m.push(option_u64_to_i64(
+                delta.cache_write_input_tokens_30m,
+                "rollup cache_write_input_tokens_30m",
+            )?);
+            cache_write_input_tokens_12h.push(option_u64_to_i64(
+                delta.cache_write_input_tokens_12h,
+                "rollup cache_write_input_tokens_12h",
+            )?);
+            priced_event_counts.push(u64_to_i64(
+                delta.priced_event_count,
+                "rollup priced_event_count",
+            )?);
+            unpriced_event_counts.push(u64_to_i64(
+                delta.unpriced_event_count,
+                "rollup unpriced_event_count",
+            )?);
+            unmetered_event_counts.push(u64_to_i64(
+                delta.unmetered_event_count,
+                "rollup unmetered_event_count",
+            )?);
+            effective_cw_tokens.push(u64_to_i64(
+                delta.effective_cache_write_input_tokens,
+                "rollup effective_cache_write_input_tokens",
+            )?);
+        }
+
         sqlx::query(
             "INSERT INTO usage_rollups_v2 \
               (resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, model, \
@@ -1353,9 +1558,25 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
                cost_components_event_count, cache_write_input_tokens, cache_write_input_tokens_30m, \
                cache_write_input_tokens_12h, priced_event_count, unpriced_event_count, unmetered_event_count, effective_cache_write_input_tokens, updated_at) \
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
-                      $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, \
-                      $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, NOW()) \
+              SELECT v.*, NOW() \
+              FROM UNNEST($1::text[], $2::bigint[], $3::text[], $4::uuid[], $5::text[], $6::text[], \
+                          $7::bigint[], $8::bigint[], $9::bigint[], $10::bigint[], $11::bigint[], $12::bigint[], \
+                          $13::bigint[], $14::bigint[], $15::bigint[], $16::bigint[], $17::bigint[], $18::bigint[], \
+                          $19::bigint[], $20::bigint[], $21::bigint[], $22::bigint[], $23::bigint[], $24::bigint[], \
+                          $25::bigint[], $26::bigint[], $27::bigint[], $28::bigint[], $29::bigint[], $30::bigint[], \
+                          $31::bigint[], $32::bigint[], $33::bigint[], $34::bigint[], $35::bigint[], $36::bigint[], \
+                          $37::bigint[], $38::bigint[], $39::bigint[], $40::bigint[], $41::bigint[], $42::bigint[]) \
+                AS v(resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, model, \
+                     request_count, input_tokens, output_tokens, cache_creation_input_tokens, \
+                     cache_read_input_tokens, error_count, latency_count, latency_ms_sum, \
+                     latency_ms_min, latency_ms_max, proxy_setup_ms_count, proxy_setup_ms_sum, \
+                     shape_ms_count, shape_ms_sum, sign_ms_count, sign_ms_sum, \
+                     upstream_ttfb_ms_count, upstream_ttfb_ms_sum, upstream_body_ms_count, \
+                     upstream_body_ms_sum, virtual_cost_micros, cost_input_micros, cost_output_micros, \
+                     cost_cache_creation_5m_micros, cost_cache_creation_1h_micros, cost_cache_read_micros, \
+                     cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
+                     cost_components_event_count, cache_write_input_tokens, cache_write_input_tokens_30m, \
+                     cache_write_input_tokens_12h, priced_event_count, unpriced_event_count, unmetered_event_count, effective_cache_write_input_tokens) \
               ON CONFLICT (resolution, bucket_start_unix_secs, principal_id, upstream_id, model) DO UPDATE \
               SET upstream_name = EXCLUDED.upstream_name, \
                   request_count = usage_rollups_v2.request_count + EXCLUDED.request_count, \
@@ -1404,98 +1625,80 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                   unmetered_event_count = usage_rollups_v2.unmetered_event_count + EXCLUDED.unmetered_event_count, \
                   updated_at = NOW()",
         )
-        .bind(key.resolution.as_str())
-        .bind(u64_to_i64(key.bucket_start, "usage rollup bucket_start")?)
-        .bind(&key.principal)
-        .bind(key.upstream_id)
-        .bind(&key.upstream_name)
-        .bind(&key.model)
-        .bind(u64_to_i64(delta.request_count, "rollup request_count")?)
-        .bind(u64_to_i64(delta.input_tokens, "rollup input_tokens")?)
-        .bind(u64_to_i64(delta.output_tokens, "rollup output_tokens")?)
-        .bind(u64_to_i64(delta.cache_creation_input_tokens, "rollup cache_creation_input_tokens")?)
-        .bind(u64_to_i64(delta.cache_read_input_tokens, "rollup cache_read_input_tokens")?)
-        .bind(u64_to_i64(delta.error_count, "rollup error_count")?)
-        .bind(u64_to_i64(delta.latency_count, "rollup latency_count")?)
-        .bind(u64_to_i64(delta.latency_ms_sum, "rollup latency_ms_sum")?)
-        .bind(option_u64_to_i64(delta.latency_ms_min, "rollup latency_ms_min")?)
-        .bind(option_u64_to_i64(delta.latency_ms_max, "rollup latency_ms_max")?)
-        .bind(u64_to_i64(delta.proxy_setup_ms_count, "rollup proxy_setup_ms_count")?)
-        .bind(u64_to_i64(delta.proxy_setup_ms_sum, "rollup proxy_setup_ms_sum")?)
-        .bind(u64_to_i64(delta.shape_ms_count, "rollup shape_ms_count")?)
-        .bind(u64_to_i64(delta.shape_ms_sum, "rollup shape_ms_sum")?)
-        .bind(u64_to_i64(delta.sign_ms_count, "rollup sign_ms_count")?)
-        .bind(u64_to_i64(delta.sign_ms_sum, "rollup sign_ms_sum")?)
-        .bind(u64_to_i64(delta.upstream_ttfb_ms_count, "rollup upstream_ttfb_ms_count")?)
-        .bind(u64_to_i64(delta.upstream_ttfb_ms_sum, "rollup upstream_ttfb_ms_sum")?)
-        .bind(u64_to_i64(delta.upstream_body_ms_count, "rollup upstream_body_ms_count")?)
-        .bind(u64_to_i64(delta.upstream_body_ms_sum, "rollup upstream_body_ms_sum")?)
-        .bind(u64_to_i64(delta.virtual_cost_micros, "rollup virtual_cost_micros")?)
-        .bind(u64_to_i64(delta.cost_input_micros, "rollup cost_input_micros")?)
-        .bind(u64_to_i64(delta.cost_output_micros, "rollup cost_output_micros")?)
-        .bind(u64_to_i64(
-            delta.cost_cache_creation_5m_micros,
-            "rollup cost_cache_creation_5m_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_cache_creation_1h_micros,
-            "rollup cost_cache_creation_1h_micros",
-        )?)
-        .bind(u64_to_i64(delta.cost_cache_read_micros, "rollup cost_cache_read_micros")?)
-        .bind(u64_to_i64(
-            delta.cost_cache_write_30m_micros,
-            "rollup cost_cache_write_30m_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_cache_write_12h_micros,
-            "rollup cost_cache_write_12h_micros",
-        )?)
-        .bind(u64_to_i64(
-            delta.cost_components_event_count,
-            "rollup cost_components_event_count",
-        )?)
-        .bind(option_u64_to_i64(
-            delta.cache_write_input_tokens,
-            "rollup cache_write_input_tokens",
-        )?)
-        .bind(option_u64_to_i64(
-            delta.cache_write_input_tokens_30m,
-            "rollup cache_write_input_tokens_30m",
-        )?)
-        .bind(option_u64_to_i64(
-            delta.cache_write_input_tokens_12h,
-            "rollup cache_write_input_tokens_12h",
-        )?)
-        .bind(u64_to_i64(delta.priced_event_count, "rollup priced_event_count")?)
-        .bind(u64_to_i64(delta.unpriced_event_count, "rollup unpriced_event_count")?)
-        .bind(u64_to_i64(delta.unmetered_event_count, "rollup unmetered_event_count")?)
-        .bind(u64_to_i64(
-            delta.effective_cache_write_input_tokens,
-            "rollup effective_cache_write_input_tokens",
-        )?)
+        .bind(&resolutions)
+        .bind(&bucket_starts)
+        .bind(&principals)
+        .bind(&upstream_ids)
+        .bind(&upstream_names)
+        .bind(&models)
+        .bind(&request_counts)
+        .bind(&input_tokens)
+        .bind(&output_tokens)
+        .bind(&cache_creation_input_tokens)
+        .bind(&cache_read_input_tokens)
+        .bind(&error_counts)
+        .bind(&latency_counts)
+        .bind(&latency_ms_sums)
+        .bind(&latency_ms_mins)
+        .bind(&latency_ms_maxs)
+        .bind(&proxy_setup_ms_counts)
+        .bind(&proxy_setup_ms_sums)
+        .bind(&shape_ms_counts)
+        .bind(&shape_ms_sums)
+        .bind(&sign_ms_counts)
+        .bind(&sign_ms_sums)
+        .bind(&upstream_ttfb_ms_counts)
+        .bind(&upstream_ttfb_ms_sums)
+        .bind(&upstream_body_ms_counts)
+        .bind(&upstream_body_ms_sums)
+        .bind(&virtual_cost_micros)
+        .bind(&cost_input_micros)
+        .bind(&cost_output_micros)
+        .bind(&cost_c5m)
+        .bind(&cost_c1h)
+        .bind(&cost_cr)
+        .bind(&cost_cw30m)
+        .bind(&cost_cw12h)
+        .bind(&cost_components_event_counts)
+        .bind(&cache_write_input_tokens)
+        .bind(&cache_write_input_tokens_30m)
+        .bind(&cache_write_input_tokens_12h)
+        .bind(&priced_event_counts)
+        .bind(&unpriced_event_counts)
+        .bind(&unmetered_event_counts)
+        .bind(&effective_cw_tokens)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
     }
-    for ((resolution, bucket_start, upstream_id), error_count) in overview_excluded_error_deltas {
+
+    if !overview_excluded_error_deltas.is_empty() {
+        let count = overview_excluded_error_deltas.len();
+        let mut resolutions = Vec::with_capacity(count);
+        let mut bucket_starts = Vec::with_capacity(count);
+        let mut upstream_ids = Vec::with_capacity(count);
+        let mut error_counts = Vec::with_capacity(count);
+        for ((resolution, bucket_start, upstream_id), error_count) in overview_excluded_error_deltas
+        {
+            resolutions.push(resolution.as_str().to_owned());
+            bucket_starts.push(u64_to_i64(bucket_start, "overview excluded error bucket")?);
+            upstream_ids.push(upstream_id.to_string());
+            error_counts.push(u64_to_i64(error_count, "overview excluded error count")?);
+        }
         sqlx::query(
             "INSERT INTO overview_excluded_error_rollups_v1 \
              (resolution, bucket_start_unix_secs, upstream_id, error_count, updated_at) \
-             VALUES ($1, $2, $3, $4, NOW()) \
+             SELECT v.resolution, v.bucket_start_unix_secs, v.upstream_id, v.error_count, NOW() \
+             FROM UNNEST($1::text[], $2::bigint[], $3::text[], $4::bigint[]) \
+               AS v(resolution, bucket_start_unix_secs, upstream_id, error_count) \
              ON CONFLICT (resolution, bucket_start_unix_secs, upstream_id) DO UPDATE SET \
                  error_count = overview_excluded_error_rollups_v1.error_count + EXCLUDED.error_count, \
                  updated_at = NOW()",
         )
-        .bind(resolution.as_str())
-        .bind(u64_to_i64(
-            bucket_start,
-            "overview excluded error bucket",
-        )?)
-        .bind(upstream_id.to_string())
-        .bind(u64_to_i64(
-            error_count,
-            "overview excluded error count",
-        )?)
+        .bind(&resolutions)
+        .bind(&bucket_starts)
+        .bind(&upstream_ids)
+        .bind(&error_counts)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;

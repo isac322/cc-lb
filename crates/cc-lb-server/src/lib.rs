@@ -46,6 +46,7 @@ pub use app::{
 pub(crate) use plugin_manifest::PluginManifest;
 #[cfg(any(feature = "storage-sqlite", feature = "storage-postgres"))]
 pub use scheduler_factory::{
-    OpenedScheduler, SchedulerBackend, SchedulerFactoryError, open_scheduler_storage,
+    OpenedScheduler, SchedulerBackend, SchedulerFactoryError, SchedulerPoolRole,
+    open_scheduler_storage, open_scheduler_storage_with_role,
 };
 pub use subscription_quota_cache::SubscriptionQuotaCache;

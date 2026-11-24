@@ -61,14 +61,31 @@ pub enum SchedulerFactoryError {
     StartupFailed { message: String },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SchedulerPoolRole {
+    Worker,
+    EnqueueOnly,
+}
+
 pub async fn open_scheduler_storage(
     storage: &StorageConfig,
     scheduler: &SchedulerConfig,
     clock: cc_lb_clock::ClockHandle,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
+    open_scheduler_storage_with_role(storage, scheduler, SchedulerPoolRole::Worker, clock).await
+}
+
+pub async fn open_scheduler_storage_with_role(
+    storage: &StorageConfig,
+    scheduler: &SchedulerConfig,
+    role: SchedulerPoolRole,
+    clock: cc_lb_clock::ClockHandle,
+) -> Result<OpenedScheduler, SchedulerFactoryError> {
     let opened = match storage {
         StorageConfig::Sqlite { path } => open_sqlite(path, scheduler, clock).await,
-        StorageConfig::Postgres { url, pool: _ } => open_postgres(url, scheduler, clock).await,
+        StorageConfig::Postgres { url, pool } => {
+            open_postgres(url, pool, scheduler, role, clock).await
+        }
     };
     crate::scheduler_metrics::set_scheduler_init_failure(opened.is_err());
     opened
@@ -145,7 +162,9 @@ fn scheduler_sqlite_path(path: &std::path::Path) -> std::path::PathBuf {
 #[cfg(not(feature = "postgres"))]
 async fn open_postgres(
     _url: &str,
+    _storage_pool: &cc_lb_config::PostgresPoolConfig,
     _scheduler: &SchedulerConfig,
+    _role: SchedulerPoolRole,
     _clock: cc_lb_clock::ClockHandle,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
     Err(SchedulerFactoryError::FeatureDisabled {
@@ -156,30 +175,55 @@ async fn open_postgres(
 #[cfg(feature = "postgres")]
 async fn open_postgres(
     url: &str,
+    storage_pool: &cc_lb_config::PostgresPoolConfig,
     scheduler: &SchedulerConfig,
+    role: SchedulerPoolRole,
     _clock: cc_lb_clock::ClockHandle,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
     use std::time::Duration;
 
     use sqlx::postgres::PgPoolOptions;
 
-    let connect_options =
+    let mut connect_options =
         postgres_connect_options(url, scheduler.separate_pool.sslmode.as_deref())?;
+    if let Some(cache_capacity) = storage_pool.effective_statement_cache_capacity() {
+        connect_options = connect_options.statement_cache_capacity(cache_capacity);
+    }
+    let direct_listener_url = storage_pool.effective_listener_url(url);
+    let direct_connect_options = postgres_connect_options(
+        direct_listener_url,
+        scheduler.separate_pool.sslmode.as_deref(),
+    )?;
+
+    let (max_connections, min_connections) = match role {
+        SchedulerPoolRole::Worker => (
+            scheduler.separate_pool.max_connections,
+            scheduler.separate_pool.min_connections,
+        ),
+        SchedulerPoolRole::EnqueueOnly => (scheduler.separate_pool.max_connections.min(2), 0),
+    };
     let statement_timeout_ms = scheduler.separate_pool.statement_timeout_secs * 1000;
-    let pool = PgPoolOptions::new()
-        .max_connections(scheduler.separate_pool.max_connections)
-        .min_connections(scheduler.separate_pool.min_connections)
+    let pgbouncer_tx_pooling = storage_pool.pgbouncer_transaction_pooling;
+    let mut builder = PgPoolOptions::new()
+        .max_connections(max_connections)
+        .min_connections(min_connections)
         .acquire_timeout(Duration::from_secs(
             scheduler.separate_pool.acquire_timeout_secs,
         ))
         .idle_timeout(Duration::from_secs(
             scheduler.separate_pool.idle_timeout_secs,
-        ))
-        .after_connect(move |connection, _metadata| {
+        ));
+    if !pgbouncer_tx_pooling {
+        builder = builder.after_connect(move |connection, _metadata| {
             Box::pin(async move {
                 let statement_timeout =
                     format!("SET statement_timeout = '{statement_timeout_ms}ms'");
                 sqlx::query(sqlx::AssertSqlSafe(statement_timeout))
+                    .execute(&mut *connection)
+                    .await?;
+                let idle_in_tx_timeout =
+                    format!("SET idle_in_transaction_session_timeout = '{statement_timeout_ms}ms'");
+                sqlx::query(sqlx::AssertSqlSafe(idle_in_tx_timeout))
                     .execute(&mut *connection)
                     .await?;
                 sqlx::query("SET search_path = cc_lb_scheduler, apalis, public")
@@ -187,13 +231,28 @@ async fn open_postgres(
                     .await?;
                 Ok(())
             })
-        })
-        .connect_with(connect_options.clone())
+        });
+    }
+    let pool = builder
+        .connect_with(connect_options)
         .await
         .map_err(|error| connection_error_with_host(url, error))?;
-    run_postgres_scheduler_setup(&connect_options, &pool).await?;
+    run_postgres_scheduler_setup(&direct_connect_options).await?;
+    let listener_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .min_connections(0)
+        .acquire_timeout(Duration::from_secs(
+            scheduler.separate_pool.acquire_timeout_secs,
+        ))
+        .idle_timeout(Duration::from_secs(
+            scheduler.separate_pool.idle_timeout_secs,
+        ))
+        .connect_lazy_with(direct_connect_options);
     Ok(OpenedScheduler {
-        backend: SchedulerBackend::Postgres(PostgresSchedulerBackend::new(pool)),
+        backend: SchedulerBackend::Postgres(PostgresSchedulerBackend::new_with_listener_pool(
+            pool,
+            listener_pool,
+        )),
     })
 }
 
@@ -250,10 +309,8 @@ fn parse_ssl_mode(value: &str) -> Result<sqlx::postgres::PgSslMode, SchedulerFac
 #[cfg(feature = "postgres")]
 async fn run_postgres_scheduler_setup(
     connect_options: &sqlx::postgres::PgConnectOptions,
-    pool: &sqlx::PgPool,
 ) -> Result<(), SchedulerFactoryError> {
     let connect_options = connect_options.clone();
-    let pool = pool.clone();
     tokio::spawn(async move {
         use sqlx::Connection as _;
 
@@ -280,7 +337,7 @@ async fn run_postgres_scheduler_setup(
                 .run_direct(None, &mut conn, false)
                 .await
                 .map_err(migration_error)?;
-            crate::migrations::apply_post_setup_migrations(&pool)
+            crate::migrations::apply_postgres_post_setup_migrations_on_conn(&mut conn)
                 .await
                 .map_err(migration_error)?;
             Ok(())

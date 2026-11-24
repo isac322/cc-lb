@@ -303,7 +303,7 @@ impl SchedulerDispatch {
             }
             #[cfg(feature = "storage-postgres")]
             SchedulerBackend::Postgres(postgres) => {
-                OAuthUsagePollCursorsStore::new(postgres.pool().clone())
+                OAuthUsagePollCursorsStore::with_scheduler_schema(postgres.pool().clone())
                     .read(upstream_id)
                     .await
             }
@@ -343,7 +343,7 @@ impl SchedulerDispatch {
             }
             #[cfg(feature = "storage-postgres")]
             SchedulerBackend::Postgres(postgres) => {
-                OAuthUsagePollCursorsStore::new(postgres.pool().clone())
+                OAuthUsagePollCursorsStore::with_scheduler_schema(postgres.pool().clone())
                     .record_attempt(
                         update.upstream_id,
                         update.observed_at_unix_secs,
@@ -369,7 +369,7 @@ impl SchedulerDispatch {
             #[cfg(feature = "storage-postgres")]
             SchedulerBackend::Postgres(postgres) => {
                 handle_anthropic_compat_refresh_job_with_core_fetcher(
-                    &AnthropicCompatEtagsStore::new(postgres.pool().clone()),
+                    &AnthropicCompatEtagsStore::with_scheduler_schema(postgres.pool().clone()),
                     self.storage.as_ref(),
                     &self.cancel,
                     &*self.clock,
@@ -403,7 +403,7 @@ impl SchedulerDispatch {
             #[cfg(feature = "storage-postgres")]
             SchedulerBackend::Postgres(postgres) => price_catalog_outcome(
                 PriceCatalogRefreshJobHandler::new(
-                    PriceCatalogVersionsStore::new(postgres.pool().clone()),
+                    PriceCatalogVersionsStore::with_scheduler_schema(postgres.pool().clone()),
                     loader,
                 )
                 .handle(job, unix_secs(self.clock.now()))

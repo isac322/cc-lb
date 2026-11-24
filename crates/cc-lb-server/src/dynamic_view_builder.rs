@@ -1011,7 +1011,7 @@ async fn apply_upstreams(
             None
         };
         if !upstream.enabled {
-            if !is_oauth {
+            if !is_oauth && upstream.last_apply_error.is_some() {
                 stores
                     .upstreams
                     .set_last_apply_error(upstream.id, None)
@@ -1075,7 +1075,7 @@ async fn apply_upstreams(
                         Ok(()) | Err(StorageError::Conflict { .. }) => {}
                         Err(error) => return Err(error),
                     }
-                } else {
+                } else if upstream.last_apply_error.as_deref() != Some(message.as_str()) {
                     stores
                         .upstreams
                         .set_last_apply_error(upstream.id, Some(message.clone()))
@@ -1099,7 +1099,7 @@ async fn apply_upstreams(
 
         // A successful validation clears stale non-terminal Vertex credential
         // errors, while terminal replacement markers remain authoritative.
-        if !is_oauth
+        if (!is_oauth && upstream.last_apply_error.is_some())
             || (upstream.kind == UpstreamKind::VertexCredential
                 && last_apply_error.is_some()
                 && !cc_lb_domain::vertex::vertex_credential_requires_replacement(

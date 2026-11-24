@@ -10,6 +10,7 @@ impl OrganizationMetadataStore for PostgresStorage {
         &self,
         record: &OrganizationMetadataRecord,
     ) -> StorageResult<()> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         sqlx::query(
             "INSERT INTO organization_metadata_v1 \
              (organization_uuid, organization_name, organization_type, rate_limit_tier, seat_tier, has_extra_usage_enabled, \
@@ -56,9 +57,20 @@ impl OrganizationMetadataStore for PostgresStorage {
         .bind(&record.last_error)
         .bind(&record.raw_profile)
         .bind(&record.raw_overage_grant)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
+        let notify_payload = if record.organization_uuid.len() <= 100 {
+            record.organization_uuid.as_str()
+        } else {
+            "organization-metadata"
+        };
+        sqlx::query("SELECT pg_notify('cclb_upstream_changed', $1)")
+            .bind(notify_payload)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
         Ok(())
     }
 

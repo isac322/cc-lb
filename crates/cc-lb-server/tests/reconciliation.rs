@@ -438,6 +438,42 @@ async fn revision_hash_changes_when_oauth_becomes_reconnect_required() {
         holder.load().upstream_status_snapshot.revision_hash,
         reconnect_hash
     );
+
+    // Changing organization metadata must also advance the revision hash and
+    // trigger a DynamicView rebuild (H-05).
+    storage
+        .put_organization_metadata(&cc_lb_storage_api::OrganizationMetadataRecord {
+            organization_uuid: "org-reconcile-h05".to_owned(),
+            organization_name: Some("Org H05".to_owned()),
+            organization_type: Some("claude_max".to_owned()),
+            rate_limit_tier: Some("default_claude_max_5x".to_owned()),
+            seat_tier: None,
+            has_extra_usage_enabled: None,
+            billing_type: None,
+            subscription_created_at_unix_secs: None,
+            account_email: None,
+            account_display_name: None,
+            account_uuid: None,
+            overage_credit_amount_minor_units: None,
+            overage_credit_currency: None,
+            overage_credit_granted: None,
+            overage_credit_eligible: None,
+            observed_at_unix_millis: 1_900_000_123,
+            last_error: None,
+            raw_profile: Some("{}".to_owned()),
+            raw_overage_grant: None,
+        })
+        .await
+        .expect("put organization metadata");
+    reconciler
+        .reconcile_once()
+        .await
+        .expect("reconcile after org metadata change");
+    assert!(holder.load().generation > reconnect_generation);
+    assert_ne!(
+        holder.load().upstream_status_snapshot.revision_hash,
+        reconnect_hash
+    );
 }
 
 #[tokio::test]

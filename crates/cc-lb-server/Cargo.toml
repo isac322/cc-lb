@@ -44,6 +44,7 @@ async-stream.workspace = true
 async-trait.workspace = true
 arc-swap.workspace = true
 axum = { workspace = true, features = ["multipart", "ws"] }
+backon = { workspace = true }
 bytes.workspace = true
 chrono.workspace = true
 cc-lb-aead = { path = "../cc-lb-aead" }

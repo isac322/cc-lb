@@ -19,6 +19,7 @@ cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire", features = ["std"] }
 cc-lb-aead = { path = "../cc-lb-aead" }
 async-trait = { workspace = true }
+backon = { workspace = true }
 chrono = { workspace = true }
 metrics = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

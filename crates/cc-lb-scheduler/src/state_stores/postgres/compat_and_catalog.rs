@@ -10,7 +10,12 @@ use crate::{
 
 impl AnthropicCompatEtagsStore<Postgres> {
     pub async fn read(&self, key: &str) -> Result<Option<AnthropicCompatEtag>> {
-        let row = sqlx::query("SELECT * FROM anthropic_compat_etags WHERE key = $1")
+        let query = if self.schema == Some("cc_lb_scheduler") {
+            "SELECT * FROM cc_lb_scheduler.anthropic_compat_etags WHERE key = $1"
+        } else {
+            "SELECT * FROM anthropic_compat_etags WHERE key = $1"
+        };
+        let row = sqlx::query(query)
             .bind(key)
             .fetch_optional(&self.pool)
             .await?;
@@ -18,24 +23,35 @@ impl AnthropicCompatEtagsStore<Postgres> {
     }
 
     pub async fn upsert_value(&self, key: &str, hash: &str, now_unix_secs: u64) -> Result<()> {
-        sqlx::query(
+        let query = if self.schema == Some("cc_lb_scheduler") {
+            "INSERT INTO cc_lb_scheduler.anthropic_compat_etags (key, last_applied_at_unix_secs, last_value_hash) \
+             VALUES ($1, $2, $3) ON CONFLICT(key) DO UPDATE SET \
+             last_applied_at_unix_secs = EXCLUDED.last_applied_at_unix_secs, \
+             last_value_hash = EXCLUDED.last_value_hash"
+        } else {
             "INSERT INTO anthropic_compat_etags (key, last_applied_at_unix_secs, last_value_hash) \
              VALUES ($1, $2, $3) ON CONFLICT(key) DO UPDATE SET \
              last_applied_at_unix_secs = EXCLUDED.last_applied_at_unix_secs, \
-             last_value_hash = EXCLUDED.last_value_hash",
-        )
-        .bind(key)
-        .bind(u64_to_i64(now_unix_secs, "last_applied_at_unix_secs")?)
-        .bind(hash)
-        .execute(&self.pool)
-        .await?;
+             last_value_hash = EXCLUDED.last_value_hash"
+        };
+        sqlx::query(query)
+            .bind(key)
+            .bind(u64_to_i64(now_unix_secs, "last_applied_at_unix_secs")?)
+            .bind(hash)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 }
 
 impl PriceCatalogVersionsStore<Postgres> {
     pub async fn read(&self, source: &str) -> Result<Option<PriceCatalogVersion>> {
-        let row = sqlx::query("SELECT * FROM price_catalog_versions WHERE source = $1")
+        let query = if self.schema == Some("cc_lb_scheduler") {
+            "SELECT * FROM cc_lb_scheduler.price_catalog_versions WHERE source = $1"
+        } else {
+            "SELECT * FROM price_catalog_versions WHERE source = $1"
+        };
+        let row = sqlx::query(query)
             .bind(source)
             .fetch_optional(&self.pool)
             .await?;
@@ -48,16 +64,21 @@ impl PriceCatalogVersionsStore<Postgres> {
         fingerprint: &str,
         fetched_at_unix_secs: u64,
     ) -> Result<()> {
-        sqlx::query(
+        let query = if self.schema == Some("cc_lb_scheduler") {
+            "INSERT INTO cc_lb_scheduler.price_catalog_versions (source, fingerprint, fetched_at_unix_secs) \
+             VALUES ($1, $2, $3) ON CONFLICT(source) DO UPDATE SET \
+             fingerprint = EXCLUDED.fingerprint, fetched_at_unix_secs = EXCLUDED.fetched_at_unix_secs"
+        } else {
             "INSERT INTO price_catalog_versions (source, fingerprint, fetched_at_unix_secs) \
              VALUES ($1, $2, $3) ON CONFLICT(source) DO UPDATE SET \
-             fingerprint = EXCLUDED.fingerprint, fetched_at_unix_secs = EXCLUDED.fetched_at_unix_secs",
-        )
-        .bind(source)
-        .bind(fingerprint)
-        .bind(u64_to_i64(fetched_at_unix_secs, "fetched_at_unix_secs")?)
-        .execute(&self.pool)
-        .await?;
+             fingerprint = EXCLUDED.fingerprint, fetched_at_unix_secs = EXCLUDED.fetched_at_unix_secs"
+        };
+        sqlx::query(query)
+            .bind(source)
+            .bind(fingerprint)
+            .bind(u64_to_i64(fetched_at_unix_secs, "fetched_at_unix_secs")?)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 }

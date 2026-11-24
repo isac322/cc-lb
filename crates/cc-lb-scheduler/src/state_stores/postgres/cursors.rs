@@ -10,8 +10,17 @@ use crate::{
 };
 
 impl OAuthUsagePollCursorsStore<Postgres> {
+    fn uses_scheduler_schema(&self) -> bool {
+        self.schema == Some("cc_lb_scheduler")
+    }
+
     pub async fn read(&self, upstream_id: Uuid) -> Result<Option<OAuthUsagePollCursor>> {
-        let row = sqlx::query("SELECT * FROM oauth_usage_poll_cursors WHERE upstream_id = $1")
+        let query = if self.uses_scheduler_schema() {
+            "SELECT * FROM cc_lb_scheduler.oauth_usage_poll_cursors WHERE upstream_id = $1"
+        } else {
+            "SELECT * FROM oauth_usage_poll_cursors WHERE upstream_id = $1"
+        };
+        let row = sqlx::query(query)
             .bind(upstream_id)
             .fetch_optional(&self.pool)
             .await?;
@@ -19,24 +28,33 @@ impl OAuthUsagePollCursorsStore<Postgres> {
     }
 
     pub async fn upsert(&self, cursor: &OAuthUsagePollCursor) -> Result<()> {
-        sqlx::query(
+        let query = if self.uses_scheduler_schema() {
+            "INSERT INTO cc_lb_scheduler.oauth_usage_poll_cursors \
+             (upstream_id, last_observed_at_unix_secs, last_status, attempt_count) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT(upstream_id) DO UPDATE SET \
+             last_observed_at_unix_secs = EXCLUDED.last_observed_at_unix_secs, \
+             last_status = EXCLUDED.last_status, \
+             attempt_count = EXCLUDED.attempt_count"
+        } else {
             "INSERT INTO oauth_usage_poll_cursors \
              (upstream_id, last_observed_at_unix_secs, last_status, attempt_count) \
              VALUES ($1, $2, $3, $4) \
              ON CONFLICT(upstream_id) DO UPDATE SET \
              last_observed_at_unix_secs = EXCLUDED.last_observed_at_unix_secs, \
              last_status = EXCLUDED.last_status, \
-             attempt_count = EXCLUDED.attempt_count",
-        )
-        .bind(cursor.upstream_id)
-        .bind(option_u64_to_i64(
-            cursor.last_observed_at_unix_secs,
-            "last_observed_at_unix_secs",
-        )?)
-        .bind(cursor.last_status)
-        .bind(u32_to_i32(cursor.attempt_count, "attempt_count")?)
-        .execute(&self.pool)
-        .await?;
+             attempt_count = EXCLUDED.attempt_count"
+        };
+        sqlx::query(query)
+            .bind(cursor.upstream_id)
+            .bind(option_u64_to_i64(
+                cursor.last_observed_at_unix_secs,
+                "last_observed_at_unix_secs",
+            )?)
+            .bind(cursor.last_status)
+            .bind(u32_to_i32(cursor.attempt_count, "attempt_count")?)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -52,7 +70,25 @@ impl OAuthUsagePollCursorsStore<Postgres> {
         observed_at_unix_secs: u64,
         status: i32,
     ) -> Result<()> {
-        sqlx::query(
+        let query = if self.uses_scheduler_schema() {
+            "INSERT INTO cc_lb_scheduler.oauth_usage_poll_cursors \
+             (upstream_id, last_observed_at_unix_secs, last_status, attempt_count) \
+             VALUES ($1, $2, $3, 1) \
+             ON CONFLICT(upstream_id) DO UPDATE SET \
+             attempt_count = cc_lb_scheduler.oauth_usage_poll_cursors.attempt_count + 1, \
+             last_observed_at_unix_secs = CASE \
+                 WHEN EXCLUDED.last_observed_at_unix_secs >= \
+                      COALESCE(cc_lb_scheduler.oauth_usage_poll_cursors.last_observed_at_unix_secs, 0) \
+                 THEN EXCLUDED.last_observed_at_unix_secs \
+                 ELSE cc_lb_scheduler.oauth_usage_poll_cursors.last_observed_at_unix_secs \
+             END, \
+             last_status = CASE \
+                 WHEN EXCLUDED.last_observed_at_unix_secs >= \
+                      COALESCE(cc_lb_scheduler.oauth_usage_poll_cursors.last_observed_at_unix_secs, 0) \
+                 THEN EXCLUDED.last_status \
+                 ELSE cc_lb_scheduler.oauth_usage_poll_cursors.last_status \
+             END"
+        } else {
             "INSERT INTO oauth_usage_poll_cursors \
              (upstream_id, last_observed_at_unix_secs, last_status, attempt_count) \
              VALUES ($1, $2, $3, 1) \
@@ -69,16 +105,17 @@ impl OAuthUsagePollCursorsStore<Postgres> {
                       COALESCE(oauth_usage_poll_cursors.last_observed_at_unix_secs, 0) \
                  THEN EXCLUDED.last_status \
                  ELSE oauth_usage_poll_cursors.last_status \
-             END",
-        )
-        .bind(upstream_id)
-        .bind(option_u64_to_i64(
-            Some(observed_at_unix_secs),
-            "last_observed_at_unix_secs",
-        )?)
-        .bind(status)
-        .execute(&self.pool)
-        .await?;
+             END"
+        };
+        sqlx::query(query)
+            .bind(upstream_id)
+            .bind(option_u64_to_i64(
+                Some(observed_at_unix_secs),
+                "last_observed_at_unix_secs",
+            )?)
+            .bind(status)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 }

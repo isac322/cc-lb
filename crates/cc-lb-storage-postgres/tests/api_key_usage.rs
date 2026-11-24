@@ -116,6 +116,58 @@ async fn run_contracts(pool: &PgPool) -> Result<()> {
             cost_usd_micros: 150
         }
     );
+
+    // Multi-delta bulk UNNEST flush inserts and accumulates multiple distinct buckets atomically.
+    let bulk_writer = Uuid::now_v7();
+    storage
+        .register_api_key_usage_writer(bulk_writer, NOW + 300)
+        .await?;
+    let bulk_flush = ApiKeyUsageFlush {
+        writer_epoch: bulk_writer,
+        flush_id: Uuid::now_v7(),
+        lease_until_unix_secs: NOW + 300,
+        deltas: vec![
+            ApiKeyUsageBucketDelta {
+                key: ApiKeyUsageBucketKey {
+                    key_id: "key-bulk-1".to_owned(),
+                    bucket_width_secs: 60,
+                    bucket_start_unix_secs: NOW,
+                },
+                usage: ApiKeyUsage {
+                    requests: 4,
+                    input_tokens: 40,
+                    output_tokens: 80,
+                    cost_usd_micros: 120,
+                },
+            },
+            ApiKeyUsageBucketDelta {
+                key: ApiKeyUsageBucketKey {
+                    key_id: "key-bulk-2".to_owned(),
+                    bucket_width_secs: 60,
+                    bucket_start_unix_secs: NOW,
+                },
+                usage: ApiKeyUsage {
+                    requests: 6,
+                    input_tokens: 60,
+                    output_tokens: 120,
+                    cost_usd_micros: 180,
+                },
+            },
+        ],
+    };
+    assert_eq!(
+        storage.flush_api_key_usage(&bulk_flush).await?,
+        ApiKeyUsageFlushResult::Applied
+    );
+    let bulk_buckets = storage
+        .query_api_key_usage_buckets(&ApiKeyUsageBucketQuery {
+            key_ids: vec!["key-bulk-1".to_owned(), "key-bulk-2".to_owned()],
+            since_unix_secs: NOW - 60,
+            until_unix_secs: NOW + 60,
+            exclude_writer_epoch: Uuid::now_v7(),
+        })
+        .await?;
+    assert_eq!(bulk_buckets.len(), 2);
     Ok(())
 }
 

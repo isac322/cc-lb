@@ -16,6 +16,7 @@ postgres = ["live-tail-pg", "dep:cc-lb-storage-postgres"]
 
 [dependencies]
 axum = { workspace = true }
+backon.workspace = true
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-config = { path = "../cc-lb-config" }

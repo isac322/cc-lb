@@ -239,6 +239,16 @@ fn validate_storage(config: &Config) -> Result<(), ConfigError> {
     match &config.storage {
         StorageConfig::Postgres { url, pool } => {
             validate_postgres_url(url)?;
+            if let Some(listener_url) = pool.listener_url.as_deref() {
+                validate_postgres_url(listener_url)?;
+            }
+            if pool.pgbouncer_transaction_pooling && pool.listener_url.is_none() {
+                return Err(ValidationError::new(
+                    "storage.pool.listener_url",
+                    "listener_url must be configured to a direct PostgreSQL URL when pgbouncer_transaction_pooling is enabled",
+                )
+                .into());
+            }
             if pool.statement_timeout_secs >= config.timeouts.upstream_total_secs {
                 return Err(ConfigError::StatementTimeoutExceedsRequestTimeout {
                     statement: pool.statement_timeout_secs,

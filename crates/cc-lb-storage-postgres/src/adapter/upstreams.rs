@@ -889,6 +889,7 @@ async fn set_split_status(
     .execute(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
+    notify(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
     Ok(())
 }
@@ -898,17 +899,21 @@ async fn soft_delete_split(
     id: Uuid,
     expected_revision: u64,
 ) -> StorageResult<()> {
+    let mut tx = pool.begin().await.map_err(map_sqlx_error)?;
     let row = sqlx::query(
         "UPDATE upstream_spec_v1 SET deleted_at = NOW(), spec_revision = spec_revision + 1, updated_at = NOW() WHERE id = $1 AND spec_revision = $2 AND deleted_at IS NULL RETURNING id",
     )
     .bind(id)
     .bind(u64_to_i64(expected_revision, "upstream spec revision")?)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
     if row.is_none() {
+        tx.rollback().await.map_err(map_sqlx_error)?;
         return Err(conflict("stale upstream revision"));
     }
+    notify(&mut tx, id).await?;
+    tx.commit().await.map_err(map_sqlx_error)?;
     Ok(())
 }
 
@@ -931,6 +936,7 @@ async fn clear_split_warmup_dialect_plugin(
         return Ok(None);
     }
     let record = get_split_by_id(&mut *tx, id).await?;
+    notify(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
     Ok(record)
 }

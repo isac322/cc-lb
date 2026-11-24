@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use backon::{BackoffBuilder as _, ExponentialBuilder};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -54,15 +55,25 @@ impl PgListener {
     async fn run(self, mut shutdown_rx: watch::Receiver<bool>) {
         let mut queue_usage_interval = tokio::time::interval(QUEUE_USAGE_POLL_INTERVAL);
         queue_usage_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let make_backoff = || {
+            ExponentialBuilder::default()
+                .with_min_delay(Duration::from_millis(100))
+                .with_max_delay(Duration::from_secs(5))
+                .with_jitter()
+                .without_max_times()
+                .build()
+        };
+        let mut backoff = make_backoff();
         loop {
             let mut listener = match sqlx::postgres::PgListener::connect_with(&self.pg_pool).await {
                 Ok(listener) => listener,
                 Err(error) => {
                     let reason = PgListenerReconnectReason::ConnectFailed;
                     record_pg_listener_reconnect(reason);
-                    tracing::warn!(%error, reason = reason.as_str(), "pg notify listener connect failed");
+                    let delay = backoff.next().unwrap_or_else(|| Duration::from_secs(5));
+                    tracing::warn!(%error, reason = reason.as_str(), backoff_ms = delay.as_millis(), "pg notify listener connect failed");
                     tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(1)) => continue,
+                        _ = tokio::time::sleep(delay) => {}
                         changed = shutdown_rx.changed() => {
                             if changed.is_err() || *shutdown_rx.borrow() { return; }
                         }
@@ -73,9 +84,17 @@ impl PgListener {
             if let Err(error) = listener.listen(&self.channel).await {
                 let reason = PgListenerReconnectReason::SubscribeFailed;
                 record_pg_listener_reconnect(reason);
-                tracing::warn!(%error, reason = reason.as_str(), channel = %self.channel, "pg notify listen failed");
+                let delay = backoff.next().unwrap_or_else(|| Duration::from_secs(5));
+                tracing::warn!(%error, reason = reason.as_str(), channel = %self.channel, backoff_ms = delay.as_millis(), "pg notify listen failed");
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() { return; }
+                    }
+                }
                 continue;
             }
+            backoff = make_backoff();
 
             loop {
                 tokio::select! {

@@ -59,9 +59,15 @@ fn get_fast_init_full_sql() -> &'static str {
         .as_str()
 }
 
-fn sqlx_migration_lock_id(database_name: &str) -> i64 {
+fn sqlx_migration_lock_id(database_name: &str, schema_name: &str) -> i64 {
     let mut crc: u32 = 0xffff_ffff;
-    for &byte in database_name.as_bytes() {
+    for byte in database_name
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(std::iter::once(0))
+        .chain(schema_name.as_bytes().iter().copied())
+    {
         crc ^= u32::from(byte);
         for _ in 0..8 {
             let mask = (crc & 1).wrapping_neg();
@@ -91,15 +97,15 @@ impl MetaStore for PostgresStorage {
             .await
             .map_err(map_sqlx_error)?;
 
-        let (is_non_public, database_name): (bool, String) =
-            sqlx::query_as("SELECT current_schema() IS DISTINCT FROM 'public', current_database()")
+        let (schema_name, database_name): (String, String) =
+            sqlx::query_as("SELECT current_schema(), current_database()")
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(map_sqlx_error)?;
 
-        if is_non_public {
+        if schema_name != "public" {
             sqlx::query("SELECT pg_advisory_xact_lock($1)")
-                .bind(sqlx_migration_lock_id(&database_name))
+                .bind(sqlx_migration_lock_id(&database_name, &schema_name))
                 .execute(&mut *tx)
                 .await
                 .map_err(map_sqlx_error)?;
@@ -126,7 +132,7 @@ impl MetaStore for PostgresStorage {
         tx.rollback().await.map_err(map_sqlx_error)?;
 
         MIGRATOR
-            .run(&self.pool)
+            .run(&self.listener_pool)
             .await
             .map_err(|error| StorageError::Fatal {
                 message: error.to_string(),
@@ -393,5 +399,22 @@ async fn finish_overview_error_attribution(storage: &PostgresStorage) -> Storage
             .map_err(map_sqlx_error)?;
         }
         tx.commit().await.map_err(map_sqlx_error)?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sqlx_migration_lock_id;
+
+    #[test]
+    fn sqlx_migration_lock_id_differs_across_schemas() {
+        assert_ne!(
+            sqlx_migration_lock_id("cclb", "schema_a"),
+            sqlx_migration_lock_id("cclb", "schema_b")
+        );
+        assert_ne!(
+            sqlx_migration_lock_id("db_a", "public"),
+            sqlx_migration_lock_id("db_b", "public")
+        );
     }
 }

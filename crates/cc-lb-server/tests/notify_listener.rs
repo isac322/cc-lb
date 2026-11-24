@@ -640,6 +640,92 @@ async fn hydrate_notifications_refresh_peer_caches_without_view_rebuild() {
     task.await.expect("listener exits");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn notify_listener_persists_across_repeated_subscribe_failures_and_channel_reset() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FlakyReconnectNotifier {
+        attempts: AtomicUsize,
+        first_tx: std::sync::Mutex<Option<broadcast::Sender<ChangeEvent>>>,
+        second_tx: broadcast::Sender<ChangeEvent>,
+        second_subscribed: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl RuntimeChangeNotifier for FlakyReconnectNotifier {
+        async fn subscribe(&self) -> StorageResult<broadcast::Receiver<ChangeEvent>> {
+            let n = self.attempts.fetch_add(1, Ordering::SeqCst);
+            if n < 2 {
+                Err(StorageError::Unavailable {
+                    message: "transient subscribe error".to_owned(),
+                })
+            } else if n == 2 {
+                Ok(self
+                    .first_tx
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .expect("first_tx open on initial subscribe")
+                    .subscribe())
+            } else {
+                self.second_subscribed.notify_one();
+                Ok(self.second_tx.subscribe())
+            }
+        }
+
+        async fn run(&self, cancel: CancellationToken) -> StorageResult<()> {
+            cancel.cancelled().await;
+            Ok(())
+        }
+    }
+
+    let fixture = fixture().await;
+    let first_tx = Some(broadcast::channel::<ChangeEvent>(16).0);
+    let (second_tx, _) = broadcast::channel::<ChangeEvent>(16);
+    let notifier = Arc::new(FlakyReconnectNotifier {
+        attempts: AtomicUsize::new(0),
+        first_tx: std::sync::Mutex::new(first_tx),
+        second_tx,
+        second_subscribed: tokio::sync::Notify::new(),
+    });
+    let cancel = CancellationToken::new();
+    let listener = Arc::new(NotifyListener::new(NotifyListenerParams {
+        notifier: notifier.clone(),
+        cancel: cancel.clone(),
+        holder: fixture.holder.clone(),
+        stores: fixture.stores.clone(),
+        runtime: fixture.runtime.clone(),
+        aead: fixture.aead.clone(),
+        data_dir: fixture._dir.path().to_path_buf(),
+        lazy_refresher: None,
+        subscription_quota_cache: fixture.quota_cache.clone(),
+        prompt_cache_grace_margin_secs: 30,
+        prompt_cache_observation_sink: Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
+        subscription_quota_routing_max_staleness_secs: 1800,
+        gemini_config: Some(fixture.gemini_config.clone()),
+        antigravity_config: Some(fixture.antigravity_config.clone()),
+        clock: Arc::new(cc_lb_clock::SystemClock),
+    }));
+
+    let task = tokio::spawn(listener.run());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while notifier.attempts.load(Ordering::SeqCst) < 3 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("listener retries beyond a single initial subscribe failure");
+
+    let wait_second = notifier.second_subscribed.notified();
+    *notifier.first_tx.lock().unwrap() = None;
+    tokio::time::timeout(Duration::from_secs(5), wait_second)
+        .await
+        .expect("listener resubscribes after RecvError::Closed");
+
+    cancel.cancel();
+    task.await.expect("listener task exits cleanly");
+}
+
 fn labeled_counter_value(handle: &PrometheusHandle, name: &str, label: &str, value: &str) -> f64 {
     let metric_prefix = format!("{name}{{");
     let label_fragment = format!(r#"{label}="{value}""#);

@@ -9,9 +9,12 @@ use anyhow::{Context, Result, ensure};
 use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_storage_api::principal::{Limit, LimitKind};
 use cc_lb_storage_api::{
-    MetaStore, OAuthTokensCreate, PluginRegistryStore, PrincipalCreate, PrincipalKind,
-    PrincipalStore, PrincipalUpdate, UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStore,
-    UpstreamUpdate, UpstreamWarmupDialectPlugin,
+    MetaStore, OAuthTokensCreate, OrganizationMetadataRecord, OrganizationMetadataStore,
+    PlanTierStore, PluginRegistryStore, PrincipalCreate, PrincipalKind, PrincipalStore,
+    PrincipalUpdate, StorageError, TierResolutionSource, UpstreamCreate, UpstreamKind,
+    UpstreamPlanTierRecord, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore,
+    UpstreamSubscriptionMetadataRecord, UpstreamSubscriptionMetadataStore, UpstreamUpdate,
+    UpstreamWarmupDialectPlugin,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::postgres::{PgConnectOptions, PgListener, PgPoolOptions};
@@ -55,6 +58,8 @@ async fn run_test(url: &str) -> Result<()> {
     registry_label_decode_failure_rolls_back(&fixture.pool, &storage).await?;
     principal_mutations_return_committed_row_with_notification(&fixture.pool, &storage).await?;
     principal_notification_failure_rolls_back(&fixture, &storage).await?;
+    upstream_and_plan_metadata_emit_notifications(&fixture.pool, &storage).await?;
+    concurrent_principal_updates_return_conflict_not_fatal(&storage).await?;
 
     fixture.drop_schema().await
 }
@@ -373,6 +378,178 @@ async fn expect_principal_notification(listener: &mut PgListener, id: Uuid) -> R
             return Ok(());
         }
     }
+}
+
+async fn expect_upstream_notification(listener: &mut PgListener, expected: &str) -> Result<()> {
+    loop {
+        let notification = tokio::time::timeout(Duration::from_secs(10), listener.recv())
+            .await
+            .context("upstream notification was not delivered")??;
+        if notification.channel() == "cclb_upstream_changed" && notification.payload() == expected {
+            return Ok(());
+        }
+    }
+}
+
+async fn upstream_and_plan_metadata_emit_notifications(
+    pool: &PgPool,
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let mut listener = PgListener::connect_with(pool).await?;
+    listener.listen("cclb_upstream_changed").await?;
+
+    let warmup = UpstreamStore::create(storage, warmup_upstream("split-notify-upstream")).await?;
+    expect_upstream_notification(&mut listener, &warmup.id.to_string()).await?;
+
+    UpstreamStore::set_status(
+        storage,
+        warmup.id,
+        UpstreamStatusUpdate {
+            last_apply_error: Some(Some("test-err".to_owned())),
+            ..UpstreamStatusUpdate::default()
+        },
+    )
+    .await?;
+    expect_upstream_notification(&mut listener, &warmup.id.to_string()).await?;
+
+    let cleared = UpstreamStore::clear_warmup_dialect_plugin(storage, warmup.id, warmup.revision)
+        .await?
+        .context("warmup cleared")?;
+    expect_upstream_notification(&mut listener, &warmup.id.to_string()).await?;
+
+    OrganizationMetadataStore::put_organization_metadata(
+        storage,
+        &OrganizationMetadataRecord {
+            organization_uuid: "org-notify-h05".to_owned(),
+            organization_name: Some("Org Notify".to_owned()),
+            organization_type: Some("claude_max".to_owned()),
+            rate_limit_tier: Some("default_claude_max_5x".to_owned()),
+            seat_tier: None,
+            has_extra_usage_enabled: None,
+            billing_type: None,
+            subscription_created_at_unix_secs: None,
+            account_email: None,
+            account_display_name: None,
+            account_uuid: None,
+            overage_credit_amount_minor_units: None,
+            overage_credit_currency: None,
+            overage_credit_granted: None,
+            overage_credit_eligible: None,
+            observed_at_unix_millis: 1_900_000_010,
+            last_error: None,
+            raw_profile: Some("{}".to_owned()),
+            raw_overage_grant: None,
+        },
+    )
+    .await?;
+    expect_upstream_notification(&mut listener, "org-notify-h05").await?;
+
+    UpstreamSubscriptionMetadataStore::put_upstream_subscription_metadata(
+        storage,
+        &UpstreamSubscriptionMetadataRecord {
+            upstream_id: warmup.id,
+            organization_uuid: Some("org-notify-h05".to_owned()),
+            organization_role: Some("admin".to_owned()),
+            workspace_role: None,
+            observed_at_unix_millis: 1_900_000_011,
+            last_error: None,
+            raw_roles: Some("{}".to_owned()),
+            raw_bootstrap: Some("{}".to_owned()),
+        },
+    )
+    .await?;
+    expect_upstream_notification(&mut listener, &warmup.id.to_string()).await?;
+
+    PlanTierStore::append_upstream_plan_tier(
+        storage,
+        &UpstreamPlanTierRecord {
+            upstream_id: warmup.id,
+            organization_uuid: Some("org-notify-h05".to_owned()),
+            organization_type: Some("claude_max".to_owned()),
+            rate_limit_tier: Some("default_claude_max_5x".to_owned()),
+            seat_tier: None,
+            tier_key: Some("max_5x".to_owned()),
+            resolution_source: TierResolutionSource::Builtin,
+            resolved_ratio_snapshot: Some(5.0),
+            observed_at_unix_millis: 1_900_000_012,
+            effective_from_unix_millis: 1_900_000_012,
+            effective_to_unix_millis: None,
+            provenance: "test".to_owned(),
+            created_at_unix_millis: 1_900_000_012,
+        },
+    )
+    .await?;
+    expect_upstream_notification(&mut listener, &warmup.id.to_string()).await?;
+
+    UpstreamStore::soft_delete(storage, warmup.id, cleared.revision).await?;
+    expect_upstream_notification(&mut listener, &warmup.id.to_string()).await?;
+    Ok(())
+}
+
+async fn concurrent_principal_updates_return_conflict_not_fatal(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let created =
+        PrincipalStore::create(storage, principal_create("race-principal"), 1_900_000_200).await?;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let mut handles = Vec::new();
+    for i in 0..2 {
+        let storage = storage.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            PrincipalStore::update(
+                &storage,
+                created.id,
+                created.revision,
+                PrincipalUpdate {
+                    name: Some(format!("race-principal-{i}")),
+                    ..PrincipalUpdate::default()
+                },
+                1_900_000_201 + i as u64,
+            )
+            .await
+        }));
+    }
+    let mut ok_count = 0;
+    let mut conflict_count = 0;
+    for handle in handles {
+        match handle.await? {
+            Ok(Some(_)) => ok_count += 1,
+            Err(StorageError::Conflict { .. }) => conflict_count += 1,
+            other => anyhow::bail!("unexpected concurrent principal update result: {other:?}"),
+        }
+    }
+    ensure!(ok_count == 1 && conflict_count == 1);
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let mut scalar_handles = Vec::new();
+    for enabled in [false, true] {
+        let storage = storage.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        scalar_handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            PrincipalStore::set_enabled(
+                &storage,
+                created.id,
+                created.revision + 1,
+                enabled,
+                1_900_000_210,
+            )
+            .await
+        }));
+    }
+    let mut ok_count = 0;
+    let mut conflict_count = 0;
+    for handle in scalar_handles {
+        match handle.await? {
+            Ok(Some(_)) => ok_count += 1,
+            Err(StorageError::Conflict { .. }) => conflict_count += 1,
+            other => anyhow::bail!("unexpected concurrent scalar update result: {other:?}"),
+        }
+    }
+    ensure!(ok_count == 1 && conflict_count == 1);
+    Ok(())
 }
 
 async fn assert_committed_upstream(

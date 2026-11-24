@@ -13,6 +13,7 @@ impl UpstreamSubscriptionMetadataStore for PostgresStorage {
         &self,
         record: &UpstreamSubscriptionMetadataRecord,
     ) -> StorageResult<()> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         sqlx::query(
             "INSERT INTO upstream_subscription_metadata_v1 \
              (upstream_id, organization_uuid, organization_role, workspace_role, observed_at_unix_millis, \
@@ -35,9 +36,15 @@ impl UpstreamSubscriptionMetadataStore for PostgresStorage {
         .bind(&record.last_error)
         .bind(&record.raw_roles)
         .bind(&record.raw_bootstrap)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
+        sqlx::query("SELECT pg_notify('cclb_upstream_changed', $1)")
+            .bind(record.upstream_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
         Ok(())
     }
 
@@ -122,8 +129,16 @@ impl UpstreamSubscriptionMetadataStore for PostgresStorage {
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
+        let wrote = written.rows_affected() != 0;
+        if wrote {
+            sqlx::query("SELECT pg_notify('cclb_upstream_changed', $1)")
+                .bind(record.upstream_id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+        }
         tx.commit().await.map_err(map_sqlx_error)?;
-        Ok(written.rows_affected() != 0)
+        Ok(wrote)
     }
 
     async fn get_upstream_subscription_metadata(

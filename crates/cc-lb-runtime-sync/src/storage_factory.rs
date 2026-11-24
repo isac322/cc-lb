@@ -112,7 +112,11 @@ pub async fn open_pg_fanout_pool(
     let mut fanout_pool_config = pool_config.clone();
     fanout_pool_config.max_connections = PG_FANOUT_MAX_CONNECTIONS;
     fanout_pool_config.min_connections = 0;
-    open_postgres_pool(url, &fanout_pool_config).await.map(Some)
+    fanout_pool_config.pgbouncer_transaction_pooling = false;
+    fanout_pool_config.statement_cache_capacity = None;
+    open_postgres_pool(pool_config.effective_listener_url(url), &fanout_pool_config)
+        .await
+        .map(Some)
 }
 
 #[cfg(not(feature = "postgres"))]
@@ -191,11 +195,24 @@ async fn open_postgres(
     clock: cc_lb_clock::ClockHandle,
 ) -> Result<OpenedStorage, StorageFactoryError> {
     let pool = open_postgres_pool(url, pool_config).await?;
+    let mut listener_pool_config = pool_config.clone();
+    listener_pool_config.max_connections = 2;
+    listener_pool_config.min_connections = 0;
+    listener_pool_config.pgbouncer_transaction_pooling = false;
+    listener_pool_config.statement_cache_capacity = None;
+    let listener_pool = open_postgres_pool(
+        pool_config.effective_listener_url(url),
+        &listener_pool_config,
+    )
+    .await?;
 
-    let storage = Arc::new(cc_lb_storage_postgres::PostgresStorage::new(
-        pool.clone(),
-        clock.clone(),
-    ));
+    let storage = Arc::new(
+        cc_lb_storage_postgres::PostgresStorage::new_with_listener_pool(
+            pool.clone(),
+            listener_pool,
+            clock.clone(),
+        ),
+    );
     storage.initialize().await.map_err(init_error)?;
     record_postgres_pool_metrics(storage.pool());
     let weak_storage = Arc::downgrade(&storage);
@@ -241,25 +258,36 @@ async fn open_postgres_pool(
     use sqlx::postgres::PgPoolOptions;
 
     let statement_timeout_ms = pool_config.statement_timeout_secs * 1000;
-    let connect_options = postgres_connect_options(url, pool_config.sslmode.as_deref())?;
+    let mut connect_options = postgres_connect_options(url, pool_config.sslmode.as_deref())?;
+    if let Some(cache_capacity) = pool_config.effective_statement_cache_capacity() {
+        connect_options = connect_options.statement_cache_capacity(cache_capacity);
+    }
 
-    PgPoolOptions::new()
+    let mut builder = PgPoolOptions::new()
         .max_connections(pool_config.max_connections)
         .min_connections(pool_config.min_connections)
         .acquire_timeout(Duration::from_secs(pool_config.acquire_timeout_secs))
         .idle_timeout(Duration::from_secs(pool_config.idle_timeout_secs))
         .max_lifetime(Duration::from_secs(pool_config.max_lifetime_secs))
-        .test_before_acquire(pool_config.test_before_acquire)
-        .after_connect(move |conn, _meta| {
+        .test_before_acquire(pool_config.test_before_acquire);
+    if !pool_config.pgbouncer_transaction_pooling {
+        builder = builder.after_connect(move |conn, _meta| {
             Box::pin(async move {
                 let statement_timeout =
                     format!("SET statement_timeout = '{statement_timeout_ms}ms'");
                 sqlx::query(AssertSqlSafe(statement_timeout))
-                    .execute(conn)
+                    .execute(&mut *conn)
+                    .await?;
+                let idle_in_tx_timeout =
+                    format!("SET idle_in_transaction_session_timeout = '{statement_timeout_ms}ms'");
+                sqlx::query(AssertSqlSafe(idle_in_tx_timeout))
+                    .execute(&mut *conn)
                     .await?;
                 Ok(())
             })
-        })
+        });
+    }
+    builder
         .connect_with(connect_options)
         .await
         .map_err(|error| StorageFactoryError::ConnectionFailed {

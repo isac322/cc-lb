@@ -455,7 +455,7 @@ async fn build_proxy_app_with_path_inner(
 ) -> Result<ProxyApp, BuildError> {
     config.validate()?;
     let (managed_store, storage, aead, lazy_refresh_claim_guard, opened_scheduler) =
-        open_storage(&config, clock.clone()).await?;
+        open_storage_for_role(&config, role, clock.clone()).await?;
     let core = build_runtime_with_storage_core(
         config,
         role,
@@ -486,9 +486,16 @@ pub async fn build_proxy_app_with_storage(
     aead: Arc<AeadService>,
     clock: ClockHandle,
 ) -> Result<ProxyApp, BuildError> {
-    let opened_scheduler = crate::scheduler_factory::open_scheduler_storage(
+    let scheduler_role = match role {
+        ProxyRole::ProxyOnly => crate::scheduler_factory::SchedulerPoolRole::EnqueueOnly,
+        ProxyRole::ProxyWorker | ProxyRole::WorkerOnly => {
+            crate::scheduler_factory::SchedulerPoolRole::Worker
+        }
+    };
+    let opened_scheduler = crate::scheduler_factory::open_scheduler_storage_with_role(
         &config.storage,
         &config.scheduler,
+        scheduler_role,
         clock.clone(),
     )
     .await?;
@@ -781,7 +788,7 @@ pub(super) async fn build_runtime_with_storage_core(
         gemini_config: config.oauth.gemini.clone(),
         antigravity_config: config.oauth.antigravity.clone(),
     }));
-    let notify_rx = notify_listener.subscribe_with_retry().await;
+    let initial_notify_rx = notify_listener.try_subscribe_once().await;
     let notifier_task = {
         let notifier = Arc::clone(&notifier);
         let cancel = notify_cancel.clone();
@@ -791,11 +798,12 @@ pub(super) async fn build_runtime_with_storage_core(
             }
         }))
     };
-    let notify_listener_task = notify_rx.map(|rx| {
-        tokio::spawn(async move {
-            notify_listener.run_subscribed(rx).await;
-        })
-    });
+    let notify_listener_task = Some(tokio::spawn(async move {
+        match initial_notify_rx {
+            Some(rx) => notify_listener.run_with_initial(rx).await,
+            None => notify_listener.run().await,
+        }
+    }));
     let in_memory_bus =
         cc_lb_control::InMemoryBus::with_capacity(config.event_bus.broadcast_capacity);
     let lifecycle_event_logger_rx = in_memory_bus
@@ -1807,6 +1815,14 @@ pub async fn open_storage(
     config: &Config,
     clock: ClockHandle,
 ) -> Result<OpenStorageParts, BuildError> {
+    open_storage_for_role(config, ProxyRole::ProxyWorker, clock).await
+}
+
+pub async fn open_storage_for_role(
+    config: &Config,
+    role: ProxyRole,
+    clock: ClockHandle,
+) -> Result<OpenStorageParts, BuildError> {
     let aead = cc_lb_runtime_sync::aead_key::load_aead_from_env(&config.aead.key_env).map_err(
         |error| match error {
             cc_lb_runtime_sync::aead_key::AeadKeyError::Missing { env } => {
@@ -1816,9 +1832,19 @@ pub async fn open_storage(
         },
     )?;
     let opened = storage_factory::open_storage(&config.storage, clock.clone()).await?;
-    let opened_scheduler =
-        crate::scheduler_factory::open_scheduler_storage(&config.storage, &config.scheduler, clock)
-            .await?;
+    let scheduler_role = match role {
+        ProxyRole::ProxyOnly => crate::scheduler_factory::SchedulerPoolRole::EnqueueOnly,
+        ProxyRole::ProxyWorker | ProxyRole::WorkerOnly => {
+            crate::scheduler_factory::SchedulerPoolRole::Worker
+        }
+    };
+    let opened_scheduler = crate::scheduler_factory::open_scheduler_storage_with_role(
+        &config.storage,
+        &config.scheduler,
+        scheduler_role,
+        clock,
+    )
+    .await?;
     let lazy_refresh_claim_guard = crate::refresh::lazy_refresh_claim_guard_from_scheduler(
         &opened_scheduler.backend,
         opened.storage.clone(),
