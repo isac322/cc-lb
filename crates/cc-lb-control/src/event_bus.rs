@@ -17,11 +17,13 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use arc_swap::{ArcSwap, ArcSwapOption};
 use cc_lb_lifecycle::LifecycleEvent;
 #[cfg(test)]
 use cc_lb_request_log::{RequestEvent, RequestEventPartial};
 pub use cc_lb_request_log::{RequestEventPhase, RequestEventUpdate};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc};
+use tokio::task::JoinHandle;
 
 /// Default capacity for the lifecycle-event broadcast channel.
 ///
@@ -56,7 +58,7 @@ pub trait RequestEventBus: Send + Sync + 'static {
 pub const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
 
 /// Default capacity for the durable lifecycle-writer mpsc channel wired by
-/// `cc_lb_engine::spawn_lifecycle_event_logger`.
+/// `cc_lb_event_pipeline::spawn_lifecycle_event_logger`.
 pub const DEFAULT_LIFECYCLE_WRITER_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY: usize = 4096;
 
@@ -84,22 +86,64 @@ pub struct InMemoryBus {
     inner: Arc<InMemoryBusInner>,
 }
 
+#[derive(Clone, Default)]
+struct LifecycleSubscribers {
+    writer_tx: Option<mpsc::Sender<LifecycleEvent>>,
+    assembler_tx: Option<mpsc::Sender<LifecycleEvent>>,
+    pricing_tx: Option<mpsc::Sender<LifecycleEvent>>,
+    limit_reconcile_tx: Option<mpsc::Sender<LifecycleEvent>>,
+    rate_limit_header_tx: Option<mpsc::Sender<LifecycleEvent>>,
+    subscription_quota_tx: Option<mpsc::Sender<LifecycleEvent>>,
+    limit_rejection_audit_tx: Option<mpsc::Sender<LifecycleEvent>>,
+    api_key_metrics_tx: Option<mpsc::Sender<LifecycleEvent>>,
+    cache_hit_miss_tx: Option<mpsc::Sender<LifecycleEvent>>,
+    routing_tier_tx: Option<mpsc::Sender<LifecycleEvent>>,
+}
+
+struct DispatcherItem {
+    event: LifecycleEvent,
+    /// Permit from `DispatcherChannel::base_permits` while occupying base
+    /// (non-reserved) capacity. Row-bearing overflow events carry `None` and
+    /// consume the dedicated reserved FIFO headroom.
+    _base_permit: Option<OwnedSemaphorePermit>,
+}
+
+struct DispatcherChannel {
+    tx: mpsc::Sender<DispatcherItem>,
+    /// Atomic base-capacity permit pool (`base_capacity` permits). Non-row
+    /// events must acquire a permit or shed immediately so concurrent
+    /// publishers can never encroach on `MAX_ASSEMBLER_OVERFLOW_TASKS`.
+    base_permits: Arc<Semaphore>,
+}
+
 struct InMemoryBusInner {
     broadcast_tx: broadcast::Sender<RequestEventUpdate>,
     lifecycle_broadcast_tx: broadcast::Sender<LifecycleEvent>,
-    lifecycle_writer_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
-    lifecycle_assembler_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
-    lifecycle_pricing_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
-    lifecycle_limit_reconcile_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
-    lifecycle_rate_limit_header_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
-    lifecycle_subscription_quota_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
-    lifecycle_limit_rejection_audit_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
-    lifecycle_api_key_metrics_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
-    lifecycle_cache_hit_miss_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
-    lifecycle_routing_tier_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
-    /// Detached tasks currently parked on a full assembler channel. Bounded
+    subscribers: ArcSwap<LifecycleSubscribers>,
+    /// Serializes `attach_lifecycle_*` copy-on-write updates; never acquired on `publish_lifecycle`.
+    attach_lock: Mutex<()>,
+    /// Optional single-channel ingest queue draining into a background fanout worker.
+    dispatcher: ArcSwapOption<DispatcherChannel>,
+    /// Detached overflow tasks currently parked on a full assembler channel. Bounded
     /// by [`MAX_ASSEMBLER_OVERFLOW_TASKS`].
     assembler_overflow_in_flight: AtomicUsize,
+}
+
+/// Handle to the background fanout dispatcher spawned by [`InMemoryBus::spawn_lifecycle_dispatcher`].
+pub struct LifecycleDispatcherHandle {
+    inner: Arc<InMemoryBusInner>,
+    sender: mpsc::Sender<DispatcherItem>,
+    task: JoinHandle<()>,
+}
+
+impl LifecycleDispatcherHandle {
+    /// Detach the single-channel dispatcher, drain all queued events through
+    /// the subscriber channels, and await completion.
+    pub async fn shutdown(self) {
+        self.inner.dispatcher.store(None);
+        drop(self.sender);
+        let _ = self.task.await;
+    }
 }
 
 impl InMemoryBus {
@@ -117,151 +161,132 @@ impl InMemoryBus {
             inner: Arc::new(InMemoryBusInner {
                 broadcast_tx,
                 lifecycle_broadcast_tx,
-                lifecycle_writer_tx: Mutex::new(None),
-                lifecycle_assembler_tx: Mutex::new(None),
-                lifecycle_pricing_tx: Mutex::new(None),
-                lifecycle_limit_reconcile_tx: Mutex::new(None),
-                lifecycle_rate_limit_header_tx: Mutex::new(None),
-                lifecycle_subscription_quota_tx: Mutex::new(None),
-                lifecycle_limit_rejection_audit_tx: Mutex::new(None),
-                lifecycle_api_key_metrics_tx: Mutex::new(None),
-                lifecycle_cache_hit_miss_tx: Mutex::new(None),
+                subscribers: ArcSwap::from_pointee(LifecycleSubscribers::default()),
+                attach_lock: Mutex::new(()),
+                dispatcher: ArcSwapOption::empty(),
                 assembler_overflow_in_flight: AtomicUsize::new(0),
-                lifecycle_routing_tier_tx: Mutex::new(None),
             }),
         }
     }
 
+    /// Spawn a background worker that receives `LifecycleEvent`s from a single
+    /// lock-free ingest MPSC channel and fans them out off the request thread.
+    ///
+    /// Allocates `capacity.max(1) + MAX_ASSEMBLER_OVERFLOW_TASKS` FIFO slots
+    /// backed by an atomic `Semaphore(capacity.max(1))` base-capacity pool:
+    /// non-row events must acquire a base permit (and therefore can never consume
+    /// the reserved `MAX_ASSEMBLER_OVERFLOW_TASKS` row headroom under concurrent
+    /// saturation), while row-bearing events acquire a base permit best-effort
+    /// and enqueue into the dedicated FIFO reserve when base capacity is full.
+    pub fn spawn_lifecycle_dispatcher(&self, capacity: usize) -> LifecycleDispatcherHandle {
+        let base_capacity = capacity.max(1);
+        let total_capacity = base_capacity.saturating_add(MAX_ASSEMBLER_OVERFLOW_TASKS);
+        let (tx, mut rx) = mpsc::channel::<DispatcherItem>(total_capacity);
+        let base_permits = Arc::new(Semaphore::new(base_capacity));
+        self.inner
+            .dispatcher
+            .store(Some(Arc::new(DispatcherChannel {
+                tx: tx.clone(),
+                base_permits,
+            })));
+        let inner = Arc::clone(&self.inner);
+        let task = tokio::spawn(async move {
+            while let Some(item) = rx.recv().await {
+                let DispatcherItem {
+                    event,
+                    _base_permit,
+                } = item;
+                drop(_base_permit);
+                fanout_lifecycle_event(&inner, event);
+            }
+        });
+        LifecycleDispatcherHandle {
+            inner: Arc::clone(&self.inner),
+            sender: tx,
+            task,
+        }
+    }
+
+    fn update_subscriber(
+        &self,
+        capacity: usize,
+        assign: impl FnOnce(&mut LifecycleSubscribers, mpsc::Sender<LifecycleEvent>),
+    ) -> mpsc::Receiver<LifecycleEvent> {
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        let _guard = self
+            .inner
+            .attach_lock
+            .lock()
+            .expect("event bus subscriber attach mutex poisoned");
+        let mut next = (**self.inner.subscribers.load()).clone();
+        assign(&mut next, tx);
+        self.inner.subscribers.store(Arc::new(next));
+        rx
+    }
+
     /// Attach the durable lifecycle-writer consumer (see
-    /// `cc_lb_engine::spawn_lifecycle_event_logger`). Only one may be attached;
+    /// `cc_lb_event_pipeline::spawn_lifecycle_event_logger`). Only one may be attached;
     /// subsequent calls replace the previous sender.
     pub fn attach_lifecycle_writer(&self, capacity: usize) -> mpsc::Receiver<LifecycleEvent> {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
-        let mut guard = self
-            .inner
-            .lifecycle_writer_tx
-            .lock()
-            .expect("event bus lifecycle writer mutex poisoned");
-        *guard = Some(tx);
-        rx
+        self.update_subscriber(capacity, |subs, tx| subs.writer_tx = Some(tx))
     }
 
     pub fn attach_lifecycle_assembler(&self, capacity: usize) -> mpsc::Receiver<LifecycleEvent> {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
-        let mut guard = self
-            .inner
-            .lifecycle_assembler_tx
-            .lock()
-            .expect("event bus lifecycle assembler mutex poisoned");
-        *guard = Some(tx);
-        rx
+        self.update_subscriber(capacity, |subs, tx| subs.assembler_tx = Some(tx))
     }
 
     pub fn attach_lifecycle_pricing(&self, capacity: usize) -> mpsc::Receiver<LifecycleEvent> {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
-        let mut guard = self
-            .inner
-            .lifecycle_pricing_tx
-            .lock()
-            .expect("event bus lifecycle pricing mutex poisoned");
-        *guard = Some(tx);
-        rx
+        self.update_subscriber(capacity, |subs, tx| subs.pricing_tx = Some(tx))
     }
 
     pub fn attach_lifecycle_limit_reconcile(
         &self,
         capacity: usize,
     ) -> mpsc::Receiver<LifecycleEvent> {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
-        let mut guard = self
-            .inner
-            .lifecycle_limit_reconcile_tx
-            .lock()
-            .expect("event bus lifecycle limit reconcile mutex poisoned");
-        *guard = Some(tx);
-        rx
+        self.update_subscriber(capacity, |subs, tx| subs.limit_reconcile_tx = Some(tx))
     }
 
     pub fn attach_lifecycle_rate_limit_header(
         &self,
         capacity: usize,
     ) -> mpsc::Receiver<LifecycleEvent> {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
-        let mut guard = self
-            .inner
-            .lifecycle_rate_limit_header_tx
-            .lock()
-            .expect("event bus lifecycle rate limit header mutex poisoned");
-        *guard = Some(tx);
-        rx
+        self.update_subscriber(capacity, |subs, tx| subs.rate_limit_header_tx = Some(tx))
     }
 
     pub fn attach_lifecycle_subscription_quota(
         &self,
         capacity: usize,
     ) -> mpsc::Receiver<LifecycleEvent> {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
-        let mut guard = self
-            .inner
-            .lifecycle_subscription_quota_tx
-            .lock()
-            .expect("event bus lifecycle subscription quota mutex poisoned");
-        *guard = Some(tx);
-        rx
+        self.update_subscriber(capacity, |subs, tx| subs.subscription_quota_tx = Some(tx))
     }
 
     pub fn attach_lifecycle_limit_rejection_audit(
         &self,
         capacity: usize,
     ) -> mpsc::Receiver<LifecycleEvent> {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
-        let mut guard = self
-            .inner
-            .lifecycle_limit_rejection_audit_tx
-            .lock()
-            .expect("event bus lifecycle limit rejection audit mutex poisoned");
-        *guard = Some(tx);
-        rx
+        self.update_subscriber(capacity, |subs, tx| {
+            subs.limit_rejection_audit_tx = Some(tx)
+        })
     }
 
     pub fn attach_lifecycle_api_key_metrics(
         &self,
         capacity: usize,
     ) -> mpsc::Receiver<LifecycleEvent> {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
-        let mut guard = self
-            .inner
-            .lifecycle_api_key_metrics_tx
-            .lock()
-            .expect("event bus lifecycle api-key metrics mutex poisoned");
-        *guard = Some(tx);
-        rx
+        self.update_subscriber(capacity, |subs, tx| subs.api_key_metrics_tx = Some(tx))
     }
 
     pub fn attach_lifecycle_cache_hit_miss(
         &self,
         capacity: usize,
     ) -> mpsc::Receiver<LifecycleEvent> {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
-        let mut guard = self
-            .inner
-            .lifecycle_cache_hit_miss_tx
-            .lock()
-            .expect("event bus lifecycle cache hit/miss mutex poisoned");
-        *guard = Some(tx);
-        rx
+        self.update_subscriber(capacity, |subs, tx| subs.cache_hit_miss_tx = Some(tx))
     }
 
     pub fn attach_lifecycle_routing_tier(&self, capacity: usize) -> mpsc::Receiver<LifecycleEvent> {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
-        let mut guard = self
-            .inner
-            .lifecycle_routing_tier_tx
-            .lock()
-            .expect("event bus lifecycle routing tier mutex poisoned");
-        *guard = Some(tx);
-        rx
+        self.update_subscriber(capacity, |subs, tx| subs.routing_tier_tx = Some(tx))
     }
+
     /// Whether this event carries request-log meaning for the durable
     /// assembler: it creates the row (`RequestStarted`), finalizes it
     /// (`RequestTerminated`), or records an abnormal outcome
@@ -285,124 +310,309 @@ impl InMemoryBus {
         )
     }
 
-    /// Non-blocking send to the lifecycle assembler. On `Full`, row-bearing
-    /// events are handed to a bounded overflow task that awaits capacity
-    /// instead of being dropped; other events keep the drop-on-full behavior.
-    fn send_to_assembler(&self, event: LifecycleEvent) {
-        let assembler_tx = {
-            let guard = match self.inner.lifecycle_assembler_tx.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            guard.clone()
-        };
-        let Some(tx) = assembler_tx else {
-            return;
-        };
-        match tx.try_send(event) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(dropped)) => {
-                if Self::carries_request_row(&dropped) {
-                    self.spawn_assembler_overflow(tx, dropped);
-                } else {
-                    record_dropped_events_by("lifecycle_assembler_full", 1);
-                    tracing::error!(
-                        kind = dropped.kind(),
-                        event_id = %dropped.event_id(),
-                        "lifecycle assembler mpsc full; dropping event (request row may be missing)",
-                    );
-                }
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                tracing::debug!("lifecycle assembler mpsc closed");
-            }
-        }
-    }
-
-    /// Park a row-bearing event on a detached task that awaits assembler
-    /// channel capacity. Bounded by [`MAX_ASSEMBLER_OVERFLOW_TASKS`]; beyond
-    /// the cap the event is dropped loudly.
-    fn spawn_assembler_overflow(&self, tx: mpsc::Sender<LifecycleEvent>, event: LifecycleEvent) {
-        let in_flight = self
-            .inner
-            .assembler_overflow_in_flight
-            .fetch_add(1, Ordering::Relaxed);
-        if in_flight >= MAX_ASSEMBLER_OVERFLOW_TASKS {
-            self.inner
-                .assembler_overflow_in_flight
-                .fetch_sub(1, Ordering::Relaxed);
-            record_dropped_events_by("lifecycle_assembler_full", 1);
-            tracing::error!(
-                kind = event.kind(),
-                event_id = %event.event_id(),
-                in_flight,
-                "lifecycle assembler overflow task cap reached; dropping row-bearing event (request row may be missing)",
-            );
-            return;
-        }
-        if tokio::runtime::Handle::try_current().is_err() {
-            self.inner
-                .assembler_overflow_in_flight
-                .fetch_sub(1, Ordering::Relaxed);
-            record_dropped_events_by("lifecycle_assembler_full", 1);
-            tracing::error!(
-                kind = event.kind(),
-                event_id = %event.event_id(),
-                "lifecycle assembler mpsc full outside a tokio runtime; dropping row-bearing event (request row may be missing)",
-            );
-            return;
-        }
-        let inner = Arc::clone(&self.inner);
-        tokio::spawn(async move {
-            if let Err(send_error) = tx.send(event).await {
-                let event = send_error.0;
-                tracing::error!(
-                    kind = event.kind(),
-                    event_id = %event.event_id(),
-                    "lifecycle assembler mpsc closed while overflow task waited; request row may be missing",
-                );
-            }
-            inner
-                .assembler_overflow_in_flight
-                .fetch_sub(1, Ordering::Relaxed);
-        });
-    }
-
-    /// Detached overflow tasks currently parked on a full assembler channel.
-    /// Read by the assembler's shutdown drain; see
+    /// Detached overflow tasks currently parked on a full assembler channel. Read
+    /// by the assembler's shutdown drain; see
     /// [`RequestEventBus::assembler_overflow_in_flight`].
     pub fn assembler_overflow_in_flight(&self) -> usize {
         self.inner
             .assembler_overflow_in_flight
             .load(Ordering::Relaxed)
     }
+}
 
-    fn try_send_activity(
-        &self,
-        slot: &Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
-        drop_reason: &'static str,
-        event: &LifecycleEvent,
-    ) {
-        let tx = match slot.lock() {
-            Ok(guard) => guard.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        };
-        let Some(tx) = tx else {
-            return;
-        };
-        match tx.try_send(event.clone()) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(dropped)) => {
-                record_dropped_events_by(drop_reason, 1);
-                tracing::debug!(
+fn send_to_assembler(
+    inner: &Arc<InMemoryBusInner>,
+    subs: &LifecycleSubscribers,
+    event: LifecycleEvent,
+) {
+    let Some(tx) = subs.assembler_tx.clone() else {
+        return;
+    };
+    match tx.try_send(event) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(dropped)) => {
+            if InMemoryBus::carries_request_row(&dropped) {
+                spawn_assembler_overflow(Arc::clone(inner), tx, dropped);
+            } else {
+                record_dropped_events_by("lifecycle_assembler_full", 1);
+                tracing::error!(
                     kind = dropped.kind(),
                     event_id = %dropped.event_id(),
-                    drop_reason,
-                    "lifecycle subscriber mpsc full; dropping activity heartbeat",
+                    "lifecycle assembler mpsc full; dropping event (request row may be missing)",
                 );
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {}
         }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            tracing::debug!("lifecycle assembler mpsc closed");
+        }
+    }
+}
+
+fn spawn_assembler_overflow(
+    inner: Arc<InMemoryBusInner>,
+    tx: mpsc::Sender<LifecycleEvent>,
+    event: LifecycleEvent,
+) {
+    let in_flight = inner
+        .assembler_overflow_in_flight
+        .fetch_add(1, Ordering::Relaxed);
+    if in_flight >= MAX_ASSEMBLER_OVERFLOW_TASKS {
+        inner
+            .assembler_overflow_in_flight
+            .fetch_sub(1, Ordering::Relaxed);
+        record_dropped_events_by("lifecycle_assembler_full", 1);
+        tracing::error!(
+            kind = event.kind(),
+            event_id = %event.event_id(),
+            in_flight,
+            "overflow task cap reached; dropping row-bearing event (request row may be missing)",
+        );
+        return;
+    }
+    if tokio::runtime::Handle::try_current().is_err() {
+        inner
+            .assembler_overflow_in_flight
+            .fetch_sub(1, Ordering::Relaxed);
+        record_dropped_events_by("lifecycle_assembler_full", 1);
+        tracing::error!(
+            kind = event.kind(),
+            event_id = %event.event_id(),
+            "mpsc full outside a tokio runtime; dropping row-bearing event (request row may be missing)",
+        );
+        return;
+    }
+    tokio::spawn(async move {
+        if let Err(send_error) = tx.send(event).await {
+            let event = send_error.0;
+            tracing::error!(
+                kind = event.kind(),
+                event_id = %event.event_id(),
+                "mpsc closed while overflow task waited; request row may be missing",
+            );
+        }
+        inner
+            .assembler_overflow_in_flight
+            .fetch_sub(1, Ordering::Release);
+    });
+}
+
+fn try_send_activity(
+    slot: Option<&mpsc::Sender<LifecycleEvent>>,
+    drop_reason: &'static str,
+    event: &LifecycleEvent,
+) {
+    let Some(tx) = slot else {
+        return;
+    };
+    match tx.try_send(event.clone()) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(dropped)) => {
+            record_dropped_events_by(drop_reason, 1);
+            tracing::debug!(
+                kind = dropped.kind(),
+                event_id = %dropped.event_id(),
+                drop_reason,
+                "lifecycle subscriber mpsc full; dropping activity heartbeat",
+            );
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {}
+    }
+}
+
+fn try_send_subscriber(
+    slot: Option<&mpsc::Sender<LifecycleEvent>>,
+    drop_reason: &'static str,
+    full_msg: &'static str,
+    closed_msg: &'static str,
+    event: &LifecycleEvent,
+) {
+    let Some(tx) = slot else {
+        return;
+    };
+    match tx.try_send(event.clone()) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(dropped)) => {
+            record_dropped_events_by(drop_reason, 1);
+            tracing::warn!(
+                kind = dropped.kind(),
+                event_id = %dropped.event_id(),
+                "{full_msg}",
+            );
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            tracing::debug!("{closed_msg}");
+        }
+    }
+}
+
+fn fanout_lifecycle_event(inner: &Arc<InMemoryBusInner>, event: LifecycleEvent) {
+    let subs = inner.subscribers.load();
+    if matches!(&event, LifecycleEvent::RequestActivity { .. }) {
+        // Advisory heartbeat: keep broadcast listeners and stateful
+        // subscribers warm without spawning assembler overflow tasks or
+        // waking the stateless limit-rejection audit subscriber.
+        if inner.lifecycle_broadcast_tx.receiver_count() > 0 {
+            let _ = inner.lifecycle_broadcast_tx.send(event.clone());
+        }
+        let targets = [
+            (subs.writer_tx.as_ref(), "lifecycle_writer_activity_dropped"),
+            (
+                subs.assembler_tx.as_ref(),
+                "lifecycle_assembler_activity_dropped",
+            ),
+            (
+                subs.pricing_tx.as_ref(),
+                "lifecycle_pricing_activity_dropped",
+            ),
+            (
+                subs.limit_reconcile_tx.as_ref(),
+                "lifecycle_limit_reconcile_activity_dropped",
+            ),
+            (
+                subs.rate_limit_header_tx.as_ref(),
+                "lifecycle_rate_limit_header_activity_dropped",
+            ),
+            (
+                subs.subscription_quota_tx.as_ref(),
+                "lifecycle_subscription_quota_activity_dropped",
+            ),
+            (
+                subs.api_key_metrics_tx.as_ref(),
+                "lifecycle_api_key_metrics_activity_dropped",
+            ),
+            (
+                subs.cache_hit_miss_tx.as_ref(),
+                "lifecycle_cache_hit_miss_activity_dropped",
+            ),
+            (
+                subs.routing_tier_tx.as_ref(),
+                "lifecycle_routing_tier_activity_dropped",
+            ),
+        ];
+        for (slot, drop_reason) in targets {
+            try_send_activity(slot, drop_reason, &event);
+        }
+        return;
+    }
+    if matches!(&event, LifecycleEvent::UpstreamQuotaFrameObserved { .. }) {
+        // Account-only frames feed only the quota subscriber. A request
+        // identity is required before the assembler may create a row.
+        let request_scoped = matches!(
+            &event,
+            LifecycleEvent::UpstreamQuotaFrameObserved { event_id, .. }
+                if !event_id.is_empty()
+        );
+        if request_scoped {
+            send_to_assembler(inner, &subs, event.clone());
+        }
+        if let Some(tx) = subs.subscription_quota_tx.as_ref()
+            && tx.try_send(event).is_err()
+        {
+            record_dropped_events_by("lifecycle_subscription_quota_full", 1);
+        }
+        return;
+    }
+    if matches!(&event, LifecycleEvent::RequestFundingObserved { .. }) {
+        send_to_assembler(inner, &subs, event);
+        return;
+    }
+    if matches!(
+        &event,
+        LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
+            | LifecycleEvent::UpstreamStreamDiagnosticsObserved { .. }
+    ) {
+        let retry_after = match &event {
+            LifecycleEvent::RequestLogUpstreamErrorObserved {
+                event_id,
+                retry_after: Some(retry_after),
+                ..
+            } => Some((event_id.clone(), retry_after.clone())),
+            _ => None,
+        };
+        // Row-bearing event routed only to the durable assembler.
+        send_to_assembler(inner, &subs, event);
+        if let Some((event_id, retry_after)) = retry_after {
+            let sanitized = LifecycleEvent::RequestLogUpstreamErrorObserved {
+                event_id,
+                error_type: String::new(),
+                error_message: String::new(),
+                upstream_error_code: None,
+                retry_after: Some(retry_after),
+            };
+            if inner.lifecycle_broadcast_tx.receiver_count() > 0 {
+                let _ = inner.lifecycle_broadcast_tx.send(sanitized.clone());
+            }
+            if let Some(tx) = subs.rate_limit_header_tx.as_ref() {
+                let _ = tx.try_send(sanitized);
+            }
+        }
+        return;
+    }
+    // Advisory broadcast copy for live dashboards; the durable request
+    // row does not depend on it, so a dropped send is acceptable.
+    if inner.lifecycle_broadcast_tx.receiver_count() > 0 {
+        let _ = inner.lifecycle_broadcast_tx.send(event.clone());
+    }
+
+    send_to_assembler(inner, &subs, event.clone());
+    let routes = [
+        (
+            subs.writer_tx.as_ref(),
+            "lifecycle_writer_full",
+            "lifecycle writer mpsc full; dropping event (subscriber metric may lag)",
+            "lifecycle writer mpsc closed",
+        ),
+        (
+            subs.pricing_tx.as_ref(),
+            "lifecycle_pricing_full",
+            "lifecycle pricing subscriber mpsc full; dropping event (pricing may be missing)",
+            "lifecycle pricing subscriber mpsc closed",
+        ),
+        (
+            subs.limit_reconcile_tx.as_ref(),
+            "lifecycle_limit_reconcile_full",
+            "lifecycle limit reconcile subscriber mpsc full; dropping event (reservation may not reconcile)",
+            "lifecycle limit reconcile subscriber mpsc closed",
+        ),
+        (
+            subs.rate_limit_header_tx.as_ref(),
+            "lifecycle_rate_limit_header_full",
+            "lifecycle rate limit header subscriber mpsc full; dropping event (upstream rate limit observation may be missing)",
+            "lifecycle rate limit header subscriber mpsc closed",
+        ),
+        (
+            subs.subscription_quota_tx.as_ref(),
+            "lifecycle_subscription_quota_full",
+            "lifecycle subscription quota subscriber mpsc full; dropping event (subscription quota observation may be missing)",
+            "lifecycle subscription quota subscriber mpsc closed",
+        ),
+        (
+            subs.limit_rejection_audit_tx.as_ref(),
+            "lifecycle_limit_rejection_audit_full",
+            "lifecycle limit rejection audit subscriber mpsc full; dropping event (audit row may be missing)",
+            "lifecycle limit rejection audit subscriber mpsc closed",
+        ),
+        (
+            subs.api_key_metrics_tx.as_ref(),
+            "lifecycle_api_key_metrics_full",
+            "lifecycle api-key metrics subscriber mpsc full; dropping event (metric samples may be missing)",
+            "lifecycle api-key metrics subscriber mpsc closed",
+        ),
+        (
+            subs.cache_hit_miss_tx.as_ref(),
+            "lifecycle_cache_hit_miss_full",
+            "lifecycle cache hit/miss subscriber mpsc full; dropping event (hit/miss metric may be missing)",
+            "lifecycle cache hit/miss subscriber mpsc closed",
+        ),
+        (
+            subs.routing_tier_tx.as_ref(),
+            "lifecycle_routing_tier_full",
+            "lifecycle routing tier subscriber mpsc full; dropping event (tier metric may be missing)",
+            "lifecycle routing tier subscriber mpsc closed",
+        ),
+    ];
+    for (slot, drop_reason, full_msg, closed_msg) in routes {
+        try_send_subscriber(slot, drop_reason, full_msg, closed_msg, &event);
     }
 }
 
@@ -425,348 +635,53 @@ impl RequestEventBus for InMemoryBus {
     }
 
     fn publish_lifecycle(&self, event: LifecycleEvent) {
-        if matches!(&event, LifecycleEvent::RequestActivity { .. }) {
-            // Advisory heartbeat: keep broadcast listeners and stateful
-            // subscribers warm without spawning assembler overflow tasks or
-            // waking the stateless limit-rejection audit subscriber.
-            if self.inner.lifecycle_broadcast_tx.receiver_count() > 0 {
-                let _ = self.inner.lifecycle_broadcast_tx.send(event.clone());
-            }
-            let targets = [
-                (
-                    &self.inner.lifecycle_writer_tx,
-                    "lifecycle_writer_activity_dropped",
-                ),
-                (
-                    &self.inner.lifecycle_assembler_tx,
-                    "lifecycle_assembler_activity_dropped",
-                ),
-                (
-                    &self.inner.lifecycle_pricing_tx,
-                    "lifecycle_pricing_activity_dropped",
-                ),
-                (
-                    &self.inner.lifecycle_limit_reconcile_tx,
-                    "lifecycle_limit_reconcile_activity_dropped",
-                ),
-                (
-                    &self.inner.lifecycle_rate_limit_header_tx,
-                    "lifecycle_rate_limit_header_activity_dropped",
-                ),
-                (
-                    &self.inner.lifecycle_subscription_quota_tx,
-                    "lifecycle_subscription_quota_activity_dropped",
-                ),
-                (
-                    &self.inner.lifecycle_api_key_metrics_tx,
-                    "lifecycle_api_key_metrics_activity_dropped",
-                ),
-                (
-                    &self.inner.lifecycle_cache_hit_miss_tx,
-                    "lifecycle_cache_hit_miss_activity_dropped",
-                ),
-                (
-                    &self.inner.lifecycle_routing_tier_tx,
-                    "lifecycle_routing_tier_activity_dropped",
-                ),
-            ];
-            for (slot, drop_reason) in targets {
-                self.try_send_activity(slot, drop_reason, &event);
-            }
-            return;
-        }
-        if matches!(&event, LifecycleEvent::UpstreamQuotaFrameObserved { .. }) {
-            // Account-only frames feed only the quota subscriber. A request
-            // identity is required before the assembler may create a row.
-            let request_scoped = matches!(
-                &event,
-                LifecycleEvent::UpstreamQuotaFrameObserved { event_id, .. }
-                    if !event_id.is_empty()
-            );
-            if request_scoped {
-                self.send_to_assembler(event.clone());
-            }
-            let tx = self
-                .inner
-                .lifecycle_subscription_quota_tx
-                .lock()
-                .expect("lifecycle subscription quota mutex poisoned")
-                .clone();
-            if let Some(tx) = tx
-                && tx.try_send(event).is_err()
-            {
-                record_dropped_events_by("lifecycle_subscription_quota_full", 1);
-            }
-            return;
-        }
-        if matches!(&event, LifecycleEvent::RequestFundingObserved { .. }) {
-            self.send_to_assembler(event);
-            return;
-        }
-        if matches!(
-            &event,
-            LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
-                | LifecycleEvent::UpstreamStreamDiagnosticsObserved { .. }
-        ) {
-            let retry_after = match &event {
-                LifecycleEvent::RequestLogUpstreamErrorObserved {
-                    event_id,
-                    retry_after: Some(retry_after),
-                    ..
-                } => Some((event_id.clone(), retry_after.clone())),
-                _ => None,
+        if let Some(dispatcher) = self.inner.dispatcher.load_full() {
+            let carries_row = Self::carries_request_row(&event);
+            let base_permit = match Arc::clone(&dispatcher.base_permits).try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) if !carries_row => {
+                    record_dropped_events_by("lifecycle_dispatcher_full", 1);
+                    tracing::debug!(
+                        kind = event.kind(),
+                        event_id = %event.event_id(),
+                        "lifecycle dispatcher mpsc at non-row capacity; dropping non-row event",
+                    );
+                    return;
+                }
+                Err(_) => None,
             };
-            // Row-bearing event routed only to the durable assembler.
-            self.send_to_assembler(event);
-            if let Some((event_id, retry_after)) = retry_after {
-                let sanitized = LifecycleEvent::RequestLogUpstreamErrorObserved {
-                    event_id,
-                    error_type: String::new(),
-                    error_message: String::new(),
-                    upstream_error_code: None,
-                    retry_after: Some(retry_after),
-                };
-                if self.inner.lifecycle_broadcast_tx.receiver_count() > 0 {
-                    let _ = self.inner.lifecycle_broadcast_tx.send(sanitized.clone());
-                }
-                let rate_limit_header_tx = {
-                    let guard = self
-                        .inner
-                        .lifecycle_rate_limit_header_tx
-                        .lock()
-                        .expect("event bus lifecycle rate limit header mutex poisoned");
-                    guard.clone()
-                };
-                if let Some(tx) = rate_limit_header_tx {
-                    let _ = tx.try_send(sanitized);
-                }
-            }
-            return;
-        }
-        // Advisory broadcast copy for live dashboards; the durable request
-        // row does not depend on it, so a dropped send is acceptable.
-        if self.inner.lifecycle_broadcast_tx.receiver_count() > 0 {
-            let _ = self.inner.lifecycle_broadcast_tx.send(event.clone());
-        }
-
-        let writer_tx = {
-            let guard = self
-                .inner
-                .lifecycle_writer_tx
-                .lock()
-                .expect("event bus lifecycle writer mutex poisoned");
-            guard.clone()
-        };
-        let pricing_tx = {
-            let guard = self
-                .inner
-                .lifecycle_pricing_tx
-                .lock()
-                .expect("event bus lifecycle pricing mutex poisoned");
-            guard.clone()
-        };
-        let limit_reconcile_tx = {
-            let guard = self
-                .inner
-                .lifecycle_limit_reconcile_tx
-                .lock()
-                .expect("event bus lifecycle limit reconcile mutex poisoned");
-            guard.clone()
-        };
-        let rate_limit_header_tx = {
-            let guard = self
-                .inner
-                .lifecycle_rate_limit_header_tx
-                .lock()
-                .expect("event bus lifecycle rate limit header mutex poisoned");
-            guard.clone()
-        };
-        let subscription_quota_tx = {
-            let guard = self
-                .inner
-                .lifecycle_subscription_quota_tx
-                .lock()
-                .expect("event bus lifecycle subscription quota mutex poisoned");
-            guard.clone()
-        };
-        let limit_rejection_audit_tx = {
-            let guard = self
-                .inner
-                .lifecycle_limit_rejection_audit_tx
-                .lock()
-                .expect("event bus lifecycle limit rejection audit mutex poisoned");
-            guard.clone()
-        };
-        let api_key_metrics_tx = {
-            let guard = self
-                .inner
-                .lifecycle_api_key_metrics_tx
-                .lock()
-                .expect("event bus lifecycle api-key metrics mutex poisoned");
-            guard.clone()
-        };
-        let cache_hit_miss_tx = {
-            let guard = self
-                .inner
-                .lifecycle_cache_hit_miss_tx
-                .lock()
-                .expect("event bus lifecycle cache hit/miss mutex poisoned");
-            guard.clone()
-        };
-        let routing_tier_tx = {
-            let guard = self
-                .inner
-                .lifecycle_routing_tier_tx
-                .lock()
-                .expect("event bus lifecycle routing tier mutex poisoned");
-            guard.clone()
-        };
-
-        if let Some(tx) = writer_tx {
-            match tx.try_send(event.clone()) {
-                Ok(()) => {}
+            match dispatcher.tx.try_send(DispatcherItem {
+                event,
+                _base_permit: base_permit,
+            }) {
+                Ok(()) => return,
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    record_dropped_events_by("lifecycle_writer_full", 1);
-                    tracing::warn!(
-                        kind = dropped.kind(),
-                        event_id = %dropped.event_id(),
-                        "lifecycle writer mpsc full; dropping event (subscriber metric may lag)",
-                    );
+                    drop(dropped._base_permit);
+                    let dropped = dropped.event;
+                    record_dropped_events_by("lifecycle_dispatcher_full", 1);
+                    if carries_row {
+                        tracing::error!(
+                            kind = dropped.kind(),
+                            event_id = %dropped.event_id(),
+                            "lifecycle dispatcher reserved row headroom exhausted; dropping row-bearing event (request row may be missing)",
+                        );
+                    } else {
+                        tracing::debug!(
+                            kind = dropped.kind(),
+                            event_id = %dropped.event_id(),
+                            "lifecycle dispatcher mpsc full; dropping non-row event",
+                        );
+                    }
+                    return;
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::debug!("lifecycle writer mpsc closed");
-                }
-            }
-        }
-        self.send_to_assembler(event.clone());
-        if let Some(tx) = pricing_tx {
-            match tx.try_send(event.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    record_dropped_events_by("lifecycle_pricing_full", 1);
-                    tracing::warn!(
-                        kind = dropped.kind(),
-                        event_id = %dropped.event_id(),
-                        "lifecycle pricing subscriber mpsc full; dropping event (pricing may be missing)",
-                    );
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::debug!("lifecycle pricing subscriber mpsc closed");
+                Err(mpsc::error::TrySendError::Closed(returned)) => {
+                    drop(returned._base_permit);
+                    fanout_lifecycle_event(&self.inner, returned.event);
+                    return;
                 }
             }
         }
-        if let Some(tx) = limit_reconcile_tx {
-            match tx.try_send(event.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    record_dropped_events_by("lifecycle_limit_reconcile_full", 1);
-                    tracing::warn!(
-                        kind = dropped.kind(),
-                        event_id = %dropped.event_id(),
-                        "lifecycle limit reconcile subscriber mpsc full; dropping event (reservation may not reconcile)",
-                    );
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::debug!("lifecycle limit reconcile subscriber mpsc closed");
-                }
-            }
-        }
-        if let Some(tx) = rate_limit_header_tx {
-            match tx.try_send(event.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    record_dropped_events_by("lifecycle_rate_limit_header_full", 1);
-                    tracing::warn!(
-                        kind = dropped.kind(),
-                        event_id = %dropped.event_id(),
-                        "lifecycle rate limit header subscriber mpsc full; dropping event (upstream rate limit observation may be missing)",
-                    );
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::debug!("lifecycle rate limit header subscriber mpsc closed");
-                }
-            }
-        }
-        if let Some(tx) = subscription_quota_tx {
-            match tx.try_send(event.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    record_dropped_events_by("lifecycle_subscription_quota_full", 1);
-                    tracing::warn!(
-                        kind = dropped.kind(),
-                        event_id = %dropped.event_id(),
-                        "lifecycle subscription quota subscriber mpsc full; dropping event (subscription quota observation may be missing)",
-                    );
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::debug!("lifecycle subscription quota subscriber mpsc closed");
-                }
-            }
-        }
-        if let Some(tx) = limit_rejection_audit_tx {
-            match tx.try_send(event.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    record_dropped_events_by("lifecycle_limit_rejection_audit_full", 1);
-                    tracing::warn!(
-                        kind = dropped.kind(),
-                        event_id = %dropped.event_id(),
-                        "lifecycle limit rejection audit subscriber mpsc full; dropping event (audit row may be missing)",
-                    );
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::debug!("lifecycle limit rejection audit subscriber mpsc closed");
-                }
-            }
-        }
-        if let Some(tx) = api_key_metrics_tx {
-            match tx.try_send(event.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    record_dropped_events_by("lifecycle_api_key_metrics_full", 1);
-                    tracing::warn!(
-                        kind = dropped.kind(),
-                        event_id = %dropped.event_id(),
-                        "lifecycle api-key metrics subscriber mpsc full; dropping event (metric samples may be missing)",
-                    );
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::debug!("lifecycle api-key metrics subscriber mpsc closed");
-                }
-            }
-        }
-        if let Some(tx) = cache_hit_miss_tx {
-            match tx.try_send(event.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    record_dropped_events_by("lifecycle_cache_hit_miss_full", 1);
-                    tracing::warn!(
-                        kind = dropped.kind(),
-                        event_id = %dropped.event_id(),
-                        "lifecycle cache hit/miss subscriber mpsc full; dropping event (hit/miss metric may be missing)",
-                    );
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::debug!("lifecycle cache hit/miss subscriber mpsc closed");
-                }
-            }
-        }
-        if let Some(tx) = routing_tier_tx {
-            match tx.try_send(event.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    record_dropped_events_by("lifecycle_routing_tier_full", 1);
-                    tracing::warn!(
-                        kind = dropped.kind(),
-                        event_id = %dropped.event_id(),
-                        "lifecycle routing tier subscriber mpsc full; dropping event (tier metric may be missing)",
-                    );
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::debug!("lifecycle routing tier subscriber mpsc closed");
-                }
-            }
-        }
+        fanout_lifecycle_event(&self.inner, event);
     }
 
     fn subscribe_lifecycle(&self) -> broadcast::Receiver<LifecycleEvent> {
@@ -1025,5 +940,257 @@ mod tests {
             0,
             "full assembler channel must drop RequestActivity without spawning overflow tasks"
         );
+    }
+
+    #[tokio::test]
+    async fn publish_lifecycle_arc_swap_delivers_across_all_ten_slots() {
+        let bus = InMemoryBus::new();
+        let mut writer_rx = bus.attach_lifecycle_writer(4);
+        let mut assembler_rx = bus.attach_lifecycle_assembler(4);
+        let mut pricing_rx = bus.attach_lifecycle_pricing(4);
+        let mut reconcile_rx = bus.attach_lifecycle_limit_reconcile(4);
+        let mut rate_limit_rx = bus.attach_lifecycle_rate_limit_header(4);
+        let mut quota_rx = bus.attach_lifecycle_subscription_quota(4);
+        let mut rejection_rx = bus.attach_lifecycle_limit_rejection_audit(4);
+        let mut api_metrics_rx = bus.attach_lifecycle_api_key_metrics(4);
+        let mut cache_hit_rx = bus.attach_lifecycle_cache_hit_miss(4);
+        let mut routing_tier_rx = bus.attach_lifecycle_routing_tier(4);
+
+        let event = sample_lifecycle_event("all-10");
+        bus.publish_lifecycle(event.clone());
+
+        for rx in [
+            &mut writer_rx,
+            &mut assembler_rx,
+            &mut pricing_rx,
+            &mut reconcile_rx,
+            &mut rate_limit_rx,
+            &mut quota_rx,
+            &mut rejection_rx,
+            &mut api_metrics_rx,
+            &mut cache_hit_rx,
+            &mut routing_tier_rx,
+        ] {
+            assert_eq!(rx.try_recv().expect("all 10 slots receive event"), event);
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_dispatcher_fans_out_single_channel_and_drains_on_shutdown() {
+        let bus = InMemoryBus::new();
+        let mut assembler_rx = bus.attach_lifecycle_assembler(8);
+        let mut writer_rx = bus.attach_lifecycle_writer(8);
+        let dispatcher = bus.spawn_lifecycle_dispatcher(2);
+
+        for idx in 0..6 {
+            bus.publish_lifecycle(sample_lifecycle_event(&format!("disp-{idx}")));
+        }
+
+        dispatcher.shutdown().await;
+
+        for idx in 0..6 {
+            let expected = format!("evt-disp-{idx}");
+            assert_eq!(
+                assembler_rx
+                    .try_recv()
+                    .expect("assembler drained")
+                    .event_id(),
+                &expected
+            );
+            assert_eq!(
+                writer_rx.try_recv().expect("writer drained").event_id(),
+                &expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_dispatcher_preserves_fifo_order_under_saturation_and_sheds_non_row_events() {
+        let bus = InMemoryBus::new();
+        let mut assembler_rx = bus.attach_lifecycle_assembler(64);
+        let dispatcher = bus.spawn_lifecycle_dispatcher(2);
+
+        for idx in 0..8 {
+            bus.publish_lifecycle(sample_lifecycle_event(&format!("fifo-{idx}")));
+            bus.publish_lifecycle(LifecycleEvent::RequestActivity {
+                event_id: format!("evt-fifo-{idx}"),
+            });
+            bus.publish_lifecycle(LifecycleEvent::RequestTerminated {
+                event_id: format!("evt-fifo-{idx}"),
+                reason: cc_lb_lifecycle::TerminationReason::Success,
+                client_status: 200,
+                duration_ms: 1,
+                request_body_read_ms: None,
+                request_body_bytes: None,
+                proxy_setup_ms: None,
+                setup_timings: cc_lb_lifecycle::RequestSetupTimings::default(),
+                io_timings: cc_lb_lifecycle::RequestIoTimings::default(),
+                upstream_ttfb_ms: None,
+                upstream_body_ms: None,
+                dns_ms: None,
+                connect_ms: None,
+                connection_reused: None,
+                first_content_delta_ms: None,
+                first_body_chunk_ms: None,
+                finalize_ms: None,
+                internal_errors: Vec::new(),
+                event_kind: None,
+                funding_ambiguous: false,
+                protocol: None,
+            });
+        }
+
+        dispatcher.shutdown().await;
+
+        let mut row_sequence = Vec::new();
+        let mut activity_count = 0usize;
+        while let Ok(event) = assembler_rx.try_recv() {
+            match event {
+                LifecycleEvent::RequestStarted { event_id, .. } => {
+                    row_sequence.push((event_id, "start"));
+                }
+                LifecycleEvent::RequestTerminated { event_id, .. } => {
+                    row_sequence.push((event_id, "term"));
+                }
+                LifecycleEvent::RequestActivity { .. } => {
+                    activity_count += 1;
+                }
+                other => panic!("unexpected event variant: {}", other.kind()),
+            }
+        }
+
+        let expected: Vec<(String, &'static str)> = (0..8)
+            .flat_map(|idx| {
+                let id = format!("evt-fifo-{idx}");
+                [(id.clone(), "start"), (id, "term")]
+            })
+            .collect();
+        assert_eq!(row_sequence, expected);
+        assert!(
+            activity_count < 8,
+            "expected non-row activity events to shed past base capacity, got {activity_count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_dispatcher_row_reserve_holds_under_concurrent_non_row_flood() {
+        const BASE_CAPACITY: usize = 4;
+        const FLOOD_THREADS: usize = 4;
+        const FLOOD_EVENTS_PER_THREAD: usize = 256;
+        const ROW_THREADS: usize = 2;
+        const ROW_PAIRS_PER_THREAD: usize = 100;
+
+        let bus = InMemoryBus::new();
+        let mut assembler_rx = bus.attach_lifecycle_assembler(2048);
+        let dispatcher = bus.spawn_lifecycle_dispatcher(BASE_CAPACITY);
+
+        let barrier = Arc::new(std::sync::Barrier::new(FLOOD_THREADS + ROW_THREADS + 1));
+        let mut handles = Vec::with_capacity(FLOOD_THREADS + ROW_THREADS);
+
+        for thread_idx in 0..FLOOD_THREADS {
+            let bus = bus.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for seq in 0..FLOOD_EVENTS_PER_THREAD {
+                    bus.publish_lifecycle(LifecycleEvent::RequestActivity {
+                        event_id: format!("flood-{thread_idx}-{seq}"),
+                    });
+                }
+            }));
+        }
+
+        for thread_idx in 0..ROW_THREADS {
+            let bus = bus.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for seq in 0..ROW_PAIRS_PER_THREAD {
+                    let req = format!("t{thread_idx}-req-{seq}");
+                    let evt = format!("evt-{req}");
+                    bus.publish_lifecycle(sample_lifecycle_event(&req));
+                    bus.publish_lifecycle(LifecycleEvent::RequestTerminated {
+                        event_id: evt,
+                        reason: cc_lb_lifecycle::TerminationReason::Success,
+                        client_status: 200,
+                        duration_ms: 1,
+                        request_body_read_ms: None,
+                        request_body_bytes: None,
+                        proxy_setup_ms: None,
+                        setup_timings: cc_lb_lifecycle::RequestSetupTimings::default(),
+                        io_timings: cc_lb_lifecycle::RequestIoTimings::default(),
+                        upstream_ttfb_ms: None,
+                        upstream_body_ms: None,
+                        dns_ms: None,
+                        connect_ms: None,
+                        connection_reused: None,
+                        first_content_delta_ms: None,
+                        first_body_chunk_ms: None,
+                        finalize_ms: None,
+                        internal_errors: Vec::new(),
+                        event_kind: None,
+                        funding_ambiguous: false,
+                        protocol: None,
+                    });
+                }
+            }));
+        }
+
+        // Release all OS threads before yielding to the current-thread runtime so
+        // the dispatcher worker has not drained a single item during contention.
+        barrier.wait();
+        for handle in handles {
+            handle.join().expect("publisher thread panicked");
+        }
+
+        assert_eq!(
+            bus.inner
+                .dispatcher
+                .load()
+                .as_ref()
+                .expect("dispatcher attached")
+                .base_permits
+                .available_permits(),
+            0,
+            "base permits must be exhausted under concurrent non-row flood"
+        );
+
+        dispatcher.shutdown().await;
+
+        let mut per_request_events: std::collections::HashMap<String, Vec<&'static str>> =
+            std::collections::HashMap::new();
+        let mut activity_count = 0usize;
+        while let Ok(event) = assembler_rx.try_recv() {
+            match event {
+                LifecycleEvent::RequestStarted { event_id, .. } => {
+                    per_request_events
+                        .entry(event_id)
+                        .or_default()
+                        .push("start");
+                }
+                LifecycleEvent::RequestTerminated { event_id, .. } => {
+                    per_request_events.entry(event_id).or_default().push("term");
+                }
+                LifecycleEvent::RequestActivity { .. } => {
+                    activity_count += 1;
+                }
+                other => panic!("unexpected event variant: {}", other.kind()),
+            }
+        }
+
+        assert!(
+            activity_count <= BASE_CAPACITY,
+            "non-row flood exceeded atomic base permit cap: {activity_count} > {BASE_CAPACITY}"
+        );
+        for thread_idx in 0..ROW_THREADS {
+            for seq in 0..ROW_PAIRS_PER_THREAD {
+                let evt = format!("evt-t{thread_idx}-req-{seq}");
+                assert_eq!(
+                    per_request_events.get(&evt).map(Vec::as_slice),
+                    Some(&["start", "term"][..]),
+                    "missing or reordered row lifecycle events for {evt}"
+                );
+            }
+        }
     }
 }

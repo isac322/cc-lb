@@ -1,6 +1,6 @@
 # Dashboard Live-Tail Metrics
 
-This is the canonical metric inventory for the dashboard live-tail redesign. Label values are backed by `cc_lb_engine::metrics_labels` where the label vocabulary is finite.
+This is the canonical metric inventory for the dashboard live-tail redesign. Label values are backed by `cc_lb_event_pipeline::metrics_labels` where the label vocabulary is finite.
 
 | Metric | Type | Labels | Description | Expected steady state |
 | --- | --- | --- | --- | --- |

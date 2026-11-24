@@ -15,9 +15,6 @@ path = "tests/all.rs"
 name = "typestate_contracts"
 path = "tests/typestate_contracts/main.rs"
 
-[features]
-postgres = []
-
 [dependencies]
 cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-config = { path = "../cc-lb-config" }
@@ -41,6 +38,8 @@ cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-lifecycle = { workspace = true }
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
+cc-lb-proxy-telemetry.workspace = true
+cc-lb-routing-eval.workspace = true
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-observability = { path = "../cc-lb-observability" }
 brotli.workspace = true
@@ -58,21 +57,15 @@ hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", 
 chrono.workspace = true
 metrics.workspace = true
 multer = "3.1"
-parking_lot = "0.13"
-opentelemetry.workspace = true
 rand = "0.10"
 rustls.workspace = true
 serde_json.workspace = true
 sonic-rs.workspace = true
 sha2 = "0.11"
 blake3.workspace = true
-sqlx.workspace = true
 thiserror.workspace = true
-tiktoken-rs = "0.12"
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
-tokio-util.workspace = true
 tracing.workspace = true
-tracing-opentelemetry.workspace = true
 url.workspace = true
 uuid.workspace = true
 tower-service.workspace = true
@@ -84,17 +77,22 @@ trybuild = "1"
 
 [target.'cfg(not(trybuild))'.dev-dependencies]
 cc-lb-workspace-hack.workspace = true
+cc-lb-event-pipeline.workspace = true
+cc-lb-routing-eval = { path = "../cc-lb-routing-eval", features = ["test-utils"] }
 cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }
-cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }
 insta.workspace = true
 metrics-exporter-prometheus.workspace = true
 metrics-util.workspace = true
+opentelemetry.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
+parking_lot = "0.13"
 proptest.workspace = true
+sqlx.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 tower = { workspace = true, features = ["util"] }
 syn = { version = "3.0.9", features = ["full", "visit"] }

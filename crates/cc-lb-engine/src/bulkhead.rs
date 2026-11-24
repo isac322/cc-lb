@@ -444,7 +444,7 @@ where
     let mut builder = Request::builder().method(method).uri(uri);
     copy_headers(headers, builder.headers_mut());
     if let Some(headers) = builder.headers_mut() {
-        cc_lb_observability::inject_current_trace_context(headers);
+        cc_lb_proxy_telemetry::inject_current_trace_context(headers);
     }
     let request = builder.body(Full::new(body)).map_err(|source| {
         record_dispatch_failure(&span, "request_build");

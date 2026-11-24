@@ -573,7 +573,7 @@ async fn gemini_live_rejects_unsupported_operation_before_upgrade() {
     .await;
     replace_websocket_upstreams(&state, Vec::new());
     let storage = state.storage.clone();
-    let assembler = cc_lb_engine::spawn_request_event_assembler(
+    let assembler = cc_lb_event_pipeline::spawn_request_event_assembler(
         bus.attach_lifecycle_assembler(128),
         storage.clone(),
         Some(bus),
@@ -824,7 +824,7 @@ async fn live_waiting_for_setup_and_realtime_active_connections_respect_drain() 
     .await;
     let drain = state.drain_controller.clone();
     let storage = state.storage.clone();
-    let assembler = cc_lb_engine::spawn_request_event_assembler(
+    let assembler = cc_lb_event_pipeline::spawn_request_event_assembler(
         bus.attach_lifecycle_assembler(128),
         storage.clone(),
         Some(bus),
@@ -1137,7 +1137,7 @@ async fn gemini_live_provider_503_persists_upstream_error_classification() {
     let mut updates = bus.subscribe();
     let state = native_websocket_observed_state(address, true, bus.clone(), None).await;
     let storage = state.storage.clone();
-    let assembler = cc_lb_engine::spawn_request_event_assembler(
+    let assembler = cc_lb_event_pipeline::spawn_request_event_assembler(
         bus.attach_lifecycle_assembler(128),
         storage.clone(),
         Some(bus),
@@ -1495,12 +1495,13 @@ async fn realtime_and_live_principal_concurrent_limit_rejects_without_second_pro
         let bus = Arc::new(cc_lb_control::InMemoryBus::new());
         let mut events = bus.subscribe_lifecycle();
         let event_logger =
-            cc_lb_engine::spawn_lifecycle_event_logger(bus.attach_lifecycle_writer(128));
+            cc_lb_event_pipeline::spawn_lifecycle_event_logger(bus.attach_lifecycle_writer(128));
         let state = native_websocket_observed_state(address, gemini, bus.clone(), Some(1)).await;
         let storage = state.storage.clone();
         let (audit_sink, audit_writer) =
             cc_lb_control::spawn_audit_writer(storage.clone(), 16);
-        let audit_subscriber = cc_lb_engine::spawn_lifecycle_limit_rejection_audit_subscriber(
+        let audit_subscriber =
+            cc_lb_event_pipeline::spawn_lifecycle_limit_rejection_audit_subscriber(
             bus.attach_lifecycle_limit_rejection_audit(128),
             Arc::new(audit_sink),
         );
@@ -1728,7 +1729,7 @@ async fn realtime_and_live_publish_active_cumulative_usage_then_preserve_provide
         let mut lifecycle_events = bus.subscribe_lifecycle();
         let state = native_websocket_observed_state(address, gemini, bus.clone(), None).await;
         let storage = state.storage.clone();
-        let assembler = cc_lb_engine::spawn_request_event_assembler(
+        let assembler = cc_lb_event_pipeline::spawn_request_event_assembler(
             bus.attach_lifecycle_assembler(128),
             storage.clone(),
             Some(bus),
@@ -1961,7 +1962,7 @@ async fn realtime_and_live_normal_downstream_close_after_completion_is_success()
         let mut lifecycle_events = bus.subscribe_lifecycle();
         let state = native_websocket_observed_state(address, gemini, bus.clone(), Some(1)).await;
         let storage = state.storage.clone();
-        let assembler = cc_lb_engine::spawn_request_event_assembler(
+        let assembler = cc_lb_event_pipeline::spawn_request_event_assembler(
             bus.attach_lifecycle_assembler(128),
             storage.clone(),
             Some(bus),
@@ -2102,7 +2103,7 @@ async fn realtime_and_live_persist_native_close_details_and_request_id() {
         let mut events = bus.subscribe_lifecycle();
         let state = native_websocket_observed_state(address, gemini, bus.clone(), None).await;
         let storage = state.storage.clone();
-        let assembler = cc_lb_engine::spawn_request_event_assembler(
+        let assembler = cc_lb_event_pipeline::spawn_request_event_assembler(
             bus.attach_lifecycle_assembler(128),
             storage.clone(),
             Some(bus),

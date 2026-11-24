@@ -1,0 +1,115 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use cc_lb_storage_api::{Storage, SubscriptionQuotaSample};
+use tokio::sync::mpsc::Receiver;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+
+pub use cc_lb_engine::subscription_quota_events::{
+    DEFAULT_SUBSCRIPTION_QUOTA_CHANNEL_CAPACITY, SubscriptionQuotaEnqueueError,
+    SubscriptionQuotaSink,
+};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionQuotaWriterConfig {
+    pub batch_max_records: usize,
+    pub flush_max_ms: u64,
+}
+
+impl Default for SubscriptionQuotaWriterConfig {
+    fn default() -> Self {
+        Self {
+            batch_max_records: 256,
+            flush_max_ms: 100,
+        }
+    }
+}
+
+pub fn start_subscription_quota_writer(
+    storage: Arc<dyn Storage>,
+    receiver: Receiver<SubscriptionQuotaSample>,
+    config: SubscriptionQuotaWriterConfig,
+    cancel: CancellationToken,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        run_subscription_quota_writer(storage, receiver, config, cancel).await;
+    })
+}
+
+async fn run_subscription_quota_writer(
+    storage: Arc<dyn Storage>,
+    mut receiver: Receiver<SubscriptionQuotaSample>,
+    config: SubscriptionQuotaWriterConfig,
+    cancel: CancellationToken,
+) {
+    let config = normalize_config(config);
+    loop {
+        let first = tokio::select! {
+            _ = cancel.cancelled() => {
+                let mut batch = Vec::new();
+                drain_remaining(&mut receiver, &mut batch);
+                flush_batch(&storage, batch).await;
+                return;
+            }
+            record = receiver.recv() => record,
+        };
+        let Some(first) = first else {
+            return;
+        };
+
+        let mut batch = Vec::with_capacity(config.batch_max_records);
+        batch.push(first);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(config.flush_max_ms);
+        let flush_sleep = tokio::time::sleep_until(deadline);
+        tokio::pin!(flush_sleep);
+
+        while batch.len() < config.batch_max_records {
+            let remaining = config.batch_max_records - batch.len();
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    drain_remaining(&mut receiver, &mut batch);
+                    flush_batch(&storage, batch).await;
+                    return;
+                }
+                _ = &mut flush_sleep => break,
+                count = receiver.recv_many(&mut batch, remaining) => {
+                    if count == 0 {
+                        flush_batch(&storage, batch).await;
+                        return;
+                    }
+                }
+            }
+        }
+
+        flush_batch(&storage, batch).await;
+    }
+}
+
+fn normalize_config(config: SubscriptionQuotaWriterConfig) -> SubscriptionQuotaWriterConfig {
+    SubscriptionQuotaWriterConfig {
+        batch_max_records: config.batch_max_records.max(1),
+        flush_max_ms: config.flush_max_ms.max(1),
+    }
+}
+
+fn drain_remaining(
+    receiver: &mut Receiver<SubscriptionQuotaSample>,
+    batch: &mut Vec<SubscriptionQuotaSample>,
+) {
+    while let Ok(record) = receiver.try_recv() {
+        batch.push(record);
+    }
+}
+
+async fn flush_batch(storage: &Arc<dyn Storage>, batch: Vec<SubscriptionQuotaSample>) {
+    if batch.is_empty() {
+        return;
+    }
+
+    metrics::histogram!("subscription_quota_writer_batch_size").record(batch.len() as f64);
+    if let Err(error) = storage.record_subscription_quota_samples(&batch).await {
+        metrics::counter!("subscription_quota_writer_error").increment(1);
+        tracing::warn!(error = %error, batch_size = batch.len(), "subscription quota batch persistence failed");
+    }
+}

@@ -12,6 +12,9 @@ const ROOT = path.resolve(HERE, '..');
 
 const FORBIDDEN_CARGO_CRATES = [
   'cc-lb-engine',
+  'cc-lb-event-pipeline',
+  'cc-lb-proxy-telemetry',
+  'cc-lb-routing-eval',
   'cc-lb-control',
   'cc-lb-scheduler',
   'cc-lb-quota',

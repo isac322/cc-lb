@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cc_lb_control::{InMemoryBus, RequestEventBus};
-use cc_lb_engine::{PgListener, PgNotifier};
+use cc_lb_event_pipeline::{PgListener, PgNotifier};
 use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
 use futures_util::FutureExt as _;
 use metrics_exporter_prometheus::PrometheusHandle;

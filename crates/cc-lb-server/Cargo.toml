@@ -23,7 +23,7 @@ sqlite = [
 postgres = [
     "cc-lb-scheduler/postgres",
     "cc-lb-admin/postgres",
-    "cc-lb-engine/postgres",
+    "cc-lb-event-pipeline/postgres",
     "dep:apalis-postgres",
     "dep:cc-lb-scheduler",
     "dep:cc-lb-storage-postgres",
@@ -58,11 +58,13 @@ cc-lb-request-log.workspace = true
 cc-lb-control = { path = "../cc-lb-control" }
 cc-lb-domain.workspace = true
 cc-lb-engine = { path = "../cc-lb-engine" }
+cc-lb-event-pipeline.workspace = true
 cc-lb-lifecycle.workspace = true
 cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-plugin-wire = { workspace = true, features = ["std"] }
 cc-lb-routing.workspace = true
+cc-lb-routing-eval.workspace = true
 cc-lb-quota.workspace = true
 cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-runtime-wasmtime = { workspace = true }

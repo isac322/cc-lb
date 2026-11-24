@@ -65,8 +65,9 @@ async fn authenticated_request_completion_metric_carries_real_attribution() {
     let snapshotter = recorder.snapshotter();
     let _recorder_guard = metrics::set_default_local_recorder(&recorder);
     let test_bus = TestLifecycleBus::new();
-    let logger =
-        cc_lb_engine::spawn_lifecycle_event_logger(test_bus.bus.attach_lifecycle_writer(256));
+    let logger = cc_lb_event_pipeline::spawn_lifecycle_event_logger(
+        test_bus.bus.attach_lifecycle_writer(256),
+    );
     let mut lifecycle_events = test_bus.bus.subscribe_lifecycle();
     let state = TestState::default();
     let lifecycle = lifecycle_with(
@@ -191,8 +192,9 @@ async fn completed_metric_for(
     let snapshotter = recorder.snapshotter();
     let _recorder_guard = metrics::set_default_local_recorder(&recorder);
     let test_bus = TestLifecycleBus::new();
-    let logger =
-        cc_lb_engine::spawn_lifecycle_event_logger(test_bus.bus.attach_lifecycle_writer(256));
+    let logger = cc_lb_event_pipeline::spawn_lifecycle_event_logger(
+        test_bus.bus.attach_lifecycle_writer(256),
+    );
     let mut lifecycle_events = test_bus.bus.subscribe_lifecycle();
     let state = TestState::default();
     let lifecycle = crate::common::lifecycle_with_parts(

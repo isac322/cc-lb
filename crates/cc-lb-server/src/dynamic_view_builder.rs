@@ -11,12 +11,12 @@ use cc_lb_control::{
     UpstreamStatusSnapshot,
 };
 use cc_lb_domain::{BUILTIN_SUBSCRIPTION_PREFERENCE_ID, Provider, RateLimitObservation, Upstream};
-use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_oauth_protocol::refresh_requires_reconnect;
 use cc_lb_quota::plan_capacity::{
     PRO_CAPACITY_RATIO, PlanInfo, PlanTierClassification, TierKey, classify_plan_tier,
 };
 use cc_lb_routing::FilterPlugin;
+use cc_lb_routing_eval::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntime};
 use cc_lb_vertex_auth::{
     BearerSource, TokenRegistry, TokenSource, TokenTransport, parse_credential,
@@ -2143,7 +2143,7 @@ mod tests {
     use async_trait::async_trait;
     use cc_lb_clock::TestClock;
     use cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
-    use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
+    use cc_lb_routing_eval::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
     use cc_lb_storage_api::{
         MetaStore, PromptCacheObservationRecord, UpstreamCreate, UpstreamUpdate,
     };

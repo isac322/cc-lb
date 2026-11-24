@@ -7,7 +7,7 @@ use cc_lb_admin::ports::{
     WarmupAttemptResult, WarmupPort,
 };
 use cc_lb_engine::Lifecycle;
-use cc_lb_engine::warmup_attempts::{
+use cc_lb_event_pipeline::warmup_attempts::{
     WarmupAttemptExecution, WarmupAttemptExecutionResult, execute_warmup_attempt,
 };
 use cc_lb_storage_api::WarmupAttemptTrigger;

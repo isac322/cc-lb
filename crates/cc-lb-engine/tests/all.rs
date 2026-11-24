@@ -6,8 +6,6 @@ mod lifecycle_vertex_qa;
 mod prompt_cache_routing_support;
 mod router_lifecycle_support;
 
-#[path = "assembler_partial_property.rs"]
-mod assembler_partial_property;
 #[path = "audit_writer_smoke.rs"]
 mod audit_writer_smoke;
 #[path = "bulkhead_drops_release_permit.rs"]
@@ -98,10 +96,6 @@ mod open_rejects_immediately;
 mod open_to_half_open_after_timeout;
 #[path = "per_upstream_isolation.rs"]
 mod per_upstream_isolation;
-#[path = "pg_listener_recovery.rs"]
-mod pg_listener_recovery;
-#[path = "pg_notify_fanout.rs"]
-mod pg_notify_fanout;
 #[path = "preserve_anthropic_headers.rs"]
 mod preserve_anthropic_headers;
 #[path = "principal_view_pipeline_cache.rs"]
@@ -120,8 +114,6 @@ mod provider_native_http;
 mod queue_full_returns_503;
 #[path = "quota_header_surface_baseline.rs"]
 mod quota_header_surface_baseline;
-#[path = "renewal_accounting_e2e.rs"]
-mod renewal_accounting_e2e;
 #[path = "request_context.rs"]
 mod request_context;
 #[path = "request_context_proxy_parity.rs"]
@@ -138,8 +130,6 @@ mod rfc_0002_fix_live_qa;
 mod semaphore_bounds_concurrency;
 #[path = "snapshot_error_responses.rs"]
 mod snapshot_error_responses;
-#[path = "storage_tail_poller.rs"]
-mod storage_tail_poller;
 #[path = "strip_connection_listed.rs"]
 mod strip_connection_listed;
 #[path = "strip_well_known.rs"]
@@ -150,8 +140,6 @@ mod subscription_preference_qa_regression;
 mod subscription_preference_v11_preview;
 #[path = "subscription_preference_v8_regression.rs"]
 mod subscription_preference_v8_regression;
-#[path = "subscription_quota_checkpoint_writer.rs"]
-mod subscription_quota_checkpoint_writer;
 #[path = "task_23_no_hop_by_hop.rs"]
 mod task_23_no_hop_by_hop;
 #[path = "tower_layer_round_trip.rs"]

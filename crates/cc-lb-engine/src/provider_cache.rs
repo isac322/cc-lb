@@ -50,7 +50,7 @@ pub(crate) fn analyze_with_openai_interpretation(
 
 /// Project provider-native usage without borrowing Anthropic creation counters.
 /// Unsupported request forms and malformed writes cannot establish cache state.
-pub(crate) fn project_usage(
+pub fn project_usage(
     native: &RequestNativeCacheObservation,
     read_evidence: RequestCacheEvidence,
     cached_tokens: u64,
@@ -253,7 +253,7 @@ fn gemini_minimum_tokens(model: &str) -> u64 {
     }
 }
 
-pub(crate) fn normalize_cached_tokens(model: Option<&str>, tokens: u64) -> u64 {
+pub fn normalize_cached_tokens(model: Option<&str>, tokens: u64) -> u64 {
     let Some(model) = model else {
         return tokens;
     };

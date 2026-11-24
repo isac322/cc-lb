@@ -3,7 +3,8 @@ use std::collections::BTreeSet;
 use syn::{Expr, ExprMatch, Item, ItemEnum, ItemFn, Pat, PatOr, PatStruct, PatTupleStruct};
 
 const EVENT_SOURCE: &str = include_str!("../../cc-lb-lifecycle/src/event.rs");
-const ASSEMBLER_SOURCE: &str = include_str!("../src/lifecycle_event_assembler.rs");
+const ASSEMBLER_SOURCE: &str =
+    include_str!("../../cc-lb-event-pipeline/src/lifecycle_event_assembler.rs");
 
 fn enum_variants(source: &str) -> BTreeSet<String> {
     let file = syn::parse_file(source).expect("lifecycle event source parses");
