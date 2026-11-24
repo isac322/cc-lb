@@ -1,3 +1,4 @@
+use super::types::duration_to_us;
 use super::*;
 
 pub fn observe_rate_limits(
@@ -84,20 +85,14 @@ pub(super) fn execute_filter_pipeline(
     let mut stages = Vec::with_capacity(filters.len());
     let mut internal_errors = Vec::new();
 
-    for (stage_index, filter) in filters.iter().enumerate() {
+    for filter in filters {
         let stage_name = filter.plugin_name().to_owned();
         let stage_started = Instant::now();
         match filter.filter(&routing_context, principal, &current) {
             Ok(output) => {
                 let stage_elapsed = stage_started.elapsed();
                 let duration_ms = duration_to_ms(stage_elapsed);
-                let stage_idx = u8::try_from(stage_index).unwrap_or(u8::MAX);
-                let output = match validate_filter_output(
-                    &output,
-                    &current,
-                    stage_idx,
-                    &mut internal_errors,
-                ) {
+                let output = match validate_filter_output(&output, &current, &mut internal_errors) {
                     Ok(output) => output,
                     Err(error) => {
                         let message = format!("filter output validation failed: {error}");
@@ -190,10 +185,8 @@ pub(super) enum ValidationError {
 pub(super) fn validate_filter_output(
     out: &FilterOutput,
     input: &[UpstreamCandidate],
-    stage_idx: u8,
     internal_errors: &mut Vec<InternalError>,
 ) -> Result<ValidatedOutput, ValidationError> {
-    let _ = stage_idx;
     let mut seen = HashSet::with_capacity(out.kept_upstream_ids.len());
     for id in &out.kept_upstream_ids {
         if !seen.insert(*id) {
@@ -218,11 +211,7 @@ pub(super) fn validate_filter_output(
         }
     }
 
-    let mut per_candidate_reasons = out.per_candidate_reasons.clone();
-    if !per_candidate_reasons.is_empty() && per_candidate_reasons.len() != input.len() {
-        if per_candidate_reasons.len() > input.len() {
-            per_candidate_reasons.truncate(input.len());
-        }
+    if !out.per_candidate_reasons.is_empty() && out.per_candidate_reasons.len() != input.len() {
         internal_errors.push(InternalError {
             stage: InternalErrorStage::RouterFilter,
             kind: InternalErrorKind::InvalidOutput,

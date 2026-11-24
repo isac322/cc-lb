@@ -206,7 +206,6 @@ impl Reservation {
 ///
 /// Kept outside `Reservation` so out-of-band consumers can reconcile without
 /// owning the handle. `Reservation` is an RAII refund guard keyed by `id`.
-#[allow(dead_code)]
 struct ReservationRecord {
     key_id: String,
     reserved: Vec<ReservedAmount>,
@@ -321,13 +320,6 @@ impl RingCounter {
             }
         }
         self.evict_old(now_sec);
-    }
-
-    pub fn replace_total(&mut self, now_sec: u64, total: i64) {
-        self.buckets.clear();
-        if total != 0 {
-            self.buckets.push_back((now_sec, total));
-        }
     }
 
     fn oldest_bucket_sec(&mut self, now_sec: u64) -> Option<u64> {

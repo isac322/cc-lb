@@ -194,14 +194,13 @@ fn ingress_path(path: &str) -> Result<(Route, Option<&str>), VertexRouteError> {
     if path.starts_with("/ws/") {
         return Ok((Route::Live, None));
     }
-    let (version, rest) = if let Some(rest) = path.strip_prefix("/v1beta/") {
-        ("v1beta1", rest)
+    let rest = if let Some(rest) = path.strip_prefix("/v1beta/") {
+        rest
     } else if let Some(rest) = path.strip_prefix("/v1/") {
-        ("v1", rest)
+        rest
     } else {
         return Err(VertexRouteError::InvalidRoute);
     };
-    let _ = version;
     if rest == "cachedContents" {
         return Ok((Route::CachedCreate, None));
     }
@@ -822,10 +821,6 @@ fn rewrite_cached_reference(
     {
         rewrite_object(nested)?;
     }
-    if spans.is_empty() && !sole_wrapper {
-        return Ok(body.clone());
-    }
-    let out = replace_spans(raw.to_vec(), spans);
     if sole_wrapper {
         // Re-run against the extracted object so the wrapper is removed while preserving its bytes.
         let inner = target.start..target.end;
@@ -867,6 +862,10 @@ fn rewrite_cached_reference(
             nested_spans,
         )));
     }
+    if spans.is_empty() {
+        return Ok(body.clone());
+    }
+    let out = replace_spans(raw.to_vec(), spans);
     Ok(Bytes::from(out))
 }
 

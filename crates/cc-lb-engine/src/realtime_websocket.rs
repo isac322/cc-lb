@@ -629,7 +629,7 @@ impl RealtimeWebSocketSession {
     /// Trace propagation belongs to the engine-created connection child span.
     pub fn inject_trace_context(&self, headers: &mut HeaderMap) {
         self.stream_span.in_scope(|| {
-            cc_lb_proxy_telemetry::inject_current_trace_context(headers);
+            cc_lb_observability::inject_current_trace_context(headers);
         });
     }
 

@@ -418,7 +418,7 @@ pub(crate) async fn load_cached_limit_resets(
             .load()
             .subscription_quota_cache
             .snapshot_for_upstream(upstream_id, now_unix_millis, max_staleness_secs);
-        if crate::subscription_quotas::five_hour_is_absent(
+        if cc_lb_control::subscription_quotas::five_hour_is_absent(
             latest.iter(),
             snapshots.iter().find(|snapshot| snapshot.window == "5h"),
             now_unix_millis,

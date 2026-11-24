@@ -25,7 +25,7 @@ pub(crate) struct CompatResponsePlan {
 pub(crate) enum CompatResponseKind {
     ResponsesAggregate { echo_metadata: Option<Value> },
     ResponsesStream { echo_metadata: Option<Value> },
-    Compact { original_request: Value },
+    Compact,
     Chat { plan: ChatPlan },
     ModelsList,
     ModelsGet { id: String },
@@ -66,7 +66,7 @@ pub(crate) fn api_key_only_features(
     ) {
         return Vec::new();
     }
-    body.map(|body| openai_compat::request::api_key_only_features(body, Transport::Http))
+    body.map(openai_compat::request::api_key_only_features)
         .unwrap_or_default()
 }
 
@@ -92,7 +92,6 @@ pub(crate) async fn prepare_request(
     capability: ProviderCapability,
     upstream_kind: StorageUpstreamKind,
     policy: &OpenaiOauthCompatPolicy,
-    _response_plan: Option<CompatResponsePlan>,
     files_body_cap: usize,
 ) -> Result<PreparedCompatRequest, CompatReject> {
     if upstream_kind != StorageUpstreamKind::OpenaiOauth {
@@ -170,9 +169,7 @@ pub(crate) async fn prepare_request(
                 .map_err(|_| CompatReject::unsupported_parameter("body"))?;
             path = "/v1/responses".to_owned();
             plan = Some(CompatResponsePlan {
-                kind: CompatResponseKind::Compact {
-                    original_request: value,
-                },
+                kind: CompatResponseKind::Compact,
                 truncation_emulate: false,
             });
         }

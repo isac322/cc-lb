@@ -1,9 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::ArcSwap;
-#[doc(hidden)]
-pub use cc_lb_domain::PlanInfo;
-use cc_lb_domain::RateLimitObservation;
+use cc_lb_domain::{PlanInfo, RateLimitObservation};
 use cc_lb_storage_api::{
     PromptCacheObservationStore, UpstreamRateLimitObservationRecord, UpstreamRecord,
 };

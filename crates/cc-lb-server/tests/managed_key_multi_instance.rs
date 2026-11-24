@@ -8,13 +8,14 @@ use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
+use crate::common::seed_app_testing_storage;
 use axum::Router;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::any;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AdminAuthProviderConfig, Config, PostgresPoolConfig, StorageConfig};
-use cc_lb_server::app::{App, build_app_with_storage, seed_app_testing_storage};
+use cc_lb_server::app::{App, build_app_with_storage};
 use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind};
 use cc_lb_storage_api::{ManagedKeyStore, PrincipalStore, Storage as StorageTrait, StorageError};
 use cc_lb_storage_postgres::adapter::retry::RetryPolicy;

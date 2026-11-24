@@ -35,7 +35,6 @@ async-trait.workspace = true
 axum.workspace = true
 base64.workspace = true
 bytes.workspace = true
-cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-lifecycle = { workspace = true }
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
@@ -60,11 +59,11 @@ hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", 
 chrono.workspace = true
 metrics.workspace = true
 multer = "3.1"
-rand = "0.10"
+rand.workspace = true
 rustls.workspace = true
 serde_json.workspace = true
 sonic-rs.workspace = true
-sha2 = "0.11"
+sha2.workspace = true
 blake3.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
@@ -80,6 +79,7 @@ trybuild = "1"
 
 [target.'cfg(not(trybuild))'.dev-dependencies]
 cc-lb-workspace-hack.workspace = true
+cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-event-pipeline = { workspace = true, features = ["postgres"] }
 cc-lb-routing-eval = { path = "../cc-lb-routing-eval", features = ["test-utils"] }
 cc-lb-runtime-sync = { workspace = true, features = ["default", "sqlite", "postgres"] }

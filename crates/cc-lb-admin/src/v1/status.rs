@@ -409,7 +409,7 @@ async fn export_registry(
 
 fn export_registry_entry(entry: WasmRegistryEntry, size_bytes: u64) -> ExportRegistryEntry {
     ExportRegistryEntry {
-        sha256_hex: hex_sha256(entry.sha256),
+        sha256_hex: hex::encode(entry.sha256),
         name: entry.name,
         original_filename: entry.original_filename,
         label: entry.label,
@@ -467,10 +467,6 @@ fn normalize_json(value: Value) -> Value {
 fn sensitive_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
     key.contains("secret") || key.contains("token") || key.contains("password")
-}
-
-fn hex_sha256(sha256: [u8; 32]) -> String {
-    sha256.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn status_error_response(error: StatusError) -> axum::response::Response {

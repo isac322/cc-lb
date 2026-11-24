@@ -57,18 +57,16 @@ where
         .store_budget
         .try_acquire()
         .inspect_err(record_pool_saturation)?;
-    let mut wi =
-        build_worker_instance(cell, hook, export_name).inspect_err(record_pool_saturation)?;
+    let mut wi = build_worker_instance(cell, export_name).inspect_err(record_pool_saturation)?;
     execute_call_scoped(&mut wi, cell, input, hook, with_output)
 }
 
 pub(crate) fn validate_hook_export(
     cell: &Arc<PluginCell>,
-    hook: HookKind,
     export_name: &str,
 ) -> Result<(), WasmtimeRuntimeError> {
     let _permit = cell.store_budget.try_acquire()?;
-    let _instance = build_worker_instance(cell, hook, export_name)?;
+    let _instance = build_worker_instance(cell, export_name)?;
     Ok(())
 }
 
@@ -134,28 +132,8 @@ where
         store,
         memory,
         alloc_fn,
-        filter_fn,
-        shape_fn,
-        transform_response_fn,
-        transform_sse_event_fn,
-        transform_realtime_frame_fn,
-        shape_envelope_gemini_fn,
+        hook_fn,
     } = wi;
-
-    let hook_fn = match hook {
-        HookKind::Filter => filter_fn.as_ref(),
-        HookKind::Shape => shape_fn.as_ref(),
-        HookKind::TransformResponse => transform_response_fn.as_ref(),
-        HookKind::TransformSseEvent => transform_sse_event_fn.as_ref(),
-        HookKind::TransformRealtimeFrame => transform_realtime_frame_fn.as_ref(),
-        HookKind::ShapeEnvelopeGemini => shape_envelope_gemini_fn.as_ref(),
-    }
-    .ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
-        reason: format!(
-            "plugin does not export `{}` — slot kind mismatch (inspect should have caught this)",
-            hook.as_str()
-        ),
-    })?;
 
     let input_len: u32 =
         input

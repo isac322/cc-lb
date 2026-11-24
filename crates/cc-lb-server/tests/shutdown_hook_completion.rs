@@ -14,8 +14,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::common::build_app_for_testing;
 use cc_lb_config::Config;
-use cc_lb_server::app::{App, build_app_for_testing};
+use cc_lb_server::app::App;
 use cc_lb_server::signal::{SHUTDOWN_HOOKS_TIMEOUT, SignalHandle};
 use tokio::sync::oneshot;
 use tokio::time::{Instant, timeout};

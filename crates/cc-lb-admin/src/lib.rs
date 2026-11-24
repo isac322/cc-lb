@@ -40,7 +40,7 @@ use cc_lb_storage_api::{
 
 use crate::ports::{SubscriptionQuotaIngestionPort, WarmupPort};
 
-pub use cc_lb_control::{
+pub(crate) use cc_lb_control::{
     LimitResetUsageRefresh, LimitResetUsageRefreshPort, WarmupWindowCheck, WarmupWindowVerifier,
 };
 

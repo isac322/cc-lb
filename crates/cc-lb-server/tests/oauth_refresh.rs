@@ -1077,12 +1077,6 @@ impl OAuthRefreshUpstreams for TestOAuthRefreshUpstreams {
             .await
             .map_err(storage_scheduler_error)
     }
-
-    async fn read_oauth_token_generation(&self, id: Uuid) -> SchedulerResult<Option<u64>> {
-        UpstreamStore::read_oauth_token_generation(self.storage.as_ref(), id)
-            .await
-            .map_err(storage_scheduler_error)
-    }
 }
 
 async fn refresh_tokens(

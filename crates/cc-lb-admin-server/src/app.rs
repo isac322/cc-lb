@@ -1,8 +1,7 @@
 use std::collections::HashMap;
-use std::fs;
 use std::io;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -31,6 +30,7 @@ use cc_lb_runtime_sync::aead_key::{AeadKeyError, load_aead_from_env};
 use cc_lb_runtime_sync::build_meta::BuildMeta;
 use cc_lb_runtime_sync::replica::load_or_create_replica_id;
 use cc_lb_runtime_sync::storage_factory::{StorageFactoryError, open_storage};
+use cc_lb_runtime_sync::{await_or_abort, resolve_data_dir};
 use cc_lb_scheduler::admin::SchedulerAdminHandle;
 use cc_lb_scheduler::factory::{OpenedScheduler, SchedulerFactoryError, open_scheduler_storage};
 use cc_lb_storage_api::{ManagedKeyStore, Storage};
@@ -242,30 +242,6 @@ pub async fn run_admin_serve(
     Ok(())
 }
 
-pub async fn build_admin_app(
-    config: Config,
-    clock: ClockHandle,
-) -> Result<AdminApp, AdminBuildError> {
-    build_admin_app_with_path(config, None, clock).await
-}
-
-pub async fn build_admin_app_with_path(
-    config: Config,
-    config_path: Option<&Path>,
-    clock: ClockHandle,
-) -> Result<AdminApp, AdminBuildError> {
-    build_admin_app_with_path_inner(
-        config,
-        config_path,
-        StartupConfigOverrides {
-            split_mode_read_only_config: true,
-            ..Default::default()
-        },
-        clock,
-    )
-    .await
-}
-
 async fn build_admin_app_with_path_inner(
     config: Config,
     config_path: Option<&Path>,
@@ -352,12 +328,7 @@ async fn build_admin_app_with_storage_inner(
         tokio::sync::broadcast::channel(cc_lb_admin::events::DEFAULT_STORAGE_TAIL_CAPACITY).0;
 
     let (event_fanout_shutdown_tx, event_fanout_shutdown_rx) = watch::channel(false);
-    #[allow(unused_mut)]
     let mut event_fanout_tasks = Vec::new();
-    #[cfg(not(feature = "postgres"))]
-    {
-        let _ = &event_fanout_shutdown_rx;
-    }
 
     let event_bus: Arc<dyn RequestEventBus> = match &config.storage {
         StorageConfig::Sqlite { .. } => {
@@ -495,34 +466,6 @@ fn wrap_admin_router(admin_state: AdminState) -> Router {
     with_browser_security_headers(router)
 }
 
-fn resolve_data_dir(
-    cli: Option<&Path>,
-    config_value: Option<&Path>,
-    env_var: &str,
-) -> Result<PathBuf, AdminBuildError> {
-    let data_dir = if let Ok(env_path) = std::env::var(env_var) {
-        PathBuf::from(env_path)
-    } else if let Some(cli_path) = cli {
-        cli_path.to_path_buf()
-    } else if let Some(config_path) = config_value {
-        config_path.to_path_buf()
-    } else {
-        PathBuf::from("./data")
-    };
-
-    if !data_dir.exists() {
-        fs::create_dir_all(&data_dir)?;
-        #[cfg(unix)]
-        {
-            use std::fs::Permissions;
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&data_dir, Permissions::from_mode(0o700))?;
-        }
-    }
-
-    Ok(data_dir)
-}
-
 fn init_observability(config: &Config) -> Result<TracingGuard, AdminBuildError> {
     let guard = cc_lb_observability::init(&ObservabilityConfig {
         tracing_level: config.observability.tracing_level.clone(),
@@ -534,13 +477,6 @@ fn init_observability(config: &Config) -> Result<TracingGuard, AdminBuildError> 
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     cc_lb_scheduler::scheduler_metrics::touch_scheduler_metric_handles();
     Ok(guard)
-}
-
-async fn await_or_abort<T>(mut task: JoinHandle<T>, timeout: Duration) {
-    if tokio::time::timeout(timeout, &mut task).await.is_err() {
-        task.abort();
-        let _ = task.await;
-    }
 }
 
 async fn shutdown_signal() {

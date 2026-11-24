@@ -14,8 +14,19 @@ use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::{Context, SubscriberExt as _};
 use tracing_subscriber::{Layer, Registry};
 
+use super::cache::{
+    DecodedPromptCacheObservation, DecodedPromptCacheObservationKind, build_cache_score_from_match,
+    fetch_prompt_cache_warm_entries, prompt_cache_observation_expires_at,
+    request_cache_breakpoint_from_plugin, request_cache_metadata,
+    request_cache_metadata_from_value, resolve_longest_warm_match,
+};
+use super::identity::{
+    MAX_IDENTITY_VALUE_BYTES, MAX_THREAD_STICKY_SUBAGENTS_PER_SHARD, ThreadStickySubagentKey,
+};
+use super::streaming::{ANTHROPIC_PROVIDER_STATE_MARKERS, SSE_BUFFER_MAX_RETAINED_CAPACITY_BYTES};
+use super::types::DEFAULT_MESSAGES_CAP_BYTES;
 use super::*;
-use crate::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
+use cc_lb_routing_eval::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
 
 #[test]
 fn has_json_content_type_matches_semantic_json_media_types() {
@@ -446,7 +457,7 @@ fn openai_replay_identity_namespaces_scope_dimensions() {
         "processing_region": "us-east"
     });
     let headers = HeaderMap::new();
-    let identity = super::openai_replay_identity(
+    let identity = super::cache::openai_replay_identity(
         &value,
         &headers,
         "gpt-5.6",
@@ -524,7 +535,7 @@ fn openai_replay_identity_namespaces_scope_dimensions() {
         scoped["processing_region"] = serde_json::Value::String(region.to_owned());
         scoped["prompt_cache_key"] = serde_json::Value::String(key.to_owned());
         scoped["conversation"]["id"] = serde_json::Value::String(conversation.to_owned());
-        let candidate = super::openai_replay_identity(&scoped, &headers, model, ttl, prefix)
+        let candidate = super::cache::openai_replay_identity(&scoped, &headers, model, ttl, prefix)
             .expect("scoped identity");
         assert_ne!(identity, candidate);
     }
@@ -535,14 +546,14 @@ fn openai_replay_identity_namespaces_scope_dimensions() {
     delimiter_right["organization"] = serde_json::Value::String("acme".to_owned());
     delimiter_right["processing_region"] = serde_json::Value::String("us|region=eu".to_owned());
     assert_ne!(
-        super::openai_replay_identity(
+        super::cache::openai_replay_identity(
             &delimiter_left,
             &headers,
             "gpt-5.6",
             Some(cc_lb_storage_api::CacheTtl::Ttl30m),
             Some("prefix-a"),
         ),
-        super::openai_replay_identity(
+        super::cache::openai_replay_identity(
             &delimiter_right,
             &headers,
             "gpt-5.6",
@@ -555,14 +566,14 @@ fn openai_replay_identity_namespaces_scope_dimensions() {
     let mut prefix_right = value.clone();
     prefix_right["organization"] = serde_json::Value::String("org-a|organization=tail".to_owned());
     assert_ne!(
-        super::openai_replay_identity(
+        super::cache::openai_replay_identity(
             &prefix_left,
             &headers,
             "gpt-5.6",
             Some(cc_lb_storage_api::CacheTtl::Ttl30m),
             Some("prefix-a|organization=org-a"),
         ),
-        super::openai_replay_identity(
+        super::cache::openai_replay_identity(
             &prefix_right,
             &headers,
             "gpt-5.6",
@@ -579,14 +590,14 @@ fn openai_replay_identity_namespaces_scope_dimensions() {
         serde_json::Value::String("key-a|prompt_cache_key=tail".to_owned());
     region_left["prompt_cache_key"] = serde_json::Value::String("tail".to_owned());
     assert_ne!(
-        super::openai_replay_identity(
+        super::cache::openai_replay_identity(
             &region_left,
             &headers,
             "gpt-5.6",
             Some(cc_lb_storage_api::CacheTtl::Ttl30m),
             Some("prefix-a"),
         ),
-        super::openai_replay_identity(
+        super::cache::openai_replay_identity(
             &region_right,
             &headers,
             "gpt-5.6",
@@ -602,14 +613,14 @@ fn openai_replay_identity_namespaces_scope_dimensions() {
     key_right["conversation"]["id"] =
         serde_json::Value::String("left|conversation=right".to_owned());
     assert_ne!(
-        super::openai_replay_identity(
+        super::cache::openai_replay_identity(
             &key_left,
             &headers,
             "gpt-5.6",
             Some(cc_lb_storage_api::CacheTtl::Ttl30m),
             Some("prefix-a"),
         ),
-        super::openai_replay_identity(
+        super::cache::openai_replay_identity(
             &key_right,
             &headers,
             "gpt-5.6",
@@ -622,14 +633,14 @@ fn openai_replay_identity_namespaces_scope_dimensions() {
     let mut string_conversation_other = value.clone();
     string_conversation_other["conversation"] = serde_json::Value::String("conv-b".to_owned());
     assert_ne!(
-        super::openai_replay_identity(
+        super::cache::openai_replay_identity(
             &string_conversation,
             &headers,
             "gpt-5.6",
             Some(cc_lb_storage_api::CacheTtl::Ttl30m),
             Some("prefix-a"),
         ),
-        super::openai_replay_identity(
+        super::cache::openai_replay_identity(
             &string_conversation_other,
             &headers,
             "gpt-5.6",
@@ -640,14 +651,14 @@ fn openai_replay_identity_namespaces_scope_dimensions() {
     let mut object_conversation = value.clone();
     object_conversation["conversation"] = serde_json::json!({"id": "conv-a"});
     assert_ne!(
-        super::openai_replay_identity(
+        super::cache::openai_replay_identity(
             &string_conversation,
             &headers,
             "gpt-5.6",
             Some(cc_lb_storage_api::CacheTtl::Ttl30m),
             Some("prefix-a"),
         ),
-        super::openai_replay_identity(
+        super::cache::openai_replay_identity(
             &object_conversation,
             &headers,
             "gpt-5.6",
@@ -6612,38 +6623,31 @@ fn sse_completion_follows_each_provider_terminal_event() {
     assert!(sse_event_completes_response(
         ProviderCapability::AnthropicMessages,
         &message_stop,
-        false,
     ));
     assert!(!sse_event_completes_response(
         ProviderCapability::AnthropicMessages,
         &response_completed,
-        false,
     ));
     assert!(sse_event_completes_response(
         ProviderCapability::OpenaiResponses,
         &response_completed,
-        false,
     ));
     assert!(sse_event_completes_response(
         ProviderCapability::OpenaiResponses,
         &response_incomplete,
-        false,
     ));
     assert!(sse_event_completes_response(
         ProviderCapability::OpenaiResponses,
         &response_incomplete_named_without_type,
-        false,
     ));
     assert!(sse_event_completes_response(
         ProviderCapability::OpenaiResponses,
         &response_incomplete_data_only,
-        false,
     ));
     for malformed in [&response_incomplete_malformed, &response_incomplete_empty] {
         assert!(!sse_event_completes_response(
             ProviderCapability::OpenaiResponses,
             malformed,
-            false,
         ));
     }
     for (event, expected) in [
@@ -6667,18 +6671,15 @@ fn sse_completion_follows_each_provider_terminal_event() {
     assert!(!sse_event_completes_response(
         ProviderCapability::OpenaiResponses,
         &message_stop,
-        false,
     ));
     assert!(!sse_event_completes_response(
         ProviderCapability::OpenaiResponses,
         &response_delta,
-        false,
     ));
     // Gemini has no terminal event; pending keys bind at clean stream end.
     assert!(!sse_event_completes_response(
         ProviderCapability::GeminiGenerateContent,
         &gemini_chunk,
-        false,
     ));
 }
 
@@ -6742,13 +6743,9 @@ fn usage_shape_completion_keeps_provider_and_payload_boundaries() {
         ProviderCapability::OpenaiCompletions,
         ProviderCapability::GeminiOpenaiChatCompletions,
     ] {
-        assert!(sse_event_completes_response(capability, &done, false));
-        assert!(sse_event_completes_response(capability, &finished, false));
-        assert!(!sse_event_completes_response(
-            capability,
-            &unfinished,
-            false
-        ));
+        assert!(sse_event_completes_response(capability, &done));
+        assert!(sse_event_completes_response(capability, &finished));
+        assert!(!sse_event_completes_response(capability, &unfinished));
         for (bytes, completes_response) in [
             (b"data: [DONE]\n\n".as_slice(), true),
             (b"data: [DONE]".as_slice(), false),
@@ -6769,8 +6766,8 @@ fn usage_shape_completion_keeps_provider_and_payload_boundaries() {
         ProviderCapability::OpenaiEmbeddings,
         ProviderCapability::GeminiEmbedContent,
     ] {
-        assert!(!sse_event_completes_response(capability, &done, false));
-        assert!(!sse_event_completes_response(capability, &finished, false));
+        assert!(!sse_event_completes_response(capability, &done));
+        assert!(!sse_event_completes_response(capability, &finished));
     }
     for raw in [
         b"event: message_stop\ndata: {bad-json}\n\n".as_slice(),
@@ -6780,7 +6777,6 @@ fn usage_shape_completion_keeps_provider_and_payload_boundaries() {
         assert!(!sse_event_completes_response(
             ProviderCapability::AnthropicMessages,
             &parse_sse_event(raw),
-            true,
         ));
     }
     for raw in [
@@ -6790,13 +6786,11 @@ fn usage_shape_completion_keeps_provider_and_payload_boundaries() {
         assert!(!sse_event_completes_response(
             ProviderCapability::OpenaiResponses,
             &parse_sse_event(raw),
-            false,
         ));
     }
     assert!(sse_event_completes_response(
         ProviderCapability::OpenaiResponses,
         &parse_sse_event(b"event: response.completed\ndata: {}\n\n"),
-        false,
     ));
 }
 

@@ -1539,7 +1539,7 @@ async fn openai_claim_rejects_unknown_unsupported_foreign_and_invalid_requests()
 }
 
 struct BlockingUsageRefresh {
-    outcome: cc_lb_admin::LimitResetUsageRefresh,
+    outcome: cc_lb_control::LimitResetUsageRefresh,
     calls: std::sync::atomic::AtomicUsize,
     started: tokio::sync::Notify,
     release: tokio::sync::Semaphore,
@@ -1547,12 +1547,12 @@ struct BlockingUsageRefresh {
 }
 
 #[async_trait::async_trait]
-impl cc_lb_admin::LimitResetUsageRefreshPort for BlockingUsageRefresh {
+impl cc_lb_control::LimitResetUsageRefreshPort for BlockingUsageRefresh {
     async fn refresh_upstream_usage(
         &self,
         _upstream_id: Uuid,
         cancel: &tokio_util::sync::CancellationToken,
-    ) -> cc_lb_admin::LimitResetUsageRefresh {
+    ) -> cc_lb_control::LimitResetUsageRefresh {
         assert!(!cancel.is_cancelled(), "continuation has a fresh token");
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.started.notify_one();
@@ -1616,7 +1616,7 @@ async fn router_claim(app: axum::Router, upstream_id: Uuid, body: Value) -> (Sta
 
 async fn usage_refresh_completion_case(
     kind: UpstreamKind,
-    outcome: cc_lb_admin::LimitResetUsageRefresh,
+    outcome: cc_lb_control::LimitResetUsageRefresh,
     disconnect: bool,
     provider_outcome: &str,
 ) {
@@ -1729,21 +1729,21 @@ async fn usage_refresh_completion_case(
 async fn reset_awaits_usage_refresh_and_keeps_refresh_failure_distinct() {
     usage_refresh_completion_case(
         UpstreamKind::AnthropicOauth,
-        cc_lb_admin::LimitResetUsageRefresh::Refreshed,
+        cc_lb_control::LimitResetUsageRefresh::Refreshed,
         false,
         "reset",
     )
     .await;
     usage_refresh_completion_case(
         UpstreamKind::OpenaiOauth,
-        cc_lb_admin::LimitResetUsageRefresh::Failed,
+        cc_lb_control::LimitResetUsageRefresh::Failed,
         false,
         "reset",
     )
     .await;
     usage_refresh_completion_case(
         UpstreamKind::OpenaiOauth,
-        cc_lb_admin::LimitResetUsageRefresh::Refreshed,
+        cc_lb_control::LimitResetUsageRefresh::Refreshed,
         false,
         "already_redeemed",
     )
@@ -1754,14 +1754,14 @@ async fn reset_awaits_usage_refresh_and_keeps_refresh_failure_distinct() {
 async fn reset_usage_refresh_survives_client_disconnect() {
     usage_refresh_completion_case(
         UpstreamKind::AnthropicOauth,
-        cc_lb_admin::LimitResetUsageRefresh::Refreshed,
+        cc_lb_control::LimitResetUsageRefresh::Refreshed,
         true,
         "reset",
     )
     .await;
     usage_refresh_completion_case(
         UpstreamKind::OpenaiOauth,
-        cc_lb_admin::LimitResetUsageRefresh::Refreshed,
+        cc_lb_control::LimitResetUsageRefresh::Refreshed,
         true,
         "reset",
     )
@@ -1813,7 +1813,7 @@ async fn openai_claim_maps_non_reset_and_uncertain_outcomes_without_refresh() {
         let upstream =
             seed_provider_oauth_upstream(&server, &provider.uri(), UpstreamKind::OpenaiOauth).await;
         let refresh = std::sync::Arc::new(BlockingUsageRefresh {
-            outcome: cc_lb_admin::LimitResetUsageRefresh::Refreshed,
+            outcome: cc_lb_control::LimitResetUsageRefresh::Refreshed,
             calls: 0.into(),
             started: tokio::sync::Notify::new(),
             release: tokio::sync::Semaphore::new(1),

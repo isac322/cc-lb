@@ -1,3 +1,4 @@
+use super::cache::request_service_tier;
 use super::*;
 
 pub(super) fn use_image_rates_for_admission(

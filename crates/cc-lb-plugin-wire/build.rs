@@ -254,11 +254,7 @@ fn render_schema_impls(entries: &[SchemaEntry]) -> String {
             .map(u8::to_string)
             .collect::<Vec<_>>()
             .join(", ");
-        let ty = if entry.ty.starts_with("v2::") || entry.ty.starts_with("v3::") {
-            format!("crate::{}", entry.ty)
-        } else {
-            entry.ty.to_owned()
-        };
+        let ty = format!("crate::{}", entry.ty);
         output.push_str(&format!(
             "impl{} crate::schema::WireSchema for {} {{ const FINGERPRINT: [u8; 32] = [{}]; const DESCRIPTOR: &'static str = {:?}; }}\n",
             entry.impl_generics, ty, bytes, entry.descriptor

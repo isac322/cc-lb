@@ -396,26 +396,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
-name = "bincode"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
-dependencies = [
- "bincode_derive",
- "serde",
- "unty",
-]
-
-[[package]]
-name = "bincode_derive"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf95709a440f45e986983918d0e8a1f30a9b1df04918fc828670606804ac3c09"
-dependencies = [
- "virtue",
-]
-
-[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -622,7 +602,6 @@ name = "cc-lb-admin"
 version = "2.2.1"
 dependencies = [
  "anyhow",
- "apalis-postgres",
  "apalis-sqlite",
  "arc-swap",
  "async-stream",
@@ -638,7 +617,6 @@ dependencies = [
  "cc-lb-oauth-protocol",
  "cc-lb-plugin-wire",
  "cc-lb-pricing",
- "cc-lb-provider-spi",
  "cc-lb-providers",
  "cc-lb-quota",
  "cc-lb-request-log",
@@ -708,7 +686,6 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-observability",
  "cc-lb-providers",
- "cc-lb-request-log",
  "cc-lb-runtime-sync",
  "cc-lb-scheduler",
  "cc-lb-storage-api",
@@ -779,7 +756,6 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.23.1",
- "bincode",
  "bytes",
  "cc-lb-aead",
  "cc-lb-clock",
@@ -799,7 +775,6 @@ dependencies = [
  "globset",
  "http",
  "http-body-util",
- "hyper",
  "hyper-rustls",
  "hyper-util",
  "loom",
@@ -946,7 +921,6 @@ dependencies = [
  "metrics-util",
  "parking_lot 0.13.0",
  "proptest",
- "serde",
  "serde_json",
  "sha2 0.11.1",
  "sonic-rs",
@@ -1013,14 +987,12 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "regex",
- "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tower-http 0.7.1",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -1152,7 +1124,6 @@ dependencies = [
  "cc-lb-workspace-hack",
  "http",
  "serde",
- "serde_json",
  "thiserror 2.0.21",
  "url",
 ]
@@ -6037,12 +6008,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
-name = "unty"
-version = "0.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
-
-[[package]]
 name = "url"
 version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6106,12 +6071,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "virtue"
-version = "0.0.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 
 [[package]]
 name = "wait-timeout"

@@ -7,6 +7,7 @@ plugins/
 ├── router/
 │   └── cache-aware-wasmtime/            # cache-affinity filter plugin
 └── test-fixtures/                       # plugins used by host tests
+    ├── wasmtime-dual-slot/
     ├── wasmtime-filter-service-tier/
     └── wasmtime-shape-passthrough/
 ```

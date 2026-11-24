@@ -233,12 +233,12 @@ pub fn virtual_cost_micros_full_with_context_and_provider_writes(
         )
     } else {
         if cache_creation_5m_input.saturating_add(cache_creation_1h_input) > 0 {
-            record_missing_cache_field(&normalized, "cache_creation_per_million_usd");
+            record_missing_price_field(&normalized, "cache_creation_per_million_usd");
         }
         (0, 0)
     };
     if native_pricing.is_some() && cache_read_input > 0 && cache_read_price.is_none() {
-        record_missing_cache_field(&normalized, "cache_read_per_million_usd");
+        record_missing_price_field(&normalized, "cache_read_per_million_usd");
         return Some(ComputedCostBreakdown::unknown());
     }
 
@@ -246,7 +246,7 @@ pub fn virtual_cost_micros_full_with_context_and_provider_writes(
         .map(|price| component_cost(cache_read_input, price))
         .unwrap_or_else(|| {
             if cache_read_input > 0 {
-                record_missing_cache_field(&normalized, "cache_read_per_million_usd");
+                record_missing_price_field(&normalized, "cache_read_per_million_usd");
             }
             0
         });
@@ -300,10 +300,6 @@ pub fn virtual_cost_micros_full_with_context_and_provider_writes(
 
 fn component_cost(tokens: u64, price: UsdPerMillion) -> u128 {
     u128::from(tokens) * u128::from(price.as_micros_usd()) / 1_000_000
-}
-
-fn record_missing_cache_field(model: &str, field: &'static str) {
-    record_missing_price_field(model, field);
 }
 
 pub(crate) fn record_missing_price_field(model: &str, field: &'static str) {

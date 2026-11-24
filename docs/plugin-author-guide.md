@@ -670,7 +670,7 @@ and synthetic upstream identity; its direction and payload can be changed.
 
 Each hook uses its single supported wire version:
 
-- Filter fixtures use `v3::FilterRequest` (`wire = 3`) with provider-appropriate candidates and native cache pricing context (`sample_filter_request_v3`, `sample_filter_request_for`).
+- Filter fixtures use `v3::FilterRequest` (`wire = 3`) with provider-appropriate candidates and native cache pricing context (`sample_filter_request_v3`, `sample_filter_request`).
 - Shape, buffered-response, and SSE fixtures use V2 (`wire = 2`) with a synthetic principal and matching `Upstream` and `UpstreamIdentity` values.
 - Frame fixtures use `v2::TransformRealtimeFrameRequest` (`wire = 2`).
 

@@ -670,6 +670,7 @@ fn realtime_use_image_rates(kind: RealtimeWebSocketKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lifecycle::MAX_IDENTITY_VALUE_BYTES;
 
     #[test]
     fn realtime_admission_uses_image_rates_only_for_openai() {

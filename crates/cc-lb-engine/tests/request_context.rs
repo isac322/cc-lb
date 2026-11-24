@@ -3,8 +3,8 @@ use cc_lb_domain::{
     CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, CachePricingSummary, PrefixBytes,
     TtlClass,
 };
-use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
 use cc_lb_engine::request_context::RequestContext;
+use cc_lb_routing_eval::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
 use http::{HeaderMap, Method};
 
 #[test]

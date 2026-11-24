@@ -11,8 +11,6 @@ runs:
   using: composite
   steps:
     - uses: ./.github/actions/setup-rust-tools
-      with:
-        profile: semver
 
     - name: Resolve baseline crate versions and cache metadata
       id: meta

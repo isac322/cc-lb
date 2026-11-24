@@ -98,7 +98,7 @@ pub(super) fn apply_thread_sticky_subagent_latch(
 }
 pub(super) const HERMES_PRODUCT_TAG: &str = "product=hermes-agent";
 pub(super) const HERMES_CONVERSATION_TAG_PREFIX: &str = "conversation=";
-pub(super) const MAX_IDENTITY_VALUE_BYTES: usize = 512;
+pub(crate) const MAX_IDENTITY_VALUE_BYTES: usize = 512;
 
 #[derive(Default)]
 pub(super) struct MetadataIdentity {
@@ -274,12 +274,6 @@ pub(super) fn request_identity_metadata(
             observed_session_id
                 .as_deref()
                 .and_then(derived_parent_session_id)
-        })
-        .or_else(|| {
-            let observed = observed_session_id.as_deref()?;
-            let meta_session = metadata.session_id.as_deref()?;
-            (meta_session != observed && derived_parent_session_id(observed).is_some())
-                .then(|| meta_session.to_owned())
         })
         .filter(|parent| observed_session_id.as_deref() != Some(parent.as_str()));
     let claude_request_class = header_identity(headers, "x-claude-code-request-class");

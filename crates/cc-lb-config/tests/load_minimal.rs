@@ -67,3 +67,27 @@ unknown_openai_reasoning = "fail_closed"
         UnknownOpenaiReasoningPolicy::FailClosed
     );
 }
+
+#[test]
+fn anthropic_oauth_partial_table_preserves_default_scopes() {
+    let (_dir, path) = crate::common::temp_config(
+        r#"
+[listener]
+
+[oauth.anthropic]
+client_id = "custom-client"
+"#,
+    );
+
+    let config = Config::load(&path).unwrap();
+
+    let anthropic = config
+        .oauth
+        .anthropic
+        .expect("anthropic oauth config should be present");
+    assert_eq!(anthropic.client_id, "custom-client");
+    assert_eq!(
+        anthropic.scopes,
+        vec!["user:profile".to_owned(), "user:inference".to_owned()]
+    );
+}

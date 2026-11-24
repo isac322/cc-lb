@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use cc_lb_engine::prompt_cache_simulator::{
+use cc_lb_routing_eval::prompt_cache_simulator::{
     V3PromptCacheBlock, V3PromptCacheBlockSource, analyze_v3_prompt_cache,
 };
 use serde_json::{Value, json};

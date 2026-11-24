@@ -1,9 +1,9 @@
 //! Procedural macros for `cc-lb-pdk-wasmtime`.
 //!
 //! `#[cc_lb_plugin(...)]` emits guest ABI exports, schema-fingerprint custom
-//! sections, and V1 legacy or V2 provider-qualified metadata.
-//! `#[handler(...)]` accepts an optional `provider = "anthropic"|"openai"|"gemini"`
-//! selector and validates per-entrypoint metadata consumed by the plugin macro.
+//! sections, and V2 provider-qualified metadata.
+//! `#[handler(...)]` requires `provider = "anthropic"|"openai"|"gemini"`
+//! alongside `wire = 2|3` and validates per-entrypoint metadata consumed by the plugin macro.
 #![forbid(unsafe_code)]
 
 extern crate proc_macro;

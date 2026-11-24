@@ -1,10 +1,10 @@
+use crate::common::build_app_for_testing;
 use axum::{
     body::Body,
     http::{Request, StatusCode, header},
     response::Response,
 };
 use cc_lb_config::Config;
-use cc_lb_server::app::build_app_for_testing;
 #[cfg(feature = "embed-spa")]
 use http_body_util::BodyExt;
 use tower::ServiceExt;

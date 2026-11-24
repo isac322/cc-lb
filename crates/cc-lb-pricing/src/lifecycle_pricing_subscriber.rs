@@ -273,13 +273,7 @@ fn compute_cost(partial: &Partial) -> Option<CostBreakdown> {
         partial.service_tier.as_deref(),
         partial.usage_seen,
     );
-    Some(event_cost_breakdown_from_pricing(breakdown))
-}
-
-fn event_cost_breakdown_from_pricing(
-    breakdown: crate::ComputedCostBreakdown,
-) -> cc_lb_request_log::CostBreakdown {
-    breakdown.into()
+    Some(breakdown.into())
 }
 
 fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, idle_ttl: Duration, max_ttl: Duration) {

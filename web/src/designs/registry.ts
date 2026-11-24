@@ -28,10 +28,7 @@ function providerItems(providers: readonly ProviderFamily[]): NavItem[] {
   }));
 }
 
-function providerNavigation(
-  installation: Installation,
-  surface: 'desktop' | 'mobile',
-): readonly NavGroup[] {
+function providerNavigation(installation: Installation): readonly NavGroup[] {
   const base = NAV_GROUPS.map((group) => ({
     ...group,
     items: group.items.map((item) => ({
@@ -48,27 +45,16 @@ function providerNavigation(
   const providers = providerItems(installation.providers);
 
   // Provider destinations live under Overview on both desktop and mobile.
-  if (surface === 'mobile') {
-    return base.map((group) => ({
-      ...group,
-      items:
-        group === monitor
-          ? group.items.map((item) =>
-              item === overview ? { ...overview, children: providers } : item,
-            )
-          : group.items,
-    }));
-  }
-
-  return [
-    {
-      ...monitor,
-      items: monitor.items.map((item) =>
-        item === overview ? { ...overview, children: providers } : item,
-      ),
-    },
-    ...base.slice(1),
-  ];
+  return base.map((group) =>
+    group === monitor
+      ? {
+          ...group,
+          items: group.items.map((item) =>
+            item === overview ? { ...overview, children: providers } : item,
+          ),
+        }
+      : group,
+  );
 }
 
 type NavigationSurface = 'desktop' | 'mobile';
@@ -94,7 +80,7 @@ export function useDesignNavigation(surface: NavigationSurface = 'desktop') {
   const location = useRouterState({ select: (state) => state.location });
   const groups =
     installation.mode === 'multi'
-      ? providerNavigation(installation, surface)
+      ? providerNavigation(installation)
       : defaultDesign.navItems(installation);
   const items = groups.flatMap((group) => [
     ...group.items,

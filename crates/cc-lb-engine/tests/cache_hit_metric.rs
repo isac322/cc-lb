@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 
-use cc_lb_engine::{CachingDnsConnector, DnsCacheError, DnsResolver, DnsResolverConfig};
+use cc_lb_engine::dns_cache::{CachingDnsConnector, DnsCacheError, DnsResolver, DnsResolverConfig};
 use hyper::Uri;
 use metrics::{Counter, CounterFn, Key, KeyName, Metadata, Recorder, SharedString, Unit};
 use tokio::net::TcpListener;

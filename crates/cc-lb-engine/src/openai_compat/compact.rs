@@ -34,7 +34,7 @@ pub fn compact_request_to_responses(body: &Value) -> Result<Value, super::Compat
 }
 
 /// Convert an aggregated Responses result into the public compact resource.
-pub fn compaction_resource(_original_request: &Value, aggregated: &Value) -> Value {
+pub fn compaction_resource(aggregated: &Value) -> Value {
     let output = aggregated
         .get("output")
         .and_then(Value::as_array)
@@ -100,7 +100,6 @@ mod tests {
     #[test]
     fn resource_keeps_user_messages_and_compaction() {
         let v = compaction_resource(
-            &json!({}),
             &json!({"id":"r","created_at":3,"usage":{"total_tokens":2},"output":[{"type":"message","role":"assistant"},{"type":"message","role":"user"},{"type":"compaction","id":"c","encrypted_content":"e"}]}),
         );
         assert_eq!(v["object"], "response.compaction");

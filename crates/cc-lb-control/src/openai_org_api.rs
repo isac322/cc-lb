@@ -209,16 +209,6 @@ impl OpenAiOrgApi {
         }
     }
 
-    /// Construct a client with explicit bounds, primarily for local fakes and
-    /// deterministic timeout/body-limit tests.
-    pub fn with_origin_and_limits(origin: Url, limits: OpenAiOrgLimits) -> Self {
-        Self {
-            origin,
-            http: http_client(),
-            limits,
-        }
-    }
-
     pub fn origin(&self) -> &Url {
         &self.origin
     }
