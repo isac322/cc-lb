@@ -230,8 +230,8 @@ async fn list_principals(
     let offset = query.after.unwrap_or(0);
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
 
-    let total = match PrincipalStore::list(storage, 0, MAX_LIMIT, false).await {
-        Ok(records) => records.len(),
+    let total = match PrincipalStore::count(storage, false).await {
+        Ok(total) => total,
         Err(error) => return storage_error(error),
     };
     match PrincipalStore::list(storage, offset, limit, false).await {
@@ -633,6 +633,7 @@ async fn complete_principal_mutation<R>(
 where
     R: FnOnce() -> axum::response::Response + Send + 'static,
 {
+    let post_commit_tracker = state.post_commit_tracker.clone();
     let continuation = async move {
         let PrincipalMutationAudit {
             action,
@@ -664,7 +665,7 @@ where
         add_dynamic_rebind_headers(&mut response, &state).await;
         response
     };
-    match complete_after_commit(continuation).await {
+    match complete_after_commit(&post_commit_tracker, continuation).await {
         Ok(response) => response,
         Err(PostCommitAborted) => {
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "storage_error")

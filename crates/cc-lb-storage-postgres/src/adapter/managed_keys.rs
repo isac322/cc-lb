@@ -168,6 +168,30 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
         rows.into_iter().map(row_to_record).collect()
     }
 
+    async fn list_by_principal_with_ids(
+        &self,
+        principal_id: &str,
+    ) -> StorageResult<Vec<(String, StoredApiKeyRecord)>> {
+        validate_identifier("principal_id", principal_id)?;
+
+        let rows = retry::with_retry(&self.retry_policy, || async {
+            sqlx::query(SELECT_BY_PRINCIPAL_SQL)
+                .bind(principal_id)
+                .fetch_all(&self.pool)
+                .await
+        })
+        .await
+        .map_err(map_sqlx_error)?;
+
+        rows.into_iter()
+            .map(|row| {
+                let key_id = row.try_get::<String, _>("key_id").map_err(map_sqlx_error)?;
+                let record = row_to_record(row)?;
+                Ok((key_id, record))
+            })
+            .collect()
+    }
+
     async fn list_all(&self) -> StorageResult<Vec<(String, String, StoredApiKeyRecord)>> {
         validate_identifier("list_all", "all")?;
 

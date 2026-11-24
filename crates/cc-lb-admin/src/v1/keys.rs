@@ -118,6 +118,7 @@ async fn issue_key(
                 .expect("plaintext key format is guaranteed by KeyStore::create");
             let route = format!("/admin/v1/principals/{id}/keys");
             let state = state.clone();
+            let post_commit_tracker = state.post_commit_tracker.clone();
             let continuation = async move {
                 if record_issue_audit_or_revoke(
                     key_store.as_ref(),
@@ -155,7 +156,7 @@ async fn issue_key(
                 };
                 (StatusCode::CREATED, Json(response)).into_response()
             };
-            match complete_after_commit(continuation).await {
+            match complete_after_commit(&post_commit_tracker, continuation).await {
                 Ok(response) => response,
                 Err(PostCommitAborted) => post_commit_aborted_response(),
             }
@@ -235,7 +236,7 @@ async fn list_keys(
             .into_response();
     };
 
-    match key_store.list_all().await {
+    match key_store.list_by_principal_with_ids(&id).await {
         Ok(records) => {
             let last_used_map: std::collections::HashMap<String, u64> = if let Some(storage) =
                 state.storage.as_ref()
@@ -265,10 +266,7 @@ async fn list_keys(
             };
 
             let mut keys = Vec::new();
-            for (principal_id, key_id, r) in records {
-                if principal_id != id {
-                    continue;
-                }
+            for (key_id, r) in records {
                 if !matches_status(r.status, query.status.as_ref()) {
                     continue;
                 }
@@ -322,6 +320,11 @@ async fn list_keys(
             }
             Json(KeyListResponse { keys }).into_response()
         }
+        Err(KeyStoreError::Storage(StorageError::InvalidInput { field, reason })) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid_input", "field": field, "reason": reason })),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("Failed to list keys: {}", e);
             (
@@ -359,6 +362,7 @@ async fn revoke_key(
             let now = cc_lb_clock::unix_secs(state.clock.now());
             let route = format!("/admin/v1/principals/{id}/keys/{key_id}/revoke");
             let state = state.clone();
+            let post_commit_tracker = state.post_commit_tracker.clone();
             let continuation = async move {
                 if let Err(error) = record_admin_audit(
                     &state,
@@ -393,7 +397,7 @@ async fn revoke_key(
                 };
                 Json(response).into_response()
             };
-            match complete_after_commit(continuation).await {
+            match complete_after_commit(&post_commit_tracker, continuation).await {
                 Ok(response) => response,
                 Err(PostCommitAborted) => post_commit_aborted_response(),
             }

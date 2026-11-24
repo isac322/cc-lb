@@ -95,7 +95,9 @@ impl SchedulerMetricPayload for AdaptiveJob {
     fn scheduler_job_type(&self) -> &'static str {
         match self {
             Self::Warmup(_) => "upstream_warmup",
+            Self::ManualWarmup(_) => "adaptive:manual_warmup",
             Self::OAuthRefresh(_) => "adaptive:oauth_refresh",
+            Self::OAuthUsageRefresh(_) => "adaptive:oauth_usage_refresh",
             Self::MetadataRefresh(_) => "adaptive:metadata_refresh",
             Self::CacheKeepalive(_) => "adaptive:cache_keepalive",
         }

@@ -885,6 +885,7 @@ async fn admin_with_fake_org(stack: &Stack) -> Router {
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock,
         anthropic_org_api: AnthropicOrgApi::with_origin(stage.fake.url.clone()),
+        post_commit_tracker: Default::default(),
     })
 }
 

@@ -370,6 +370,18 @@ pub trait ManagedKeyStore: Send + Sync {
     async fn list_by_principal(&self, principal_id: &str)
     -> StorageResult<Vec<StoredApiKeyRecord>>;
 
+    async fn list_by_principal_with_ids(
+        &self,
+        principal_id: &str,
+    ) -> StorageResult<Vec<(String, StoredApiKeyRecord)>> {
+        Ok(self
+            .list_all()
+            .await?
+            .into_iter()
+            .filter_map(|(pid, key_id, record)| (pid == principal_id).then_some((key_id, record)))
+            .collect())
+    }
+
     async fn list_all(&self) -> StorageResult<Vec<(String, String, StoredApiKeyRecord)>>;
 
     async fn update(

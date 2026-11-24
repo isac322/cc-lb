@@ -344,7 +344,8 @@ async fn put_config_draft(
             .await;
     match result {
         Ok(response) => {
-            match complete_after_commit(async move {
+            let post_commit_tracker = state.post_commit_tracker.clone();
+            match complete_after_commit(&post_commit_tracker, async move {
                 let action = "config_draft_put";
                 if let Err(error) = record_admin_audit(
                     &state,
@@ -384,7 +385,8 @@ async fn validate_config_draft(
     let result = crate::settings::validate_draft(&state, request).await;
     match result {
         Ok(response) => {
-            match complete_after_commit(async move {
+            let post_commit_tracker = state.post_commit_tracker.clone();
+            match complete_after_commit(&post_commit_tracker, async move {
                 let action = "config_draft_validate";
                 if let Err(error) = record_admin_audit(
                     &state,
@@ -428,7 +430,8 @@ async fn save_config_file(
     let result = crate::settings::write_config_file(&state, &identity.provider_id, request).await;
     match result {
         Ok(written) => {
-            match complete_after_commit(async move {
+            let post_commit_tracker = state.post_commit_tracker.clone();
+            match complete_after_commit(&post_commit_tracker, async move {
                 let response = written.finish(saved_at_unix_secs).await;
                 let action = "config_save";
                 if let Err(error) = record_admin_audit(

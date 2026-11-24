@@ -485,7 +485,9 @@ impl Fixture {
             .find_map(|task| match task.args {
                 AdaptiveJob::CacheKeepalive(job) if job.generation == generation => Some(job),
                 AdaptiveJob::Warmup(_)
+                | AdaptiveJob::ManualWarmup(_)
                 | AdaptiveJob::OAuthRefresh(_)
+                | AdaptiveJob::OAuthUsageRefresh(_)
                 | AdaptiveJob::MetadataRefresh(_)
                 | AdaptiveJob::CacheKeepalive(_) => None,
             })

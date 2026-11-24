@@ -391,6 +391,7 @@ async fn latest_admin_api_preserves_persisted_credits_source_and_freshness() {
         clock,
         anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
             .expect("production origin"),
+        post_commit_tracker: Default::default(),
     });
     for (index, source, window, expected_state) in [
         (

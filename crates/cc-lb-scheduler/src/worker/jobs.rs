@@ -7,14 +7,14 @@ use crate::jobs::cache_keepalive::CacheKeepaliveJob;
 use crate::jobs::compat::AnthropicCompatRefreshJob;
 use crate::jobs::metadata_refresh::MetadataRefreshJob;
 use crate::jobs::oauth_refresh::OAuthRefreshJob;
-use crate::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
+use crate::jobs::oauth_usage_poll::{OAuthUsagePollCronJob, OAuthUsageRefreshJob};
 use crate::jobs::pool_quota_snapshot::PoolQuotaSnapshotCronJob;
 use crate::jobs::price_catalog::PriceCatalogRefreshJob;
 use crate::jobs::prompt_cache_purge::PromptCacheObservationPurgeJob;
 use crate::jobs::upstream_affinity_purge::UpstreamAffinityPurgeJob;
 use crate::jobs::usage_prune::UsagePruneJob;
 use crate::jobs::usage_rollup::UsageRollupTask;
-use crate::jobs::warmup::UpstreamWarmupJob;
+use crate::jobs::warmup::{ManualWarmupJob, UpstreamWarmupJob};
 use crate::jobs::watchdog::{OAuthRefreshWatchdogJob, WarmupWatchdogJob};
 use crate::middleware::TraceparentCarrier;
 use crate::retry::RetryPayload;
@@ -23,8 +23,11 @@ use crate::retry::RetryPayload;
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum AdaptiveJob {
     Warmup(UpstreamWarmupJob),
+    ManualWarmup(ManualWarmupJob),
     #[serde(rename = "oauth_refresh")]
     OAuthRefresh(OAuthRefreshJob),
+    #[serde(rename = "oauth_usage_refresh")]
+    OAuthUsageRefresh(OAuthUsageRefreshJob),
     MetadataRefresh(MetadataRefreshJob),
     CacheKeepalive(CacheKeepaliveJob),
 }
@@ -71,7 +74,9 @@ impl AdaptiveJob {
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::Warmup(job) => job.lane.job_kind(),
+            Self::ManualWarmup(_) => "manual_warmup",
             Self::OAuthRefresh(_) => "oauth_refresh",
+            Self::OAuthUsageRefresh(_) => "oauth_usage_refresh",
             Self::MetadataRefresh(_) => "metadata_refresh",
             Self::CacheKeepalive(_) => "cache_keepalive",
         }
@@ -82,7 +87,9 @@ impl TraceparentCarrier for AdaptiveJob {
     fn traceparent(&self) -> Option<&str> {
         match self {
             Self::Warmup(_) => None,
+            Self::ManualWarmup(job) => job.traceparent(),
             Self::OAuthRefresh(job) => job.traceparent(),
+            Self::OAuthUsageRefresh(job) => job.traceparent(),
             Self::MetadataRefresh(job) => job.traceparent(),
             Self::CacheKeepalive(job) => job.traceparent(),
         }
@@ -91,7 +98,9 @@ impl TraceparentCarrier for AdaptiveJob {
     fn set_traceparent(&mut self, traceparent: Option<String>) {
         match self {
             Self::Warmup(_) => {}
+            Self::ManualWarmup(job) => job.set_traceparent(traceparent),
             Self::OAuthRefresh(job) => job.set_traceparent(traceparent),
+            Self::OAuthUsageRefresh(job) => job.set_traceparent(traceparent),
             Self::MetadataRefresh(job) => job.set_traceparent(traceparent),
             Self::CacheKeepalive(job) => job.set_traceparent(traceparent),
         }
@@ -254,5 +263,30 @@ mod tests {
                 traceparent: None,
             }) if id == upstream_id
         ));
+    }
+
+    #[test]
+    fn split_bridge_adaptive_jobs_round_trip() {
+        let upstream_id = uuid::Uuid::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
+        let nonce = uuid::Uuid::from_u128(0x99);
+        let warmup = AdaptiveJob::ManualWarmup(ManualWarmupJob::new(
+            upstream_id,
+            cc_lb_storage_api::WarmupLane::Primary,
+            "fire-now:test".to_owned(),
+            1_800_000_000,
+            nonce,
+        ));
+        assert_eq!(warmup.kind(), "manual_warmup");
+        let warmup_json = serde_json::to_value(&warmup).expect("serialize manual warmup");
+        let warmup_decoded: AdaptiveJob =
+            serde_json::from_value(warmup_json).expect("deserialize manual warmup");
+        assert!(matches!(warmup_decoded, AdaptiveJob::ManualWarmup(_)));
+
+        let usage = AdaptiveJob::OAuthUsageRefresh(OAuthUsageRefreshJob::new(upstream_id, nonce));
+        assert_eq!(usage.kind(), "oauth_usage_refresh");
+        let usage_json = serde_json::to_value(&usage).expect("serialize usage refresh");
+        let usage_decoded: AdaptiveJob =
+            serde_json::from_value(usage_json).expect("deserialize usage refresh");
+        assert!(matches!(usage_decoded, AdaptiveJob::OAuthUsageRefresh(_)));
     }
 }

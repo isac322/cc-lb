@@ -126,6 +126,7 @@ async fn harness_with_scheduler(
         clock,
         anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
             .expect("production Anthropic origin parses"),
+        post_commit_tracker: Default::default(),
     };
     Harness {
         _dir: dir,

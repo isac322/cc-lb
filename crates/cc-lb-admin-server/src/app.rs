@@ -48,10 +48,12 @@ use tokio::task::{JoinHandle, JoinSet};
 use tower::ServiceExt as _;
 
 const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_millis(500);
+const POST_COMMIT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct AdminApp {
     pub admin_router: Router,
     pub admin_addr: SocketAddr,
+    pub(crate) post_commit_tracker: cc_lb_control::PostCommitTracker,
     event_fanout_shutdown_tx: Option<watch::Sender<bool>>,
     event_fanout_tasks: Vec<JoinHandle<()>>,
 }
@@ -160,6 +162,11 @@ impl AdminApp {
             while conn_tasks.join_next().await.is_some() {}
         }
 
+        let _ = tokio::time::timeout(
+            POST_COMMIT_SHUTDOWN_TIMEOUT,
+            self.post_commit_tracker.wait_idle(),
+        )
+        .await;
         if let Some(tx) = self.event_fanout_shutdown_tx {
             let _ = tx.send(true);
         }
@@ -425,6 +432,25 @@ async fn build_admin_app_with_storage_inner(
         &admin_config.runtime.wasmtime,
     )?;
     let meta = BuildMeta::current();
+    let post_commit_tracker = cc_lb_control::PostCommitTracker::default();
+    let scheduler_backend = opened_scheduler.lazy_handle();
+    let split_lazy_refresher = Arc::new(crate::split_ports::SplitSchedulerLazyRefresher::new(
+        storage.clone(),
+        scheduler_backend.clone(),
+        clock.clone(),
+    ));
+    let split_limit_reset_refresh = Arc::new(
+        crate::split_ports::SplitSchedulerLimitResetUsageRefresh::new(
+            storage.clone(),
+            scheduler_backend.clone(),
+            clock.clone(),
+        ),
+    );
+    let split_manual_warmup = Arc::new(crate::split_ports::SplitSchedulerManualWarmup::new(
+        storage.clone(),
+        scheduler_backend.clone(),
+        clock.clone(),
+    ));
     let admin_state = AdminState {
         build: AdminBuildInfo {
             git_sha: meta.git_sha,
@@ -441,17 +467,18 @@ async fn build_admin_app_with_storage_inner(
             warmup: None,
             subscription_quota_ingestion: None,
             replica_identity,
+            split_manual_warmup: Some(split_manual_warmup),
         }),
-        lazy_refresher: None,
+        lazy_refresher: Some(split_lazy_refresher),
         runtime: Some(runtime),
         data_dir: Some(data_dir),
         warmup_dialect_dispatcher: None,
         warmup_window_verifier: None,
-        limit_reset_usage_refresh: None,
+        limit_reset_usage_refresh: Some(split_limit_reset_refresh),
         dynamic_view,
         config: admin_config,
         dynamic_view_rebinder: None,
-        scheduler: Some(SchedulerAdminHandle::new(opened_scheduler.lazy_handle())),
+        scheduler: Some(SchedulerAdminHandle::new(scheduler_backend)),
         admin_auth,
         start_time: Instant::now(),
         event_bus: Some(event_bus),
@@ -459,11 +486,13 @@ async fn build_admin_app_with_storage_inner(
         clock,
         anthropic_org_api: AnthropicOrgApi::production()
             .map_err(AdminBuildError::AnthropicOrgOrigin)?,
+        post_commit_tracker: post_commit_tracker.clone(),
     };
 
     Ok(AdminApp {
         admin_router: wrap_admin_router(admin_state),
         admin_addr,
+        post_commit_tracker,
         event_fanout_shutdown_tx: Some(event_fanout_shutdown_tx),
         event_fanout_tasks,
     })
@@ -653,6 +682,7 @@ mod tests {
         let app = AdminApp {
             admin_router: router,
             admin_addr: addr,
+            post_commit_tracker: cc_lb_control::PostCommitTracker::default(),
             event_fanout_shutdown_tx: None,
             event_fanout_tasks: Vec::new(),
         };
@@ -829,5 +859,97 @@ mod tests {
             TcpStream::connect(addr).await.is_err(),
             "admin listener must stop accepting new connections after shutdown"
         );
+    }
+
+    #[tokio::test]
+    async fn serve_with_listener_waits_for_detached_post_commit_tasks_on_shutdown() {
+        let tracker = cc_lb_control::PostCommitTracker::default();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (finished_tx, mut finished_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Arc::new(std::sync::Mutex::new(Some(started_tx)));
+        let release_rx = Arc::new(tokio::sync::Mutex::new(Some(release_rx)));
+        let finished_tx = Arc::new(std::sync::Mutex::new(Some(finished_tx)));
+        let route_tracker = tracker.clone();
+
+        let router = Router::new().route(
+            "/detached",
+            axum::routing::get(move || {
+                let route_tracker = route_tracker.clone();
+                let started_tx = Arc::clone(&started_tx);
+                let release_rx = Arc::clone(&release_rx);
+                let finished_tx = Arc::clone(&finished_tx);
+                async move {
+                    drop(route_tracker.spawn(async move {
+                        if let Some(tx) = started_tx.lock().expect("lock").take() {
+                            let _ = tx.send(());
+                        }
+                        let rx = release_rx.lock().await.take();
+                        if let Some(rx) = rx {
+                            let _ = rx.await;
+                        }
+                        if let Some(tx) = finished_tx.lock().expect("lock").take() {
+                            let _ = tx.send(());
+                        }
+                    }));
+                    "accepted"
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let app = AdminApp {
+            admin_router: router,
+            admin_addr: addr,
+            post_commit_tracker: tracker.clone(),
+            event_fanout_shutdown_tx: None,
+            event_fanout_tasks: Vec::new(),
+        };
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut server_task = tokio::spawn(async move {
+            app.serve_with_listener(
+                listener,
+                async move {
+                    let _ = shutdown_rx.await;
+                },
+                Duration::from_millis(100),
+            )
+            .await
+        });
+
+        let stream = TcpStream::connect(addr).await.expect("connect");
+        write_raw_request(
+            &stream,
+            &format!("GET /detached HTTP/1.1\r\nHost: {addr}\r\n\r\n"),
+        )
+        .await;
+        let _ = read_until_contains(&stream, "accepted").await;
+        started_rx.await.expect("detached task started");
+        assert_eq!(tracker.in_flight(), 1);
+
+        let _ = shutdown_tx.send(());
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(
+                finished_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "detached task must still be gated"
+        );
+        assert!(
+            !server_task.is_finished(),
+            "shutdown must wait for in-flight post-commit task"
+        );
+
+        let _ = release_tx.send(());
+        finished_rx.await.expect("detached task completed");
+        tokio::time::timeout(Duration::from_secs(2), &mut server_task)
+            .await
+            .expect("serve_with_listener finishes promptly after post-commit task drains")
+            .expect("server task panicked")
+            .expect("serve_with_listener succeeds");
+        assert_eq!(tracker.in_flight(), 0);
     }
 }

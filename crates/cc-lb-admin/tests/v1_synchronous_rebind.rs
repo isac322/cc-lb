@@ -147,6 +147,7 @@ fn admin_state(
         clock: Arc::new(cc_lb_clock::SystemClock),
         anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
             .expect("production Anthropic origin parses"),
+        post_commit_tracker: Default::default(),
     }
 }
 

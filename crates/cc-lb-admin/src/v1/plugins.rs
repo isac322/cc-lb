@@ -247,8 +247,9 @@ async fn patch_registry(
     {
         Ok(entry) => {
             let state = state.clone();
+            let post_commit_tracker = state.post_commit_tracker.clone();
             let storage_handle = Arc::clone(&storage_handle);
-            finish_after_commit(async move {
+            finish_after_commit(&post_commit_tracker, async move {
                 let wasm_registry_id = entry.id.to_string();
                 let audit_payload = json!({
                     "wasm_registry_id": wasm_registry_id,
@@ -347,8 +348,9 @@ async fn delete_registry(
         {
             Ok(Some(deleted)) => {
                 let state = state.clone();
+                let post_commit_tracker = state.post_commit_tracker.clone();
                 let storage_handle = Arc::clone(&storage_handle);
-                finish_after_commit(async move {
+                finish_after_commit(&post_commit_tracker, async move {
                     let size_bytes =
                         match registry_size_bytes(&*storage_handle, deleted.entry.sha256).await {
                             Ok(size_bytes) => size_bytes,
@@ -404,7 +406,8 @@ async fn delete_registry(
     {
         Ok(Some(deleted)) => {
             let state = state.clone();
-            finish_after_commit(async move {
+            let post_commit_tracker = state.post_commit_tracker.clone();
+            finish_after_commit(&post_commit_tracker, async move {
                 remove_wasm_cache_file(&state, deleted.sha256).await;
                 let payload = AuditPayload::PluginRegistryDelete {
                     sha256: hex::encode(deleted.sha256),
@@ -504,7 +507,8 @@ async fn insert_chain(
     match storage.insert_chain_entry(input).await {
         Ok(entry) => {
             let state = state.clone();
-            finish_after_commit(async move {
+            let post_commit_tracker = state.post_commit_tracker.clone();
+            finish_after_commit(&post_commit_tracker, async move {
                 let audit_metadata = audit_metadata
                     .unwrap_or_else(|| empty_plugin_chain_audit_metadata(entry.wasm_registry_id));
                 let target_principal_id = principal_id.to_string();
@@ -606,8 +610,9 @@ async fn reorder_chain(
     match storage.reorder_chain(principal_id, slot, new_orders).await {
         Ok(entries) => {
             let state = state.clone();
+            let post_commit_tracker = state.post_commit_tracker.clone();
             let storage_handle = Arc::clone(&storage_handle);
-            finish_after_commit(async move {
+            finish_after_commit(&post_commit_tracker, async move {
                 let audit_metadata =
                     match first_plugin_chain_audit_metadata(&*storage_handle, &entries).await {
                         Ok(metadata) => metadata,
@@ -676,8 +681,9 @@ async fn delete_chain(
     {
         Ok(Some(entry)) => {
             let state = state.clone();
+            let post_commit_tracker = state.post_commit_tracker.clone();
             let storage_handle = Arc::clone(&storage_handle);
-            finish_after_commit(async move {
+            finish_after_commit(&post_commit_tracker, async move {
                 let audit_metadata = match fetch_plugin_chain_audit_metadata(
                     &*storage_handle,
                     entry.wasm_registry_id,
@@ -1252,11 +1258,14 @@ fn audit_write_failed(storage_error: StorageError, action: &str) -> axum::respon
 }
 
 /// Finishes a committed mutation on a task that a dropped request cannot cancel.
-async fn finish_after_commit<F>(continuation: F) -> axum::response::Response
+async fn finish_after_commit<F>(
+    tracker: &cc_lb_control::PostCommitTracker,
+    continuation: F,
+) -> axum::response::Response
 where
     F: Future<Output = axum::response::Response> + Send + 'static,
 {
-    match complete_after_commit(continuation).await {
+    match complete_after_commit(tracker, continuation).await {
         Ok(response) => response,
         Err(PostCommitAborted) => error(StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
     }

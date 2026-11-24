@@ -1593,6 +1593,7 @@ fn refresh_test_router(
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock: std::sync::Arc::new(SystemClock),
         anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production().unwrap(),
+        post_commit_tracker: Default::default(),
     })
 }
 

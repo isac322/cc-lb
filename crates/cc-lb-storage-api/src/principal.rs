@@ -93,6 +93,8 @@ pub trait PrincipalStore: Send + Sync {
         include_deleted: bool,
     ) -> StorageResult<Vec<PrincipalRecord>>;
 
+    async fn count(&self, include_deleted: bool) -> StorageResult<usize>;
+
     async fn update(
         &self,
         id: Uuid,

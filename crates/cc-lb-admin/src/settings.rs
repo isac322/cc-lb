@@ -1187,18 +1187,31 @@ fn check_writable_file_path(issues: &mut Vec<ConfigValidationIssue>, field: &str
 }
 
 fn file_snapshot_for_state(state: &AdminState) -> Result<FileSnapshot, SettingsError> {
-    let mut snapshot = file_snapshot(state.config_path.as_deref())?;
-    if state.startup_config_overrides.split_mode_read_only_config {
-        snapshot.info.mode = ConfigFileMode::ReadOnly;
-        snapshot.info.reason = Some(
-            "split admin server cannot write proxy config files directly; download TOML instead"
-                .to_owned(),
-        );
-    }
-    Ok(snapshot)
+    file_snapshot(
+        state.config_path.as_deref(),
+        state.startup_config_overrides.split_mode_read_only_config,
+    )
 }
 
-fn file_snapshot(path: Option<&Path>) -> Result<FileSnapshot, SettingsError> {
+fn file_snapshot(
+    path: Option<&Path>,
+    split_read_only: bool,
+) -> Result<FileSnapshot, SettingsError> {
+    file_snapshot_with_probe(path, split_read_only, probe_parent_write)
+}
+
+fn file_snapshot_with_probe<F>(
+    path: Option<&Path>,
+    split_read_only: bool,
+    probe: F,
+) -> Result<FileSnapshot, SettingsError>
+where
+    F: FnOnce(&Path) -> (ConfigFileMode, Option<String>),
+{
+    let split_reason = || {
+        "split admin server cannot write proxy config files directly; download TOML instead"
+            .to_owned()
+    };
     let Some(path) = path else {
         return Ok(FileSnapshot {
             bytes: None,
@@ -1206,15 +1219,23 @@ fn file_snapshot(path: Option<&Path>) -> Result<FileSnapshot, SettingsError> {
                 path: String::new(),
                 exists: false,
                 mode: ConfigFileMode::ReadOnly,
-                reason: Some("config path is not configured".to_owned()),
+                reason: Some(if split_read_only {
+                    split_reason()
+                } else {
+                    "config path is not configured".to_owned()
+                }),
                 fingerprint: None,
             },
         });
     };
     match fs::read(path) {
         Ok(bytes) => {
-            let metadata = fs::metadata(path)?;
-            let capability = atomic_replace_capability(path, true, Some(&metadata));
+            let capability = if split_read_only {
+                (ConfigFileMode::ReadOnly, Some(split_reason()))
+            } else {
+                let metadata = fs::metadata(path)?;
+                atomic_replace_capability_with_probe(path, true, Some(&metadata), probe)
+            };
             Ok(FileSnapshot {
                 info: ConfigFileInfo {
                     path: path.display().to_string(),
@@ -1227,7 +1248,11 @@ fn file_snapshot(path: Option<&Path>) -> Result<FileSnapshot, SettingsError> {
             })
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let capability = atomic_replace_capability(path, false, None);
+            let capability = if split_read_only {
+                (ConfigFileMode::ReadOnly, Some(split_reason()))
+            } else {
+                atomic_replace_capability_with_probe(path, false, None, probe)
+            };
             Ok(FileSnapshot {
                 bytes: None,
                 info: ConfigFileInfo {
@@ -1243,11 +1268,15 @@ fn file_snapshot(path: Option<&Path>) -> Result<FileSnapshot, SettingsError> {
     }
 }
 
-fn atomic_replace_capability(
+fn atomic_replace_capability_with_probe<F>(
     path: &Path,
     exists: bool,
     metadata: Option<&fs::Metadata>,
-) -> (ConfigFileMode, Option<String>) {
+    probe: F,
+) -> (ConfigFileMode, Option<String>)
+where
+    F: FnOnce(&Path) -> (ConfigFileMode, Option<String>),
+{
     if exists && !metadata.is_some_and(fs::Metadata::is_file) {
         return (
             ConfigFileMode::ReadOnly,
@@ -1264,7 +1293,7 @@ fn atomic_replace_capability(
             ConfigFileMode::ReadOnly,
             Some("config parent directory is read-only".to_owned()),
         ),
-        Ok(_) => probe_parent_write(parent),
+        Ok(_) => probe(parent),
         Err(error) => (
             ConfigFileMode::ReadOnly,
             Some(format!("config parent directory is unavailable: {error}")),
@@ -1398,5 +1427,55 @@ fn history_item(entry: HistoryEntry) -> ConfigHistoryItem {
     ConfigHistoryItem {
         revision: entry.revision,
         saved_at_unix_secs: entry.applied_at_unix_secs,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_read_only_file_snapshot_skips_write_probe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let existing_path = dir.path().join("cc-lb.toml");
+        let bytes = br#"[listener]
+proxy_addr = "127.0.0.1:8080"
+"#;
+        fs::write(&existing_path, bytes).expect("write config");
+
+        let existing = file_snapshot_with_probe(Some(&existing_path), true, |_| {
+            panic!("write probe must not run in split read-only mode");
+        })
+        .expect("existing config snapshot");
+        assert!(existing.info.exists);
+        assert_eq!(existing.info.mode, ConfigFileMode::ReadOnly);
+        assert_eq!(
+            existing.info.fingerprint.as_deref(),
+            Some(fingerprint_bytes(bytes).as_str())
+        );
+        assert_eq!(existing.bytes.as_deref(), Some(bytes.as_slice()));
+
+        let missing_path = dir.path().join("missing.toml");
+        let missing = file_snapshot_with_probe(Some(&missing_path), true, |_| {
+            panic!("write probe must not run for missing config in split read-only mode");
+        })
+        .expect("missing config snapshot");
+        assert!(!missing.info.exists);
+        assert_eq!(missing.info.mode, ConfigFileMode::ReadOnly);
+        assert!(missing.info.fingerprint.is_none());
+        assert!(missing.bytes.is_none());
+
+        let mut entries = fs::read_dir(dir.path())
+            .expect("read dir")
+            .map(|entry| {
+                entry
+                    .expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        entries.sort();
+        assert_eq!(entries, vec!["cc-lb.toml".to_owned()]);
     }
 }

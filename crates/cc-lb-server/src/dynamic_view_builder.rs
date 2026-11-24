@@ -5739,6 +5739,10 @@ mod tests {
             PrincipalStore::list(self.storage.as_ref(), offset, limit, include_deleted).await
         }
 
+        async fn count(&self, include_deleted: bool) -> StorageResult<usize> {
+            PrincipalStore::count(self.storage.as_ref(), include_deleted).await
+        }
+
         async fn update(
             &self,
             id: Uuid,

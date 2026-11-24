@@ -251,7 +251,9 @@ fn entity_idempotency_key(job: &AdaptiveJob, run_at_unix_secs: i64) -> Result<St
         .map_err(|_| SchedulerError::Job("run_at_unix_secs is negative".to_owned()))?;
     match job {
         AdaptiveJob::Warmup(job) => Ok(job.idempotency_key(job.cycle_key)),
+        AdaptiveJob::ManualWarmup(job) => Ok(job.idempotency_key()),
         AdaptiveJob::OAuthRefresh(job) => Ok(job.idempotency_key(run_at_unix_secs)),
+        AdaptiveJob::OAuthUsageRefresh(job) => Ok(job.idempotency_key()),
         AdaptiveJob::MetadataRefresh(job) => Ok(job.idempotency_key()),
         AdaptiveJob::CacheKeepalive(job) => Ok(job.idempotency_key()),
     }

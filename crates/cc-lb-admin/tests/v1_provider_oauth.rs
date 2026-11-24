@@ -126,6 +126,7 @@ impl Fixture {
             clock: clock_handle,
             anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
                 .expect("Anthropic origin"),
+            post_commit_tracker: Default::default(),
         };
         Self {
             _dir: dir,

@@ -7,7 +7,7 @@ use crate::warmup::execute::{
 use cc_lb_clock::{Clock, unix_millis, unix_secs};
 use cc_lb_control::WarmupWindowVerifier;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
-use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
+use cc_lb_scheduler::jobs::warmup::{ManualWarmupJob, UpstreamWarmupJob};
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_storage_api::{UpstreamRecord, UpstreamStatusUpdate, UpstreamStore};
 use cc_lb_storage_api::{
@@ -467,6 +467,232 @@ impl SchedulerDispatch {
             Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
             Err(error) => Err(error),
         }
+    }
+
+    pub(super) async fn dispatch_manual_warmup(
+        &self,
+        job: ManualWarmupJob,
+    ) -> SchedulerResult<JobOutcome> {
+        let Some(mut upstream) = UpstreamStore::get_by_id(self.storage.as_ref(), job.upstream_id)
+            .await
+            .map_err(storage_scheduler_error)?
+        else {
+            return Ok(JobOutcome::Skip);
+        };
+        let attempted_at_unix_secs = now_unix_secs_i64(&*self.clock)?;
+        if !upstream.warmup_enabled {
+            let record = execute_warmup_attempt(WarmupAttemptExecution {
+                storage: self.storage.as_ref(),
+                upstream: &upstream,
+                lane: job.lane,
+                scheduled_for_unix_secs: attempted_at_unix_secs,
+                trigger: WarmupAttemptTrigger::Manual,
+                replica_id: self.replica_id,
+                lease_holder: Some(job.holder.as_str()),
+                expected_cycle_key: Some(job.candidate_cycle_key),
+                attempted_at_unix_secs,
+                completed_at_unix_secs: Some(attempted_at_unix_secs),
+                dispatch_kind: cc_lb_storage_api::WarmupDispatchKind::NotDispatched,
+                result: WarmupAttemptExecutionResult::Skipped {
+                    reason: WarmupSkipReason::UpstreamDisabled,
+                    cycle_key: None,
+                    error_detail: None,
+                },
+            })
+            .await;
+            cc_lb_control::record_manual_warmup_result(
+                self.storage.as_ref(),
+                upstream.id,
+                job.lane,
+                cc_lb_control::ManualWarmupJobResult {
+                    nonce: job.nonce,
+                    outcome: record.outcome,
+                    cycle_key: record.cycle_key,
+                    error_detail: record.error_detail,
+                },
+            )
+            .await
+            .map_err(storage_scheduler_error)?;
+            return Ok(JobOutcome::Done);
+        }
+
+        if let Err(error) = self.ensure_fresh_oauth_token(&mut upstream).await {
+            if let Some(reason) = pre_request_error_reason(&error) {
+                let error_detail = error.to_string();
+                let record = execute_warmup_attempt(WarmupAttemptExecution {
+                    storage: self.storage.as_ref(),
+                    upstream: &upstream,
+                    lane: job.lane,
+                    scheduled_for_unix_secs: attempted_at_unix_secs,
+                    trigger: WarmupAttemptTrigger::Manual,
+                    replica_id: self.replica_id,
+                    lease_holder: Some(job.holder.as_str()),
+                    expected_cycle_key: Some(job.candidate_cycle_key),
+                    attempted_at_unix_secs,
+                    completed_at_unix_secs: Some(now_unix_secs_i64(&*self.clock)?),
+                    dispatch_kind: cc_lb_storage_api::WarmupDispatchKind::NotDispatched,
+                    result: WarmupAttemptExecutionResult::PermanentFailure {
+                        reason,
+                        http_status: None,
+                        error_detail: Some(error_detail.as_str()),
+                    },
+                })
+                .await;
+                cc_lb_control::record_manual_warmup_result(
+                    self.storage.as_ref(),
+                    upstream.id,
+                    job.lane,
+                    cc_lb_control::ManualWarmupJobResult {
+                        nonce: job.nonce,
+                        outcome: record.outcome,
+                        cycle_key: record.cycle_key,
+                        error_detail: record.error_detail,
+                    },
+                )
+                .await
+                .map_err(storage_scheduler_error)?;
+                return Ok(JobOutcome::Done);
+            }
+            return Err(error);
+        }
+
+        let previous_resets = {
+            let view = self.dynamic_view.load();
+            let max_staleness_secs = view.subscription_quota_routing_max_staleness_secs;
+            drop(view);
+            let snapshots = self.subscription_quota_cache.snapshot_for_upstream(
+                upstream.id,
+                now_unix_millis(&*self.clock),
+                max_staleness_secs,
+            );
+            target_window_resets(upstream.kind, job.lane, &snapshots)
+        };
+        let initial_attempt = self.dispatch_warmup_request(&upstream, job.lane).await;
+        let final_attempt = if response_is_auth_failed(&initial_attempt) {
+            match self.force_refresh_oauth_token(&mut upstream).await {
+                Ok(true) => self.dispatch_warmup_request(&upstream, job.lane).await,
+                Ok(false) => initial_attempt,
+                Err(error) => {
+                    tracing::warn!(upstream_id = %upstream.id, %error, "manual warmup oauth force-refresh failed");
+                    WarmupDispatchAttempt {
+                        dispatch_kind: initial_attempt.dispatch_kind,
+                        result: WarmupDispatchResult::PermanentFailure {
+                            reason: WarmupPermanentFailureReason::OauthRefreshFailed,
+                            error_detail: error.to_string(),
+                        },
+                    }
+                }
+            }
+        } else {
+            initial_attempt
+        };
+
+        let request_completed_at_unix_secs = now_unix_secs_i64(&*self.clock)?;
+        let can_verify_window =
+            request_completed_at_unix_secs.saturating_sub(attempted_at_unix_secs) <= 20;
+        let window_check = if can_verify_window
+            && upstream.kind == cc_lb_storage_api::upstream::UpstreamKind::GeminiOauth
+            && matches!(
+                &final_attempt.result,
+                WarmupDispatchResult::Response { status, .. } if status.is_success()
+            ) {
+            Some(
+                self.verify_warmup_window(
+                    &upstream,
+                    job.lane,
+                    &previous_resets,
+                    request_completed_at_unix_secs,
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let verified_observations = match window_check.as_ref() {
+            Some(cc_lb_control::WarmupWindowCheck::Started { observations }) => {
+                Some(observations.as_slice())
+            }
+            _ => None,
+        };
+        let not_started_error_detail = match window_check.as_ref() {
+            Some(cc_lb_control::WarmupWindowCheck::NotStarted { windows }) => {
+                let windows = windows
+                    .iter()
+                    .map(|window| window.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let status = match &final_attempt.result {
+                    WarmupDispatchResult::Response { status, .. } => *status,
+                    _ => unreachable!("not-started verification requires a response"),
+                };
+                Some(format!(
+                    "warm-up returned {status} but {windows} did not start"
+                ))
+            }
+            _ => None,
+        };
+        let execution_result = if let Some(error_detail) = not_started_error_detail.as_deref() {
+            let WarmupDispatchResult::Response { status, .. } = &final_attempt.result else {
+                unreachable!("not-started verification requires a response");
+            };
+            WarmupAttemptExecutionResult::PermanentFailure {
+                reason: WarmupPermanentFailureReason::WindowNotStarted,
+                http_status: Some(*status),
+                error_detail: Some(error_detail),
+            }
+        } else {
+            execution_result_from_dispatch_attempt(&final_attempt, verified_observations)
+        };
+        let completed_at_unix_secs = Some(now_unix_secs_i64(&*self.clock)?);
+        let record = execute_warmup_attempt(WarmupAttemptExecution {
+            storage: self.storage.as_ref(),
+            upstream: &upstream,
+            lane: job.lane,
+            scheduled_for_unix_secs: attempted_at_unix_secs,
+            trigger: WarmupAttemptTrigger::Manual,
+            replica_id: self.replica_id,
+            lease_holder: Some(job.holder.as_str()),
+            expected_cycle_key: Some(job.candidate_cycle_key),
+            attempted_at_unix_secs,
+            completed_at_unix_secs,
+            dispatch_kind: final_attempt.dispatch_kind,
+            result: execution_result,
+        })
+        .await;
+
+        if matches!(record.outcome, WarmupAttemptOutcome::Success(_)) {
+            let status = UpstreamStatusUpdate {
+                last_warmup_at_unix_secs: Some(Some(unix_secs(self.clock.now()))),
+                ..UpstreamStatusUpdate::default()
+            };
+            if let Err(error) =
+                UpstreamStore::set_status(self.storage.as_ref(), upstream.id, status).await
+            {
+                tracing::warn!(upstream_id = %upstream.id, %error, "manual warmup status writeback failed");
+            }
+            if !matches!(
+                window_check.as_ref(),
+                Some(cc_lb_control::WarmupWindowCheck::Started { .. })
+            ) && let WarmupDispatchResult::Response { observations, .. } = final_attempt.result
+            {
+                self.record_warmup_observations(upstream.id, observations)?;
+            }
+        }
+
+        cc_lb_control::record_manual_warmup_result(
+            self.storage.as_ref(),
+            upstream.id,
+            job.lane,
+            cc_lb_control::ManualWarmupJobResult {
+                nonce: job.nonce,
+                outcome: record.outcome,
+                cycle_key: record.cycle_key,
+                error_detail: record.error_detail,
+            },
+        )
+        .await
+        .map_err(storage_scheduler_error)?;
+        Ok(JobOutcome::Done)
     }
 }
 

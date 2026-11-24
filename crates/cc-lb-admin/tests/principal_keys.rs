@@ -307,3 +307,160 @@ async fn wait_for_audit_action(
     }
     panic!("audit action {needle} for key {key_id} was not persisted");
 }
+
+#[tokio::test]
+async fn list_keys_queries_target_principal_without_scanning_all_keys() {
+    use async_trait::async_trait;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, header},
+    };
+    use cc_lb_control::api_keys::key_store::KeyStore;
+    use cc_lb_storage_api::{
+        ApiKeyMutation, IssueParams, KeyStatus, ManagedKeyStore, StorageResult, StoredApiKeyRecord,
+    };
+    use tower::ServiceExt as _;
+
+    struct NoListAllKeyStore {
+        inner: Arc<dyn ManagedKeyStore>,
+    }
+
+    #[async_trait]
+    impl ManagedKeyStore for NoListAllKeyStore {
+        async fn issue(
+            &self,
+            principal_id: &str,
+            key_id: &str,
+            params: IssueParams,
+        ) -> StorageResult<StoredApiKeyRecord> {
+            self.inner.issue(principal_id, key_id, params).await
+        }
+
+        async fn get(
+            &self,
+            principal_id: &str,
+            key_id: &str,
+        ) -> StorageResult<Option<StoredApiKeyRecord>> {
+            self.inner.get(principal_id, key_id).await
+        }
+
+        async fn lookup_by_index_hash(
+            &self,
+            index_hash: &[u8; 32],
+        ) -> StorageResult<Option<(String, String, StoredApiKeyRecord)>> {
+            self.inner.lookup_by_index_hash(index_hash).await
+        }
+
+        async fn list_by_principal(
+            &self,
+            principal_id: &str,
+        ) -> StorageResult<Vec<StoredApiKeyRecord>> {
+            self.inner.list_by_principal(principal_id).await
+        }
+
+        async fn list_by_principal_with_ids(
+            &self,
+            principal_id: &str,
+        ) -> StorageResult<Vec<(String, StoredApiKeyRecord)>> {
+            self.inner.list_by_principal_with_ids(principal_id).await
+        }
+
+        async fn list_all(&self) -> StorageResult<Vec<(String, String, StoredApiKeyRecord)>> {
+            panic!("list_keys must use list_by_principal_with_ids instead of list_all");
+        }
+
+        async fn update(
+            &self,
+            principal_id: &str,
+            key_id: &str,
+            mutation: ApiKeyMutation,
+        ) -> StorageResult<()> {
+            self.inner.update(principal_id, key_id, mutation).await
+        }
+
+        async fn revoke_zero_secrets(&self, principal_id: &str, key_id: &str) -> StorageResult<()> {
+            self.inner.revoke_zero_secrets(principal_id, key_id).await
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = admin_test_common::sqlite_storage(dir.path(), "no-list-all.sqlite").await;
+    let wrapped_key_store = Arc::new(KeyStore::new(Arc::new(NoListAllKeyStore {
+        inner: storage.clone(),
+    })));
+    wrapped_key_store
+        .create(
+            "principal-target",
+            cc_lb_control::api_keys::key_store::CreateParams {
+                label: "target-key".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("issue target key");
+    wrapped_key_store
+        .create(
+            "principal-other",
+            cc_lb_control::api_keys::key_store::CreateParams {
+                label: "other-key".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("issue other key");
+
+    let config = cc_lb_config::Config::default();
+    let state = cc_lb_admin::AdminState {
+        config_path: None,
+        build: admin_test_common::test_build_info(),
+        startup_config_overrides: Default::default(),
+        storage: Some(storage),
+        key_store: Some(wrapped_key_store),
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
+        lifecycle: None,
+        lazy_refresher: None,
+        runtime: None,
+        data_dir: None,
+        warmup_dialect_dispatcher: None,
+        warmup_window_verifier: None,
+        limit_reset_usage_refresh: None,
+        dynamic_view: admin_test_common::dynamic_view_holder(&config),
+        config: Arc::new(config),
+        dynamic_view_rebinder: None,
+        scheduler: None,
+        admin_auth: admin_test_common::static_token_auth("test-token"),
+        start_time: std::time::Instant::now(),
+        event_bus: None,
+        storage_tail: cc_lb_admin::events::storage_tail_channel(),
+        clock: Arc::new(cc_lb_clock::SystemClock),
+        anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
+            .expect("production Anthropic origin parses"),
+        post_commit_tracker: Default::default(),
+    };
+    let app = cc_lb_admin::router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/v1/principals/principal-target/keys")
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response succeeds");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+    let keys = body["keys"].as_array().expect("keys array");
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["label"], "target-key");
+    let _ = KeyStatus::Active;
+}

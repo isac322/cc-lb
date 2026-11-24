@@ -309,7 +309,8 @@ async fn start_oauth(
             Err(()) => return unsupported_flow_response(),
         };
         let storage = Arc::clone(storage);
-        return match complete_after_commit(async move {
+        let post_commit_tracker = state.post_commit_tracker.clone();
+        return match complete_after_commit(&post_commit_tracker, async move {
             start_provider_oauth(
                 &state,
                 storage.as_ref(),
@@ -335,7 +336,8 @@ async fn start_oauth(
     }
     if upstream.kind == UpstreamKind::GeminiOauth {
         let storage = Arc::clone(storage);
-        return match complete_after_commit(async move {
+        let post_commit_tracker = state.post_commit_tracker.clone();
+        return match complete_after_commit(&post_commit_tracker, async move {
             start_provider_oauth(
                 &state,
                 storage.as_ref(),
@@ -413,7 +415,8 @@ async fn start_oauth(
     .to_string();
     let route = format!("/admin/v1/upstreams/{upstream_id}/oauth/start");
     let authorize_url = handshake_state.authorize_url.to_string();
-    match complete_after_commit(async move {
+    let post_commit_tracker = state.post_commit_tracker.clone();
+    match complete_after_commit(&post_commit_tracker, async move {
         if let Err(error) = record_admin_audit(
             &state,
             AdminAuditEvent {
@@ -726,7 +729,8 @@ async fn start_oauth_draft(
     }
 
     let authorize_url = handshake_state.authorize_url.to_string();
-    match complete_after_commit(async move {
+    let post_commit_tracker = state.post_commit_tracker.clone();
+    match complete_after_commit(&post_commit_tracker, async move {
         if let Err(error) = record_admin_audit(
             &state,
             AdminAuditEvent {
@@ -1140,7 +1144,8 @@ async fn complete_oauth_draft(
         }
 
         let state_token = payload.state_token;
-        match complete_after_commit(async move {
+        let post_commit_tracker = state.post_commit_tracker.clone();
+        match complete_after_commit(&post_commit_tracker, async move {
             if let Err(error) = record_admin_audit(
                 &state,
                 AdminAuditEvent {
@@ -1328,7 +1333,8 @@ async fn create_upstream_from_oauth_draft(
     };
     let storage = Arc::clone(storage);
     let state_token = payload.state_token;
-    match complete_after_commit(async move {
+    let post_commit_tracker = state.post_commit_tracker.clone();
+    match complete_after_commit(&post_commit_tracker, async move {
         if let Err(error) = seed_oauth_bootstrap_tasks(&state, &created).await {
             return rollback_oauth_draft_creation(
                 &state,
@@ -1481,7 +1487,8 @@ async fn complete_oauth(
         UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
     ) {
         let storage = Arc::clone(storage);
-        return match complete_after_commit(async move {
+        let post_commit_tracker = state.post_commit_tracker.clone();
+        return match complete_after_commit(&post_commit_tracker, async move {
             complete_provider_oauth(
                 &state,
                 storage.as_ref(),
@@ -1607,7 +1614,8 @@ async fn complete_oauth(
         Err(error) => return storage_error_response(&error),
     };
 
-    match complete_after_commit(async move {
+    let post_commit_tracker = state.post_commit_tracker.clone();
+    match complete_after_commit(&post_commit_tracker, async move {
         if let Err(error) =
             seed_oauth_reconnect_tasks(&state, &updated, bundle.expires_at_unix_secs).await
         {

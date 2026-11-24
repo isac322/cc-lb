@@ -74,3 +74,18 @@ pub trait SubscriptionQuotaIngestionPort: Send + Sync {
         observed_at: SystemTime,
     );
 }
+
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("split manual warmup unavailable: {0}")]
+pub struct SplitManualWarmupError(pub String);
+
+#[async_trait]
+pub trait SplitManualWarmupPort: Send + Sync {
+    async fn fire_manual_warmup(
+        &self,
+        upstream_id: Uuid,
+        lane: WarmupLane,
+        holder: String,
+        candidate_cycle_key: i64,
+    ) -> Result<cc_lb_control::ManualWarmupJobResult, SplitManualWarmupError>;
+}

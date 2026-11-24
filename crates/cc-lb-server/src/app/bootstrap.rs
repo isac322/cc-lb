@@ -264,7 +264,7 @@ pub(super) async fn serve_runtime(
     shutdown: ShutdownRuntime,
     router: Router,
     proxy_addr: SocketAddr,
-    admin: Option<(Router, SocketAddr)>,
+    admin: Option<(Router, SocketAddr, cc_lb_control::PostCommitTracker)>,
 ) -> Result<(), BuildError> {
     let ShutdownRuntime {
         lifecycle,
@@ -296,7 +296,7 @@ pub(super) async fn serve_runtime(
     server_state.wait_for_ready().await;
     let proxy_listener = TcpListener::bind(proxy_addr).await?;
     cc_lb_runtime_sync::warn_if_container_loopback_bind("proxy", proxy_addr);
-    let admin_handle = if let Some((admin_router, admin_addr)) = admin {
+    let admin_handle = if let Some((admin_router, admin_addr, admin_post_commit_tracker)) = admin {
         let admin_listener = TcpListener::bind(admin_addr).await?;
         cc_lb_runtime_sync::warn_if_container_loopback_bind("admin", admin_addr);
         let (admin_stop_tx, admin_shutdown) = watch::channel(false);
@@ -305,7 +305,7 @@ pub(super) async fn serve_runtime(
                 .with_graceful_shutdown(signal::wait_for_shutdown(admin_shutdown))
                 .await
         });
-        Some((admin_stop_tx, admin_task))
+        Some((admin_stop_tx, admin_task, admin_post_commit_tracker))
     } else {
         None
     };
@@ -397,9 +397,22 @@ pub(super) async fn serve_runtime(
     if let Some(task) = wasmtime_pool_metrics_task {
         cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
     }
-    if let Some((admin_stop_tx, admin_task)) = admin_handle {
+    if let Some((admin_stop_tx, admin_task, admin_post_commit_tracker)) = admin_handle {
         let _ = admin_stop_tx.send(true);
         cc_lb_runtime_sync::await_or_abort(admin_task, SHUTDOWN_TASK_TIMEOUT).await;
+        if tokio::time::timeout(
+            DURABLE_WRITER_SHUTDOWN_TIMEOUT,
+            admin_post_commit_tracker.wait_idle(),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                in_flight = admin_post_commit_tracker.in_flight(),
+                timeout_secs = DURABLE_WRITER_SHUTDOWN_TIMEOUT.as_secs(),
+                "timed out waiting for detached admin post-commit tasks to drain",
+            );
+        }
     }
 
     // 3. Await any remaining scheduler tasks concurrently under one shared 10s deadline.

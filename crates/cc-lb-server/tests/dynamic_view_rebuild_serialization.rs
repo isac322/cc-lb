@@ -504,6 +504,7 @@ async fn fixture() -> Fixture {
         clock,
         anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
             .expect("production Anthropic origin parses"),
+        post_commit_tracker: Default::default(),
     };
     Fixture {
         _dir: dir,

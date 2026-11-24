@@ -10,6 +10,8 @@ use super::jwks::{JwksCache, JwksError};
 use super::{AdminActorKind, AdminAuthProvider, AdminIdentity, ProviderOutcome};
 
 const CLOCK_SKEW_LEEWAY_SECS: u64 = 60;
+const MAX_COMPACT_JWT_BYTES: usize = 16 * 1024;
+const MAX_KID_LEN: usize = 256;
 
 pub(crate) struct CloudflareAccessProvider {
     id: String,
@@ -51,26 +53,24 @@ impl AdminAuthProvider for CloudflareAccessProvider {
         let Ok(token) = header_value.to_str() else {
             return ProviderOutcome::Rejected("cf_access_invalid_token");
         };
-
-        let jwt = match CompactJwt::parse(token) {
-            Ok(jwt) if jwt.header.algorithm == "RS256" && !jwt.header.key_id.is_empty() => jwt,
-            _ => return ProviderOutcome::Rejected("cf_access_invalid_token"),
-        };
-        let key = match self.jwks.get(&jwt.header.key_id).await {
-            Ok(key) => key,
-            Err(JwksError::UnknownKid) => {
-                return ProviderOutcome::Rejected("cf_access_invalid_token");
-            }
-            Err(
-                JwksError::Request(_) | JwksError::InvalidDocument | JwksError::RefreshThrottled,
-            ) => {
-                return ProviderOutcome::Rejected("cf_access_jwks_unavailable");
-            }
-        };
-        if key.verify_rs256(jwt.signing_input, &jwt.signature).is_err() {
+        if token.len() > MAX_COMPACT_JWT_BYTES {
             return ProviderOutcome::Rejected("cf_access_invalid_token");
         }
 
+        let jwt = match CompactJwt::parse(token) {
+            Ok(jwt)
+                if jwt.header.algorithm == "RS256"
+                    && !jwt.header.key_id.is_empty()
+                    && jwt.header.key_id.len() <= MAX_KID_LEN =>
+            {
+                jwt
+            }
+            _ => return ProviderOutcome::Rejected("cf_access_invalid_token"),
+        };
+
+        // Validate claim format, issuer, audience, and time window before any JWKS
+        // lookup so unauthenticated tokens with invalid metadata cannot trigger
+        // JWKS fetches or unknown-kid cache Churn.
         let claims: CfClaims = match sonic_rs::from_slice(&jwt.claims) {
             Ok(claims) => claims,
             Err(_) => return ProviderOutcome::Rejected("cf_access_invalid_token"),
@@ -85,6 +85,21 @@ impl AdminAuthProvider for CloudflareAccessProvider {
                 .nbf
                 .is_some_and(|not_before| not_before > now.saturating_add(CLOCK_SKEW_LEEWAY_SECS))
         {
+            return ProviderOutcome::Rejected("cf_access_invalid_token");
+        }
+
+        let key = match self.jwks.get(&jwt.header.key_id).await {
+            Ok(key) => key,
+            Err(JwksError::UnknownKid) => {
+                return ProviderOutcome::Rejected("cf_access_invalid_token");
+            }
+            Err(
+                JwksError::Request(_) | JwksError::InvalidDocument | JwksError::RefreshThrottled,
+            ) => {
+                return ProviderOutcome::Rejected("cf_access_jwks_unavailable");
+            }
+        };
+        if key.verify_rs256(jwt.signing_input, &jwt.signature).is_err() {
             return ProviderOutcome::Rejected("cf_access_invalid_token");
         }
 

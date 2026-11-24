@@ -521,3 +521,68 @@ async fn warmup_preflight_derives_secs_and_millis_from_same_post_hydration_clock
         "crossed reset during hydration must dispatch warmup instead of skipping: {attempts_reset:?}"
     );
 }
+
+#[tokio::test]
+async fn dispatch_manual_warmup_records_manual_attempt_and_meta_result() {
+    use cc_lb_scheduler::jobs::warmup::ManualWarmupJob;
+
+    let fixture = Fixture::new().await;
+    let upstream_id = create_gemini_upstream(&fixture, GeminiOAuthProfile::GeminiCli).await;
+    let dispatch = fixture.dispatch(Arc::new(FailingPusher));
+    let nonce = Uuid::new_v4();
+
+    // Disable warmup to exercise the deterministic manual skip path + meta result persistence.
+    let current = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream_id)
+        .await
+        .expect("get upstream")
+        .expect("upstream exists");
+    UpstreamStore::update(
+        fixture.storage.as_ref(),
+        upstream_id,
+        current.revision,
+        cc_lb_storage_api::upstream::UpstreamUpdate {
+            warmup_enabled: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("disable warmup");
+
+    let outcome = dispatch
+        .dispatch_entity(AdaptiveJob::ManualWarmup(ManualWarmupJob::new(
+            upstream_id,
+            WarmupLane::Primary,
+            "fire-now:test-manual".to_owned(),
+            1_700_000_000,
+            nonce,
+        )))
+        .await
+        .expect("dispatch_manual_warmup");
+    assert_eq!(outcome, JobOutcome::Done);
+
+    let attempts = fixture
+        .storage
+        .list_warmup_attempts_for_upstream(upstream_id, WarmupAttemptListFilters::default())
+        .await
+        .expect("list attempts");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].outcome,
+        WarmupAttemptOutcome::Skipped(WarmupSkipReason::UpstreamDisabled)
+    );
+
+    let recorded = cc_lb_control::load_manual_warmup_result(
+        fixture.storage.as_ref(),
+        upstream_id,
+        WarmupLane::Primary,
+        nonce,
+    )
+    .await
+    .expect("load result")
+    .expect("manual warmup result persisted");
+    assert_eq!(recorded.nonce, nonce);
+    assert_eq!(
+        recorded.outcome,
+        WarmupAttemptOutcome::Skipped(WarmupSkipReason::UpstreamDisabled)
+    );
+}

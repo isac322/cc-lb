@@ -15,6 +15,8 @@ pub mod event_bus;
 pub mod gemini_period_unknown_quota;
 pub mod openai_limit_resets;
 pub mod openai_org_api;
+pub mod post_commit;
+pub mod split_admin_bridge;
 pub mod subscription_metadata_hook;
 pub mod subscription_quota_snapshots;
 pub mod subscription_quotas;
@@ -36,6 +38,15 @@ pub use openai_org_api::{
     OpenAiBucketWidth, OpenAiCostAmount, OpenAiCostResult, OpenAiCostsBucket, OpenAiCostsPage,
     OpenAiCostsQuery, OpenAiOrgApi, OpenAiOrgApiError, OpenAiOrgLimits, OpenAiTextUsageBucket,
     OpenAiTextUsagePage, OpenAiTextUsageResult, OpenAiUsageQuery,
+};
+pub use post_commit::PostCommitTracker;
+pub use split_admin_bridge::{
+    BoundedBridgeResults, ManualWarmupJobResult, OAuthUsageRefreshJobResult,
+    SPLIT_BRIDGE_DEFAULT_TIMEOUT, SPLIT_BRIDGE_POLL_INTERVAL, load_manual_warmup_result,
+    load_oauth_usage_refresh_result, manual_warmup_idempotency_key, manual_warmup_result_meta_key,
+    oauth_refresh_bridge_idempotency_key, oauth_usage_refresh_idempotency_key,
+    oauth_usage_refresh_result_meta_key, record_manual_warmup_result,
+    record_oauth_usage_refresh_result,
 };
 pub use subscription_metadata_hook::{
     MetadataHookEnqueueError, MetadataHookHandle, MetadataHookRequest, MetadataRefreshEnqueue,

@@ -1384,7 +1384,8 @@ async fn create_upstream(
     let check = api_key.map(|prepared| prepared.check);
     let imported_oauth = oauth_bundle.is_some();
     let storage = storage_arc(&state)?;
-    complete_after_commit(async move {
+    let post_commit_tracker = state.post_commit_tracker.clone();
+    complete_after_commit(&post_commit_tracker, async move {
         if imported_oauth
             && let Err(error) = super::oauth::seed_oauth_bootstrap_tasks(&state, &record).await
         {
@@ -1583,7 +1584,8 @@ async fn refresh_upstream_subscription_metadata(
 
     // The subscription record is committed: the organization write, the
     // audit and the response read outlive a dropped request.
-    complete_after_commit(async move {
+    let post_commit_tracker = state.post_commit_tracker.clone();
+    complete_after_commit(&post_commit_tracker, async move {
         match tokio::time::timeout_at(
             deadline,
             store_organization_metadata(storage.as_ref(), &records),
@@ -1652,7 +1654,8 @@ async fn fire_now_upstream_warmup(
             .await?;
     // Every stage has committed a warmup attempt row (or needs no write);
     // the remaining persistence and the audit outlive a dropped request.
-    complete_after_commit(async move {
+    let post_commit_tracker = state.post_commit_tracker.clone();
+    complete_after_commit(&post_commit_tracker, async move {
         let response = match stage {
             FireNowStage::Finished(response) => response,
             FireNowStage::Attempted(attempted) => {
@@ -1890,6 +1893,48 @@ async fn fire_now_upstream_warmup_inner(
                 .map(|(_, reset)| *reset)
         })
         .unwrap_or(now_unix_secs);
+    if state.warmup_dialect_dispatcher.is_none()
+        && let Some(split_warmup) = state
+            .lifecycle
+            .as_ref()
+            .and_then(|ports| ports.split_manual_warmup.as_ref())
+            .cloned()
+    {
+        let result = split_warmup
+            .fire_manual_warmup(upstream_id, lane, holder.clone(), candidate_cycle_key)
+            .await
+            .map_err(|_| UpstreamError::WarmupUnavailable)?;
+        tracing::info!(
+            target: "warmup",
+            upstream_id = %upstream_id,
+            holder = %holder,
+            outcome = ?result.outcome,
+            dispatch_error = result.error_detail.as_deref(),
+            action = "split_dispatch_result"
+        );
+        let response = match result.outcome {
+            WarmupAttemptOutcome::Success(_) => {
+                let response_cycle_key = result.cycle_key.unwrap_or(candidate_cycle_key);
+                Json(FireNowFiredResponse {
+                    fired: true,
+                    lane,
+                    cycle_key: response_cycle_key,
+                    outcome: result.outcome,
+                })
+                .into_response()
+            }
+            WarmupAttemptOutcome::PermanentFailure(_) => {
+                fire_now_not_fired_response(StatusCode::BAD_GATEWAY, lane, result.outcome)
+            }
+            WarmupAttemptOutcome::TransientFailure(_) => {
+                fire_now_not_fired_response(StatusCode::SERVICE_UNAVAILABLE, lane, result.outcome)
+            }
+            WarmupAttemptOutcome::Skipped(_) => {
+                fire_now_not_fired_response(StatusCode::ACCEPTED, lane, result.outcome)
+            }
+        };
+        return Ok(FireNowStage::Finished(response));
+    }
     if upstream.warmup_dialect_plugin.is_some()
         && (state.runtime.is_none()
             || state.data_dir.is_none()
@@ -2934,7 +2979,8 @@ async fn update_upstream(
         };
         let mut response = respond_with_etag(&updated, None);
         add_dynamic_rebind_headers(&mut response, &state).await;
-        complete_after_commit(async move {
+        let post_commit_tracker = state.post_commit_tracker.clone();
+        complete_after_commit(&post_commit_tracker, async move {
             if let Err(error) = super::oauth::seed_oauth_bootstrap_tasks(&state, &updated).await {
                 super::oauth::rebuild_after_committed_failure(
                     &state,
@@ -3179,7 +3225,8 @@ async fn update_upstream(
         match result {
             Ok(updated) => {
                 let storage = storage_arc(&state)?;
-                complete_after_commit(async move {
+                let post_commit_tracker = state.post_commit_tracker.clone();
+                complete_after_commit(&post_commit_tracker, async move {
                     if let Err(error) = seed_warmup_if_toggled(&state, &current, &updated).await {
                         // The update is committed even though seeding failed;
                         // keep routing in step before returning the seed error.
@@ -3350,7 +3397,8 @@ async fn delete_upstream(
     let result = UpstreamStore::soft_delete(storage, current.id, expected_revision).await;
     match result {
         Ok(()) => {
-            complete_after_commit(async move {
+            let post_commit_tracker = state.post_commit_tracker.clone();
+            complete_after_commit(&post_commit_tracker, async move {
                 let payload = AuditPayload::UpstreamDelete {
                     upstream_id: current.id.to_string(),
                 };
@@ -3407,7 +3455,8 @@ async fn delete_upstream_warmup_dialect_plugin(
     match cleared {
         Some(updated) => {
             let storage = storage_arc(&state)?;
-            complete_after_commit(async move {
+            let post_commit_tracker = state.post_commit_tracker.clone();
+            complete_after_commit(&post_commit_tracker, async move {
                 let payload = AuditPayload::UpstreamUpdate {
                     upstream_id: updated.id.to_string(),
                     fields_changed: vec!["warmup_dialect_plugin"],
@@ -4847,6 +4896,7 @@ mod tests {
             clock: Arc::new(cc_lb_clock::SystemClock),
             anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
                 .expect("production Anthropic origin parses"),
+            post_commit_tracker: Default::default(),
         };
         TestContext {
             _dir: dir,

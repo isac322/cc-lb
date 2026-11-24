@@ -397,7 +397,9 @@ fn dispatching_scheduler_ctx(dispatch_tx: mpsc::Sender<&'static str>) -> Schedul
             Box::pin(async move {
                 let kind = match job {
                     AdaptiveJob::Warmup(_) => "warmup",
+                    AdaptiveJob::ManualWarmup(_) => "manual_warmup",
                     AdaptiveJob::OAuthRefresh(_) => "oauth_refresh",
+                    AdaptiveJob::OAuthUsageRefresh(_) => "oauth_usage_refresh",
                     AdaptiveJob::MetadataRefresh(_) => "metadata_refresh",
                     AdaptiveJob::CacheKeepalive(_) => "cache_keepalive",
                 };

@@ -263,7 +263,8 @@ pub(crate) async fn recheck_upstream_api_key(
 
     // The snapshot write (or its discard) is settled: the poll enqueue and the
     // audit outlive a dropped request.
-    complete_after_commit(async move {
+    let post_commit_tracker = state.post_commit_tracker.clone();
+    complete_after_commit(&post_commit_tracker, async move {
         let openai_success = outcome.access.provider == Some(Provider::Openai)
             && outcome.wire.verdict == PreflightVerdict::Ok
             && !previous_openai_success;

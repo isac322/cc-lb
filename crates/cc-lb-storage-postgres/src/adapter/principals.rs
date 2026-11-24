@@ -114,6 +114,19 @@ impl PrincipalStore for PostgresStorage {
         rows.into_iter().map(principal_from_row).collect()
     }
 
+    async fn count(&self, include_deleted: bool) -> StorageResult<usize> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM principals_v1 WHERE ($1 OR deleted_at IS NULL)",
+        )
+        .bind(include_deleted)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        usize::try_from(count).map_err(|_| StorageError::Corrupted {
+            message: format!("principal count {count} cannot be represented as usize"),
+        })
+    }
+
     async fn update(
         &self,
         id: Uuid,

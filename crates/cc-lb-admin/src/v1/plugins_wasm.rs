@@ -161,7 +161,8 @@ async fn upload_wasm(
     match upload_wasm_inner(&state, &identity, multipart).await {
         Ok((status, response, replaced_sha256_hex)) => {
             let state = state.clone();
-            finish_after_commit(async move {
+            let post_commit_tracker = state.post_commit_tracker.clone();
+            finish_after_commit(&post_commit_tracker, async move {
                 if let Some(replaced_sha256_hex) = replaced_sha256_hex {
                     remove_cache_file(&state, &replaced_sha256_hex).await;
                 }
@@ -611,7 +612,8 @@ async fn gc_wasm(
             Err(error) => return storage_response(error),
         }
     }
-    finish_after_commit(async move {
+    let post_commit_tracker = state.post_commit_tracker.clone();
+    finish_after_commit(&post_commit_tracker, async move {
         let mut removed = Vec::new();
         if let Some(sha) = first_removed {
             removed.push(remove_orphan_cache_file(&state, sha).await);
@@ -886,11 +888,14 @@ fn audit_write_failed(error: StorageError, action: &str) -> Response {
 }
 
 /// Finishes a committed mutation on a task that a dropped request cannot cancel.
-async fn finish_after_commit<F>(continuation: F) -> Response
+async fn finish_after_commit<F>(
+    tracker: &cc_lb_control::PostCommitTracker,
+    continuation: F,
+) -> Response
 where
     F: Future<Output = Response> + Send + 'static,
 {
-    match complete_after_commit(continuation).await {
+    match complete_after_commit(tracker, continuation).await {
         Ok(response) => response,
         Err(PostCommitAborted) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,

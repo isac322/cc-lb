@@ -67,6 +67,25 @@ pub async fn record_auth_rejected(
     path: &str,
     reason: &str,
 ) -> Result<(), StorageError> {
+    record_auth_rejected_with_suppressed(state, method, path, reason, 0).await
+}
+
+pub async fn record_auth_rejected_with_suppressed(
+    state: &AdminState,
+    method: &Method,
+    path: &str,
+    reason: &str,
+    suppressed_count: u64,
+) -> Result<(), StorageError> {
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "method".to_owned(),
+        Value::String(method.as_str().to_owned()),
+    );
+    payload.insert("reason".to_owned(), Value::String(reason.to_owned()));
+    if suppressed_count > 0 {
+        payload.insert("suppressed_count".to_owned(), json!(suppressed_count));
+    }
     record_admin_audit(
         state,
         AdminAuditEvent {
@@ -78,10 +97,7 @@ pub async fn record_auth_rejected(
             target_upstream: None,
             api_key_id: None,
             status: 401,
-            payload: Some(json!({
-                "method": method.as_str(),
-                "reason": reason,
-            })),
+            payload: Some(Value::Object(payload)),
         },
     )
     .await
