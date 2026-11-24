@@ -861,13 +861,13 @@ async fn scheduled_oauth_refresh_defers_non_conflict_commit_storage_error_past_r
     let router = axum::Router::new().route(
         "/oauth/token",
         axum::routing::post(move || {
-            let ordinal = endpoint_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            endpoint_calls.fetch_add(1, Ordering::SeqCst);
             async move {
                 (
                     StatusCode::OK,
                     axum::Json(serde_json::json!({
-                        "access_token": format!("sk-ant-oat01-commit-err-{ordinal}"),
-                        "refresh_token": format!("sk-ant-ort01-commit-err-{ordinal}"),
+                        "access_token": "sk-ant-oat01-commit-recovered",
+                        "refresh_token": "sk-ant-ort01-commit-recovered",
                         "expires_in": 3600,
                         "token_type": "Bearer"
                     })),
