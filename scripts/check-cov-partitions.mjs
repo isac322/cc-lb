@@ -65,6 +65,287 @@ function parsePartitionShard(nextestArgs = []) {
   return null;
 }
 
+function collectWorkspacePackages(metadata) {
+  const workspaceIds = new Set(metadata.workspace_members ?? []);
+  const workspacePkgs = new Map();
+  for (const pkg of metadata.packages ?? []) {
+    if (workspaceIds.size === 0 || workspaceIds.has(pkg.id)) {
+      workspacePkgs.set(pkg.name, pkg);
+    }
+  }
+  return workspacePkgs;
+}
+
+function isTargetActiveForCoverage(target) {
+  if (!target) return true;
+  const normalized = String(target).replace(/\s+/g, '');
+  return normalized !== 'cfg(loom)' && normalized !== 'cfg(trybuild)';
+}
+
+function getRelevantDeps(pkg, rootSet, workspacePkgs, workspaceOnly = true) {
+  if (!pkg) return [];
+  const isRoot = rootSet.has(pkg.name);
+  return (pkg.dependencies ?? []).filter(
+    (dep) =>
+      (!workspaceOnly || workspacePkgs.has(dep.name)) &&
+      isTargetActiveForCoverage(dep.target) &&
+      (dep.kind !== 'dev' || isRoot),
+  );
+}
+
+function createResolutionState(workspacePkgs, rootPkgNames) {
+  return {
+    workspacePkgs,
+    rootPkgNames,
+    rootSet: new Set(rootPkgNames),
+    activePkgs: new Set(),
+    featuresByPkg: new Map(),
+    activeDepKeysByPkg: new Map(),
+    weakDepFeatsByPkg: new Map(),
+    expandedByPkg: new Map(),
+    extraErrors: [],
+    changed: false,
+  };
+}
+
+function ensurePkgState(state, pkgName) {
+  if (!state.featuresByPkg.has(pkgName)) state.featuresByPkg.set(pkgName, new Set());
+  if (!state.activeDepKeysByPkg.has(pkgName)) state.activeDepKeysByPkg.set(pkgName, new Set());
+  if (!state.weakDepFeatsByPkg.has(pkgName)) state.weakDepFeatsByPkg.set(pkgName, new Map());
+  if (!state.expandedByPkg.has(pkgName)) state.expandedByPkg.set(pkgName, new Set());
+}
+
+function activatePkg(state, pkgName) {
+  if (!state.workspacePkgs.has(pkgName)) return;
+  ensurePkgState(state, pkgName);
+  if (!state.activePkgs.has(pkgName)) {
+    state.activePkgs.add(pkgName);
+    state.changed = true;
+  }
+}
+
+function enablePkgFeature(state, pkgName, featName) {
+  const pkg = state.workspacePkgs.get(pkgName);
+  if (!pkg || !featName) return;
+  if (pkg.features && Object.prototype.hasOwnProperty.call(pkg.features, featName)) {
+    ensurePkgState(state, pkgName);
+    const set = state.featuresByPkg.get(pkgName);
+    if (!set.has(featName)) {
+      set.add(featName);
+      state.changed = true;
+    }
+    return;
+  }
+  for (const dep of getRelevantDeps(pkg, state.rootSet, state.workspacePkgs)) {
+    if (dep.optional && (dep.rename ?? dep.name) === featName) {
+      activateDepEdge(state, pkgName, dep);
+    }
+  }
+}
+
+function activateDepEdge(state, ownerName, dep) {
+  const depKey = dep.rename ?? dep.name;
+  ensurePkgState(state, ownerName);
+  const activeKeys = state.activeDepKeysByPkg.get(ownerName);
+  if (!activeKeys.has(depKey)) {
+    activeKeys.add(depKey);
+    state.changed = true;
+  }
+  activatePkg(state, dep.name);
+  if (dep.uses_default_features !== false) {
+    enablePkgFeature(state, dep.name, 'default');
+  }
+  for (const df of dep.features ?? []) {
+    enablePkgFeature(state, dep.name, df);
+  }
+}
+
+function activateDepByKey(state, ownerName, depKey, depFeat) {
+  const owner = state.workspacePkgs.get(ownerName);
+  for (const dep of getRelevantDeps(owner, state.rootSet, state.workspacePkgs)) {
+    if ((dep.rename ?? dep.name) === depKey || dep.name === depKey) {
+      activateDepEdge(state, ownerName, dep);
+      if (depFeat) enablePkgFeature(state, dep.name, depFeat);
+    }
+  }
+}
+
+function addWeakDepFeature(state, ownerName, depKey, depFeat) {
+  ensurePkgState(state, ownerName);
+  const weakMap = state.weakDepFeatsByPkg.get(ownerName);
+  let set = weakMap.get(depKey);
+  if (!set) {
+    set = new Set();
+    weakMap.set(depKey, set);
+  }
+  if (!set.has(depFeat)) {
+    set.add(depFeat);
+    state.changed = true;
+  }
+}
+
+function applyExtraFeatureSpecs(state, extraFeatures) {
+  for (const rawSpec of extraFeatures) {
+    const spec = rawSpec.trim();
+    if (!spec) continue;
+    const slashIdx = spec.indexOf('/');
+    if (slashIdx === -1) {
+      let matched = false;
+      for (const rootName of state.rootPkgNames) {
+        const pkg = state.workspacePkgs.get(rootName);
+        if (pkg?.features && Object.prototype.hasOwnProperty.call(pkg.features, spec)) {
+          enablePkgFeature(state, rootName, spec);
+          matched = true;
+        }
+      }
+      if (!matched) {
+        state.extraErrors.push(
+          `extra_features entry '${spec}' does not match any feature on [${state.rootPkgNames.join(', ')}]`,
+        );
+      }
+      continue;
+    }
+
+    const depSpec = spec.slice(0, slashIdx);
+    const depFeat = spec.slice(slashIdx + 1);
+    let matched = false;
+    if (state.rootSet.has(depSpec)) {
+      const targetPkg = state.workspacePkgs.get(depSpec);
+      if (targetPkg?.features && Object.prototype.hasOwnProperty.call(targetPkg.features, depFeat)) {
+        enablePkgFeature(state, depSpec, depFeat);
+        matched = true;
+      }
+    }
+    for (const rootName of state.rootPkgNames) {
+      const rootPkg = state.workspacePkgs.get(rootName);
+      for (const dep of getRelevantDeps(rootPkg, state.rootSet, state.workspacePkgs, false)) {
+        const depKey = dep.rename ?? dep.name;
+        if (depKey !== depSpec && dep.name !== depSpec) continue;
+        matched = true;
+        if (state.workspacePkgs.has(dep.name)) {
+          activateDepEdge(state, rootName, dep);
+          enablePkgFeature(state, dep.name, depFeat);
+        }
+      }
+    }
+    if (!matched) {
+      state.extraErrors.push(
+        `extra_features entry '${spec}' does not match any root package or direct dependency of [${state.rootPkgNames.join(', ')}]`,
+      );
+    }
+  }
+}
+
+function propagateActivePackageStep(state, pkgName) {
+  const pkg = state.workspacePkgs.get(pkgName);
+  const relevant = getRelevantDeps(pkg, state.rootSet, state.workspacePkgs);
+  for (const dep of relevant) {
+    if (!dep.optional) activateDepEdge(state, pkgName, dep);
+  }
+
+  const expanded = state.expandedByPkg.get(pkgName);
+  for (const featName of [...(state.featuresByPkg.get(pkgName) ?? [])]) {
+    if (expanded.has(featName)) continue;
+    expanded.add(featName);
+    state.changed = true;
+    for (const item of pkg.features?.[featName] ?? []) {
+      if (item.startsWith('dep:')) {
+        activateDepByKey(state, pkgName, item.slice('dep:'.length), null);
+      } else if (item.includes('?/')) {
+        const qSlash = item.indexOf('?/');
+        addWeakDepFeature(state, pkgName, item.slice(0, qSlash), item.slice(qSlash + 2));
+      } else if (item.includes('/')) {
+        const slash = item.indexOf('/');
+        activateDepByKey(state, pkgName, item.slice(0, slash), item.slice(slash + 1));
+      } else {
+        enablePkgFeature(state, pkgName, item);
+      }
+    }
+  }
+
+  const activeKeys = state.activeDepKeysByPkg.get(pkgName);
+  const weakMap = state.weakDepFeatsByPkg.get(pkgName);
+  for (const dep of relevant) {
+    const depKey = dep.rename ?? dep.name;
+    if (!activeKeys.has(depKey)) continue;
+    for (const df of weakMap.get(depKey) ?? []) {
+      enablePkgFeature(state, dep.name, df);
+    }
+  }
+}
+
+// Offline workspace-internal feature resolver mirroring Cargo's `--all-features`
+// and `--features` unification so `fmt` can catch cache-busting drift without
+// restoring `~/.cargo/registry` for `cargo tree`.
+export function resolveWorkspaceFeatures(workspacePkgs, rootPkgNames, extraFeatures = []) {
+  const state = createResolutionState(workspacePkgs, rootPkgNames);
+
+  for (const rootName of rootPkgNames) {
+    const pkg = workspacePkgs.get(rootName);
+    if (!pkg) continue;
+    activatePkg(state, rootName);
+    for (const featName of Object.keys(pkg.features ?? {})) {
+      enablePkgFeature(state, rootName, featName);
+    }
+    for (const dep of getRelevantDeps(pkg, state.rootSet, workspacePkgs)) {
+      if (dep.optional) activateDepEdge(state, rootName, dep);
+    }
+  }
+
+  applyExtraFeatureSpecs(state, extraFeatures);
+
+  do {
+    state.changed = false;
+    for (const pkgName of [...state.activePkgs]) {
+      propagateActivePackageStep(state, pkgName);
+    }
+  } while (state.changed);
+
+  return {
+    featuresByPkg: state.featuresByPkg,
+    activePkgs: state.activePkgs,
+    extraErrors: state.extraErrors,
+  };
+}
+
+export function validateFeatureParity(config, metadata) {
+  const errors = [];
+  const excluded = new Set(config.excluded ?? []);
+  const workspacePkgs = collectWorkspacePackages(metadata);
+  const seedRootPkgs = [...workspacePkgs.keys()].filter((name) => !excluded.has(name));
+  const seedResolved = resolveWorkspaceFeatures(workspacePkgs, seedRootPkgs, []);
+
+  for (const part of config.partitions ?? []) {
+    for (const run of part.runs ?? []) {
+      const partResolved = resolveWorkspaceFeatures(
+        workspacePkgs,
+        run.packages ?? [],
+        run.extra_features ?? [],
+      );
+      for (const err of partResolved.extraErrors) {
+        errors.push(`partition '${part.name}' ${err}`);
+      }
+      for (const pkgName of [...partResolved.activePkgs].sort()) {
+        const actual = partResolved.featuresByPkg.get(pkgName) ?? new Set();
+        const expected = seedResolved.featuresByPkg.get(pkgName) ?? new Set();
+        const missing = [...expected].filter((f) => !actual.has(f)).sort();
+        const extra = [...actual].filter((f) => !expected.has(f)).sort();
+        if (missing.length > 0 || extra.length > 0) {
+          const actualList = [...actual].sort().join(', ');
+          const expectedList = [...expected].sort().join(', ');
+          const details = [];
+          if (missing.length > 0) details.push(`missing=[${missing.join(', ')}]`);
+          if (extra.length > 0) details.push(`extra=[${extra.join(', ')}]`);
+          errors.push(
+            `partition '${part.name}' feature drift vs seed-cov-cache for '${pkgName}': resolved=[${actualList}], seed=[${expectedList}], ${details.join(', ')}`,
+          );
+        }
+      }
+    }
+  }
+  return errors;
+}
+
 export function validatePartitions(config, metadata, gatedPackages) {
   const errors = [];
   const excluded = new Set(config.excluded ?? []);
@@ -74,13 +355,7 @@ export function validatePartitions(config, metadata, gatedPackages) {
     return errors;
   }
 
-  const workspaceIds = new Set(metadata.workspace_members ?? []);
-  const workspacePkgs = new Map();
-  for (const pkg of metadata.packages ?? []) {
-    if (workspaceIds.size === 0 || workspaceIds.has(pkg.id)) {
-      workspacePkgs.set(pkg.name, pkg);
-    }
-  }
+  const workspacePkgs = collectWorkspacePackages(metadata);
 
   for (const ex of excluded) {
     if (!workspacePkgs.has(ex)) {
@@ -248,6 +523,15 @@ export function validatePartitions(config, metadata, gatedPackages) {
     if (!covered || covered.size === 0) {
       errors.push(`coverage-gate package '${gated}' is not covered by any partition`);
     }
+  }
+
+  const hasFeatureMetadata =
+    workspacePkgs.size > 0 &&
+    [...workspacePkgs.values()].every(
+      (pkg) => pkg.features && typeof pkg.features === 'object' && Array.isArray(pkg.dependencies),
+    );
+  if (hasFeatureMetadata) {
+    errors.push(...validateFeatureParity(config, metadata));
   }
 
   return errors;

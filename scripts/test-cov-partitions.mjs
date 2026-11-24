@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { extractGatedPackages, validatePartitions } from './check-cov-partitions.mjs';
+import {
+  extractGatedPackages,
+  validateFeatureParity,
+  validatePartitions,
+} from './check-cov-partitions.mjs';
 
 const META = {
   workspace_members: ['pkg-a 1.0.0', 'pkg-b 1.0.0', 'pkg-ex 1.0.0'],
@@ -226,4 +230,143 @@ test('validatePartitions skips target.test === false and accepts zero-testable-t
   };
   const errMissing = validatePartitions(missingFixture, metaWithNoTestTargets, new Set(['pkg-lib']));
   assert.ok(errMissing.some((e) => e.includes('pkg-fixture') && e.includes('missing from all partitions')));
+});
+
+function buildFeatureMeta({ syncDefaultInApp = true, routingEvalTestUtils = true } = {}) {
+  return {
+    workspace_members: ['app 1.0.0', 'sync 1.0.0', 'routing 1.0.0', 'eval 1.0.0', 'opt-admin 1.0.0'],
+    packages: [
+      {
+        id: 'opt-admin 1.0.0',
+        name: 'opt-admin',
+        targets: [{ name: 'opt_admin', kind: ['lib'], test: true }],
+        features: { default: ['sqlite'], sqlite: [], postgres: [] },
+        dependencies: [],
+      },
+      {
+        id: 'sync 1.0.0',
+        name: 'sync',
+        targets: [{ name: 'sync', kind: ['lib'], test: true }],
+        features: { default: ['sqlite'], sqlite: [], postgres: [] },
+        dependencies: [],
+      },
+      {
+        id: 'eval 1.0.0',
+        name: 'eval',
+        targets: [{ name: 'eval', kind: ['lib'], test: true }],
+        features: { 'test-utils': [] },
+        dependencies: [],
+      },
+      {
+        id: 'routing 1.0.0',
+        name: 'routing',
+        targets: [{ name: 'routing', kind: ['lib'], test: true }],
+        features: {},
+        dependencies: [
+          {
+            name: 'eval',
+            kind: null,
+            optional: false,
+            uses_default_features: true,
+            features: [],
+            target: null,
+          },
+          {
+            name: 'eval',
+            kind: 'dev',
+            optional: false,
+            uses_default_features: true,
+            features: routingEvalTestUtils ? ['test-utils'] : [],
+            target: null,
+          },
+        ],
+      },
+      {
+        id: 'app 1.0.0',
+        name: 'app',
+        targets: [{ name: 'app', kind: ['lib'], test: true }],
+        features: {
+          default: ['sqlite', 'opt-admin?/default'],
+          admin: ['dep:opt-admin'],
+          sqlite: syncDefaultInApp ? ['sync/default', 'sync/sqlite', 'admin', 'opt-admin?/sqlite'] : ['sync/sqlite', 'admin', 'opt-admin?/sqlite'],
+          postgres: ['sync/postgres', 'admin', 'opt-admin?/postgres'],
+        },
+        dependencies: [
+          {
+            name: 'opt-admin',
+            kind: null,
+            optional: true,
+            uses_default_features: false,
+            features: [],
+            target: null,
+          },
+          {
+            name: 'sync',
+            kind: null,
+            optional: false,
+            uses_default_features: false,
+            features: [],
+            target: null,
+          },
+          {
+            name: 'routing',
+            kind: null,
+            optional: false,
+            uses_default_features: true,
+            features: [],
+            target: null,
+          },
+          {
+            name: 'eval',
+            kind: null,
+            optional: false,
+            uses_default_features: true,
+            features: [],
+            target: null,
+          },
+        ],
+      },
+    ],
+  };
+}
+
+test('validateFeatureParity accepts aligned transitive and weak features and rejects missing features', () => {
+  const alignedMeta = buildFeatureMeta({ syncDefaultInApp: true });
+  const cfgAligned = {
+    excluded: [],
+    partitions: [
+      {
+        name: 'p-app',
+        runs: [{ packages: ['app'], cargo_args: [], extra_features: ['eval/test-utils'] }],
+      },
+      {
+        name: 'p-rest',
+        runs: [{ packages: ['sync', 'routing', 'eval', 'opt-admin'], cargo_args: [] }],
+      },
+    ],
+  };
+  assert.deepEqual(validatePartitions(cfgAligned, alignedMeta, new Set(['app'])), []);
+  assert.deepEqual(validateFeatureParity(cfgAligned, alignedMeta), []);
+
+  // Missing transitive default feature on `sync` when `app` skips `sync/default`
+  const driftedMeta = buildFeatureMeta({ syncDefaultInApp: false });
+  const driftedErrs = validateFeatureParity(cfgAligned, driftedMeta);
+  assert.ok(
+    driftedErrs.some((e) => e.includes("partition 'p-app'") && e.includes("'sync'") && e.includes('missing=[default]')),
+  );
+
+  // Removing `eval/test-utils` from extra_features exposes dev-dep drift from `routing`
+  const cfgMissingExtra = {
+    excluded: [],
+    partitions: [
+      { name: 'p-app', runs: [{ packages: ['app'], cargo_args: [], extra_features: [] }] },
+      { name: 'p-rest', runs: [{ packages: ['sync', 'routing', 'eval', 'opt-admin'], cargo_args: [] }] },
+    ],
+  };
+  const missingExtraErrs = validateFeatureParity(cfgMissingExtra, alignedMeta);
+  assert.ok(
+    missingExtraErrs.some(
+      (e) => e.includes("partition 'p-app'") && e.includes("'eval'") && e.includes('missing=[test-utils]'),
+    ),
+  );
 });

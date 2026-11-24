@@ -21,7 +21,8 @@
             "--lib"
           ],
           "extra_features": [
-            "cc-lb-storage-api/dto-roundtrip"
+            "cc-lb-storage-api/dto-roundtrip",
+            "cc-lb-routing-eval/test-utils"
           ]
         }
       ]
@@ -43,7 +44,8 @@
             "integration"
           ],
           "extra_features": [
-            "cc-lb-storage-api/dto-roundtrip"
+            "cc-lb-storage-api/dto-roundtrip",
+            "cc-lb-routing-eval/test-utils"
           ],
           "nextest_args": [
             "--partition",
@@ -69,7 +71,8 @@
             "integration"
           ],
           "extra_features": [
-            "cc-lb-storage-api/dto-roundtrip"
+            "cc-lb-storage-api/dto-roundtrip",
+            "cc-lb-routing-eval/test-utils"
           ],
           "nextest_args": [
             "--partition",
@@ -203,7 +206,8 @@
           ],
           "cargo_args": [],
           "extra_features": [
-            "cc-lb-storage-api/dto-roundtrip"
+            "cc-lb-storage-api/dto-roundtrip",
+            "cc-lb-server/postgres"
           ]
         }
       ]
@@ -260,7 +264,9 @@
           ],
           "cargo_args": [],
           "extra_features": [
-            "cc-lb-storage-api/dto-roundtrip"
+            "cc-lb-storage-api/dto-roundtrip",
+            "cc-lb-server/default",
+            "cc-lb-server/postgres"
           ]
         }
       ]

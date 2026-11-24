@@ -19,6 +19,7 @@ cc-lb-config = { path = "../../crates/cc-lb-config" }
 cc-lb-control.workspace = true
 cc-lb-engine = { path = "../../crates/cc-lb-engine" }
 cc-lb-pricing = { path = "../../crates/cc-lb-pricing" }
+cc-lb-routing-eval = { workspace = true, features = ["test-utils"] }
 cc-lb-server = { path = "../../crates/cc-lb-server" }
 cc-lb-storage-api = { path = "../../crates/cc-lb-storage-api" }
 cc-lb-storage-sqlite = { path = "../../crates/cc-lb-storage-sqlite" }

@@ -13,6 +13,7 @@ default = ["sqlite", "embed-spa"]
 embed-spa = ["cc-lb-admin/embed-spa"]
 sqlite = [
     "cc-lb-admin/sqlite",
+    "cc-lb-runtime-sync/default",
     "cc-lb-runtime-sync/sqlite",
     "cc-lb-scheduler/default",
     "cc-lb-scheduler/sqlite",
