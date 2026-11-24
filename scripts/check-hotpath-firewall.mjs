@@ -246,6 +246,34 @@ export const FORBIDDEN_NORMAL_DEPS = new Map([
       'opentelemetry',
     ]),
   ],
+  [
+    'crates/cc-lb-runtime-sync/Cargo.toml',
+    new Set([
+      'cc-lb-scheduler',
+      'cc-lb-admin',
+      'cc-lb-admin-server',
+      'cc-lb-engine',
+      'cc-lb-server',
+      'cc-lb-proxy',
+      'rust-embed',
+    ]),
+  ],
+  [
+    'crates/cc-lb-proxy/Cargo.toml',
+    new Set(['cc-lb-admin', 'cc-lb-admin-server', 'rust-embed']),
+  ],
+  [
+    'crates/cc-lb-admin-server/Cargo.toml',
+    new Set([
+      'cc-lb-engine',
+      'cc-lb-server',
+      'cc-lb-proxy',
+      'cc-lb-routing',
+      'cc-lb-routing-eval',
+      'cc-lb-event-pipeline',
+      'rust-embed',
+    ]),
+  ],
 ]);
 
 export const FORBIDDEN_TRANSITIVE_NORMAL_DEPS = new Map([
@@ -321,6 +349,20 @@ export const FORBIDDEN_TRANSITIVE_NORMAL_DEPS = new Map([
   [
     'crates/cc-lb-providers/Cargo.toml',
     FORBIDDEN_NORMAL_DEPS.get('crates/cc-lb-providers/Cargo.toml'),
+  ],
+  [
+    'crates/cc-lb-runtime-sync/Cargo.toml',
+    FORBIDDEN_NORMAL_DEPS.get('crates/cc-lb-runtime-sync/Cargo.toml'),
+  ],
+  [
+    'crates/cc-lb-admin-server/Cargo.toml',
+    new Set([
+      'cc-lb-engine',
+      'cc-lb-server',
+      'cc-lb-proxy',
+      'cc-lb-routing-eval',
+      'cc-lb-event-pipeline',
+    ]),
   ],
 ]);
 
@@ -541,6 +583,8 @@ function updateDepRecordFromStatement(record, rhsOrSubkey, rhsValue) {
     if (/^true\b/.test(rhsValue.trim())) record.usesWorkspace = true;
   } else if (rhsOrSubkey === 'optional') {
     if (/^true\b/.test(rhsValue.trim())) record.optional = true;
+  } else if (rhsOrSubkey === 'default-features' || rhsOrSubkey === 'default_features') {
+    if (/^false\b/.test(rhsValue.trim())) record.defaultFeatures = false;
   } else if (rhsOrSubkey === null) {
     const pkgMatch = /\bpackage\s*=\s*(['"])([A-Za-z0-9_-]+)\1/.exec(rhsValue);
     if (pkgMatch) record.explicitPackage = pkgMatch[2];
@@ -548,6 +592,7 @@ function updateDepRecordFromStatement(record, rhsOrSubkey, rhsValue) {
     if (pathMatch) record.path = pathMatch[2];
     if (/\bworkspace\s*=\s*true\b/.test(rhsValue)) record.usesWorkspace = true;
     if (/\boptional\s*=\s*true\b/.test(rhsValue)) record.optional = true;
+    if (/\bdefault[-_]features\s*=\s*false\b/.test(rhsValue)) record.defaultFeatures = false;
   }
 }
 
@@ -720,6 +765,7 @@ function extractNormalDeps(raw, workspaceAliases = new Map()) {
         explicitPackage: null,
         usesWorkspace: false,
         optional: false,
+        defaultFeatures: true,
       };
       byKey.set(rawKey, record);
       order.push(record);
@@ -764,6 +810,7 @@ function extractNormalDeps(raw, workspaceAliases = new Map()) {
       line: record.line,
       optional: record.optional,
       usesWorkspace: record.usesWorkspace,
+      defaultFeatures: record.defaultFeatures,
     };
   });
 }
@@ -940,6 +987,126 @@ function checkTransitiveDeps(
   }
 }
 
+function extractFeatureEntries(raw) {
+  const features = new Map();
+  for (const stmt of collectTomlStatements(raw)) {
+    if (stmt.kind === 'entry' && classifyHeader(stmt.header).kind === 'features') {
+      const parsed = parseDottedAssignment(stmt.text);
+      if (!parsed || parsed.subkey !== null) continue;
+      features.set(parsed.key, {
+        line: stmt.line,
+        rhs: parsed.rhs,
+        tokens: Array.from(parsed.rhs.matchAll(/(['"])([^'"]+)\1/g), (m) => m[2]),
+      });
+    }
+  }
+  return features;
+}
+
+function checkSplitBinaryIsolation(rootDir, workspaceAliases, violations) {
+  const tryRead = (relPath) => {
+    try {
+      return readFileSync(path.join(rootDir, relPath), 'utf8');
+    } catch {
+      return null;
+    }
+  };
+
+  const serverRel = 'crates/cc-lb-server/Cargo.toml';
+  const serverRaw = tryRead(serverRel);
+  if (serverRaw !== null) {
+    const serverDeps = extractNormalDeps(serverRaw, workspaceAliases);
+    const adminDep = serverDeps.find((dep) => dep.name === 'cc-lb-admin');
+    if (adminDep && !adminDep.optional) {
+      violations.push(
+        `${serverRel}:${adminDep.line}: \`cc-lb-admin\` (key \`${adminDep.rawKey}\`) must set \`optional = true\` so \`cc-lb-proxy\` stays isolated`,
+      );
+    }
+    const adminKey = adminDep?.rawKey ?? 'cc-lb-admin';
+    const features = extractFeatureEntries(serverRaw);
+    for (const featureName of ['storage-sqlite', 'storage-postgres']) {
+      const entry = features.get(featureName);
+      if (!entry) continue;
+      for (const token of entry.tokens) {
+        if (
+          token === 'admin' ||
+          token === 'embed-spa' ||
+          token === `dep:${adminKey}` ||
+          token.startsWith(`${adminKey}/`) ||
+          token.startsWith(`${adminKey}?/`)
+        ) {
+          violations.push(
+            `${serverRel}:${entry.line}: split proxy storage feature \`${featureName}\` must not enable \`${token}\``,
+          );
+        }
+      }
+    }
+  }
+
+  const proxyRel = 'crates/cc-lb-proxy/Cargo.toml';
+  const proxyRaw = tryRead(proxyRel);
+  if (proxyRaw !== null) {
+    const proxyDeps = extractNormalDeps(proxyRaw, workspaceAliases);
+    const serverDep = proxyDeps.find((dep) => dep.name === 'cc-lb-server');
+    if (serverDep && serverDep.defaultFeatures !== false) {
+      violations.push(
+        `${proxyRel}:${serverDep.line}: \`cc-lb-server\` (key \`${serverDep.rawKey}\`) must set \`default-features = false\``,
+      );
+    }
+    const serverKey = serverDep?.rawKey ?? 'cc-lb-server';
+    const forbiddenProxyTokens = new Set([
+      'admin',
+      'embed-spa',
+      `${serverKey}/admin`,
+      `${serverKey}/embed-spa`,
+      `${serverKey}/sqlite`,
+      `${serverKey}/postgres`,
+      'dep:cc-lb-admin',
+    ]);
+    for (const [featureName, entry] of extractFeatureEntries(proxyRaw).entries()) {
+      for (const token of entry.tokens) {
+        if (forbiddenProxyTokens.has(token)) {
+          violations.push(
+            `${proxyRel}:${entry.line}: feature \`${featureName}\` must not enable \`${token}\``,
+          );
+        }
+      }
+    }
+  }
+
+  const adminServerRel = 'crates/cc-lb-admin-server/Cargo.toml';
+  const adminServerRaw = tryRead(adminServerRel);
+  if (adminServerRaw !== null) {
+    const deps = extractNormalDeps(adminServerRaw, workspaceAliases);
+    const adminDep = deps.find((dep) => dep.name === 'cc-lb-admin');
+    if (adminDep && adminDep.defaultFeatures !== false) {
+      violations.push(
+        `${adminServerRel}:${adminDep.line}: \`cc-lb-admin\` (key \`${adminDep.rawKey}\`) must set \`default-features = false\` so \`embed-spa\` stays optional`,
+      );
+    }
+    const adminKey = adminDep?.rawKey ?? 'cc-lb-admin';
+    const features = extractFeatureEntries(adminServerRaw);
+    const embedSpa = features.get('embed-spa');
+    const expectedToken = `${adminKey}/embed-spa`;
+    if (!embedSpa || (!embedSpa.tokens.includes(expectedToken) && !embedSpa.tokens.includes(`${adminKey}?/embed-spa`))) {
+      violations.push(
+        `${adminServerRel}: missing \`embed-spa\` feature gating \`${expectedToken}\``,
+      );
+    }
+    for (const featureName of ['sqlite', 'postgres']) {
+      const entry = features.get(featureName);
+      if (!entry) continue;
+      for (const token of entry.tokens) {
+        if (token === 'embed-spa' || token === expectedToken || token === `${adminKey}?/embed-spa`) {
+          violations.push(
+            `${adminServerRel}:${entry.line}: backend feature \`${featureName}\` must not force \`${token}\``,
+          );
+        }
+      }
+    }
+  }
+}
+
 function checkAdminEmbedSpaOptional(relPath, raw, workspaceAliases, violations) {
   let embedSpaRhs = null;
   for (const stmt of collectTomlStatements(raw)) {
@@ -1005,6 +1172,8 @@ export function checkHotpathFirewall(rootDir = ROOT) {
   } catch {
     // Missing only inside synthetic test fixtures that omit cc-lb-admin.
   }
+
+  checkSplitBinaryIsolation(rootDir, workspaceAliases, violations);
 
   const eventBusRel = 'crates/cc-lb-control/src/event_bus.rs';
   try {

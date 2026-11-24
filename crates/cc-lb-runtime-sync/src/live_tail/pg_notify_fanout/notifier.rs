@@ -3,11 +3,10 @@ use cc_lb_request_log::RequestEventPartial;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
+use super::DEFAULT_PG_NOTIFY_CHANNEL;
 use super::metrics::{record_notify_dropped, record_notify_sent};
-use crate::metrics_labels::{NotifyDropReason, NotifySentOutcome};
+use crate::live_tail::metrics_labels::{NotifyDropReason, NotifySentOutcome};
 
-pub const DEFAULT_PG_NOTIFY_CHANNEL: &str = "cc_lb_events_partial";
-pub const PARTIAL_NOTIFY_MPSC_CAPACITY: usize = 1024;
 const NOTIFY_PAYLOAD_LIMIT_BYTES: usize = 7500;
 const MAX_TRIMMED_LABEL_CHARS: usize = 128;
 

@@ -2334,7 +2334,7 @@ async fn pol15_idle_ticks_cost_nothing() {
     );
     let scheduler_pool = match &fixture.scheduler.backend {
         cc_lb_scheduler::worker::SchedulerBackend::Sqlite(sqlite) => sqlite.pool().clone(),
-        #[cfg(feature = "postgres")]
+        #[cfg(feature = "storage-postgres")]
         cc_lb_scheduler::worker::SchedulerBackend::Postgres(_) => {
             unreachable!("fixture uses sqlite")
         }

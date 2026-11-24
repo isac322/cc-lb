@@ -128,6 +128,7 @@ pub struct AdminPorts {
 #[derive(Clone, Debug, Default)]
 pub struct StartupConfigOverrides {
     pub runtime_data_dir: Option<PathBuf>,
+    pub split_mode_read_only_config: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,0 +1,42 @@
+# Example PostgreSQL configuration for split deployment (`cc-lb-proxy` + `cc-lb-admin`).
+# Mount read-only as `/etc/cc-lb/cc-lb.toml` in every container.
+# Set `CC_LB_MASTER_KEY` (64-char hex) and `CC_LB_ADMIN_TOKEN` via environment variables.
+
+[listener]
+proxy_addr = "0.0.0.0:8080"
+admin_addr = "0.0.0.0:9090"
+metrics_addr = "0.0.0.0:9091"
+
+[body]
+messages_cap_bytes = 33554432
+files_cap_bytes = 104857600
+
+[timeouts]
+upstream_total_secs = 600
+drain_secs = 30
+
+[storage]
+kind = "postgres"
+url = "postgres://cc_lb:cc_lb@postgres:5432/cc_lb"
+
+[storage.pool]
+max_connections = 16
+acquire_timeout_secs = 10
+statement_timeout_secs = 25
+sslmode = "disable"
+
+[aead]
+key_env = "CC_LB_MASTER_KEY"
+
+[observability]
+tracing_level = "info"
+log_redaction = true
+user_prompt_redaction = false
+
+[[admin.auth.providers]]
+kind = "static_token"
+id = "operator"
+token_env = "CC_LB_ADMIN_TOKEN"
+
+[runtime]
+data_dir = "/var/lib/cc-lb"

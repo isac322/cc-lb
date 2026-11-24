@@ -131,7 +131,8 @@
       "runs": [
         {
           "packages": [
-            "cc-lb-admin"
+            "cc-lb-admin",
+            "cc-lb-admin-server"
           ],
           "cargo_args": [],
           "extra_features": [
@@ -170,6 +171,7 @@
         {
           "packages": [
             "cc-lb-event-pipeline",
+            "cc-lb-runtime-sync",
             "cc-lb-storage-conformance",
             "cc-lb-storage-sqlite",
             "cc-lb-storage-api",
@@ -178,7 +180,8 @@
           "cargo_args": [],
           "extra_features": [
             "cc-lb-storage-api/dto-roundtrip",
-            "cc-lb-event-pipeline/postgres"
+            "cc-lb-event-pipeline/postgres",
+            "cc-lb-runtime-sync/postgres"
           ]
         }
       ]
@@ -235,6 +238,7 @@
             "cc-lb-provider-spi",
             "cc-lb-provider-vertex",
             "cc-lb-providers",
+            "cc-lb-proxy",
             "cc-lb-proxy-telemetry",
             "cc-lb-quota",
             "cc-lb-request-log",

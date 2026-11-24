@@ -1034,7 +1034,7 @@ async fn apply_upstreams(
             );
             continue;
         }
-        if let Err(message) = validate_upstream(upstream, aead) {
+        if let Err(message) = cc_lb_control::validate_upstream(upstream, aead) {
             let reconnect_required = if upstream.kind == UpstreamKind::VertexCredential {
                 cc_lb_domain::vertex::vertex_credential_requires_replacement(
                     last_apply_error.as_deref(),
@@ -1113,112 +1113,6 @@ async fn apply_upstreams(
         );
     }
     Ok(statuses)
-}
-
-fn validate_upstream(upstream: &UpstreamRecord, aead: &AeadService) -> Result<(), String> {
-    match upstream.kind {
-        UpstreamKind::AnthropicApiKey => {
-            // The resolved probe is only used to prove the credential is
-            // usable; `Zeroizing` scrubs it when this arm returns.
-            if let Err(reason) = resolve_api_key(aead, upstream) {
-                return Err(match reason {
-                    ApiKeyResolutionError::Missing => {
-                        "anthropic api-key upstream missing api_key_ciphertext".to_owned()
-                    }
-                    ApiKeyResolutionError::NotDecryptable => {
-                        "anthropic api-key upstream credential is not decryptable".to_owned()
-                    }
-                    ApiKeyResolutionError::NotUtf8 => {
-                        "anthropic api-key upstream credential is not valid utf-8".to_owned()
-                    }
-                    ApiKeyResolutionError::InvalidHeaderValue => {
-                        "anthropic api-key upstream credential is not a valid header value"
-                            .to_owned()
-                    }
-                    ApiKeyResolutionError::LegacyEncoding => {
-                        "anthropic api-key upstream credential uses a retired encoding; re-set api_key_value for this upstream"
-                            .to_owned()
-                    }
-                });
-            }
-        }
-        UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey => {
-            if let Err(reason) = resolve_api_key(aead, upstream) {
-                let provider = match upstream.kind {
-                    UpstreamKind::OpenaiApiKey => "openai",
-                    UpstreamKind::GeminiApiKey => "gemini",
-                    _ => unreachable!("provider arm restricts upstream kind"),
-                };
-                return Err(match reason {
-                    ApiKeyResolutionError::Missing => {
-                        format!("{provider} api-key upstream missing api_key_ciphertext")
-                    }
-                    ApiKeyResolutionError::NotDecryptable => {
-                        format!("{provider} api-key upstream credential is not decryptable")
-                    }
-                    ApiKeyResolutionError::NotUtf8 => {
-                        format!("{provider} api-key upstream credential is not valid utf-8")
-                    }
-                    ApiKeyResolutionError::InvalidHeaderValue => {
-                        format!(
-                            "{provider} api-key upstream credential is not a valid header value"
-                        )
-                    }
-                    ApiKeyResolutionError::LegacyEncoding => {
-                        format!(
-                            "{provider} api-key upstream credential uses a retired encoding; re-set api_key_value for this upstream"
-                        )
-                    }
-                });
-            }
-        }
-        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth => {
-            let provider = match upstream.kind {
-                UpstreamKind::AnthropicOauth => "anthropic",
-                UpstreamKind::OpenaiOauth => "openai",
-                UpstreamKind::GeminiOauth => "gemini",
-                _ => unreachable!("oauth arm restricts upstream kind"),
-            };
-            let ciphertext = upstream
-                .oauth_credentials
-                .as_ref()
-                .ok_or_else(|| format!("{provider} oauth upstream missing oauth credentials"))?
-                .ciphertext();
-            if ciphertext.len() < 29 {
-                return Err(format!(
-                    "{provider} oauth credentials ciphertext is corrupt"
-                ));
-            }
-        }
-        UpstreamKind::VertexApiKey => {
-            resolve_api_key(aead, upstream).map_err(|reason| {
-                format!(
-                    "vertex api-key upstream credential invalid: {}",
-                    match reason {
-                        ApiKeyResolutionError::Missing => "missing",
-                        ApiKeyResolutionError::NotDecryptable => "not_decryptable",
-                        ApiKeyResolutionError::NotUtf8 => "not_utf8",
-                        ApiKeyResolutionError::InvalidHeaderValue => "invalid_header",
-                        ApiKeyResolutionError::LegacyEncoding => "legacy_encoding",
-                    }
-                )
-            })?;
-        }
-        UpstreamKind::VertexCredential => {
-            let ciphertext = upstream.api_key_ciphertext.as_deref().ok_or_else(|| {
-                "vertex credential upstream missing credential ciphertext".to_owned()
-            })?;
-            let plaintext = aead
-                .decrypt(ciphertext, &vertex_credential_aad(&upstream.id.to_string()))
-                .map_err(|_| {
-                    "vertex credential upstream credential is not decryptable".to_owned()
-                })?;
-            parse_credential(&plaintext).map(|_| ()).map_err(|error| {
-                format!("vertex credential upstream credential invalid: {error}")
-            })?;
-        }
-    }
-    Ok(())
 }
 
 fn build_vertex_sources(

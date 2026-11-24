@@ -1431,7 +1431,7 @@ fn provider_label(provider: Provider) -> &'static str {
     }
 }
 
-#[cfg(all(test, feature = "sqlite"))]
+#[cfg(all(test, feature = "storage-sqlite"))]
 #[path = "api_key_usage/tests.rs"]
 mod tests;
 #[cfg(test)]

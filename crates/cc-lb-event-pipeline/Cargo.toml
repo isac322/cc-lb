@@ -12,7 +12,7 @@ name = "integration"
 path = "tests/all.rs"
 
 [features]
-postgres = []
+postgres = ["cc-lb-runtime-sync/live-tail-pg"]
 
 [dependencies]
 arc-swap.workspace = true
@@ -26,6 +26,7 @@ cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-quota.workspace = true
 cc-lb-request-log.workspace = true
 cc-lb-routing-trace.workspace = true
+cc-lb-runtime-sync = { workspace = true, default-features = false, features = ["live-tail-pg"] }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 http.workspace = true
 metrics.workspace = true

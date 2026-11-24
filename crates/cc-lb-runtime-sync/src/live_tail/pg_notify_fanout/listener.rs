@@ -4,10 +4,10 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use super::DEFAULT_PG_NOTIFY_CHANNEL;
 use super::metrics::{record_pg_listener_reconnect, record_queue_usage};
-use super::notifier::DEFAULT_PG_NOTIFY_CHANNEL;
 use super::protocol::NotifyOrigin;
-use crate::metrics_labels::PgListenerReconnectReason;
+use crate::live_tail::metrics_labels::PgListenerReconnectReason;
 use cc_lb_control::event_bus::{RequestEventBus, RequestEventUpdate};
 
 const QUEUE_USAGE_POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -128,7 +128,7 @@ mod tests {
     use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
 
     use super::is_local_notification;
-    use crate::pg_notify_fanout::protocol::InlinePartialNotify;
+    use crate::live_tail::pg_notify_fanout::protocol::InlinePartialNotify;
 
     #[test]
     fn local_inline_partial_is_identified_by_producer_id() {

@@ -311,3 +311,71 @@ test('enforces Phase-4 optional rust-embed and proxy rust-embed exclusion rules'
     rmSync(goodDir, { recursive: true, force: true });
   }
 });
+
+test('enforces Phase-5 three-binary split isolation and feature gating', () => {
+  const badCases = [
+    [
+      'crates/cc-lb-runtime-sync/Cargo.toml',
+      '[package]\nname = "cc-lb-runtime-sync"\n[dependencies]\ncc-lb-scheduler = { path = "../cc-lb-scheduler" }\n',
+      /cc-lb-runtime-sync\/Cargo\.toml.*forbidden normal dependency `cc-lb-scheduler`/,
+    ],
+    [
+      'crates/cc-lb-proxy/Cargo.toml',
+      '[package]\nname = "cc-lb-proxy"\n[dependencies]\ncc-lb-admin = { path = "../cc-lb-admin" }\n',
+      /cc-lb-proxy\/Cargo\.toml.*forbidden normal dependency `cc-lb-admin`/,
+    ],
+    [
+      'crates/cc-lb-admin-server/Cargo.toml',
+      '[package]\nname = "cc-lb-admin-server"\n[features]\nembed-spa = ["cc-lb-admin/embed-spa"]\n[dependencies]\ncc-lb-admin = { path = "../cc-lb-admin", default-features = false }\ncc-lb-engine = { path = "../cc-lb-engine" }\n',
+      /cc-lb-admin-server\/Cargo\.toml.*forbidden normal dependency `cc-lb-engine`/,
+    ],
+    [
+      'crates/cc-lb-server/Cargo.toml',
+      '[package]\nname = "cc-lb-server"\n[features]\nstorage-sqlite = ["admin"]\n[dependencies]\ncc-lb-admin = { path = "../cc-lb-admin" }\n',
+      /must set `optional = true`/,
+    ],
+    [
+      'crates/cc-lb-proxy/Cargo.toml',
+      '[package]\nname = "cc-lb-proxy"\n[features]\nsqlite = ["cc-lb-server/sqlite"]\n[dependencies]\ncc-lb-server = { path = "../cc-lb-server" }\n',
+      /must set `default-features = false`/,
+    ],
+    [
+      'crates/cc-lb-proxy/Cargo.toml',
+      '[package]\nname = "cc-lb-proxy"\n[features]\nsqlite = ["cc-lb-server/sqlite"]\n[dependencies]\ncc-lb-server = { path = "../cc-lb-server", default-features = false }\n',
+      /feature `sqlite` must not enable `cc-lb-server\/sqlite`/,
+    ],
+    [
+      'crates/cc-lb-admin-server/Cargo.toml',
+      '[package]\nname = "cc-lb-admin-server"\n[features]\nsqlite = ["cc-lb-admin/embed-spa"]\n[dependencies]\ncc-lb-admin = { path = "../cc-lb-admin" }\n',
+      /must set `default-features = false`/,
+    ],
+  ];
+
+  for (const [file, manifest, expected] of badCases) {
+    const dir = makeTempRepo({ [file]: manifest });
+    try {
+      const result = checkHotpathFirewall(dir);
+      assert.equal(result.ok, false, `Expected failure for ${file}`);
+      assert.match(result.violations.join('\n'), expected);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const transitiveDir = makeTempRepo({
+    'crates/helper/Cargo.toml':
+      '[package]\nname = "helper"\n[dependencies]\ncc-lb-engine = { path = "../cc-lb-engine" }\n',
+    'crates/cc-lb-admin-server/Cargo.toml':
+      '[package]\nname = "cc-lb-admin-server"\n[features]\nembed-spa = ["cc-lb-admin/embed-spa"]\n[dependencies]\ncc-lb-admin = { path = "../cc-lb-admin", default-features = false }\nhelper = { path = "../helper" }\n',
+  });
+  try {
+    const result = checkHotpathFirewall(transitiveDir);
+    assert.equal(result.ok, false, 'Expected transitive engine violation in cc-lb-admin-server');
+    assert.match(
+      result.violations.join('\n'),
+      /cc-lb-admin-server\/Cargo\.toml.*forbidden transitive normal dependency `cc-lb-engine` via `cc-lb-admin-server -> helper -> cc-lb-engine`/,
+    );
+  } finally {
+    rmSync(transitiveDir, { recursive: true, force: true });
+  }
+});

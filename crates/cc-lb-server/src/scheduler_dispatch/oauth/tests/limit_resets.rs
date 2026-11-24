@@ -465,8 +465,10 @@ async fn live_reset_fence_blocks_usage_and_abandoned_openai_fence_recovers_befor
     assert_eq!(provider.state.usage_calls.load(Ordering::SeqCst), 1);
 }
 
+#[cfg(feature = "admin")]
 struct TestAdminAuth;
 
+#[cfg(feature = "admin")]
 #[async_trait]
 impl cc_lb_admin::auth::AdminAuthProvider for TestAdminAuth {
     fn id(&self) -> &str {
@@ -489,6 +491,7 @@ impl cc_lb_admin::auth::AdminAuthProvider for TestAdminAuth {
     }
 }
 
+#[cfg(feature = "admin")]
 fn admin_router(
     fixture: &DispatchFixture,
     port: Arc<dyn LimitResetUsageRefreshPort>,
@@ -522,6 +525,7 @@ fn admin_router(
     })
 }
 
+#[cfg(feature = "admin")]
 fn claim_request(id: Uuid) -> http::Request<axum::body::Body> {
     http::Request::post(format!("/admin/v1/upstreams/{id}/limit-resets/claim"))
         .header("authorization", "Bearer test")
@@ -536,6 +540,7 @@ fn claim_request(id: Uuid) -> http::Request<axum::body::Body> {
         .unwrap()
 }
 
+#[cfg(feature = "admin")]
 #[tokio::test]
 async fn admin_claim_awaits_actual_usage_publication_before_next_routing_selection() {
     use tower::ServiceExt;
@@ -587,11 +592,13 @@ async fn admin_claim_awaits_actual_usage_publication_before_next_routing_selecti
     }
 }
 
+#[cfg(feature = "admin")]
 struct ObservedRefresh {
     dispatch: SchedulerDispatch,
     finished: Arc<tokio::sync::Notify>,
 }
 
+#[cfg(feature = "admin")]
 #[async_trait]
 impl LimitResetUsageRefreshPort for ObservedRefresh {
     async fn refresh_upstream_usage(
@@ -605,6 +612,7 @@ impl LimitResetUsageRefreshPort for ObservedRefresh {
     }
 }
 
+#[cfg(feature = "admin")]
 #[tokio::test]
 async fn dropped_admin_request_does_not_cancel_committed_claim_usage_refresh() {
     use tower::ServiceExt;
@@ -744,6 +752,7 @@ async fn reset_inventory_eligibility_uses_this_poll_main_usage_without_an_extra_
     assert_eq!(provider.state.usage_calls.load(Ordering::SeqCst), 2);
 }
 
+#[cfg(feature = "admin")]
 #[tokio::test]
 async fn admin_claim_refuses_when_cached_reset_eligibility_no_longer_matches_live_usage() {
     use tower::ServiceExt;
@@ -985,12 +994,12 @@ async fn valid_monthly_poll_records_successful_scheduler_attempt_without_claimin
         "valid provider usage is a normal scheduler attempt"
     );
     let cursor = match &fixture.dispatch.backend {
-        #[cfg(feature = "sqlite")]
+        #[cfg(feature = "storage-sqlite")]
         SchedulerBackend::Sqlite(sqlite) => OAuthUsagePollCursorsStore::new(sqlite.pool().clone())
             .read(upstream.id)
             .await
             .unwrap(),
-        #[cfg(feature = "postgres")]
+        #[cfg(feature = "storage-postgres")]
         SchedulerBackend::Postgres(_) => panic!("DispatchFixture uses SQLite"),
     };
     let cursor = cursor.expect("monthly provider success must record the normal poll cursor");
@@ -1174,14 +1183,14 @@ async fn oauth_usage_poll_backs_off_after_429_and_resumes_after_interval_window(
 
     let read_cursor = || async {
         match &fixture.dispatch.backend {
-            #[cfg(feature = "sqlite")]
+            #[cfg(feature = "storage-sqlite")]
             SchedulerBackend::Sqlite(sqlite) => {
                 OAuthUsagePollCursorsStore::new(sqlite.pool().clone())
                     .read(upstream.id)
                     .await
                     .unwrap()
             }
-            #[cfg(feature = "postgres")]
+            #[cfg(feature = "storage-postgres")]
             SchedulerBackend::Postgres(_) => panic!("DispatchFixture uses SQLite"),
         }
     };
@@ -1291,13 +1300,13 @@ async fn anthropic_throttled_post_claim_refresh_uses_header_probe_and_unblocks_r
 
     // Post-claim 429 was recorded in the poll cursor without polluting warmup_attempts.
     let cursor = match &fixture.dispatch.backend {
-        #[cfg(feature = "sqlite")]
+        #[cfg(feature = "storage-sqlite")]
         SchedulerBackend::Sqlite(sqlite) => OAuthUsagePollCursorsStore::new(sqlite.pool().clone())
             .read(upstream.id)
             .await
             .unwrap()
             .expect("429 recorded in cursor"),
-        #[cfg(feature = "postgres")]
+        #[cfg(feature = "storage-postgres")]
         SchedulerBackend::Postgres(_) => panic!("DispatchFixture uses SQLite"),
     };
     assert_eq!(cursor.last_status, Some(429));

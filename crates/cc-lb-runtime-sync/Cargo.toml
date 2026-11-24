@@ -1,0 +1,44 @@
+[package]
+name = "cc-lb-runtime-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+build = "build.rs"
+autotests = false
+
+[features]
+default = ["sqlite"]
+live-tail-pg = ["dep:sqlx", "sqlx/postgres"]
+sqlite = ["dep:cc-lb-storage-sqlite"]
+postgres = ["live-tail-pg", "dep:cc-lb-storage-postgres"]
+
+[dependencies]
+axum = { workspace = true }
+cc-lb-aead = { path = "../cc-lb-aead" }
+cc-lb-clock = { path = "../cc-lb-clock" }
+cc-lb-config = { path = "../cc-lb-config" }
+cc-lb-control = { path = "../cc-lb-control" }
+cc-lb-lifecycle.workspace = true
+cc-lb-request-log.workspace = true
+cc-lb-storage-api = { path = "../cc-lb-storage-api" }
+cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres", optional = true }
+cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite", optional = true }
+metrics.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sqlx = { workspace = true, optional = true }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["compression-br", "compression-gzip", "set-header"] }
+tracing.workspace = true
+url.workspace = true
+uuid = { workspace = true, features = ["v4", "v7", "serde"] }
+
+[dev-dependencies]
+cc-lb-workspace-hack.workspace = true
+metrics-exporter-prometheus.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

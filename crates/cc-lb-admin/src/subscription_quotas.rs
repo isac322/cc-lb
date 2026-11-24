@@ -691,22 +691,24 @@ async fn build_latest_response(
             }));
     let upstreams = upstreams_for_optional_query(storage, query.upstream_ids.as_deref()).await?;
     let dynamic_view = state.dynamic_view.load();
+    let db_only_split = state.dynamic_view_rebinder.is_none();
     let mut durable_latest_by_upstream = HashMap::<Uuid, Vec<SubscriptionQuotaSample>>::new();
-    if source != SubscriptionQuotaSourceMerge::Header {
+    if db_only_split || source != SubscriptionQuotaSourceMerge::Header {
         let durable_ids = upstreams
             .iter()
             .filter(|upstream| {
                 matches!(
                     upstream.kind,
                     UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
-                )
+                ) || (db_only_split && upstream.kind == UpstreamKind::AnthropicOauth)
             })
             .map(|upstream| upstream.id)
             .collect::<Vec<_>>();
         if !durable_ids.is_empty() {
-            // A serving replica may have a cold cache after a restart. Use the
-            // durable latest row as the read-side fallback; cache publication
-            // still applies the existing timestamp fence.
+            // A serving replica may have a cold cache after a restart, and a
+            // DB-only split admin process has no local cache at all. Load durable
+            // latest rows as the read-side source/fallback while cache
+            // publication preserves the existing timestamp fence.
             for sample in storage
                 .list_latest_subscription_quota_for_upstreams(&durable_ids)
                 .await
@@ -725,11 +727,28 @@ async fn build_latest_response(
     let mut response_upstreams = Vec::with_capacity(upstreams.len());
 
     for upstream in upstreams {
-        let snapshots = dynamic_view.subscription_quota_cache.snapshot_for_upstream(
+        let mut snapshots = dynamic_view.subscription_quota_cache.snapshot_for_upstream(
             upstream.id,
             now_unix_millis,
             max_staleness_secs,
         );
+        let cache_has_no_observations = snapshots.is_empty()
+            || (db_only_split
+                && snapshots
+                    .iter()
+                    .all(|snapshot| snapshot.state == SubscriptionQuotaDataState::Unobserved));
+        if cache_has_no_observations && !provider_quota_windows(upstream.kind).is_empty() {
+            let durable_samples = durable_latest_by_upstream
+                .get(&upstream.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            snapshots =
+                cc_lb_control::subscription_quota_snapshots::candidate_snapshots_from_samples(
+                    durable_samples,
+                    now_unix_millis,
+                    max_staleness_secs,
+                );
+        }
         let mut period_unknown_meters = Vec::new();
         let mut raw_summary = None;
         let mut raw_fallback = None;

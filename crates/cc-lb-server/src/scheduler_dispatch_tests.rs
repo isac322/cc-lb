@@ -109,7 +109,7 @@ impl KeepaliveDispatcher for StaticRenewalDispatcher {
     }
 }
 
-#[cfg(all(test, feature = "sqlite"))]
+#[cfg(all(test, feature = "storage-sqlite"))]
 #[tokio::test]
 async fn lazy_refresh_waits_across_rescheduled_pending_retry_until_generation_advances() {
     use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
@@ -276,7 +276,7 @@ async fn lazy_refresh_waits_across_rescheduled_pending_retry_until_generation_ad
     #[allow(clippy::infallible_destructuring_match)]
     let pool = match &fixture.backend.backend {
         SchedulerBackend::Sqlite(sqlite) => sqlite.pool().clone(),
-        #[cfg(feature = "postgres")]
+        #[cfg(feature = "storage-postgres")]
         SchedulerBackend::Postgres(_) => panic!("expected SQLite scheduler"),
     };
     let (pending_tx, mut pending_rx) = mpsc::unbounded_channel();
@@ -425,7 +425,7 @@ async fn apalis_housekeeping_maintains_separate_sqlite_application_and_scheduler
     let fixture = Fixture::new().await;
     let scheduler_pool = match &fixture.backend.backend {
         SchedulerBackend::Sqlite(backend) => backend.pool(),
-        #[cfg(feature = "postgres")]
+        #[cfg(feature = "storage-postgres")]
         SchedulerBackend::Postgres(_) => panic!("fixture must open SQLite scheduler storage"),
     };
     let application_file: String =
@@ -871,7 +871,7 @@ async fn apalis_housekeeping_reopened_scheduler_factory_cleans_existing_files_qa
     .bind(i64::try_from(NOW).expect("timestamp fits i64"))
     .execute(match &fixture.backend.backend {
         SchedulerBackend::Sqlite(backend) => backend.pool(),
-        #[cfg(feature = "postgres")]
+        #[cfg(feature = "storage-postgres")]
         SchedulerBackend::Postgres(_) => panic!("QA-18 requires SQLite scheduler storage"),
     })
     .await
@@ -891,7 +891,7 @@ async fn apalis_housekeeping_reopened_scheduler_factory_cleans_existing_files_qa
     .bind("cache_keepalive:qa18-stale:1")
     .execute(match &fixture.backend.backend {
         SchedulerBackend::Sqlite(backend) => backend.pool(),
-        #[cfg(feature = "postgres")]
+        #[cfg(feature = "storage-postgres")]
         SchedulerBackend::Postgres(_) => panic!("QA-18 requires SQLite scheduler storage"),
     })
     .await
@@ -932,7 +932,7 @@ async fn apalis_housekeeping_reopened_scheduler_factory_cleans_existing_files_qa
 
     let scheduler_pool = match &fixture.backend.backend {
         SchedulerBackend::Sqlite(backend) => backend.pool(),
-        #[cfg(feature = "postgres")]
+        #[cfg(feature = "storage-postgres")]
         SchedulerBackend::Postgres(_) => panic!("QA-18 requires SQLite scheduler storage"),
     };
     let scheduler_application_tables: i64 = sqlx::query_scalar(
@@ -4219,7 +4219,7 @@ async fn worker_dispatches_published_job_before_producer_marks_enqueued() {
     );
 }
 
-#[cfg(feature = "postgres")]
+#[cfg(feature = "storage-postgres")]
 #[tokio::test]
 async fn postgres_idle_keepalive_worker_renews_session_before_expiry() {
     use std::panic::AssertUnwindSafe;
@@ -4729,7 +4729,7 @@ async fn assert_partial_keepalive_preservation(fixture: &Fixture, storage: Arc<d
     assert_eq!(requests[0].body, expected_bytes);
 }
 
-#[cfg(feature = "postgres")]
+#[cfg(feature = "storage-postgres")]
 #[tokio::test]
 async fn postgres_recreated_keepalive_cycle_retains_every_paid_turn_event_and_evidence() {
     use cc_lb_storage_api::MetaStore;
@@ -5483,34 +5483,37 @@ async fn assert_keepalive_terminal_cap_counts_all_dispatched_renewals(
         .expect("final request event")
         .expect("event");
     assert_eq!(event.source_ref_id.as_deref(), Some(final_source.as_str()));
-    let view = cc_lb_admin::cache_keepalive_view::derive_activity_view(
-        cc_lb_admin::cache_keepalive_view::CacheKeepaliveActivitySource {
-            item: &item,
-            session: Some(&terminal),
-            turns: &turns,
-            evidence: &evidence,
-            now_ms: terminal.updated_at_unix_secs.saturating_mul(1_000),
-            horizon_start_ms: None,
-        },
-        cc_lb_pricing::global_catalog().as_ref(),
-    );
-    assert_eq!(
-        view.state,
-        cc_lb_admin::cache_keepalive_view::status::CacheKeepaliveViewState::Capped
-    );
-    assert_eq!(
-        (view.generation, view.attempts, view.max_attempts),
-        (4, Some(3), Some(3))
-    );
-    assert!(!view.is_active);
-    assert!(view.next_renewal.is_none());
-    assert_eq!(
-        view.turns
-            .iter()
-            .filter(|turn| turn.cycle_id == Some(cycle_id))
-            .count(),
-        3
-    );
+    #[cfg(feature = "admin")]
+    {
+        let view = cc_lb_admin::cache_keepalive_view::derive_activity_view(
+            cc_lb_admin::cache_keepalive_view::CacheKeepaliveActivitySource {
+                item: &item,
+                session: Some(&terminal),
+                turns: &turns,
+                evidence: &evidence,
+                now_ms: terminal.updated_at_unix_secs.saturating_mul(1_000),
+                horizon_start_ms: None,
+            },
+            cc_lb_pricing::global_catalog().as_ref(),
+        );
+        assert_eq!(
+            view.state,
+            cc_lb_admin::cache_keepalive_view::status::CacheKeepaliveViewState::Capped
+        );
+        assert_eq!(
+            (view.generation, view.attempts, view.max_attempts),
+            (4, Some(3), Some(3))
+        );
+        assert!(!view.is_active);
+        assert!(view.next_renewal.is_none());
+        assert_eq!(
+            view.turns
+                .iter()
+                .filter(|turn| turn.cycle_id == Some(cycle_id))
+                .count(),
+            3
+        );
+    }
     assert_eq!(
         storage
             .recover_cache_keepalive_stale_running(

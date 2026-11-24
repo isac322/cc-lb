@@ -1084,14 +1084,14 @@ fn lazy_refresh_holder(replica_id: Uuid) -> String {
     format!("cc-lb-server:lazy-refresher:{replica_id}")
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "storage-sqlite", feature = "storage-postgres"))]
 fn scheduler_claim_error(error: cc_lb_scheduler::error::SchedulerError) -> StorageError {
     StorageError::Unavailable {
         message: error.to_string(),
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "storage-sqlite"))]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};

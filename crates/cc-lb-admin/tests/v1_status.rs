@@ -149,6 +149,110 @@ async fn status_shows_partial_failure_when_upstream_marked_error_in_snapshot() {
 }
 
 #[tokio::test]
+async fn status_falls_back_to_db_upstreams_when_rebinder_absent_and_snapshot_empty() {
+    let (_dir, storage) = temp_storage().await;
+    let state_template = test_state(Config::default(), None);
+    let active_id = Uuid::new_v4();
+    let encrypted_key = state_template
+        .aead
+        .encrypt(b"sk-ant-valid-db-key", active_id.as_bytes())
+        .unwrap();
+    let active = UpstreamStore::create(
+        storage.as_ref(),
+        UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
+            id: active_id,
+            name: "alpha-db-upstream".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            base_url: None,
+            api_key_ciphertext: Some(encrypted_key),
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await
+    .unwrap();
+    let disabled = UpstreamStore::create(
+        storage.as_ref(),
+        UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
+            id: Uuid::new_v4(),
+            name: "beta-disabled-upstream".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await
+    .unwrap();
+    UpstreamStore::update(
+        storage.as_ref(),
+        disabled.id,
+        disabled.revision,
+        cc_lb_storage_api::upstream::UpstreamUpdate {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let unconfigured = UpstreamStore::create(
+        storage.as_ref(),
+        UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
+            id: Uuid::new_v4(),
+            name: "gamma-unconfigured-oauth".to_owned(),
+            kind: UpstreamKind::AnthropicOauth,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let state = test_state(Config::default(), Some(storage));
+    assert!(state.dynamic_view_rebinder.is_none());
+
+    let (status, _, body, _) = authed_json(app(state), "GET", "/admin/v1/status", None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let list = body["upstreams"].as_array().unwrap();
+    assert_eq!(list.len(), 3);
+    assert_eq!(list[0]["id"], active.id.to_string());
+    assert_eq!(list[0]["name"], "alpha-db-upstream");
+    assert_eq!(list[0]["status"], "active");
+    assert_eq!(list[1]["id"], disabled.id.to_string());
+    assert_eq!(list[1]["name"], "beta-disabled-upstream");
+    assert_eq!(list[1]["status"], "disabled");
+    assert_eq!(list[2]["id"], unconfigured.id.to_string());
+    assert_eq!(list[2]["name"], "gamma-unconfigured-oauth");
+    assert_eq!(list[2]["status"], "error");
+    assert_eq!(
+        list[2]["last_apply_error"],
+        "anthropic oauth upstream missing oauth credentials"
+    );
+}
+
+#[tokio::test]
 async fn export_contains_no_plaintext_oauth_tokens() {
     let (_dir, storage) = temp_storage().await;
     let upstream = UpstreamStore::create(

@@ -20,10 +20,10 @@ const APALIS_1_0_FIRST_MIGRATION_CHECKSUM: [u8; 48] = [
 ];
 
 #[cfg(feature = "postgres")]
-pub use cc_lb_scheduler::worker::PostgresSchedulerBackend;
-pub use cc_lb_scheduler::worker::SchedulerBackend;
+pub use crate::worker::PostgresSchedulerBackend;
+pub use crate::worker::SchedulerBackend;
 #[cfg(feature = "sqlite")]
-pub use cc_lb_scheduler::worker::SqliteSchedulerBackend;
+pub use crate::worker::SqliteSchedulerBackend;
 
 #[derive(Debug)]
 pub struct OpenedScheduler {
@@ -37,10 +37,10 @@ impl OpenedScheduler {
 
     pub async fn spawn(
         &self,
-        ctx: cc_lb_scheduler::worker::SchedulerCtx,
+        ctx: crate::worker::SchedulerCtx,
         cancel: CancellationToken,
     ) -> Result<Vec<JoinHandle<()>>, SchedulerFactoryError> {
-        cc_lb_scheduler::scheduler_metrics::touch_scheduler_metric_handles();
+        crate::scheduler_metrics::touch_scheduler_metric_handles();
         self.backend.spawn(ctx, cancel).await.map_err(|error| {
             SchedulerFactoryError::StartupFailed {
                 message: error.to_string(),
@@ -70,7 +70,7 @@ pub async fn open_scheduler_storage(
         StorageConfig::Sqlite { path } => open_sqlite(path, scheduler, clock).await,
         StorageConfig::Postgres { url, pool: _ } => open_postgres(url, scheduler, clock).await,
     };
-    cc_lb_scheduler::scheduler_metrics::set_scheduler_init_failure(opened.is_err());
+    crate::scheduler_metrics::set_scheduler_init_failure(opened.is_err());
     opened
 }
 
@@ -129,7 +129,7 @@ async fn open_sqlite(
     apalis_sqlite::SqliteStorage::setup(&pool)
         .await
         .map_err(migration_error)?;
-    cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
+    crate::migrations::apply_post_setup_migrations(&pool)
         .await
         .map_err(migration_error)?;
     Ok(OpenedScheduler {
@@ -163,20 +163,8 @@ async fn open_postgres(
 
     use sqlx::postgres::PgPoolOptions;
 
-    let connect_options = crate::storage_factory::postgres_connect_options(
-        url,
-        scheduler.separate_pool.sslmode.as_deref(),
-    )
-    .map_err(|error| {
-        use crate::storage_factory::StorageFactoryError;
-
-        let message = match error {
-            StorageFactoryError::ConnectionFailed { message }
-            | StorageFactoryError::InitFailed { message } => message,
-            error => error.to_string(),
-        };
-        SchedulerFactoryError::ConnectionFailed { message }
-    })?;
+    let connect_options =
+        postgres_connect_options(url, scheduler.separate_pool.sslmode.as_deref())?;
     let statement_timeout_ms = scheduler.separate_pool.statement_timeout_secs * 1000;
     let pool = PgPoolOptions::new()
         .max_connections(scheduler.separate_pool.max_connections)
@@ -207,6 +195,56 @@ async fn open_postgres(
     Ok(OpenedScheduler {
         backend: SchedulerBackend::Postgres(PostgresSchedulerBackend::new(pool)),
     })
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_connect_options(
+    url: &str,
+    sslmode: Option<&str>,
+) -> Result<sqlx::postgres::PgConnectOptions, SchedulerFactoryError> {
+    use sqlx::ConnectOptions;
+    use sqlx::postgres::{PgConnectOptions, PgSslMode};
+
+    let explicit_ssl_mode = sslmode.map(parse_ssl_mode).transpose()?;
+    let parsed_url =
+        url::Url::parse(url).map_err(|error| SchedulerFactoryError::ConnectionFailed {
+            message: host_only(url) + ": " + &error.to_string(),
+        })?;
+    let options = PgConnectOptions::from_url(&parsed_url).map_err(|error| {
+        SchedulerFactoryError::ConnectionFailed {
+            message: host_only(url) + ": " + &error.to_string(),
+        }
+    })?;
+    if let Some(ssl_mode) = explicit_ssl_mode {
+        return Ok(options.ssl_mode(ssl_mode));
+    }
+    if parsed_url
+        .query_pairs()
+        .any(|(key, _)| matches!(key.as_ref(), "sslmode" | "ssl-mode"))
+    {
+        return Ok(options);
+    }
+    Ok(options.ssl_mode(PgSslMode::Prefer))
+}
+
+#[cfg(feature = "postgres")]
+fn parse_ssl_mode(value: &str) -> Result<sqlx::postgres::PgSslMode, SchedulerFactoryError> {
+    use sqlx::postgres::PgSslMode;
+
+    match value.to_ascii_lowercase().as_str() {
+        "disable" => Ok(PgSslMode::Disable),
+        "allow" => Ok(PgSslMode::Allow),
+        "prefer" => Ok(PgSslMode::Prefer),
+        "require" => Ok(PgSslMode::Require),
+        "verify-ca" | "verify_ca" => Ok(PgSslMode::VerifyCa),
+        "verify-full" | "verify_full" => Ok(PgSslMode::VerifyFull),
+        other => Err(SchedulerFactoryError::ConnectionFailed {
+            message: format!(
+                "unknown postgres sslmode '{other}'; expected one of: disable, allow, prefer, \
+                 require, verify-ca, verify-full"
+            ),
+        }),
+    }
 }
 
 #[cfg(feature = "postgres")]
@@ -242,7 +280,7 @@ async fn run_postgres_scheduler_setup(
                 .run_direct(None, &mut conn, false)
                 .await
                 .map_err(migration_error)?;
-            cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
+            crate::migrations::apply_post_setup_migrations(&pool)
                 .await
                 .map_err(migration_error)?;
             Ok(())

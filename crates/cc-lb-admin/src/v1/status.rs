@@ -168,22 +168,51 @@ async fn build_status(state: &AdminState) -> Result<StatusResponse, StatusError>
     let storage = storage(state)?;
     let view = state.dynamic_view.load();
     let upstream_records = all_upstreams(storage).await?;
-    let upstreams_by_name = upstream_records
-        .iter()
-        .map(|record| (record.name.clone(), record.id.to_string()))
-        .collect::<BTreeMap<_, _>>();
-    let mut upstreams = view
-        .upstream_status_snapshot
-        .entries
-        .iter()
-        .map(|(name, entry)| StatusUpstream {
-            id: upstreams_by_name.get(name).cloned().unwrap_or_default(),
-            name: name.clone(),
-            status: apply_status_label(entry.status),
-            last_apply_at_unix_secs: entry.last_apply_at_unix_secs,
-            last_apply_error: entry.last_apply_error.clone(),
-        })
-        .collect::<Vec<_>>();
+    let mut upstreams = if state.dynamic_view_rebinder.is_none()
+        && view.upstream_status_snapshot.entries.is_empty()
+    {
+        upstream_records
+            .into_iter()
+            .filter(|record| record.deleted_at_unix_secs.is_none())
+            .map(|record| {
+                let (status, last_apply_error) = if !record.enabled {
+                    ("disabled", record.last_apply_error)
+                } else if record.last_apply_error.is_some() {
+                    ("error", record.last_apply_error)
+                } else if let Err(message) = cc_lb_control::validate_upstream(&record, &state.aead)
+                {
+                    ("error", Some(message))
+                } else {
+                    ("active", None)
+                };
+                StatusUpstream {
+                    id: record.id.to_string(),
+                    name: record.name,
+                    status,
+                    last_apply_at_unix_secs: record
+                        .last_apply_at_unix_secs
+                        .unwrap_or(record.updated_at_unix_secs),
+                    last_apply_error,
+                }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        let upstreams_by_name = upstream_records
+            .iter()
+            .map(|record| (record.name.clone(), record.id.to_string()))
+            .collect::<BTreeMap<_, _>>();
+        view.upstream_status_snapshot
+            .entries
+            .iter()
+            .map(|(name, entry)| StatusUpstream {
+                id: upstreams_by_name.get(name).cloned().unwrap_or_default(),
+                name: name.clone(),
+                status: apply_status_label(entry.status),
+                last_apply_at_unix_secs: entry.last_apply_at_unix_secs,
+                last_apply_error: entry.last_apply_error.clone(),
+            })
+            .collect::<Vec<_>>()
+    };
     upstreams.sort_by(|left, right| left.name.cmp(&right.name));
 
     let replica_identity = state

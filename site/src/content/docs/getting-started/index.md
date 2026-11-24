@@ -12,6 +12,7 @@ cc-lb puts an operator-managed endpoint in front of pooled Anthropic, OpenAI, an
 | --- | --- | --- |
 | [Build the binary](#build-the-binary) | You own the host toolchain and want a local release build. | `target/release/cc-lb` |
 | [Run the published container](#run-the-published-container) | You want the packaged server with no Rust checkout on the host. | `ghcr.io/isac322/cc-lb:1.0.1` |
+| [Split control-plane & data-plane](#split-control-plane-and-data-plane-deployment) | You scale proxy pods independently from a PostgreSQL-backed admin control plane. | `cc-lb-proxy` + `cc-lb-admin` (`--target proxy`, `--target admin`) |
 
 Both paths need an upstream, an admin token, a master key for encrypted credentials, and durable storage. The upstream may be Anthropic (`anthropic_api_key` or `anthropic_oauth`), OpenAI (`openai_api_key` or `openai_oauth`), Gemini (`gemini_api_key` or `gemini_oauth`), or Vertex (`vertex_api_key` or `vertex_credential`). See [upstream concepts](/docs/concepts/upstreams/) for credential paths and warm-up limits.
 
@@ -130,6 +131,32 @@ docker run --rm --name cc-lb \
 ```
 
 The container exposes the proxy, admin, and metrics listeners. Keep the admin and metrics ports on a private network when the container is not running only on a local host.
+
+## Split control-plane and data-plane deployment
+
+For PostgreSQL-backed deployments that scale proxy pods separately from the admin control plane, cc-lb also builds as two focused binaries (plus Docker targets `proxy` and `admin`):
+
+| Binary / Docker target | Purpose &amp; roles | Listeners &amp; routes | Compile isolation |
+| --- | --- | --- | --- |
+| `cc-lb-proxy` (`--target proxy`) | Data-plane proxy and optional scheduler worker pool. Supports `--role proxy-worker` (default), `--role proxy` (or `--no-worker`, stateless proxy only), `--role worker`, plus `config validate`. | `proxy_addr` (default `:8080`, includes `/healthz` and `/readyz`) and `metrics_addr` (default `:9091`) | Excludes `cc-lb-admin` and `rust-embed` / SPA web assets |
+| `cc-lb-admin` (`--target admin`) | PostgreSQL DB-only control plane (`cc-lb-admin-server` package). Enqueues jobs without running worker loops; streams live-tail updates via Postgres `LISTEN`/`NOTIFY` and storage polling. | `admin_addr` (default `:9090`, includes `/admin/health` and optional SPA via `embed-spa`) and `metrics_addr` (default `:9091`) | Excludes proxy engine, routing evaluator, event pipeline, and proxy listeners |
+
+Build the PostgreSQL split binaries from source or via Docker:
+
+```bash
+cargo build --release -p cc-lb-proxy --no-default-features --features postgres
+cargo build --release -p cc-lb-admin-server --no-default-features --features postgres,embed-spa
+
+# Or container targets:
+docker buildx build --target proxy --build-arg FEATURES=postgres -t cc-lb-proxy .
+docker buildx build --target admin --build-arg FEATURES=postgres -t cc-lb-admin .
+```
+
+### Split environment, ports, and config contract
+
+- **Environment variables**: set `CC_LB_MASTER_KEY` (64-character hex) on every `cc-lb-proxy` and `cc-lb-admin` process so all nodes decrypt credentials consistently; set `CC_LB_ADMIN_TOKEN` on `cc-lb-admin`.
+- **Shared configuration**: mount the shared PostgreSQL config read-only (for example, [`deploy/compose/cc-lb.split.toml`](https://github.com/isac322/cc-lb/blob/master/deploy/compose/cc-lb.split.toml) at `/etc/cc-lb/cc-lb.toml:ro`). Because `cc-lb-admin` cannot rewrite proxy config files across separate filesystems, `GET /admin/v1/config/editor` reports `file.mode = "read_only"` and `POST /admin/v1/config/save` returns `409 file_not_writable`, while draft editing, validation, and `POST /admin/v1/config/draft/download` (`200 OK` TOML) stay enabled.
+- **Compose example**: run [`deploy/compose/docker-compose.split.yml`](https://github.com/isac322/cc-lb/blob/master/deploy/compose/docker-compose.split.yml) (`proxy-a` `:8080` / metrics `:9091` with `--role proxy-worker`, `proxy-b` `:8081` / metrics `:9092` with `--role proxy`, and `admin` `:9090` / metrics `:9093`); see [`deploy/compose/README.md`](https://github.com/isac322/cc-lb/blob/master/deploy/compose/README.md).
 
 ## Continue with runtime setup
 

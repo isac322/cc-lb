@@ -192,7 +192,7 @@ struct MaterializedDraft {
 
 pub async fn editor_response(state: &AdminState) -> Result<ConfigEditorResponse, SettingsError> {
     let storage = config_storage(state)?;
-    let snapshot = file_snapshot(state.config_path.as_deref())?;
+    let snapshot = file_snapshot_for_state(state)?;
     let raw_toml = snapshot_text(&snapshot)?;
     let mut file_config = partial_file_json(raw_toml)?;
     redact_storage_url(&mut file_config);
@@ -341,6 +341,15 @@ pub async fn write_config_file(
         .ok_or(SettingsError::StorageUnavailable)?;
     let draft_state = storage.get_config_draft().await?;
     ensure_revision(&draft_state, request.expected_revision)?;
+    if state.startup_config_overrides.split_mode_read_only_config {
+        let snapshot = file_snapshot_for_state(state)?;
+        return Err(SettingsError::FileNotWritable(
+            snapshot
+                .info
+                .reason
+                .unwrap_or_else(|| "atomic replacement is unavailable".to_owned()),
+        ));
+    }
     if draft_state.last_validated_revision != Some(request.expected_revision) {
         return Err(SettingsError::DraftNotValidated);
     }
@@ -351,7 +360,7 @@ pub async fn write_config_file(
         .config_path
         .as_deref()
         .ok_or(SettingsError::ConfigPathMissing)?;
-    let before = file_snapshot(Some(path))?;
+    let before = file_snapshot_for_state(state)?;
     ensure_expected_fingerprint(&before.info, request.expected_fingerprint.as_deref())?;
     if before.info.mode != ConfigFileMode::Writable {
         return Err(SettingsError::FileNotWritable(
@@ -498,7 +507,7 @@ fn materialize_and_validate(
     storage_url_replacement: Option<&str>,
 ) -> Result<MaterializedDraft, SettingsError> {
     normalize_unset(&mut draft);
-    let snapshot = file_snapshot(state.config_path.as_deref())?;
+    let snapshot = file_snapshot_for_state(state)?;
     let current_file = partial_file_json(snapshot_text(&snapshot)?)?;
     if let Err(issue) = restore_storage_url(&mut draft, &current_file, storage_url_replacement) {
         let report = ConfigValidationReport {
@@ -511,7 +520,7 @@ fn materialize_and_validate(
                 valid: false,
                 issues: Vec::new(),
             },
-            filesystem: filesystem_capability_issues(&snapshot.info),
+            filesystem: validation_filesystem_capability_issues(state, &snapshot.info),
             overrides: Vec::new(),
         };
         return Ok(MaterializedDraft {
@@ -530,7 +539,7 @@ fn materialize_and_validate(
     let (mut effective_validation, effective_config) =
         validate_effective_config(&toml, &state.startup_config_overrides);
     normalize_unknown_recurring_job_issues(&mut effective_validation, &draft_recurring_job_issues);
-    let mut filesystem = filesystem_capability_issues(&snapshot.info);
+    let mut filesystem = validation_filesystem_capability_issues(state, &snapshot.info);
     if let Some(config) = effective_config.as_ref() {
         filesystem.extend(config_filesystem_issues(config));
     }
@@ -969,6 +978,17 @@ fn special_env_runtime_data_dir() -> Option<PathBuf> {
     std::env::var(DATA_DIR_ENV).ok().map(PathBuf::from)
 }
 
+fn validation_filesystem_capability_issues(
+    state: &AdminState,
+    info: &ConfigFileInfo,
+) -> Vec<ConfigValidationIssue> {
+    if state.startup_config_overrides.split_mode_read_only_config {
+        Vec::new()
+    } else {
+        filesystem_capability_issues(info)
+    }
+}
+
 fn filesystem_capability_issues(info: &ConfigFileInfo) -> Vec<ConfigValidationIssue> {
     if info.mode == ConfigFileMode::Writable {
         Vec::new()
@@ -1072,6 +1092,18 @@ fn check_writable_file_path(issues: &mut Vec<ConfigValidationIssue>, field: &str
         )),
         _ => {}
     }
+}
+
+fn file_snapshot_for_state(state: &AdminState) -> Result<FileSnapshot, SettingsError> {
+    let mut snapshot = file_snapshot(state.config_path.as_deref())?;
+    if state.startup_config_overrides.split_mode_read_only_config {
+        snapshot.info.mode = ConfigFileMode::ReadOnly;
+        snapshot.info.reason = Some(
+            "split admin server cannot write proxy config files directly; download TOML instead"
+                .to_owned(),
+        );
+    }
+    Ok(snapshot)
 }
 
 fn file_snapshot(path: Option<&Path>) -> Result<FileSnapshot, SettingsError> {

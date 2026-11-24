@@ -263,3 +263,132 @@ async fn save_requires_confirmation_when_active_admin_provider_changes() {
     .await;
     assert_eq!(status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn split_mode_forces_read_only_save_409_while_preserving_download() {
+    let (dir, storage) = temp_storage().await;
+    let config = config_admin_common::minimal_config();
+    let path = write_config_file(dir.path(), &config);
+    let mut state = test_state_with_config_path(config, Some(storage), path);
+    state.startup_config_overrides.split_mode_read_only_config = true;
+    let app = app(state);
+
+    let (_, _, editor, _) = authed_json(app.clone(), "GET", "/admin/v1/config/editor", None).await;
+    assert_eq!(editor["file"]["mode"], "read_only");
+    assert!(
+        editor["file"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("split admin server")
+    );
+
+    let (_, _, saved, _) = authed_json(
+        app.clone(),
+        "PUT",
+        "/admin/v1/config/draft",
+        Some(put_body(config_value(456), 0)),
+    )
+    .await;
+    let revision = saved["revision"].as_u64().unwrap();
+    let (_, _, report, _) = authed_json(
+        app.clone(),
+        "POST",
+        "/admin/v1/config/draft/validate",
+        Some(json!({ "expected_revision": revision })),
+    )
+    .await;
+    assert_eq!(report["file"]["valid"], true);
+    assert_eq!(report["effective"]["valid"], true);
+    assert_eq!(report["filesystem"], json!([]));
+
+    let (_, _, editor_after, _) =
+        authed_json(app.clone(), "GET", "/admin/v1/config/editor", None).await;
+    assert_eq!(editor_after["file"]["mode"], "read_only");
+    assert_eq!(editor_after["last_validated_revision"], revision);
+
+    let (save_status, _, save_resp, _) = authed_json(
+        app.clone(),
+        "POST",
+        "/admin/v1/config/save",
+        Some(json!({
+            "expected_revision": revision,
+            "expected_fingerprint": editor["file"]["fingerprint"],
+            "confirm_self_lockout": false,
+        })),
+    )
+    .await;
+    assert_eq!(save_status, StatusCode::CONFLICT);
+    assert_eq!(save_resp["error"], "file_not_writable");
+
+    let (dl_status, _, dl_bytes) = config_admin_common::authed_bytes(
+        app,
+        "POST",
+        "/admin/v1/config/draft/download",
+        Some(json!({ "expected_revision": revision })),
+    )
+    .await;
+    assert_eq!(dl_status, StatusCode::OK);
+    let downloaded = String::from_utf8(dl_bytes.to_vec()).unwrap();
+    assert!(downloaded.contains("upstream_total_secs = 456"));
+}
+
+#[tokio::test]
+async fn split_mode_without_config_path_records_validated_revision_and_allows_download() {
+    let (_dir, storage) = temp_storage().await;
+    let config = config_admin_common::minimal_config();
+    let mut state = config_admin_common::test_state(config, Some(storage));
+    state.startup_config_overrides.split_mode_read_only_config = true;
+    let app = app(state);
+
+    let (_, _, editor, _) = authed_json(app.clone(), "GET", "/admin/v1/config/editor", None).await;
+    assert_eq!(editor["file"]["mode"], "read_only");
+
+    let (_, _, saved, _) = authed_json(
+        app.clone(),
+        "PUT",
+        "/admin/v1/config/draft",
+        Some(put_body(config_value(789), 0)),
+    )
+    .await;
+    let revision = saved["revision"].as_u64().unwrap();
+
+    let (_, _, report, _) = authed_json(
+        app.clone(),
+        "POST",
+        "/admin/v1/config/draft/validate",
+        Some(json!({ "expected_revision": revision })),
+    )
+    .await;
+    assert_eq!(report["file"]["valid"], true);
+    assert_eq!(report["effective"]["valid"], true);
+    assert_eq!(report["filesystem"], json!([]));
+
+    let (_, _, editor_after, _) =
+        authed_json(app.clone(), "GET", "/admin/v1/config/editor", None).await;
+    assert_eq!(editor_after["last_validated_revision"], revision);
+
+    let (save_status, _, save_resp, _) = authed_json(
+        app.clone(),
+        "POST",
+        "/admin/v1/config/save",
+        Some(json!({
+            "expected_revision": revision,
+            "expected_fingerprint": editor["file"]["fingerprint"],
+            "confirm_self_lockout": false,
+        })),
+    )
+    .await;
+    assert_eq!(save_status, StatusCode::CONFLICT);
+    assert_eq!(save_resp["error"], "file_not_writable");
+
+    let (dl_status, _, dl_bytes) = config_admin_common::authed_bytes(
+        app,
+        "POST",
+        "/admin/v1/config/draft/download",
+        Some(json!({ "expected_revision": revision })),
+    )
+    .await;
+    assert_eq!(dl_status, StatusCode::OK);
+    let downloaded = String::from_utf8(dl_bytes.to_vec()).unwrap();
+    assert!(downloaded.contains("upstream_total_secs = 789"));
+}

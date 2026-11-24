@@ -71,7 +71,7 @@ impl SchedulerDispatch {
             ),
             CronJob::PriceCatalogRefresh(job) => self.dispatch_price_catalog(job).await,
             CronJob::ApalisHousekeeping(job) => match &self.backend {
-                #[cfg(feature = "sqlite")]
+                #[cfg(feature = "storage-sqlite")]
                 SchedulerBackend::Sqlite(sqlite) => {
                     let config =
                         ApalisHousekeepingConfig::new(self.config.scheduler.dlq_retention_days);
@@ -81,7 +81,7 @@ impl SchedulerDispatch {
                             .await,
                     )
                 }
-                #[cfg(feature = "postgres")]
+                #[cfg(feature = "storage-postgres")]
                 SchedulerBackend::Postgres(postgres) => {
                     let config =
                         ApalisHousekeepingConfig::new(self.config.scheduler.dlq_retention_days);
@@ -274,13 +274,13 @@ impl SchedulerDispatch {
         upstream_id: Uuid,
     ) -> Option<cc_lb_scheduler::state_stores::OAuthUsagePollCursor> {
         let result = match &self.backend {
-            #[cfg(feature = "sqlite")]
+            #[cfg(feature = "storage-sqlite")]
             SchedulerBackend::Sqlite(sqlite) => {
                 OAuthUsagePollCursorsStore::new(sqlite.pool().clone())
                     .read(upstream_id)
                     .await
             }
-            #[cfg(feature = "postgres")]
+            #[cfg(feature = "storage-postgres")]
             SchedulerBackend::Postgres(postgres) => {
                 OAuthUsagePollCursorsStore::new(postgres.pool().clone())
                     .read(upstream_id)
@@ -310,7 +310,7 @@ impl SchedulerDispatch {
             return Ok(());
         };
         match &self.backend {
-            #[cfg(feature = "sqlite")]
+            #[cfg(feature = "storage-sqlite")]
             SchedulerBackend::Sqlite(sqlite) => {
                 OAuthUsagePollCursorsStore::new(sqlite.pool().clone())
                     .record_attempt(
@@ -320,7 +320,7 @@ impl SchedulerDispatch {
                     )
                     .await
             }
-            #[cfg(feature = "postgres")]
+            #[cfg(feature = "storage-postgres")]
             SchedulerBackend::Postgres(postgres) => {
                 OAuthUsagePollCursorsStore::new(postgres.pool().clone())
                     .record_attempt(
@@ -335,7 +335,7 @@ impl SchedulerDispatch {
 
     async fn dispatch_anthropic_compat(&self) -> SchedulerResult<JobOutcome> {
         match &self.backend {
-            #[cfg(feature = "sqlite")]
+            #[cfg(feature = "storage-sqlite")]
             SchedulerBackend::Sqlite(sqlite) => {
                 handle_anthropic_compat_refresh_job_with_core_fetcher(
                     &AnthropicCompatEtagsStore::new(sqlite.pool().clone()),
@@ -345,7 +345,7 @@ impl SchedulerDispatch {
                 )
                 .await
             }
-            #[cfg(feature = "postgres")]
+            #[cfg(feature = "storage-postgres")]
             SchedulerBackend::Postgres(postgres) => {
                 handle_anthropic_compat_refresh_job_with_core_fetcher(
                     &AnthropicCompatEtagsStore::new(postgres.pool().clone()),
@@ -370,7 +370,7 @@ impl SchedulerDispatch {
             self.clock.clone(),
         );
         match &self.backend {
-            #[cfg(feature = "sqlite")]
+            #[cfg(feature = "storage-sqlite")]
             SchedulerBackend::Sqlite(sqlite) => price_catalog_outcome(
                 PriceCatalogRefreshJobHandler::new(
                     PriceCatalogVersionsStore::new(sqlite.pool().clone()),
@@ -379,7 +379,7 @@ impl SchedulerDispatch {
                 .handle(job, unix_secs(self.clock.now()))
                 .await,
             ),
-            #[cfg(feature = "postgres")]
+            #[cfg(feature = "storage-postgres")]
             SchedulerBackend::Postgres(postgres) => price_catalog_outcome(
                 PriceCatalogRefreshJobHandler::new(
                     PriceCatalogVersionsStore::new(postgres.pool().clone()),

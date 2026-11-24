@@ -1651,6 +1651,39 @@ async fn build_cc_lb_oauth_extra_usage(
         .collect::<Vec<_>>();
     let now_unix_millis = now_unix_millis(clock);
     let dynamic_view = dynamic_view.load();
+    let mut cached_by_upstream = HashMap::with_capacity(upstreams.len());
+    let mut uncached_ids = Vec::new();
+    for upstream in &upstreams {
+        let snapshots = dynamic_view.subscription_quota_cache.snapshot_for_upstream(
+            upstream.id,
+            now_unix_millis,
+            max_staleness_secs,
+        );
+        let has_observed_overage = snapshots.iter().any(|snapshot| {
+            SubscriptionQuotaWindow::from_str(&snapshot.window)
+                == Some(SubscriptionQuotaWindow::Overage)
+                && snapshot.state != SubscriptionQuotaDataState::Unobserved
+        });
+        if has_observed_overage {
+            cached_by_upstream.insert(upstream.id, snapshots);
+        } else {
+            uncached_ids.push(upstream.id);
+        }
+    }
+    let mut durable_by_upstream = HashMap::<Uuid, Vec<SubscriptionQuotaSample>>::new();
+    if !uncached_ids.is_empty() {
+        for sample in storage
+            .list_latest_subscription_quota_for_upstreams(&uncached_ids)
+            .await?
+        {
+            if sample.window == SubscriptionQuotaWindow::Overage {
+                durable_by_upstream
+                    .entry(sample.upstream_id)
+                    .or_default()
+                    .push(sample);
+            }
+        }
+    }
     let mut enabled = None;
     let mut monthly_limit = 0.0;
     let mut saw_monthly_limit = false;
@@ -1658,11 +1691,18 @@ async fn build_cc_lb_oauth_extra_usage(
     let mut saw_used_credits = false;
 
     for upstream in upstreams {
-        for snapshot in dynamic_view.subscription_quota_cache.snapshot_for_upstream(
-            upstream.id,
-            now_unix_millis,
-            max_staleness_secs,
-        ) {
+        let snapshots = match cached_by_upstream.remove(&upstream.id) {
+            Some(cached) => cached,
+            None => crate::subscription_quota_snapshots::candidate_snapshots_from_samples(
+                durable_by_upstream
+                    .get(&upstream.id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                now_unix_millis,
+                max_staleness_secs,
+            ),
+        };
+        for snapshot in snapshots {
             if SubscriptionQuotaWindow::from_str(&snapshot.window)
                 != Some(SubscriptionQuotaWindow::Overage)
             {
@@ -3056,61 +3096,89 @@ mod tests {
         1_780_000_000
     }
 
-    #[tokio::test]
-    async fn aggregate_counts_all_eligible_upstreams_when_one_has_no_quota_lot() {
-        use std::sync::Arc;
-
-        use async_trait::async_trait;
-        use cc_lb_domain::Upstream;
-        use cc_lb_storage_api::{MetaStore, UpstreamCreate, UpstreamSubscriptionQuotaStore};
-        use cc_lb_upstream::{
-            ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer,
-            SignerError, SignerFactory, SigningCapability, UpstreamError,
-        };
-
-        struct DummySigner;
-        #[async_trait]
-        impl Signer for DummySigner {
-            async fn sign(
-                &self,
-                shaped: ShapedRequest,
-                capability: &mut SigningCapability,
-            ) -> Result<SignedRequest, SignerError> {
-                Ok(SignedRequest::from_shaped(shaped, capability))
-            }
-
-            async fn on_unauthorized(&self, _error: &UpstreamError) -> RetryDecision {
-                RetryDecision::Fail
-            }
+    struct TestDummySigner;
+    #[async_trait::async_trait]
+    impl cc_lb_upstream::Signer for TestDummySigner {
+        async fn sign(
+            &self,
+            shaped: cc_lb_upstream::ShapedRequest,
+            capability: &mut cc_lb_upstream::SigningCapability,
+        ) -> Result<cc_lb_upstream::SignedRequest, cc_lb_upstream::SignerError> {
+            Ok(cc_lb_upstream::SignedRequest::from_shaped(
+                shaped, capability,
+            ))
         }
 
-        struct DummySignerFactory;
-        impl ApiKeyAwareSignerFactory for DummySignerFactory {
-            fn with_router_choice(
-                &self,
-                _router_chosen_upstream_name: String,
-            ) -> Arc<dyn SignerFactory> {
-                Arc::new(DummySignerFactory)
-            }
+        async fn on_unauthorized(
+            &self,
+            _error: &cc_lb_upstream::UpstreamError,
+        ) -> cc_lb_upstream::RetryDecision {
+            cc_lb_upstream::RetryDecision::Fail
         }
-        #[async_trait]
-        impl SignerFactory for DummySignerFactory {
-            async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
-                Ok(Arc::new(DummySigner))
-            }
-        }
+    }
 
+    struct TestDummySignerFactory;
+    impl cc_lb_upstream::ApiKeyAwareSignerFactory for TestDummySignerFactory {
+        fn with_router_choice(
+            &self,
+            _router_chosen_upstream_name: String,
+        ) -> std::sync::Arc<dyn cc_lb_upstream::SignerFactory> {
+            std::sync::Arc::new(TestDummySignerFactory)
+        }
+    }
+    #[async_trait::async_trait]
+    impl cc_lb_upstream::SignerFactory for TestDummySignerFactory {
+        async fn build(
+            &self,
+            _upstream: &cc_lb_domain::Upstream,
+        ) -> Result<std::sync::Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError>
+        {
+            Ok(std::sync::Arc::new(TestDummySigner))
+        }
+    }
+
+    async fn open_quota_test_sqlite(
+        now_secs: u64,
+    ) -> (
+        tempfile::TempDir,
+        std::sync::Arc<cc_lb_clock::TestClock>,
+        cc_lb_storage_sqlite::SqliteStorage,
+    ) {
+        use cc_lb_storage_api::MetaStore as _;
         let dir = tempfile::tempdir().expect("tempdir");
         let db_url = format!(
             "sqlite://{}?mode=rwc",
             dir.path().join("quota.sqlite").display()
         );
-        let now_secs = now_unix_secs_test();
-        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(now_secs));
+        let clock = std::sync::Arc::new(cc_lb_clock::TestClock::new_at_secs(now_secs));
         let storage = cc_lb_storage_sqlite::open_sqlite(&db_url, clock.clone())
             .await
             .expect("open sqlite");
         storage.initialize().await.expect("initialize sqlite");
+        (dir, clock, storage)
+    }
+
+    fn dynamic_view_holder_with_quota_cache(
+        cache: std::sync::Arc<dyn crate::SubscriptionQuotaCacheLike>,
+    ) -> DynamicViewHolder {
+        use std::sync::Arc;
+        let view = crate::DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(TestDummySignerFactory))
+            .principal_view(Arc::new(
+                crate::api_keys::principal_view::PrincipalView::from_db(&[], HashMap::new()),
+            ))
+            .upstream_status_snapshot(Arc::new(crate::UpstreamStatusSnapshot::default()))
+            .subscription_quota_cache(cache)
+            .build();
+        DynamicViewHolder::new(view)
+    }
+
+    #[tokio::test]
+    async fn aggregate_counts_all_eligible_upstreams_when_one_has_no_quota_lot() {
+        use cc_lb_storage_api::{UpstreamCreate, UpstreamSubscriptionQuotaStore};
+
+        let now_secs = now_unix_secs_test();
+        let (_dir, clock, storage) = open_quota_test_sqlite(now_secs).await;
 
         for (id, name) in [
             (Uuid::from_u128(1), "with-lot"),
@@ -3155,14 +3223,9 @@ mod tests {
             .await
             .expect("record sample");
 
-        let view = crate::DynamicViewBuilder::new(0)
-            .signer_factory(Arc::new(DummySignerFactory))
-            .principal_view(Arc::new(
-                crate::api_keys::principal_view::PrincipalView::from_db(&[], HashMap::new()),
-            ))
-            .upstream_status_snapshot(Arc::new(crate::UpstreamStatusSnapshot::default()))
-            .build();
-        let holder = DynamicViewHolder::new(view);
+        let holder = dynamic_view_holder_with_quota_cache(std::sync::Arc::new(
+            crate::NoopSubscriptionQuotaCache,
+        ));
 
         let aggregate = build_cc_lb_aggregate_response_for_provider(
             &storage,
@@ -3183,5 +3246,143 @@ mod tests {
         assert_eq!(aggregate.windows.len(), 1);
         assert_eq!(aggregate.windows[0].eligible_upstreams, 2);
         assert_eq!(aggregate.windows[0].contributing_upstreams, 1);
+    }
+
+    #[tokio::test]
+    async fn oauth_usage_extra_usage_falls_back_to_durable_rows_when_cache_is_empty_or_unobserved()
+    {
+        use std::sync::Arc;
+
+        use cc_lb_storage_api::{UpstreamCreate, UpstreamSubscriptionQuotaStore};
+
+        struct FixedQuotaCache(Vec<SubscriptionQuotaCandidateSnapshot>);
+        impl crate::SubscriptionQuotaCacheLike for FixedQuotaCache {
+            fn upsert_observation(&self, _record: &SubscriptionQuotaSample) {}
+
+            fn snapshot_for_upstream(
+                &self,
+                _upstream_id: Uuid,
+                _now_unix_millis: u64,
+                _max_staleness_secs: u64,
+            ) -> Vec<SubscriptionQuotaCandidateSnapshot> {
+                self.0.clone()
+            }
+        }
+
+        let now_secs = now_unix_secs_test();
+        let (_dir, clock, storage) = open_quota_test_sqlite(now_secs).await;
+        let upstream_id = Uuid::from_u128(10);
+        UpstreamStore::create(
+            &storage,
+            UpstreamCreate {
+                id: upstream_id,
+                name: "oauth-with-overage".to_owned(),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .expect("create upstream");
+
+        let overage_sample: SubscriptionQuotaSample = serde_json::from_value(json!({
+            "upstream_id": upstream_id,
+            "window": "overage",
+            "source": "api",
+            "sample_kind": "sample",
+            "observed_at_unix_millis": now_secs * 1_000,
+            "ingested_at_unix_millis": now_secs * 1_000,
+            "sample_id": Uuid::from_u128(101),
+            "extra_usage_enabled": true,
+            "extra_usage_monthly_limit": 500.0,
+            "extra_usage_used_credits": 125.0,
+        }))
+        .expect("overage sample deserializes");
+        storage
+            .record_subscription_quota_samples(&[overage_sample])
+            .await
+            .expect("record overage sample");
+
+        // 1. Empty slice (NoopSubscriptionQuotaCache).
+        let noop_holder =
+            dynamic_view_holder_with_quota_cache(Arc::new(crate::NoopSubscriptionQuotaCache));
+        let noop_resp = build_cc_lb_oauth_usage_response(&storage, &noop_holder, clock.as_ref())
+            .await
+            .expect("oauth usage with noop cache");
+        let extra = noop_resp.extra_usage.expect("extra_usage from durable row");
+        assert_eq!(extra.enabled, Some(true));
+        assert_eq!(extra.monthly_limit, Some(500.0));
+        assert_eq!(extra.used_credits, Some(125.0));
+
+        // 2. Cold cache returning all-Unobserved candidates (matching SubscriptionQuotaCache).
+        let cold_unobserved = SubscriptionQuotaWindow::all()
+            .iter()
+            .copied()
+            .map(|window| crate::subscription_quota_snapshots::unobserved_candidate(window, 1_800))
+            .collect::<Vec<_>>();
+        let cold_holder = dynamic_view_holder_with_quota_cache(Arc::new(FixedQuotaCache(
+            cold_unobserved.clone(),
+        )));
+        let cold_resp = build_cc_lb_oauth_usage_response(&storage, &cold_holder, clock.as_ref())
+            .await
+            .expect("oauth usage with cold unobserved cache");
+        let extra = cold_resp
+            .extra_usage
+            .expect("extra_usage when cache only has Unobserved candidates");
+        assert_eq!(extra.enabled, Some(true));
+        assert_eq!(extra.monthly_limit, Some(500.0));
+        assert_eq!(extra.used_credits, Some(125.0));
+
+        // 3. Partially warm cache: 5h Fresh, Overage still Unobserved.
+        let mut partial = cold_unobserved;
+        for snapshot in &mut partial {
+            if snapshot.window == "5h" {
+                snapshot.state = SubscriptionQuotaDataState::Fresh;
+                snapshot.source = Some("header".to_owned());
+                snapshot.utilization = Some(0.2);
+                snapshot.observed_at_unix_millis = Some(now_secs * 1_000);
+            }
+        }
+        let partial_holder =
+            dynamic_view_holder_with_quota_cache(Arc::new(FixedQuotaCache(partial.clone())));
+        let partial_resp =
+            build_cc_lb_oauth_usage_response(&storage, &partial_holder, clock.as_ref())
+                .await
+                .expect("oauth usage with partial cache");
+        let extra = partial_resp
+            .extra_usage
+            .expect("extra_usage when Overage is Unobserved in cache");
+        assert_eq!(extra.enabled, Some(true));
+        assert_eq!(extra.monthly_limit, Some(500.0));
+        assert_eq!(extra.used_credits, Some(125.0));
+
+        // 4. Warm cache with observed Overage uses in-memory snapshot instead of DB.
+        let mut warm = partial;
+        for snapshot in &mut warm {
+            if snapshot.window == "overage" {
+                snapshot.state = SubscriptionQuotaDataState::Fresh;
+                snapshot.source = Some("api".to_owned());
+                snapshot.observed_at_unix_millis = Some(now_secs * 1_000);
+                snapshot.extra_usage_enabled = Some(true);
+                snapshot.extra_usage_monthly_limit = Some(900.0);
+                snapshot.extra_usage_used_credits = Some(300.0);
+            }
+        }
+        let warm_holder = dynamic_view_holder_with_quota_cache(Arc::new(FixedQuotaCache(warm)));
+        let warm_resp = build_cc_lb_oauth_usage_response(&storage, &warm_holder, clock.as_ref())
+            .await
+            .expect("oauth usage with warm overage cache");
+        let extra = warm_resp.extra_usage.expect("extra_usage from warm cache");
+        assert_eq!(extra.enabled, Some(true));
+        assert_eq!(extra.monthly_limit, Some(900.0));
+        assert_eq!(extra.used_credits, Some(300.0));
     }
 }

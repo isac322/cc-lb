@@ -695,6 +695,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-lb-admin-server"
+version = "2.2.1"
+dependencies = [
+ "async-trait",
+ "axum",
+ "cc-lb-admin",
+ "cc-lb-aead",
+ "cc-lb-clock",
+ "cc-lb-config",
+ "cc-lb-control",
+ "cc-lb-domain",
+ "cc-lb-observability",
+ "cc-lb-providers",
+ "cc-lb-request-log",
+ "cc-lb-runtime-sync",
+ "cc-lb-scheduler",
+ "cc-lb-storage-api",
+ "cc-lb-storage-sqlite",
+ "cc-lb-upstream",
+ "cc-lb-workspace-hack",
+ "clap",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rustls",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tikv-jemallocator",
+ "tokio",
+ "tower",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "cc-lb-aead"
 version = "2.2.1"
 dependencies = [
@@ -754,6 +791,7 @@ dependencies = [
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
  "cc-lb-upstream",
+ "cc-lb-vertex-auth",
  "cc-lb-workspace-hack",
  "chrono",
  "dashmap",
@@ -894,6 +932,7 @@ dependencies = [
  "cc-lb-quota",
  "cc-lb-request-log",
  "cc-lb-routing-trace",
+ "cc-lb-runtime-sync",
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
@@ -1145,6 +1184,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-lb-proxy"
+version = "2.2.1"
+dependencies = [
+ "axum",
+ "cc-lb-aead",
+ "cc-lb-clock",
+ "cc-lb-config",
+ "cc-lb-runtime-sync",
+ "cc-lb-server",
+ "cc-lb-storage-api",
+ "cc-lb-storage-sqlite",
+ "cc-lb-workspace-hack",
+ "clap",
+ "tempfile",
+ "tikv-jemallocator",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "cc-lb-proxy-telemetry"
 version = "2.2.1"
 dependencies = [
@@ -1230,6 +1289,36 @@ dependencies = [
  "cc-lb-workspace-hack",
  "serde",
  "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "cc-lb-runtime-sync"
+version = "2.2.1"
+dependencies = [
+ "axum",
+ "cc-lb-aead",
+ "cc-lb-clock",
+ "cc-lb-config",
+ "cc-lb-control",
+ "cc-lb-lifecycle",
+ "cc-lb-request-log",
+ "cc-lb-storage-api",
+ "cc-lb-storage-postgres",
+ "cc-lb-storage-sqlite",
+ "cc-lb-workspace-hack",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tower-http 0.7.1",
+ "tracing",
+ "url",
  "uuid",
 ]
 
@@ -1336,6 +1425,7 @@ dependencies = [
  "cc-lb-request-log",
  "cc-lb-routing",
  "cc-lb-routing-eval",
+ "cc-lb-runtime-sync",
  "cc-lb-runtime-wasmtime",
  "cc-lb-scheduler",
  "cc-lb-signer-anthropic-key",
@@ -1383,7 +1473,6 @@ dependencies = [
  "tokio-tungstenite 0.30.0",
  "tokio-util",
  "tower",
- "tower-http 0.7.1",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
