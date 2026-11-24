@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Verifies via Cargo Resolver 2 compilation units (`target`, `host-build`,
-// `host-proc-macro`) that every partition in `.github/ci/cov-partitions.json`
-// resolves the same workspace crate feature sets as `seed-cov-cache`.
+// Verifies via Cargo's resolved `--unit-graph` (`target` and `host` compilation
+// units) that every partition in `.github/ci/cov-partitions.json` resolves the
+// same workspace crate feature sets as `seed-cov-cache`.
 import { execFile as execFileCb } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -11,14 +11,14 @@ import { promisify } from 'node:util';
 const execFile = promisify(execFileCb);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = path.resolve(HERE, '..');
-const UNIT_KINDS = ['target', 'host-build', 'host-proc-macro'];
 const MAX_CARGO_CONCURRENCY = 4;
 
 async function mapLimit(items, limit, fn) {
+  if (items.length === 0) return [];
   const results = new Array(items.length);
   let nextIdx = 0;
   const workerCount = Math.min(limit, items.length);
-  await Promise.all(
+  const settled = await Promise.allSettled(
     Array.from({ length: workerCount }, async () => {
       while (true) {
         const idx = nextIdx;
@@ -28,80 +28,20 @@ async function mapLimit(items, limit, fn) {
       }
     }),
   );
+  const firstRejected = settled.find((s) => s.status === 'rejected');
+  if (firstRejected) {
+    throw firstRejected.reason;
+  }
   return results;
 }
 
-function normalizeFeatureList(featStr) {
-  const cleaned = featStr.replaceAll(' (*)', '');
-  const feats = cleaned
-    .split(',')
-    .map((f) => f.trim())
-    .filter(Boolean);
-  return [...new Set(feats)].sort().join(',');
-}
-
-function recordUnitFeature(unitMap, pkgName, featKey) {
-  let set = unitMap.get(pkgName);
+function recordUnitFeature(unitMap, unitKey, featKey) {
+  let set = unitMap.get(unitKey);
   if (!set) {
     set = new Set();
-    unitMap.set(pkgName, set);
+    unitMap.set(unitKey, set);
   }
   set.add(featKey);
-}
-
-function createEmptyUnitBuckets() {
-  return {
-    target: new Map(),
-    'host-build': new Map(),
-    'host-proc-macro': new Map(),
-  };
-}
-
-function parseCargoTreeDepthLine(line) {
-  const match = /^(\d+)\s*(.+?)\|\|\|(.*)$/.exec(line.trimEnd());
-  if (!match) return null;
-  const depth = Number(match[1]);
-  const pkgPart = match[2].trim();
-  const pkgName = pkgPart.split(/\s+/)[0];
-  if (!pkgName) return null;
-  return {
-    depth,
-    pkgPart,
-    pkgName,
-    featKey: normalizeFeatureList(match[3]),
-  };
-}
-
-function parseNormalDevUnits(stdout, workspaceNames, procMacroNames, buckets) {
-  let procMacroDepth = null;
-  for (const rawLine of stdout.split(/\r?\n/)) {
-    const parsed = parseCargoTreeDepthLine(rawLine);
-    if (!parsed) continue;
-    const { depth, pkgPart, pkgName, featKey } = parsed;
-    if (procMacroDepth !== null && depth <= procMacroDepth) {
-      procMacroDepth = null;
-    }
-    const unitKind = procMacroDepth !== null ? 'host-proc-macro' : 'target';
-    if (workspaceNames.has(pkgName)) {
-      recordUnitFeature(buckets[unitKind], pkgName, featKey);
-    }
-    if (
-      procMacroDepth === null &&
-      (procMacroNames.has(pkgName) || /\(proc-macro\)/.test(pkgPart))
-    ) {
-      procMacroDepth = depth;
-    }
-  }
-}
-
-function parseBuildUnits(stdout, workspaceNames, buckets) {
-  for (const rawLine of stdout.split(/\r?\n/)) {
-    const parsed = parseCargoTreeDepthLine(rawLine);
-    if (!parsed || parsed.depth === 0) continue;
-    if (workspaceNames.has(parsed.pkgName)) {
-      recordUnitFeature(buckets['host-build'], parsed.pkgName, parsed.featKey);
-    }
-  }
 }
 
 async function detectHostTriple(rootDir) {
@@ -121,16 +61,12 @@ async function loadWorkspaceMeta(rootDir) {
   });
   const metadata = JSON.parse(stdout);
   const workspaceIds = new Set(metadata.workspace_members ?? []);
-  const workspaceNames = new Set();
-  const procMacroNames = new Set();
+  const workspaceIdToName = new Map();
   for (const pkg of metadata.packages ?? []) {
     if (workspaceIds.size > 0 && !workspaceIds.has(pkg.id)) continue;
-    workspaceNames.add(pkg.name);
-    if ((pkg.targets ?? []).some((t) => (t.kind ?? []).includes('proc-macro'))) {
-      procMacroNames.add(pkg.name);
-    }
+    workspaceIdToName.set(pkg.id, pkg.name);
   }
-  return { workspaceNames, procMacroNames };
+  return { workspaceIdToName };
 }
 
 function formatCargoError(err) {
@@ -140,46 +76,62 @@ function formatCargoError(err) {
   return lines.slice(0, 6).join(' | ');
 }
 
-async function inspectCargoUnits({
-  rootDir,
-  target,
-  locked,
-  pkgArgs,
-  workspaceNames,
-  procMacroNames,
-}) {
-  const buckets = createEmptyUnitBuckets();
-  const baseArgs = ['tree', '--offline', ...(locked ? ['--locked'] : []), '--target', target];
+function parseUnitGraph(stdout, workspaceIdToName) {
+  const graph = JSON.parse(stdout);
+  if (graph?.version !== 1 || !Array.isArray(graph?.units)) {
+    throw new Error(`Unexpected Cargo unit-graph payload (version=${graph?.version})`);
+  }
 
-  const [normalRes, buildRes] = await Promise.all([
-    execFile(
-      'cargo',
-      [...baseArgs, '-e', 'normal,dev', '--prefix', 'depth', '--format', '{p}|||{f}', ...pkgArgs],
-      { cwd: rootDir, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
-    ),
-    execFile(
-      'cargo',
-      [...baseArgs, '-e', 'build', '--prefix', 'depth', '--format', '{p}|||{f}', ...pkgArgs],
-      { cwd: rootDir, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
-    ),
-  ]);
+  const units = new Map();
+  for (const u of graph.units) {
+    const pkgName = workspaceIdToName.get(u.pkg_id);
+    if (!pkgName) continue;
+    // `cargo nextest` runs compiled test binaries and never invokes rustdoc doctests.
+    if (u.mode === 'doctest') continue;
 
-  parseNormalDevUnits(normalRes.stdout, workspaceNames, procMacroNames, buckets);
-  parseBuildUnits(buildRes.stdout, workspaceNames, buckets);
-  return buckets;
+    const unitKind = u.platform ? 'target' : 'host';
+    const targetKinds = (u.target?.kind ?? []).slice().sort().join(',');
+    const targetName = u.target?.name ?? '';
+    const unitKey = `${unitKind}|${pkgName}|${targetKinds}|${targetName}|${u.mode}`;
+    const featKey = [...new Set(u.features ?? [])].sort().join(',');
+    recordUnitFeature(units, unitKey, featKey);
+  }
+  return units;
 }
 
-function compareBuckets(partName, partBuckets, seedBuckets) {
+async function inspectCargoUnits({ rootDir, target, locked, pkgArgs, workspaceIdToName }) {
+  const args = [
+    'test',
+    '-Z',
+    'unstable-options',
+    '--unit-graph',
+    '--no-run',
+    '--offline',
+    ...(locked ? ['--locked'] : []),
+    '--target',
+    target,
+    ...pkgArgs,
+  ];
+  const { stdout } = await execFile('cargo', args, {
+    cwd: rootDir,
+    encoding: 'utf8',
+    maxBuffer: 128 * 1024 * 1024,
+    env: { ...process.env, RUSTC_BOOTSTRAP: '1' },
+  });
+  return parseUnitGraph(stdout, workspaceIdToName);
+}
+
+function compareUnits(partName, partUnits, seedUnits) {
   const errors = [];
-  for (const unitKind of UNIT_KINDS) {
-    const actualMap = partBuckets[unitKind];
-    const seedMap = seedBuckets[unitKind];
-    for (const pkgName of [...actualMap.keys()].sort()) {
-      const actual = [...actualMap.get(pkgName)].sort();
-      const expected = [...(seedMap.get(pkgName) ?? [])].sort();
-      if (actual.join(';') !== expected.join(';')) {
+  for (const unitKey of [...partUnits.keys()].sort()) {
+    const [unitKind, pkgName, targetKinds, targetName, mode] = unitKey.split('|');
+    const actualFeats = [...partUnits.get(unitKey)].sort();
+    const seedSet = seedUnits.get(unitKey);
+    const seedFeats = [...(seedSet ?? [])].sort();
+    for (const actualFeat of actualFeats) {
+      if (!seedSet || !seedSet.has(actualFeat)) {
         errors.push(
-          `partition '${partName}' [${unitKind}] feature drift vs seed-cov-cache for '${pkgName}': resolved=[${actual.join(' | ')}], seed=[${expected.join(' | ')}]`,
+          `partition '${partName}' [${unitKind}] feature drift vs seed-cov-cache for '${pkgName}' (${targetKinds}:${targetName}:${mode}): resolved=[${actualFeat}], seed=[${seedFeats.join(' | ')}]`,
         );
       }
     }
@@ -189,33 +141,35 @@ function compareBuckets(partName, partBuckets, seedBuckets) {
 
 /**
  * Checks every run in `config.partitions` against the `seed-cov-cache`
- * `--workspace --all-features` invocation across `target`, `host-build`, and
- * `host-proc-macro` Cargo Resolver 2 compilation units.
+ * `--workspace --all-features` invocation across `target` and `host`
+ * Cargo Resolver 2 compilation units via `cargo test --unit-graph`.
  */
 export async function checkFeatureParity({ rootDir, config, target, locked = true }) {
   const resolvedTarget = target ?? (await detectHostTriple(rootDir));
-  const { workspaceNames, procMacroNames } = await loadWorkspaceMeta(rootDir);
+  const { workspaceIdToName } = await loadWorkspaceMeta(rootDir);
 
+  const seedExcluded = Array.isArray(config.seed_excluded)
+    ? config.seed_excluded
+    : (config.excluded ?? []);
   const seedPkgArgs = ['--workspace', '--all-features'];
-  for (const excludedPkg of config.excluded ?? []) {
+  for (const excludedPkg of seedExcluded) {
     seedPkgArgs.push('--exclude', excludedPkg);
   }
 
-  let seedBuckets;
+  let seedUnits;
   try {
-    seedBuckets = await inspectCargoUnits({
+    seedUnits = await inspectCargoUnits({
       rootDir,
       target: resolvedTarget,
       locked,
       pkgArgs: seedPkgArgs,
-      workspaceNames,
-      procMacroNames,
+      workspaceIdToName,
     });
   } catch (err) {
     return {
       target: resolvedTarget,
       partitionRuns: 0,
-      errors: [`seed-cov-cache cargo tree failed: ${formatCargoError(err)}`],
+      errors: [`seed-cov-cache cargo test --unit-graph failed: ${formatCargoError(err)}`],
     };
   }
 
@@ -226,6 +180,7 @@ export async function checkFeatureParity({ rootDir, config, target, locked = tru
       for (const pkg of run.packages ?? []) {
         pkgArgs.push('-p', pkg);
       }
+      pkgArgs.push(...(run.cargo_args ?? []));
       pkgArgs.push('--all-features');
       const extraFeatures = Array.isArray(run.extra_features)
         ? run.extra_features.filter(Boolean)
@@ -239,20 +194,19 @@ export async function checkFeatureParity({ rootDir, config, target, locked = tru
 
   const perRunResults = await mapLimit(runTasks, MAX_CARGO_CONCURRENCY, async (task) => {
     try {
-      const buckets = await inspectCargoUnits({
+      const units = await inspectCargoUnits({
         rootDir,
         target: resolvedTarget,
         locked,
         pkgArgs: task.pkgArgs,
-        workspaceNames,
-        procMacroNames,
+        workspaceIdToName,
       });
-      return { partName: task.partName, buckets, error: null };
+      return { partName: task.partName, units, error: null };
     } catch (err) {
       return {
         partName: task.partName,
-        buckets: null,
-        error: `partition '${task.partName}' cargo tree failed: ${formatCargoError(err)}`,
+        units: null,
+        error: `partition '${task.partName}' cargo test --unit-graph failed: ${formatCargoError(err)}`,
       };
     }
   });
@@ -262,7 +216,7 @@ export async function checkFeatureParity({ rootDir, config, target, locked = tru
     if (res.error) {
       errors.push(res.error);
     } else {
-      errors.push(...compareBuckets(res.partName, res.buckets, seedBuckets));
+      errors.push(...compareUnits(res.partName, res.units, seedUnits));
     }
   }
 

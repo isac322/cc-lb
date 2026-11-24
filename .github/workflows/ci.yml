@@ -481,7 +481,15 @@ jobs:
           set -euo pipefail
           eval "$(cargo llvm-cov show-env --sh)"
           export CARGO_TARGET_DIR="$PWD/target/llvm-cov-target"
-          cargo nextest run --no-run --workspace --exclude cc-lb-loadgen --exclude cc-lb-stress-suite --all-features
+          mapfile -t seed_excludes < <(node -e '
+            const fs = require("node:fs");
+            const cfg = JSON.parse(fs.readFileSync(".github/ci/cov-partitions.json", "utf8"));
+            for (const pkg of cfg.seed_excluded ?? []) {
+              console.log("--exclude");
+              console.log(pkg);
+            }
+          ')
+          cargo nextest run --no-run --workspace ${seed_excludes[@]+"${seed_excludes[@]}"} --all-features
       - name: Save rolling coverage workspace cache
         if: steps.decide.outputs.need_seed == 'true'
         uses: ./.github/actions/save-rust-target-cache

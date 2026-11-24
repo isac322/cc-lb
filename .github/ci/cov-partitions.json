@@ -4,6 +4,10 @@
     "cc-lb-stress-suite",
     "cc-lb-workspace-hack"
   ],
+  "seed_excluded": [
+    "cc-lb-loadgen",
+    "cc-lb-stress-suite"
+  ],
   "partitions": [
     {
       "name": "server-lib",
