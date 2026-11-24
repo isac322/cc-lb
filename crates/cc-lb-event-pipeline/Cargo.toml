@@ -46,6 +46,7 @@ uuid.workspace = true
 axum.workspace = true
 bytes.workspace = true
 cc-lb-clock = { path = "../cc-lb-clock" }
+cc-lb-routing-eval = { workspace = true, features = ["test-utils"] }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 cc-lb-upstream.workspace = true

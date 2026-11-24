@@ -227,3 +227,54 @@ test('validatePartitions skips target.test === false and accepts zero-testable-t
   const errMissing = validatePartitions(missingFixture, metaWithNoTestTargets, new Set(['pkg-lib']));
   assert.ok(errMissing.some((e) => e.includes('pkg-fixture') && e.includes('missing from all partitions')));
 });
+
+test('validatePartitions validates seed_excluded subset rules', () => {
+  const valid = {
+    excluded: ['pkg-ex'],
+    seed_excluded: ['pkg-ex'],
+    partitions: [
+      {
+        name: 'p1',
+        runs: [{ packages: ['pkg-a', 'pkg-b'], cargo_args: [] }],
+      },
+    ],
+  };
+  assert.deepEqual(validatePartitions(valid, META, new Set(['pkg-a', 'pkg-b'])), []);
+
+  const badType = {
+    ...valid,
+    seed_excluded: 'pkg-ex',
+  };
+  assert.ok(
+    validatePartitions(badType, META, new Set(['pkg-a', 'pkg-b'])).some((e) =>
+      e.includes('seed_excluded must be an array'),
+    ),
+  );
+
+  const duplicate = {
+    ...valid,
+    seed_excluded: ['pkg-ex', 'pkg-ex'],
+  };
+  assert.ok(
+    validatePartitions(duplicate, META, new Set(['pkg-a', 'pkg-b'])).some((e) =>
+      e.includes("duplicate seed_excluded package 'pkg-ex'"),
+    ),
+  );
+
+  const unknownPkg = {
+    ...valid,
+    seed_excluded: ['missing-pkg'],
+  };
+  const unknownErrors = validatePartitions(unknownPkg, META, new Set(['pkg-a', 'pkg-b']));
+  assert.ok(unknownErrors.some((e) => e.includes("seed_excluded package 'missing-pkg' is not a workspace member")));
+
+  const notInExcluded = {
+    ...valid,
+    seed_excluded: ['pkg-b'],
+  };
+  assert.ok(
+    validatePartitions(notInExcluded, META, new Set(['pkg-a', 'pkg-b'])).some((e) =>
+      e.includes("seed_excluded package 'pkg-b' must also be listed in excluded"),
+    ),
+  );
+});

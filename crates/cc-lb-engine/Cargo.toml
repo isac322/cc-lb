@@ -80,8 +80,9 @@ trybuild = "1"
 
 [target.'cfg(not(trybuild))'.dev-dependencies]
 cc-lb-workspace-hack.workspace = true
-cc-lb-event-pipeline.workspace = true
+cc-lb-event-pipeline = { workspace = true, features = ["postgres"] }
 cc-lb-routing-eval = { path = "../cc-lb-routing-eval", features = ["test-utils"] }
+cc-lb-runtime-sync = { workspace = true, features = ["default", "sqlite", "postgres"] }
 cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }

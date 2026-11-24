@@ -143,7 +143,7 @@ jobs:
           node scripts/check-cov-partitions.mjs
           node scripts/check-proxy-admin-boundary.mjs
           node scripts/check-hotpath-firewall.mjs
-          node --test scripts/test-cov-partitions.mjs scripts/test-proxy-admin-boundary.mjs scripts/test-hotpath-firewall.mjs scripts/test-ws-mtimes.mjs scripts/test-prune-rust-target.mjs scripts/test-export-merged-lcov.mjs scripts/test-cd-deps-hash.mjs
+          node --test scripts/test-cov-partitions.mjs scripts/test-cov-feature-parity.mjs scripts/test-proxy-admin-boundary.mjs scripts/test-hotpath-firewall.mjs scripts/test-ws-mtimes.mjs scripts/test-prune-rust-target.mjs scripts/test-export-merged-lcov.mjs scripts/test-cd-deps-hash.mjs
 
   guard-crate-versions:
     name: guard crate versions
@@ -481,7 +481,15 @@ jobs:
           set -euo pipefail
           eval "$(cargo llvm-cov show-env --sh)"
           export CARGO_TARGET_DIR="$PWD/target/llvm-cov-target"
-          cargo nextest run --no-run --workspace --exclude cc-lb-loadgen --exclude cc-lb-stress-suite --all-features
+          mapfile -t seed_excludes < <(node -e '
+            const fs = require("node:fs");
+            const cfg = JSON.parse(fs.readFileSync(".github/ci/cov-partitions.json", "utf8"));
+            for (const pkg of cfg.seed_excluded ?? []) {
+              console.log("--exclude");
+              console.log(pkg);
+            }
+          ')
+          cargo nextest run --no-run --workspace ${seed_excludes[@]+"${seed_excludes[@]}"} --all-features
       - name: Save rolling coverage workspace cache
         if: steps.decide.outputs.need_seed == 'true'
         uses: ./.github/actions/save-rust-target-cache
@@ -674,10 +682,13 @@ jobs:
           target-dir: target/debug
           extra-cache-paths: target/tests/trybuild
           stable-build-metadata: "true"
+      - name: Fetch locked dependencies for host target
+        run: cargo fetch --locked --target x86_64-unknown-linux-gnu
+      - name: Verify coverage partition feature parity against seed-cov-cache
+        run: node scripts/check-cov-feature-parity.mjs --target x86_64-unknown-linux-gnu
       - name: Run compile-fail contract tests
         run: |
           set -euo pipefail
-          cargo fetch --locked --target x86_64-unknown-linux-gnu
           unset RUSTFLAGS
           CC_LB_TRYBUILD_UNIFIED=1
           CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' --cfg trybuild --verbose -A dead_code --diagnostic-width=140)"
@@ -687,6 +698,8 @@ jobs:
             --test typestate_contracts \
             --all-features \
             -- --exact authn_rail_trybuild::authn_rail_typestate_contracts --nocapture
+      - name: Run standalone split-proxy integration tests with admin disabled
+        run: cargo nextest run --locked -p cc-lb-proxy --no-default-features --features sqlite,postgres --test integration
       - name: Save rolling trybuild cache
         uses: ./.github/actions/save-rust-target-cache
         with:

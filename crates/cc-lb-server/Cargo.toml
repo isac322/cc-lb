@@ -9,10 +9,11 @@ build = "build.rs"
 autotests = false
 
 [features]
-default = ["sqlite", "embed-spa"]
+default = ["sqlite", "embed-spa", "cc-lb-admin?/default"]
 admin = ["dep:cc-lb-admin"]
 embed-spa = ["admin", "cc-lb-admin?/embed-spa"]
 storage-sqlite = [
+    "cc-lb-runtime-sync/default",
     "cc-lb-runtime-sync/sqlite",
     "cc-lb-scheduler/default",
     "cc-lb-scheduler/sqlite",

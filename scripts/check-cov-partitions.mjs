@@ -91,6 +91,29 @@ export function validatePartitions(config, metadata, gatedPackages) {
     }
   }
 
+  if (config.seed_excluded !== undefined) {
+    if (
+      !Array.isArray(config.seed_excluded) ||
+      config.seed_excluded.some((pkg) => typeof pkg !== 'string' || pkg.length === 0)
+    ) {
+      errors.push('seed_excluded must be an array of non-empty package names');
+    } else {
+      const seenSeedExcluded = new Set();
+      for (const pkg of config.seed_excluded) {
+        if (seenSeedExcluded.has(pkg)) {
+          errors.push(`duplicate seed_excluded package '${pkg}'`);
+        }
+        seenSeedExcluded.add(pkg);
+        if (!workspacePkgs.has(pkg)) {
+          errors.push(`seed_excluded package '${pkg}' is not a workspace member`);
+        }
+        if (!excluded.has(pkg)) {
+          errors.push(`seed_excluded package '${pkg}' must also be listed in excluded`);
+        }
+      }
+    }
+  }
+
   const partitionNames = new Set();
   const seenPackages = new Set();
   const seenTargetsByPkg = new Map();
@@ -264,6 +287,9 @@ function main() {
   });
   const metadata = JSON.parse(rawMeta);
   const errors = validatePartitions(config, metadata, gatedPackages);
+  if (!Array.isArray(config.seed_excluded)) {
+    errors.push('.github/ci/cov-partitions.json must define a seed_excluded array');
+  }
   const ciPath = path.join(ROOT, '.github/workflows/ci.yml');
   try {
     const ciText = readFileSync(ciPath, 'utf8');

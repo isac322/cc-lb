@@ -10,7 +10,7 @@ autotests = false
 
 [features]
 default = ["sqlite"]
-sqlite = ["cc-lb-server/storage-sqlite", "cc-lb-runtime-sync/sqlite"]
+sqlite = ["cc-lb-server/storage-sqlite", "cc-lb-runtime-sync/default", "cc-lb-runtime-sync/sqlite"]
 postgres = ["cc-lb-server/storage-postgres", "cc-lb-runtime-sync/postgres"]
 
 [[bin]]
