@@ -97,12 +97,40 @@ async fn postgres_oauth_refresh_watchdog_recovers_exhausted_failed_and_killed_sa
                 );
                 assert_eq!(u64::try_from(row.1)?, run_at);
 
+                // Single-snapshot family helpers observe the active recovery row even while
+                // the canonical row is terminal, including Running -> retryable Pending transitions.
+                assert_eq!(
+                    backend.adaptive_task_key_family_state(&canonical_key).await?,
+                    cc_lb_scheduler::worker::AdaptiveTaskKeyState::Active
+                );
+                assert_eq!(
+                    backend
+                        .find_active_adaptive_key_in_family(&canonical_key)
+                        .await?
+                        .as_deref(),
+                    Some(recovery_key_1.as_str())
+                );
+
                 // Subsequent tick sees the active recovery row and seeds nothing.
                 let second =
                     run_oauth_refresh_watchdog(&backend, &[target], TICK_UNIX_SECS + 60).await?;
                 assert_eq!(second.seeded, 0);
 
-                // If the recovery row also exhausts, a later tick seeds a new recovery row.
+                // Rescheduling recovery row from Running back to retryable Pending stays Active.
+                sqlx::query(
+                    "UPDATE apalis.jobs SET status = 'Pending', attempts = 1, max_attempts = 5 WHERE job_type = $1 AND idempotency_key = $2",
+                )
+                .bind(ADAPTIVE_QUEUE)
+                .bind(&recovery_key_1)
+                .execute(&pool)
+                .await?;
+                assert_eq!(
+                    backend.adaptive_task_key_family_state(&recovery_key_1).await?,
+                    cc_lb_scheduler::worker::AdaptiveTaskKeyState::Active
+                );
+
+                // If the recovery row also exhausts, family becomes TerminalFailure and a later
+                // tick seeds a new recovery row.
                 sqlx::query(
                     "UPDATE apalis.jobs SET status = 'Failed', attempts = 5, max_attempts = 5 WHERE job_type = $1 AND idempotency_key = $2",
                 )
@@ -110,6 +138,10 @@ async fn postgres_oauth_refresh_watchdog_recovers_exhausted_failed_and_killed_sa
                 .bind(&recovery_key_1)
                 .execute(&pool)
                 .await?;
+                assert_eq!(
+                    backend.adaptive_task_key_family_state(&canonical_key).await?,
+                    cc_lb_scheduler::worker::AdaptiveTaskKeyState::TerminalFailure
+                );
                 let third =
                     run_oauth_refresh_watchdog(&backend, &[target], TICK_UNIX_SECS + 120).await?;
                 assert_eq!(third.seeded, 1);
@@ -127,6 +159,19 @@ async fn postgres_oauth_refresh_watchdog_recovers_exhausted_failed_and_killed_sa
                 .fetch_one(&pool)
                 .await?;
                 assert_eq!(count2, 1);
+
+                // Done recovery row takes precedence over Killed canonical sibling.
+                sqlx::query(
+                    "UPDATE apalis.jobs SET status = 'Done' WHERE job_type = $1 AND idempotency_key = $2",
+                )
+                .bind(ADAPTIVE_QUEUE)
+                .bind(&recovery_key_2)
+                .execute(&pool)
+                .await?;
+                assert_eq!(
+                    backend.adaptive_task_key_family_state(&canonical_key).await?,
+                    cc_lb_scheduler::worker::AdaptiveTaskKeyState::Done
+                );
             }
             Ok(())
         })

@@ -554,48 +554,6 @@ impl SchedulerDispatch {
         }
     }
 
-    async fn has_active_or_done_metadata_refresh_job(
-        &self,
-        upstream_id: Uuid,
-        credential_generation: u64,
-    ) -> SchedulerResult<bool> {
-        const PAGE_SIZE: u32 = 500;
-        for status in [
-            TaskStatus::Pending,
-            TaskStatus::Queued,
-            TaskStatus::Running,
-            TaskStatus::Failed,
-            TaskStatus::Done,
-        ] {
-            let is_failed = status == TaskStatus::Failed;
-            let mut page = 1;
-            loop {
-                let filter = Filter {
-                    status: Some(status.clone()),
-                    page,
-                    page_size: Some(PAGE_SIZE),
-                };
-                let tasks = self.backend.list_adaptive_tasks(&filter).await?;
-                for task in &tasks {
-                    if is_failed && task.attempts >= task.max_attempts {
-                        continue;
-                    }
-                    if let AdaptiveJob::MetadataRefresh(candidate) = &task.args
-                        && candidate.upstream_id == upstream_id
-                        && candidate.credential_generation == credential_generation
-                    {
-                        return Ok(true);
-                    }
-                }
-                if tasks.len() < PAGE_SIZE as usize {
-                    break;
-                }
-                page += 1;
-            }
-        }
-        Ok(false)
-    }
-
     pub(super) async fn reconcile_metadata_refresh(
         &self,
         job: MetadataRefreshJob,
@@ -611,18 +569,13 @@ impl SchedulerDispatch {
         match self.backend.push_adaptive_task(task).await {
             Ok(()) => Ok(()),
             Err(SchedulerError::Conflict(_)) => {
-                match self.backend.adaptive_task_key_state(&canonical_key).await? {
+                match self
+                    .backend
+                    .adaptive_task_key_family_state(&canonical_key)
+                    .await?
+                {
                     AdaptiveTaskKeyState::Active | AdaptiveTaskKeyState::Done => Ok(()),
                     AdaptiveTaskKeyState::Missing | AdaptiveTaskKeyState::TerminalFailure => {
-                        if self
-                            .has_active_or_done_metadata_refresh_job(
-                                job.upstream_id,
-                                job.credential_generation,
-                            )
-                            .await?
-                        {
-                            return Ok(());
-                        }
                         let recovery_key = format!("{canonical_key}:watchdog:{tick_unix_secs}");
                         let recovery_task = SchedulerPushTask {
                             args: AdaptiveJob::MetadataRefresh(job),

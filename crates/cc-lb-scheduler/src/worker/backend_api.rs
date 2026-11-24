@@ -73,6 +73,38 @@ impl SchedulerBackend {
         }
     }
 
+    pub async fn adaptive_task_key_family_state(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<AdaptiveTaskKeyState, SchedulerError> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(sqlite) => {
+                sqlite_adaptive_task_key_family_state(sqlite.pool(), idempotency_key).await
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => {
+                postgres_adaptive_task_key_family_state(postgres.pool(), idempotency_key).await
+            }
+        }
+    }
+
+    pub async fn find_active_adaptive_key_in_family(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<String>, SchedulerError> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(sqlite) => {
+                sqlite_find_active_adaptive_key_in_family(sqlite.pool(), idempotency_key).await
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => {
+                postgres_find_active_adaptive_key_in_family(postgres.pool(), idempotency_key).await
+            }
+        }
+    }
+
     pub async fn push_adaptive_task(
         &self,
         task: SchedulerPushTask<AdaptiveJob>,
@@ -217,6 +249,36 @@ async fn sqlite_adaptive_task_key_state(
     Ok(classify_task_key_state(row))
 }
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+fn task_key_family_parts(idempotency_key: &str) -> (&str, String) {
+    let base = idempotency_key
+        .split_once(":watchdog:")
+        .map_or(idempotency_key, |(prefix, _)| prefix);
+    let watchdog_prefix = format!("{base}:watchdog:");
+    (base, watchdog_prefix)
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+fn fold_task_key_family_state(rows: &[(String, i32, i32)]) -> AdaptiveTaskKeyState {
+    let mut saw_done = false;
+    let mut saw_terminal_failure = false;
+    for (status, attempts, max_attempts) in rows {
+        match classify_task_key_state(Some((status.clone(), *attempts, *max_attempts))) {
+            AdaptiveTaskKeyState::Active => return AdaptiveTaskKeyState::Active,
+            AdaptiveTaskKeyState::Done => saw_done = true,
+            AdaptiveTaskKeyState::TerminalFailure => saw_terminal_failure = true,
+            AdaptiveTaskKeyState::Missing => {}
+        }
+    }
+    if saw_done {
+        AdaptiveTaskKeyState::Done
+    } else if saw_terminal_failure {
+        AdaptiveTaskKeyState::TerminalFailure
+    } else {
+        AdaptiveTaskKeyState::Missing
+    }
+}
+
 #[cfg(feature = "postgres")]
 async fn postgres_adaptive_task_key_state(
     pool: &sqlx::PgPool,
@@ -233,6 +295,94 @@ async fn postgres_adaptive_task_key_state(
     .fetch_optional(pool)
     .await?;
     Ok(classify_task_key_state(row))
+}
+
+#[cfg(feature = "sqlite")]
+async fn sqlite_adaptive_task_key_family_state(
+    pool: &sqlx::SqlitePool,
+    idempotency_key: &str,
+) -> Result<AdaptiveTaskKeyState, SchedulerError> {
+    let (base, watchdog_prefix) = task_key_family_parts(idempotency_key);
+    let rows: Vec<(String, i32, i32)> = sqlx::query_as(
+        "SELECT status, attempts, max_attempts \
+         FROM Jobs \
+         WHERE job_type = ?1 \
+           AND (idempotency_key = ?2 OR substr(idempotency_key, 1, length(?3)) = ?3)",
+    )
+    .bind(ADAPTIVE_QUEUE)
+    .bind(base)
+    .bind(watchdog_prefix)
+    .fetch_all(pool)
+    .await?;
+    Ok(fold_task_key_family_state(&rows))
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_adaptive_task_key_family_state(
+    pool: &sqlx::PgPool,
+    idempotency_key: &str,
+) -> Result<AdaptiveTaskKeyState, SchedulerError> {
+    let (base, watchdog_prefix) = task_key_family_parts(idempotency_key);
+    let rows: Vec<(String, i32, i32)> = sqlx::query_as(
+        "SELECT status, attempts, max_attempts \
+         FROM apalis.jobs \
+         WHERE job_type = $1 \
+           AND (idempotency_key = $2 OR starts_with(idempotency_key, $3))",
+    )
+    .bind(ADAPTIVE_QUEUE)
+    .bind(base)
+    .bind(watchdog_prefix)
+    .fetch_all(pool)
+    .await?;
+    Ok(fold_task_key_family_state(&rows))
+}
+
+#[cfg(feature = "sqlite")]
+async fn sqlite_find_active_adaptive_key_in_family(
+    pool: &sqlx::SqlitePool,
+    idempotency_key: &str,
+) -> Result<Option<String>, SchedulerError> {
+    let (base, watchdog_prefix) = task_key_family_parts(idempotency_key);
+    let key: Option<String> = sqlx::query_scalar(
+        "SELECT idempotency_key \
+         FROM Jobs \
+         WHERE job_type = ?1 \
+           AND idempotency_key IS NOT NULL \
+           AND (idempotency_key = ?2 OR substr(idempotency_key, 1, length(?3)) = ?3) \
+           AND (status IN ('Pending', 'Queued', 'Running') OR (status = 'Failed' AND attempts < max_attempts)) \
+         ORDER BY CASE status WHEN 'Running' THEN 1 WHEN 'Queued' THEN 2 WHEN 'Pending' THEN 3 ELSE 4 END, run_at ASC \
+         LIMIT 1",
+    )
+    .bind(ADAPTIVE_QUEUE)
+    .bind(base)
+    .bind(watchdog_prefix)
+    .fetch_optional(pool)
+    .await?;
+    Ok(key)
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_find_active_adaptive_key_in_family(
+    pool: &sqlx::PgPool,
+    idempotency_key: &str,
+) -> Result<Option<String>, SchedulerError> {
+    let (base, watchdog_prefix) = task_key_family_parts(idempotency_key);
+    let key: Option<String> = sqlx::query_scalar(
+        "SELECT idempotency_key \
+         FROM apalis.jobs \
+         WHERE job_type = $1 \
+           AND idempotency_key IS NOT NULL \
+           AND (idempotency_key = $2 OR starts_with(idempotency_key, $3)) \
+           AND (status IN ('Pending', 'Queued', 'Running') OR (status = 'Failed' AND attempts < max_attempts)) \
+         ORDER BY CASE status WHEN 'Running' THEN 1 WHEN 'Queued' THEN 2 WHEN 'Pending' THEN 3 ELSE 4 END, run_at ASC \
+         LIMIT 1",
+    )
+    .bind(ADAPTIVE_QUEUE)
+    .bind(base)
+    .bind(watchdog_prefix)
+    .fetch_optional(pool)
+    .await?;
+    Ok(key)
 }
 
 #[cfg(feature = "sqlite")]

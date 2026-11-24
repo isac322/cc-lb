@@ -15,7 +15,7 @@ use cc_lb_oauth_protocol::{
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::worker::{
-    AdaptiveJob, AdaptiveTaskKeyState, Filter, SchedulerBackend, SchedulerPushTask, TaskStatus,
+    AdaptiveJob, AdaptiveTaskKeyState, SchedulerBackend, SchedulerPushTask,
 };
 use cc_lb_signer_anthropic_oauth::{LazyRefreshError, LazyRefreshHandle};
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -38,7 +38,6 @@ use crate::dynamic_view_builder::Stores;
 
 const LAZY_REFRESH_CONTENTION_WAIT_SECS: u64 = 60;
 const LAZY_REFRESH_POLL_INTERVAL_SECS: u64 = 1;
-const LAZY_REFRESH_TASK_PAGE_SIZE: u32 = 500;
 const OAUTH_REFRESH_LEASE_TTL_SECS: u64 = 90;
 const OAUTH_REFRESH_LEASE_RENEW_INTERVAL_SECS: u64 = 25;
 const OAUTH_REFRESH_LEASE_SAFETY_MARGIN_SECS: u64 = 1;
@@ -912,13 +911,12 @@ impl LazyRefreshClaimGuard for ApalisLazyRefreshClaimGuard {
                 idempotency_key: canonical_key,
             });
         }
-        if let Some(recovery_key) = find_active_oauth_refresh_recovery_key(
-            &self.scheduler_backend,
-            upstream_id,
-            expected_generation,
-            expires_at_unix_secs,
-        )
-        .await?
+        if let Some(active_key) = self
+            .scheduler_backend
+            .find_active_adaptive_key_in_family(&canonical_key)
+            .await
+            .map_err(scheduler_claim_error)?
+            && active_key != canonical_key
         {
             let recovery_job = OAuthRefreshJob::for_credential(
                 upstream_id,
@@ -928,7 +926,7 @@ impl LazyRefreshClaimGuard for ApalisLazyRefreshClaimGuard {
             return self
                 .begin_refresh_task(
                     recovery_job,
-                    recovery_key,
+                    active_key,
                     expires_at_unix_secs,
                     now_unix_secs,
                 )
@@ -1010,133 +1008,22 @@ impl LazyRefreshClaimGuard for ApalisLazyRefreshClaimGuard {
     }
 }
 
-fn oauth_refresh_key_family_matches(watched_key: &str, candidate_key: &str) -> bool {
-    let base = watched_key
-        .split_once(":watchdog:")
-        .map_or(watched_key, |(prefix, _)| prefix);
-    candidate_key == base
-        || candidate_key
-            .strip_prefix(base)
-            .is_some_and(|rest| rest.starts_with(":watchdog:"))
-}
-
-async fn find_active_oauth_refresh_recovery_key(
-    scheduler_backend: &SchedulerBackend,
-    upstream_id: Uuid,
-    expected_generation: u64,
-    expected_expires_at_unix_secs: u64,
-) -> StorageResult<Option<String>> {
-    for status in [
-        TaskStatus::Running,
-        TaskStatus::Queued,
-        TaskStatus::Pending,
-        TaskStatus::Failed,
-    ] {
-        let is_failed = status == TaskStatus::Failed;
-        let mut page = 1;
-        loop {
-            let filter = Filter {
-                status: Some(status.clone()),
-                page,
-                page_size: Some(LAZY_REFRESH_TASK_PAGE_SIZE),
-            };
-            let tasks = scheduler_backend
-                .list_adaptive_tasks(&filter)
-                .await
-                .map_err(scheduler_claim_error)?;
-            for task in &tasks {
-                if is_failed && task.attempts >= task.max_attempts {
-                    continue;
-                }
-                if let AdaptiveJob::OAuthRefresh(candidate) = &task.args
-                    && candidate.upstream_id == upstream_id
-                    && candidate.expected_generation == Some(expected_generation)
-                    && candidate
-                        .expected_expires_at_unix_secs
-                        .is_none_or(|exp| exp == expected_expires_at_unix_secs)
-                    && let Some(key) = task.idempotency_key.as_deref()
-                {
-                    return Ok(Some(key.to_owned()));
-                }
-            }
-            if tasks.len() < usize::try_from(LAZY_REFRESH_TASK_PAGE_SIZE).unwrap_or(usize::MAX) {
-                break;
-            }
-            page += 1;
-        }
-    }
-    Ok(None)
-}
-
 async fn apalis_lazy_refresh_task_state(
     scheduler_backend: &SchedulerBackend,
     idempotency_key: &str,
 ) -> StorageResult<LazyRefreshTaskState> {
-    let mut terminal_state = None;
-    for status in [
-        TaskStatus::Pending,
-        TaskStatus::Queued,
-        TaskStatus::Running,
-        TaskStatus::Failed,
-        TaskStatus::Killed,
-        TaskStatus::Done,
-    ] {
-        let mut page = 1;
-        loop {
-            let filter = Filter {
-                status: Some(status.clone()),
-                page,
-                page_size: Some(LAZY_REFRESH_TASK_PAGE_SIZE),
-            };
-            let tasks = scheduler_backend
-                .list_adaptive_tasks(&filter)
-                .await
-                .map_err(scheduler_claim_error)?;
-            for task in &tasks {
-                let Some(task_key) = task.idempotency_key.as_deref() else {
-                    continue;
-                };
-                if !oauth_refresh_key_family_matches(idempotency_key, task_key) {
-                    continue;
-                }
-                match lazy_refresh_task_state_from_row(task) {
-                    LazyRefreshTaskState::Active => return Ok(LazyRefreshTaskState::Active),
-                    state @ LazyRefreshTaskState::TerminalFailure { .. } => {
-                        terminal_state = Some(state);
-                    }
-                    LazyRefreshTaskState::Done => {
-                        terminal_state.get_or_insert(LazyRefreshTaskState::Done);
-                    }
-                }
-            }
-            if tasks.len() < usize::try_from(LAZY_REFRESH_TASK_PAGE_SIZE).unwrap_or(usize::MAX) {
-                break;
-            }
-            page += 1;
+    match scheduler_backend
+        .adaptive_task_key_family_state(idempotency_key)
+        .await
+        .map_err(scheduler_claim_error)?
+    {
+        AdaptiveTaskKeyState::Active | AdaptiveTaskKeyState::Missing => {
+            Ok(LazyRefreshTaskState::Active)
         }
-    }
-    Ok(terminal_state.unwrap_or(LazyRefreshTaskState::Active))
-}
-
-fn lazy_refresh_task_state_from_row(
-    task: &cc_lb_scheduler::worker::SchedulerTaskRow<AdaptiveJob>,
-) -> LazyRefreshTaskState {
-    match &task.status {
-        TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Running => {
-            LazyRefreshTaskState::Active
-        }
-        TaskStatus::Failed if task.attempts < task.max_attempts => LazyRefreshTaskState::Active,
-        TaskStatus::Failed => LazyRefreshTaskState::TerminalFailure {
+        AdaptiveTaskKeyState::Done => Ok(LazyRefreshTaskState::Done),
+        AdaptiveTaskKeyState::TerminalFailure => Ok(LazyRefreshTaskState::TerminalFailure {
             reason: "oauth refresh job failed permanently".to_owned(),
-        },
-        TaskStatus::Killed => LazyRefreshTaskState::TerminalFailure {
-            reason: "oauth refresh job was killed after exhausting retries".to_owned(),
-        },
-        TaskStatus::Done => LazyRefreshTaskState::Done,
-        _ => {
-            tracing::warn!(status = ?task.status, "unknown oauth refresh task status");
-            LazyRefreshTaskState::Active
-        }
+        }),
     }
 }
 
@@ -1504,55 +1391,15 @@ impl LazyRefresher {
         contended_reason: &str,
         wait_deadline: tokio::time::Instant,
     ) -> Result<(), LazyRefreshError> {
-        let lease = loop {
-            let upstream = self
-                .stores
-                .upstreams
-                .get_by_id(upstream_id)
-                .await
-                .map_err(lazy_error)?
-                .ok_or_else(|| LazyRefreshError::Failed {
-                    reason: "oauth upstream not found".to_owned(),
-                })?;
-            if upstream.oauth_token_generation > starting_generation {
-                return Ok(());
-            }
-            let bundle = oauth_token_bundle(&upstream, &self.aead)?;
-            if bundle.never_refresh {
-                return Err(LazyRefreshError::Failed {
-                    reason: RefreshError::NotRefreshable.to_string(),
-                });
-            }
-            check_refresh_allowed(&self.stores, &upstream, &bundle, &*self.clock)
-                .await
-                .map_err(lazy_refresh_error)?;
+        enum PollFallback {
+            Claimed(LazyRefreshFallbackLease),
+            GenerationAdvanced,
+            Contended,
+        }
 
-            if let Some(lease) = self
-                .claim_guard
-                .try_claim_fallback(
-                    upstream_id,
-                    holder,
-                    idempotency_key,
-                    starting_generation,
-                    unix_secs(self.clock.now()),
-                )
-                .await
-                .map_err(lazy_error)?
-            {
-                break lease;
-            }
-            if let Some(current_generation) = self
-                .stores
-                .upstreams
-                .read_oauth_token_generation(upstream_id)
-                .await
-                .map_err(lazy_error)?
-                && current_generation > starting_generation
-            {
-                return Ok(());
-            }
-            let now = tokio::time::Instant::now();
-            if now >= wait_deadline {
+        let mut attempt = 0usize;
+        let lease = loop {
+            if attempt > 0 && tokio::time::Instant::now() >= wait_deadline {
                 tracing::warn!(
                     upstream_id = %upstream_id,
                     idempotency_key = %idempotency_key,
@@ -1562,14 +1409,111 @@ impl LazyRefresher {
                     reason: contended_reason.to_owned(),
                 });
             }
-            let sleep_for = self.contention.poll_interval.min(wait_deadline - now);
-            tokio::select! {
-                _ = self.cancel.cancelled() => {
+
+            let poll_once = async {
+                let upstream = self
+                    .stores
+                    .upstreams
+                    .get_by_id(upstream_id)
+                    .await
+                    .map_err(lazy_error)?
+                    .ok_or_else(|| LazyRefreshError::Failed {
+                        reason: "oauth upstream not found".to_owned(),
+                    })?;
+                if upstream.oauth_token_generation > starting_generation {
+                    return Ok(PollFallback::GenerationAdvanced);
+                }
+                let bundle = oauth_token_bundle(&upstream, &self.aead)?;
+                if bundle.never_refresh {
                     return Err(LazyRefreshError::Failed {
-                        reason: "oauth refresh cancelled".to_owned(),
+                        reason: RefreshError::NotRefreshable.to_string(),
                     });
                 }
-                _ = tokio::time::sleep(sleep_for) => {}
+                check_refresh_allowed(&self.stores, &upstream, &bundle, &*self.clock)
+                    .await
+                    .map_err(lazy_refresh_error)?;
+
+                if let Some(lease) = self
+                    .claim_guard
+                    .try_claim_fallback(
+                        upstream_id,
+                        holder,
+                        idempotency_key,
+                        starting_generation,
+                        unix_secs(self.clock.now()),
+                    )
+                    .await
+                    .map_err(lazy_error)?
+                {
+                    return Ok(PollFallback::Claimed(lease));
+                }
+                if let Some(current_generation) = self
+                    .stores
+                    .upstreams
+                    .read_oauth_token_generation(upstream_id)
+                    .await
+                    .map_err(lazy_error)?
+                    && current_generation > starting_generation
+                {
+                    return Ok(PollFallback::GenerationAdvanced);
+                }
+                Ok(PollFallback::Contended)
+            };
+
+            let outcome = if attempt == 0 {
+                poll_once.await?
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = self.cancel.cancelled() => {
+                        return Err(LazyRefreshError::Failed {
+                            reason: "oauth refresh cancelled".to_owned(),
+                        });
+                    }
+                    res = tokio::time::timeout_at(wait_deadline, poll_once) => {
+                        match res {
+                            Ok(outcome) => outcome?,
+                            Err(_) => {
+                                tracing::warn!(
+                                    upstream_id = %upstream_id,
+                                    idempotency_key = %idempotency_key,
+                                    "skipping in-process oauth refresh fallback because wait budget expired during contended storage poll",
+                                );
+                                return Err(LazyRefreshError::Failed {
+                                    reason: contended_reason.to_owned(),
+                                });
+                            }
+                        }
+                    }
+                }
+            };
+
+            match outcome {
+                PollFallback::GenerationAdvanced => return Ok(()),
+                PollFallback::Claimed(lease) => break lease,
+                PollFallback::Contended => {
+                    attempt += 1;
+                    let now = tokio::time::Instant::now();
+                    if now >= wait_deadline {
+                        tracing::warn!(
+                            upstream_id = %upstream_id,
+                            idempotency_key = %idempotency_key,
+                            "skipping in-process oauth refresh fallback because exclusive credential ownership could not be established",
+                        );
+                        return Err(LazyRefreshError::Failed {
+                            reason: contended_reason.to_owned(),
+                        });
+                    }
+                    let sleep_for = self.contention.poll_interval.min(wait_deadline - now);
+                    tokio::select! {
+                        _ = self.cancel.cancelled() => {
+                            return Err(LazyRefreshError::Failed {
+                                reason: "oauth refresh cancelled".to_owned(),
+                            });
+                        }
+                        _ = tokio::time::sleep(sleep_for) => {}
+                    }
+                }
             }
         };
 
@@ -3749,6 +3693,561 @@ mod tests {
             .await?;
         wait_task_c.await??;
         assert_eq!(fixture.refresh_call_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lazy_refresher_keeps_waiting_when_recovery_job_reschedules_from_running_to_pending()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::sync::watch;
+
+        struct ObservingRescheduleClaims {
+            inner: super::ApalisLazyRefreshClaimGuard,
+            active_count: watch::Sender<usize>,
+        }
+
+        #[async_trait::async_trait]
+        impl super::LazyRefreshClaimGuard for ObservingRescheduleClaims {
+            async fn begin_refresh(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                expires_at_unix_secs: u64,
+                now_unix_secs: u64,
+            ) -> StorageResult<super::LazyRefreshClaim> {
+                self.inner
+                    .begin_refresh(upstream_id, holder, expires_at_unix_secs, now_unix_secs)
+                    .await
+            }
+
+            async fn begin_refresh_for_generation(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                expires_at_unix_secs: u64,
+                expected_generation: u64,
+                now_unix_secs: u64,
+            ) -> StorageResult<super::LazyRefreshClaim> {
+                self.inner
+                    .begin_refresh_for_generation(
+                        upstream_id,
+                        holder,
+                        expires_at_unix_secs,
+                        expected_generation,
+                        now_unix_secs,
+                    )
+                    .await
+            }
+
+            async fn complete_and_bump_generation(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                generation: u64,
+            ) -> StorageResult<bool> {
+                self.inner
+                    .complete_and_bump_generation(upstream_id, holder, generation)
+                    .await
+            }
+
+            async fn release_if_holder(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+            ) -> StorageResult<bool> {
+                self.inner.release_if_holder(upstream_id, holder).await
+            }
+
+            async fn task_state(
+                &self,
+                idempotency_key: &str,
+            ) -> StorageResult<super::LazyRefreshTaskState> {
+                let state = self.inner.task_state(idempotency_key).await?;
+                if matches!(state, super::LazyRefreshTaskState::Active) {
+                    let _ = self.active_count.send_modify(|count| *count += 1);
+                }
+                Ok(state)
+            }
+
+            async fn try_claim_fallback(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                idempotency_key: &str,
+                generation: u64,
+                now_unix_secs: u64,
+            ) -> StorageResult<Option<super::LazyRefreshFallbackLease>> {
+                self.inner
+                    .try_claim_fallback(
+                        upstream_id,
+                        holder,
+                        idempotency_key,
+                        generation,
+                        now_unix_secs,
+                    )
+                    .await
+            }
+
+            async fn renew_fallback_claim(
+                &self,
+                upstream_id: Uuid,
+                lease: &super::LazyRefreshFallbackLease,
+                now_unix_secs: u64,
+            ) -> StorageResult<Option<super::LazyRefreshFallbackLease>> {
+                self.inner
+                    .renew_fallback_claim(upstream_id, lease, now_unix_secs)
+                    .await
+            }
+
+            fn fallback_lease_meta_key(&self, upstream_id: Uuid) -> Option<String> {
+                self.inner.fallback_lease_meta_key(upstream_id)
+            }
+
+            async fn finish_fallback_claim(
+                &self,
+                upstream_id: Uuid,
+                lease: &super::LazyRefreshFallbackLease,
+                final_generation: u64,
+            ) -> StorageResult<()> {
+                self.inner
+                    .finish_fallback_claim(upstream_id, lease, final_generation)
+                    .await
+            }
+        }
+
+        let fixture = LazyRefreshFixture::new(Duration::ZERO).await;
+        let upstream_id = fixture.create_oauth_upstream().await;
+        let record = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream_id)
+            .await?
+            .ok_or("missing upstream")?;
+        let bundle = super::oauth_token_bundle(&record, fixture.aead.as_ref())
+            .map_err(|e| format!("{e}"))?;
+        let gen1 = record.oauth_token_generation;
+        let exp1 = bundle.expires_at_unix_secs;
+        let now = cc_lb_clock::unix_secs(fixture.clock.now());
+
+        let job = cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob::for_credential(
+            upstream_id,
+            gen1,
+            exp1,
+        );
+        let canonical_key = job.generation_idempotency_key(gen1, exp1);
+        let recovery_key = job.watchdog_recovery_idempotency_key(gen1, exp1, now);
+        fixture
+            .scheduler_backend
+            .push_adaptive_task(cc_lb_scheduler::worker::SchedulerPushTask {
+                args: cc_lb_scheduler::worker::AdaptiveJob::OAuthRefresh(job.clone()),
+                idempotency_key: Some(canonical_key.clone()),
+                run_at_unix_secs: Some(now),
+                max_attempts: None,
+            })
+            .await?;
+        sqlx::query("UPDATE Jobs SET status = 'Killed', done_at = ?1 WHERE idempotency_key = ?2")
+            .bind(i64::try_from(now)?)
+            .bind(&canonical_key)
+            .execute(&fixture.scheduler_pool)
+            .await?;
+
+        sqlx::query(
+            "INSERT INTO Workers (id, worker_type, storage_name, layers, last_seen, started_at) \
+             VALUES ('recovery-worker', 'adaptive', 'default', '', ?1, ?1)",
+        )
+        .bind(i64::try_from(now)?)
+        .execute(&fixture.scheduler_pool)
+        .await?;
+        fixture
+            .scheduler_backend
+            .push_adaptive_task(cc_lb_scheduler::worker::SchedulerPushTask {
+                args: cc_lb_scheduler::worker::AdaptiveJob::OAuthRefresh(job),
+                idempotency_key: Some(recovery_key.clone()),
+                run_at_unix_secs: Some(now),
+                max_attempts: Some(5),
+            })
+            .await?;
+        sqlx::query(
+            "UPDATE Jobs SET status = 'Running', lock_by = 'recovery-worker', lock_at = ?1 WHERE idempotency_key = ?2",
+        )
+        .bind(i64::try_from(now)?)
+        .bind(&recovery_key)
+        .execute(&fixture.scheduler_pool)
+        .await?;
+
+        let worker_lease = super::try_acquire_oauth_refresh_lease(
+            fixture.storage.as_ref(),
+            upstream_id,
+            gen1,
+            now,
+        )
+        .await?
+        .ok_or("worker_lease must succeed")?;
+
+        let (active_tx, mut active_rx) = watch::channel(0usize);
+        let base_guard = super::ApalisLazyRefreshClaimGuard::new(
+            fixture.scheduler_backend.clone(),
+            fixture.storage.clone(),
+        );
+        let observer = Arc::new(ObservingRescheduleClaims {
+            inner: base_guard.clone(),
+            active_count: active_tx,
+        });
+        let refresher = fixture.lazy_refresher(
+            observer,
+            LazyRefreshContentionConfig::for_tests(
+                Duration::from_secs(2),
+                Duration::from_millis(5),
+            ),
+        );
+
+        let wait_task = tokio::spawn(async move { refresher.refresh_one(upstream_id).await });
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            active_rx.wait_for(|&count| count >= 1),
+        )
+        .await??;
+
+        // Reschedule the recovery job from Running back to retryable Pending AND release the lease.
+        sqlx::query(
+            "UPDATE Jobs SET status = 'Pending', attempts = 1, max_attempts = 5, lock_by = NULL, lock_at = NULL, run_at = ?1 WHERE idempotency_key = ?2",
+        )
+        .bind(i64::try_from(now + 30)?)
+        .bind(&recovery_key)
+        .execute(&fixture.scheduler_pool)
+        .await?;
+        super::release_oauth_refresh_lease(
+            fixture.storage.as_ref(),
+            upstream_id,
+            &worker_lease.token,
+            gen1,
+        )
+        .await?;
+
+        let after_reschedule = *active_rx.borrow();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            active_rx.wait_for(|&count| count > after_reschedule),
+        )
+        .await??;
+        assert!(!wait_task.is_finished());
+        assert_eq!(fixture.refresh_call_count(), 0);
+        assert_eq!(
+            base_guard.task_state(&canonical_key).await?,
+            super::LazyRefreshTaskState::Active
+        );
+        assert_eq!(
+            base_guard.task_state(&recovery_key).await?,
+            super::LazyRefreshTaskState::Active
+        );
+
+        let tokens_gen2 = EncryptedOAuthTokens::encrypt(
+            fixture.aead.as_ref(),
+            &OAuthTokenBundle {
+                oauth_profile: Default::default(),
+                access_token: "sk-ant-oat01-resched-2".to_owned(),
+                refresh_token: "sk-ant-ort01-resched-2".to_owned(),
+                expires_at_unix_secs: now + 3_600,
+                refresh_token_expires_at_unix_secs: None,
+                account_id: None,
+                project_id: None,
+                scopes: vec!["messages".to_owned()],
+                never_refresh: false,
+            },
+            upstream_id.as_bytes(),
+        )?;
+        fixture
+            .storage
+            .complete_refresh(upstream_id, Uuid::new_v4(), tokens_gen2)
+            .await?;
+        sqlx::query("UPDATE Jobs SET status = 'Done', done_at = ?1 WHERE idempotency_key = ?2")
+            .bind(i64::try_from(now)?)
+            .bind(&recovery_key)
+            .execute(&fixture.scheduler_pool)
+            .await?;
+        wait_task.await??;
+        assert_eq!(fixture.refresh_call_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lazy_refresher_bounds_contended_fallback_storage_poll_by_wait_deadline()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::sync::watch;
+
+        struct HangOnSecondClaimGuard {
+            inner: super::ApalisLazyRefreshClaimGuard,
+            calls: Arc<AtomicUsize>,
+            second_entered: watch::Sender<bool>,
+        }
+
+        #[async_trait::async_trait]
+        impl super::LazyRefreshClaimGuard for HangOnSecondClaimGuard {
+            async fn begin_refresh(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                expires_at_unix_secs: u64,
+                now_unix_secs: u64,
+            ) -> StorageResult<super::LazyRefreshClaim> {
+                self.inner
+                    .begin_refresh(upstream_id, holder, expires_at_unix_secs, now_unix_secs)
+                    .await
+            }
+
+            async fn begin_refresh_for_generation(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                expires_at_unix_secs: u64,
+                expected_generation: u64,
+                now_unix_secs: u64,
+            ) -> StorageResult<super::LazyRefreshClaim> {
+                self.inner
+                    .begin_refresh_for_generation(
+                        upstream_id,
+                        holder,
+                        expires_at_unix_secs,
+                        expected_generation,
+                        now_unix_secs,
+                    )
+                    .await
+            }
+
+            async fn complete_and_bump_generation(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+                _generation: u64,
+            ) -> StorageResult<bool> {
+                Ok(false)
+            }
+
+            async fn release_if_holder(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+            ) -> StorageResult<bool> {
+                Ok(false)
+            }
+
+            async fn task_state(
+                &self,
+                idempotency_key: &str,
+            ) -> StorageResult<super::LazyRefreshTaskState> {
+                self.inner.task_state(idempotency_key).await
+            }
+
+            async fn try_claim_fallback(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+                _idempotency_key: &str,
+                _generation: u64,
+                _now_unix_secs: u64,
+            ) -> StorageResult<Option<super::LazyRefreshFallbackLease>> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(None)
+                } else {
+                    self.second_entered.send_replace(true);
+                    std::future::pending::<()>().await;
+                    Ok(None)
+                }
+            }
+        }
+
+        struct CountingFailClosedGuard {
+            inner: super::ApalisLazyRefreshClaimGuard,
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl super::LazyRefreshClaimGuard for CountingFailClosedGuard {
+            async fn begin_refresh(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                expires_at_unix_secs: u64,
+                now_unix_secs: u64,
+            ) -> StorageResult<super::LazyRefreshClaim> {
+                self.inner
+                    .begin_refresh(upstream_id, holder, expires_at_unix_secs, now_unix_secs)
+                    .await
+            }
+
+            async fn begin_refresh_for_generation(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                expires_at_unix_secs: u64,
+                expected_generation: u64,
+                now_unix_secs: u64,
+            ) -> StorageResult<super::LazyRefreshClaim> {
+                self.inner
+                    .begin_refresh_for_generation(
+                        upstream_id,
+                        holder,
+                        expires_at_unix_secs,
+                        expected_generation,
+                        now_unix_secs,
+                    )
+                    .await
+            }
+
+            async fn complete_and_bump_generation(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+                _generation: u64,
+            ) -> StorageResult<bool> {
+                Ok(false)
+            }
+
+            async fn release_if_holder(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+            ) -> StorageResult<bool> {
+                Ok(false)
+            }
+
+            async fn task_state(
+                &self,
+                idempotency_key: &str,
+            ) -> StorageResult<super::LazyRefreshTaskState> {
+                self.inner.task_state(idempotency_key).await
+            }
+
+            async fn try_claim_fallback(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+                _idempotency_key: &str,
+                _generation: u64,
+                _now_unix_secs: u64,
+            ) -> StorageResult<Option<super::LazyRefreshFallbackLease>> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(None)
+                } else {
+                    Ok(Some(super::LazyRefreshFallbackLease::from_token(
+                        "unexpected-post-deadline-lease".to_owned(),
+                    )))
+                }
+            }
+        }
+
+        // Case 1: A contended fallback storage call hanging across wait_deadline is aborted when the budget expires.
+        let fixture1 = LazyRefreshFixture::new(Duration::ZERO).await;
+        let upstream1 = fixture1.create_oauth_upstream().await;
+        let record1 = UpstreamStore::get_by_id(fixture1.storage.as_ref(), upstream1)
+            .await?
+            .ok_or("missing upstream1")?;
+        let bundle1 = super::oauth_token_bundle(&record1, fixture1.aead.as_ref())
+            .map_err(|e| format!("{e}"))?;
+        let now1 = cc_lb_clock::unix_secs(fixture1.clock.now());
+        let job1 = cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob::for_credential(
+            upstream1,
+            record1.oauth_token_generation,
+            bundle1.expires_at_unix_secs,
+        );
+        let key1 = job1.generation_idempotency_key(
+            record1.oauth_token_generation,
+            bundle1.expires_at_unix_secs,
+        );
+        fixture1
+            .scheduler_backend
+            .push_adaptive_task(cc_lb_scheduler::worker::SchedulerPushTask {
+                args: cc_lb_scheduler::worker::AdaptiveJob::OAuthRefresh(job1),
+                idempotency_key: Some(key1.clone()),
+                run_at_unix_secs: Some(now1),
+                max_attempts: None,
+            })
+            .await?;
+        sqlx::query("UPDATE Jobs SET status = 'Killed', done_at = ?1 WHERE idempotency_key = ?2")
+            .bind(i64::try_from(now1)?)
+            .bind(&key1)
+            .execute(&fixture1.scheduler_pool)
+            .await?;
+
+        let (entered_tx, mut entered_rx) = watch::channel(false);
+        let hang_calls = Arc::new(AtomicUsize::new(0));
+        let refresher1 = fixture1.lazy_refresher(
+            Arc::new(HangOnSecondClaimGuard {
+                inner: super::ApalisLazyRefreshClaimGuard::new(
+                    fixture1.scheduler_backend.clone(),
+                    fixture1.storage.clone(),
+                ),
+                calls: Arc::clone(&hang_calls),
+                second_entered: entered_tx,
+            }),
+            LazyRefreshContentionConfig::for_tests(
+                Duration::from_millis(60),
+                Duration::from_millis(5),
+            ),
+        );
+        let handle1 = tokio::spawn(async move { refresher1.refresh_one(upstream1).await });
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            entered_rx.wait_for(|&entered| entered),
+        )
+        .await??;
+        let err1 = tokio::time::timeout(Duration::from_secs(2), handle1)
+            .await??
+            .expect_err("hung contended poll must fail at wait_deadline");
+        assert!(matches!(err1, super::LazyRefreshError::Failed { .. }));
+        assert_eq!(fixture1.refresh_call_count(), 0);
+        assert_eq!(hang_calls.load(Ordering::SeqCst), 2);
+
+        // Case 2: Sleeping to wait_deadline never starts another storage poll/acquisition after expiry.
+        let fixture2 = LazyRefreshFixture::new(Duration::ZERO).await;
+        let upstream2 = fixture2.create_oauth_upstream().await;
+        let record2 = UpstreamStore::get_by_id(fixture2.storage.as_ref(), upstream2)
+            .await?
+            .ok_or("missing upstream2")?;
+        let bundle2 = super::oauth_token_bundle(&record2, fixture2.aead.as_ref())
+            .map_err(|e| format!("{e}"))?;
+        let now2 = cc_lb_clock::unix_secs(fixture2.clock.now());
+        let job2 = cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob::for_credential(
+            upstream2,
+            record2.oauth_token_generation,
+            bundle2.expires_at_unix_secs,
+        );
+        let key2 = job2.generation_idempotency_key(
+            record2.oauth_token_generation,
+            bundle2.expires_at_unix_secs,
+        );
+        fixture2
+            .scheduler_backend
+            .push_adaptive_task(cc_lb_scheduler::worker::SchedulerPushTask {
+                args: cc_lb_scheduler::worker::AdaptiveJob::OAuthRefresh(job2),
+                idempotency_key: Some(key2.clone()),
+                run_at_unix_secs: Some(now2),
+                max_attempts: None,
+            })
+            .await?;
+        sqlx::query("UPDATE Jobs SET status = 'Killed', done_at = ?1 WHERE idempotency_key = ?2")
+            .bind(i64::try_from(now2)?)
+            .bind(&key2)
+            .execute(&fixture2.scheduler_pool)
+            .await?;
+
+        let post_calls = Arc::new(AtomicUsize::new(0));
+        let refresher2 = fixture2.lazy_refresher(
+            Arc::new(CountingFailClosedGuard {
+                inner: super::ApalisLazyRefreshClaimGuard::new(
+                    fixture2.scheduler_backend.clone(),
+                    fixture2.storage.clone(),
+                ),
+                calls: Arc::clone(&post_calls),
+            }),
+            LazyRefreshContentionConfig::for_tests(
+                Duration::from_millis(30),
+                Duration::from_millis(100),
+            ),
+        );
+        let err2 = tokio::time::timeout(Duration::from_secs(2), refresher2.refresh_one(upstream2))
+            .await?
+            .expect_err("expired contention sleep must not invoke a post-deadline poll");
+        assert!(matches!(err2, super::LazyRefreshError::Failed { .. }));
+        assert_eq!(post_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture2.refresh_call_count(), 0);
         Ok(())
     }
 
