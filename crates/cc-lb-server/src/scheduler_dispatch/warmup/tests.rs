@@ -1330,9 +1330,9 @@ fn post_warmup_check_separates_running_from_rolling_windows() {
             &previous,
             c,
         ) {
-            cc_lb_admin::WarmupWindowCheck::Started { .. } => Expect::Started,
-            cc_lb_admin::WarmupWindowCheck::NotStarted { windows } => Expect::NotStarted(windows),
-            cc_lb_admin::WarmupWindowCheck::Unknown => Expect::Unknown,
+            cc_lb_control::WarmupWindowCheck::Started { .. } => Expect::Started,
+            cc_lb_control::WarmupWindowCheck::NotStarted { windows } => Expect::NotStarted(windows),
+            cc_lb_control::WarmupWindowCheck::Unknown => Expect::Unknown,
         };
         assert_eq!(actual, expected, "{name}");
     }
@@ -1375,7 +1375,7 @@ fn previous_resets_skip_unused_rolling_windows_so_chained_starts_count() {
             &previous,
             completed,
         ),
-        cc_lb_admin::WarmupWindowCheck::Started { .. }
+        cc_lb_control::WarmupWindowCheck::Started { .. }
     ));
 }
 

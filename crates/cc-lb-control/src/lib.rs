@@ -16,7 +16,9 @@ pub mod gemini_period_unknown_quota;
 pub mod openai_limit_resets;
 pub mod openai_org_api;
 pub mod subscription_metadata_hook;
+pub mod subscription_quotas;
 pub mod traits;
+pub mod warmup_ports;
 
 pub use audit_payload::AuditPayload;
 pub use audit_writer::{AuditDropped, AuditEntry, AuditWriterSink, spawn_audit_writer};
@@ -40,4 +42,7 @@ pub use subscription_metadata_hook::{
 pub use traits::{
     NoopPromptCacheObservationSink, NoopSubscriptionQuotaCache, PromptCacheObservationEnqueueError,
     PromptCacheObservationSinkLike, SubscriptionQuotaCacheLike,
+};
+pub use warmup_ports::{
+    LimitResetUsageRefresh, LimitResetUsageRefreshPort, WarmupWindowCheck, WarmupWindowVerifier,
 };

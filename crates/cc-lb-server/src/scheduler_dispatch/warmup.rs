@@ -4,8 +4,8 @@ use crate::scheduler_dispatch::time::now_unix_millis;
 use crate::warmup::execute::{
     WarmupAttemptExecution, WarmupAttemptExecutionResult, execute_warmup_attempt,
 };
-use cc_lb_admin::WarmupWindowVerifier;
 use cc_lb_clock::unix_secs;
+use cc_lb_control::WarmupWindowVerifier;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::retry::JobOutcome;
@@ -244,13 +244,13 @@ impl SchedulerDispatch {
             None
         };
         let verified_observations = match window_check.as_ref() {
-            Some(cc_lb_admin::WarmupWindowCheck::Started { observations }) => {
+            Some(cc_lb_control::WarmupWindowCheck::Started { observations }) => {
                 Some(observations.as_slice())
             }
             _ => None,
         };
         let not_started_error_detail = match window_check.as_ref() {
-            Some(cc_lb_admin::WarmupWindowCheck::NotStarted { windows }) => {
+            Some(cc_lb_control::WarmupWindowCheck::NotStarted { windows }) => {
                 let windows = windows
                     .iter()
                     .map(|window| window.as_str())
@@ -307,7 +307,7 @@ impl SchedulerDispatch {
                     max_staleness_secs,
                 );
                 let observations = match window_check.as_ref() {
-                    Some(cc_lb_admin::WarmupWindowCheck::Started { observations }) => {
+                    Some(cc_lb_control::WarmupWindowCheck::Started { observations }) => {
                         observations.as_slice()
                     }
                     _ => match &final_attempt.result {
@@ -328,7 +328,7 @@ impl SchedulerDispatch {
                     .await?;
                 if !matches!(
                     window_check.as_ref(),
-                    Some(cc_lb_admin::WarmupWindowCheck::Started { .. })
+                    Some(cc_lb_control::WarmupWindowCheck::Started { .. })
                 ) && let WarmupDispatchResult::Response { observations, .. } =
                     final_attempt.result
                 {
@@ -342,7 +342,7 @@ impl SchedulerDispatch {
             WarmupAttemptOutcome::PermanentFailure(reason) => {
                 if matches!(
                     window_check.as_ref(),
-                    Some(cc_lb_admin::WarmupWindowCheck::NotStarted { .. })
+                    Some(cc_lb_control::WarmupWindowCheck::NotStarted { .. })
                 ) {
                     let now_unix_secs = now_unix_secs_i64(&*self.clock)?;
                     let view = self.dynamic_view.load();

@@ -835,10 +835,11 @@ async fn raw_http(
         request.push_str("\r\n");
     }
     request.push_str("\r\n");
+    let mut payload = request.into_bytes();
+    payload.extend_from_slice(body);
 
     let mut stream = TcpStream::connect((host, port)).await?;
-    stream.write_all(request.as_bytes()).await?;
-    stream.write_all(body).await?;
+    stream.write_all(&payload).await?;
     let mut bytes = Vec::new();
     stream.read_to_end(&mut bytes).await?;
     parse_raw_response(&bytes)

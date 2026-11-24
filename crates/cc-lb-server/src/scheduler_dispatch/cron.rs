@@ -105,7 +105,7 @@ impl SchedulerDispatch {
         &self,
         job: PoolQuotaSnapshotCronJob,
     ) -> SchedulerResult<JobOutcome> {
-        use cc_lb_admin::subscription_quotas::record_provider_pool_quota_snapshots_now;
+        use cc_lb_control::subscription_quotas::record_provider_pool_quota_snapshots_now;
         use cc_lb_storage_api::Provider;
 
         for provider in [Provider::Anthropic, Provider::Openai, Provider::Gemini] {

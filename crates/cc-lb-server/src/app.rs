@@ -4270,7 +4270,7 @@ async fn oauth_usage_handler(
         return response;
     }
 
-    let mut response = match cc_lb_admin::subscription_quotas::build_cc_lb_oauth_usage_response(
+    let mut response = match cc_lb_control::subscription_quotas::build_cc_lb_oauth_usage_response(
         state.storage.as_ref(),
         &state.dynamic_view,
         &*state.clock,
