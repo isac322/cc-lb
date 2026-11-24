@@ -2925,12 +2925,6 @@ impl ResponsesWebSocketGateway {
                     turn.response_created = true;
                 }
                 turn.prepared.span.record("gen_ai.response.id", id);
-                self.lifecycle.record_openai_session_hint(
-                    turn.auth.principal_id(),
-                    &self.headers,
-                    &turn.body,
-                    upstream_id,
-                );
                 if let Some(parent) = turn.steer_parent.as_ref() {
                     self.successors.remove(parent);
                     let lane = self.lanes.entry(lane.clone()).or_default();
@@ -3047,6 +3041,18 @@ impl ResponsesWebSocketGateway {
                 let signer = self.connection_signers.get(&connection_id).map(Arc::as_ref);
                 let (failure, incomplete_reason) =
                     classify_terminal_frame(kind, &value, &lane, signer);
+                if failure.is_none()
+                    && matches!(kind, "response.completed" | "response.incomplete")
+                    && let Some(turn) = self.turns.get(&turn_id)
+                    && let Some(upstream_id) = turn.upstream_id
+                {
+                    self.lifecycle.record_openai_session_hint(
+                        turn.auth.principal_id(),
+                        &self.headers,
+                        &turn.body,
+                        upstream_id,
+                    );
+                }
                 if let Some(turn) = self.turns.get_mut(&turn_id) {
                     turn.incomplete_reason = incomplete_reason;
                 }
@@ -8276,5 +8282,131 @@ pub(crate) mod tests {
             .expect("prewarm must fall back cleanly instead of failing on blocked hint")
             .unwrap();
         assert_eq!(dispatch.candidates[0].upstream_id, fixture.upstream_b);
+    }
+
+    #[tokio::test]
+    async fn failed_or_interrupted_ws_turn_does_not_record_session_hint() {
+        let fixture = PrewarmMultiUpstreamFixture::new().await;
+
+        // 1. A turn that receives response.created on upstream A but terminates with response.failed
+        // must NOT persist a session hint pointing future prewarms to failed upstream A.
+        let mut gateway_failed = fixture.gateway(HeaderMap::new());
+        let failed_turn_frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "prompt_cache_key": "failed-session-S",
+                "store": false,
+                "input": [{"role": "user", "content": "hi"}]
+            }))
+            .unwrap(),
+        );
+        let d_failed = gateway_failed
+            .client_message(fixture.auth.clone(), failed_turn_frame)
+            .await
+            .unwrap()
+            .unwrap();
+        gateway_failed.assign_connection(d_failed.turn_id, 1, fixture.upstream_a, "oauth-a");
+        gateway_failed.commit_send_attempt(d_failed.turn_id);
+        let _ = gateway_failed.sent_with_timings(
+            d_failed.turn_id,
+            ResponsesDispatchTimings::reused(),
+            std::time::Instant::now(),
+        );
+        gateway_failed
+            .provider_message(
+                1,
+                &Bytes::from_static(
+                    br#"{"type":"response.created","response":{"id":"resp_fail_a","status":"in_progress","store":false}}"#,
+                ),
+            )
+            .await
+            .unwrap();
+        gateway_failed
+            .provider_message(
+                1,
+                &Bytes::from_static(
+                    br#"{"type":"response.failed","response":{"id":"resp_fail_a","status":"failed","error":{"code":"server_error","message":"boom"}}}"#,
+                ),
+            )
+            .await
+            .unwrap();
+
+        let mut gateway_prewarm_after_fail = fixture.gateway(HeaderMap::new());
+        let prewarm_after_fail = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "generate": false,
+                "prompt_cache_key": "failed-session-S",
+                "store": false,
+                "input": []
+            }))
+            .unwrap(),
+        );
+        let d_prewarm_fail = gateway_prewarm_after_fail
+            .client_message(fixture.auth.clone(), prewarm_after_fail)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(d_prewarm_fail.candidates[0].upstream_id, fixture.upstream_b);
+
+        // 2. A turn that receives response.created on upstream A and disconnects before a clean
+        // terminal must also leave the session unhinted.
+        let mut gateway_closed = fixture.gateway(HeaderMap::new());
+        let closed_turn_frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "prompt_cache_key": "closed-session-S",
+                "store": false,
+                "input": [{"role": "user", "content": "hi"}]
+            }))
+            .unwrap(),
+        );
+        let d_closed = gateway_closed
+            .client_message(fixture.auth.clone(), closed_turn_frame)
+            .await
+            .unwrap()
+            .unwrap();
+        gateway_closed.assign_connection(d_closed.turn_id, 2, fixture.upstream_a, "oauth-a");
+        gateway_closed.commit_send_attempt(d_closed.turn_id);
+        let _ = gateway_closed.sent_with_timings(
+            d_closed.turn_id,
+            ResponsesDispatchTimings::reused(),
+            std::time::Instant::now(),
+        );
+        gateway_closed
+            .provider_message(
+                2,
+                &Bytes::from_static(
+                    br#"{"type":"response.created","response":{"id":"resp_close_a","status":"in_progress","store":false}}"#,
+                ),
+            )
+            .await
+            .unwrap();
+        gateway_closed.connection_closed(2, "upstream reset mid-stream");
+
+        let mut gateway_prewarm_after_close = fixture.gateway(HeaderMap::new());
+        let prewarm_after_close = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "generate": false,
+                "prompt_cache_key": "closed-session-S",
+                "store": false,
+                "input": []
+            }))
+            .unwrap(),
+        );
+        let d_prewarm_close = gateway_prewarm_after_close
+            .client_message(fixture.auth.clone(), prewarm_after_close)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            d_prewarm_close.candidates[0].upstream_id,
+            fixture.upstream_b
+        );
     }
 }

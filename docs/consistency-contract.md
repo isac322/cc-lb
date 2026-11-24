@@ -306,7 +306,10 @@ Each entry in `/latest`'s `upstreams` array may include `raw_summary` and `raw_f
 Codex credit observations use these same delivery boundaries. Usage polls store
 the full credit state on `overage`; response headers store partial state on
 `unified`; Responses WebSocket `codex.rate_limits` frames enter the same
-off-path subscriber without changing their forwarded bytes. Cache and storage
+off-path subscriber as `unified` observations without changing their forwarded
+bytes (and unlike HTTP response headers, `credits.overage_limit_reached` on
+main-family frames or `workspace_member_credits_depleted` frames populate
+`limit_reached`). Cache and storage
 retain field-specific observation time and source for `has_credits`, `unlimited`,
 `limit_reached`, and `balance`. Missing fields do not refresh an older field.
 Routing compares explicit flags by their own newest applicable evidence:
