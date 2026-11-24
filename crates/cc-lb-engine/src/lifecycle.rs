@@ -722,6 +722,7 @@ impl Lifecycle {
                     owner,
                     request_id.to_owned(),
                     codex_backend,
+                    false,
                 )
                 .await
                 .inspect_err(|error| {
@@ -879,12 +880,14 @@ impl Lifecycle {
                     },
                 });
             }
+            let explicit_store = body.get("store").and_then(Value::as_bool);
             let mut candidates =
                 Vec::with_capacity(pipeline_result.candidates.len() + fallback_candidates.len());
             candidates.push(WebSocketCandidate {
                 upstream_id: selected_id,
                 upstream_name: record.name.clone(),
                 socket_per_lane: record.kind == StorageUpstreamKind::OpenaiOauth,
+                is_api_key: record.kind == StorageUpstreamKind::OpenaiApiKey,
             });
             candidates.extend(
                 pipeline_result
@@ -896,6 +899,7 @@ impl Lifecycle {
                         upstream_id: candidate.upstream_id,
                         upstream_name: candidate.name,
                         socket_per_lane: candidate.kind == cc_lb_domain::UpstreamKind::OpenaiOauth,
+                        is_api_key: candidate.kind.credential_kind() == CredentialKind::ApiKey,
                     }),
             );
             Ok(PreparedWebSocketTurn {
@@ -910,13 +914,11 @@ impl Lifecycle {
                 limit_engine: self.limit_engine.clone(),
                 oauth_compat: false,
                 oauth_transport: record.kind == StorageUpstreamKind::OpenaiOauth,
+                explicit_store,
                 principal_id: auth.principal_id().to_owned(),
                 key_id: auth.key_id().to_owned(),
                 model,
-                store: body
-                    .get("store")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(record.kind != StorageUpstreamKind::OpenaiOauth),
+                store: explicit_store.unwrap_or(record.kind != StorageUpstreamKind::OpenaiOauth),
                 span: stream_span.clone(),
                 setup_timings,
                 request_id: request_id.to_owned(),
@@ -951,7 +953,16 @@ impl Lifecycle {
         result
     }
 
+    pub(crate) fn is_openai_oauth_upstream(&self, upstream_id: Uuid) -> Option<bool> {
+        let view = self.dynamic_view.load();
+        view.upstreams_snapshot()
+            .iter()
+            .find(|record| record.id == upstream_id)
+            .map(|record| record.kind == StorageUpstreamKind::OpenaiOauth)
+    }
+
     /// Recheck a retained connection against the current view without reserving again.
+    #[cfg(test)]
     pub(crate) async fn validate_websocket_turn(
         &self,
         auth: &crate::Authenticated,
@@ -959,6 +970,27 @@ impl Lifecycle {
         body: &Value,
         upstream_id: Uuid,
         codex_backend: bool,
+    ) -> Result<(), WebSocketError> {
+        self.validate_websocket_turn_with_policy(
+            auth,
+            ingress,
+            body,
+            upstream_id,
+            codex_backend,
+            false,
+        )
+        .await
+    }
+
+    /// Recheck a retained or fallback candidate against the current view.
+    pub(crate) async fn validate_websocket_turn_with_policy(
+        &self,
+        auth: &crate::Authenticated,
+        ingress: WebSocketIngress<'_>,
+        body: &Value,
+        upstream_id: Uuid,
+        codex_backend: bool,
+        reject_exhausted_subscription: bool,
     ) -> Result<(), WebSocketError> {
         let view = self.dynamic_view.load();
         self.websocket_routing(
@@ -969,6 +1001,7 @@ impl Lifecycle {
             Some(upstream_id),
             next_request_id(),
             codex_backend,
+            reject_exhausted_subscription,
         )
         .await
         .map(|_| ())
@@ -984,6 +1017,7 @@ impl Lifecycle {
         owner: Option<Uuid>,
         request_id: String,
         codex_backend: bool,
+        reject_exhausted_subscription: bool,
     ) -> Result<
         (
             RequestContext,
@@ -1238,6 +1272,20 @@ impl Lifecycle {
                 },
             ));
         }
+        if reject_exhausted_subscription
+            && filters
+                .iter()
+                .any(|filter| filter.plugin_id() == BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
+            && result.candidates.iter().all(|candidate| {
+                subscription_hard_blocked(ctx.canonical_model_id.as_str(), candidate)
+            })
+        {
+            return Err(WebSocketError::new(
+                503,
+                error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER,
+                "fallback subscription quota is exhausted",
+            ));
+        }
         // Built-in `subscription-preference` returns a single winner per filter pass;
         // precompute ordered fallback candidates (matching HTTP failover) so initial
         // WebSocket handshake failures can still fail over across eligible upstreams.
@@ -1275,11 +1323,57 @@ impl Lifecycle {
                 excluded.push(next_id);
                 fallback_candidates.push(next_candidate);
             }
+            // Keep eligible public API-key fallbacks reachable even when more than
+            // `MAX_WS_FALLBACK_CANDIDATES` OAuth candidates precede them; native
+            // Codex routes remain OAuth-only.
+            if !codex_backend
+                && !result
+                    .candidates
+                    .iter()
+                    .chain(fallback_candidates.iter())
+                    .any(|candidate| candidate.kind.credential_kind() == CredentialKind::ApiKey)
+            {
+                const MAX_WS_EXTRA_API_KEY_FALLBACKS: usize = 4;
+                let mut added_api_keys = 0;
+                while added_api_keys < MAX_WS_EXTRA_API_KEY_FALLBACKS {
+                    let remaining_api_keys: Vec<UpstreamCandidate> = pool
+                        .iter()
+                        .filter(|candidate| {
+                            !excluded.contains(&candidate.upstream_id)
+                                && candidate.kind.credential_kind() == CredentialKind::ApiKey
+                        })
+                        .cloned()
+                        .collect();
+                    if remaining_api_keys.is_empty() {
+                        break;
+                    }
+                    let next_result =
+                        execute_filter_pipeline(filters, &ctx, &principal, remaining_api_keys);
+                    let terminal = self.select_terminal_upstream(
+                        pipeline.terminal.clone(),
+                        &next_result.candidates,
+                    );
+                    let Some(next_id) = terminal.upstream_id else {
+                        break;
+                    };
+                    let Some(next_candidate) = next_result
+                        .candidates
+                        .into_iter()
+                        .find(|candidate| candidate.upstream_id == next_id)
+                    else {
+                        break;
+                    };
+                    excluded.push(next_id);
+                    fallback_candidates.push(next_candidate);
+                    added_api_keys += 1;
+                }
+            }
         }
+        let dispatchable_candidates = result.candidates.len() + fallback_candidates.len();
         let plan = match recovery {
             WsUnknownReasoningRecovery::None => WsUnknownReasoningPlan::None,
             WsUnknownReasoningRecovery::Unestablished => {
-                if result.candidates.len() > 1 {
+                if dispatchable_candidates > 1 {
                     if let Some(stripped) = strip_openai_reasoning_encrypted_items(body, None)
                         && let Ok(bytes) = serde_json::to_vec(&stripped)
                     {

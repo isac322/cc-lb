@@ -565,6 +565,13 @@ impl Lifecycle {
                     upstream_id: id,
                     upstream_name: record.name.clone(),
                     socket_per_lane: false,
+                    is_api_key: matches!(
+                        record.kind,
+                        StorageUpstreamKind::OpenaiApiKey
+                            | StorageUpstreamKind::AnthropicApiKey
+                            | StorageUpstreamKind::GeminiApiKey
+                            | StorageUpstreamKind::VertexApiKey
+                    ),
                 },
                 url,
                 headers: signed_headers,

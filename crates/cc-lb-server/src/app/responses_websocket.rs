@@ -134,6 +134,9 @@ fn acquire_websocket_breaker_permit(
     })
 }
 
+pub(super) const DEFAULT_WS_PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const WS_PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub(super) async fn connect_provider_websocket(
     state: &ProxyState,
     upstream_id: uuid::Uuid,
@@ -154,7 +157,7 @@ pub(super) async fn connect_provider_websocket(
         state.body_caps.messages,
         request,
         bulkhead_guard,
-        WS_PROVIDER_CONNECT_TIMEOUT,
+        DEFAULT_WS_PROVIDER_CONNECT_TIMEOUT,
     )
     .await
 }
@@ -281,7 +284,6 @@ async fn connect_provider_websocket_with_permit(
         }
     }
 }
-pub(super) const WS_PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 pub(super) const WS_DISPATCH_CONNECT_BUDGET: Duration = Duration::from_secs(30);
 pub(super) const WS_MAX_UPSTREAM_ATTEMPTS: usize = 3;
 
@@ -580,21 +582,73 @@ pub(super) async fn dispatch_responses_websocket_with_limits(
     let mut last_error = None;
     let mut attempts = 0usize;
     let deadline = tokio::time::Instant::now() + connect_budget;
-    for candidate in &dispatch.candidates {
+    let mut pending: VecDeque<cc_lb_engine::responses_websocket::WebSocketCandidate> =
+        dispatch.candidates.iter().cloned().collect();
+    while !pending.is_empty() {
+        let reserve_api_key = max_attempts > 1
+            && attempts + 1 == max_attempts
+            && dispatch.prefer_api_key_on_final_attempt;
+        let candidate = if reserve_api_key && !pending[0].is_api_key {
+            if let Some(pos) = pending.iter().position(|candidate| candidate.is_api_key) {
+                pending.remove(pos).expect("api-key candidate exists")
+            } else {
+                pending.pop_front().expect("pending queue is non-empty")
+            }
+        } else {
+            pending.pop_front().expect("pending queue is non-empty")
+        };
         let existing = connections.iter().find_map(|(id, connection)| {
             (connection.upstream_id == candidate.upstream_id
                 && (!candidate.socket_per_lane || connection.lane == dispatch.stream_id))
                 .then_some(*id)
         });
         if let Some(connection_id) = existing {
-            return send_responses_dispatch(
-                gateway,
-                dispatch,
-                connection_id,
-                connections,
-                cc_lb_engine::responses_websocket::ResponsesDispatchTimings::reused(),
+            if deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .is_zero()
+            {
+                last_error.get_or_insert_with(|| {
+                    WebSocketError::new(
+                        504,
+                        "upstream_unavailable",
+                        "provider WebSocket connection timed out",
+                    )
+                });
+                break;
+            }
+            match tokio::time::timeout_at(
+                deadline,
+                gateway.validate_fallback_candidate(&dispatch, &candidate),
             )
-            .await;
+            .await
+            {
+                Ok(Ok(())) => {
+                    return send_responses_dispatch(
+                        gateway,
+                        dispatch,
+                        connection_id,
+                        connections,
+                        cc_lb_engine::responses_websocket::ResponsesDispatchTimings::reused(),
+                    )
+                    .await;
+                }
+                Ok(Err(error)) => {
+                    let authentication_failed = error.code == "authentication_error";
+                    last_error = Some(error);
+                    if authentication_failed {
+                        break;
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    last_error = Some(WebSocketError::new(
+                        504,
+                        "upstream_unavailable",
+                        "provider WebSocket connection timed out",
+                    ));
+                    break;
+                }
+            }
         }
         if connections.len() >= connection_capacity {
             last_error = Some(WebSocketError::new(
@@ -616,8 +670,10 @@ pub(super) async fn dispatch_responses_websocket_with_limits(
             drop(permit);
             break;
         }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
+        if deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .is_zero()
+        {
             drop(permit);
             last_error.get_or_insert_with(|| {
                 WebSocketError::new(
@@ -628,32 +684,17 @@ pub(super) async fn dispatch_responses_websocket_with_limits(
             });
             break;
         }
-        attempts += 1;
-        let mut bulkhead_config = state.websocket_bulkhead_config;
-        bulkhead_config.semaphore_permits = bulkhead_config.max_conns_per_upstream;
-        let bulkhead = state
-            .websocket_bulkheads
-            .bulkhead(candidate.upstream_name.clone(), bulkhead_config);
-        let bulkhead_started = std::time::Instant::now();
-        let bulkhead_guard = match bulkhead.acquire_owned().await {
-            Ok(guard) => guard,
-            Err(error) => {
-                drop(permit);
-                last_error = Some(WebSocketError::new(
-                    503,
-                    "overloaded_error",
-                    error.to_string(),
-                ));
-                break;
-            }
-        };
-        let bulkhead_wait_ms = bulkhead_started
-            .elapsed()
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64;
-        let prepared = match gateway.prepare_connection(&dispatch, candidate).await {
-            Ok(prepared) => prepared,
-            Err(error) => {
+        // Recheck fresh quota and routing eligibility before burning an attempt
+        // slot or acquiring the bulkhead so an unpinned fallback whose quota just
+        // exhausted skips cleanly to the next eligible upstream.
+        match tokio::time::timeout_at(
+            deadline,
+            gateway.validate_fallback_candidate(&dispatch, &candidate),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
                 drop(permit);
                 let authentication_failed = error.code == "authentication_error";
                 last_error = Some(error);
@@ -662,27 +703,110 @@ pub(super) async fn dispatch_responses_websocket_with_limits(
                 }
                 continue;
             }
+            Err(_) => {
+                drop(permit);
+                last_error = Some(WebSocketError::new(
+                    504,
+                    "upstream_unavailable",
+                    "provider WebSocket connection timed out",
+                ));
+                break;
+            }
+        }
+        attempts += 1;
+        let attempt_deadline = (tokio::time::Instant::now() + per_attempt_timeout).min(deadline);
+        let mut bulkhead_config = state.websocket_bulkhead_config;
+        bulkhead_config.semaphore_permits = bulkhead_config.max_conns_per_upstream;
+        let bulkhead = state
+            .websocket_bulkheads
+            .bulkhead(candidate.upstream_name.clone(), bulkhead_config);
+        let bulkhead_started = std::time::Instant::now();
+        let bulkhead_guard =
+            match tokio::time::timeout_at(attempt_deadline, bulkhead.acquire_owned()).await {
+                Ok(Ok(guard)) => guard,
+                Ok(Err(error)) => {
+                    drop(permit);
+                    last_error = Some(WebSocketError::new(
+                        503,
+                        "overloaded_error",
+                        error.to_string(),
+                    ));
+                    break;
+                }
+                Err(_) => {
+                    drop(permit);
+                    last_error = Some(WebSocketError::new(
+                        504,
+                        "upstream_unavailable",
+                        "provider WebSocket connection timed out",
+                    ));
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    continue;
+                }
+            };
+        let bulkhead_wait_ms = bulkhead_started
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let prepared = match tokio::time::timeout_at(
+            attempt_deadline,
+            gateway.prepare_connection(&dispatch, &candidate),
+        )
+        .await
+        {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(error)) => {
+                drop(bulkhead_guard);
+                drop(permit);
+                let authentication_failed = error.code == "authentication_error";
+                last_error = Some(error);
+                if authentication_failed {
+                    break;
+                }
+                continue;
+            }
+            Err(_) => {
+                drop(bulkhead_guard);
+                drop(permit);
+                last_error = Some(WebSocketError::new(
+                    504,
+                    "upstream_unavailable",
+                    "provider WebSocket connection timed out",
+                ));
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                continue;
+            }
         };
         let request = match responses_websocket_request(prepared.0, prepared.1) {
             Ok(request) => request,
             Err(error) => {
+                drop(bulkhead_guard);
                 drop(permit);
                 last_error = Some(WebSocketError::new(502, "upstream_unavailable", error));
                 continue;
             }
         };
-        let attempt_timeout = per_attempt_timeout
-            .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+        let attempt_timeout =
+            attempt_deadline.saturating_duration_since(tokio::time::Instant::now());
         if attempt_timeout.is_zero() {
+            drop(bulkhead_guard);
             drop(permit);
             last_error = Some(WebSocketError::new(
                 504,
                 "upstream_unavailable",
                 "provider WebSocket connection timed out",
             ));
-            break;
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            continue;
         }
         let Some(next_id) = next_connection_id.checked_add(1) else {
+            drop(bulkhead_guard);
             drop(permit);
             last_error = Some(WebSocketError::new(
                 503,
@@ -888,9 +1012,19 @@ async fn relay_responses_websocket(
                 }
             }
 
+            let pending_deadline = gateway
+                .next_pending_error_deadline()
+                .map(tokio::time::Instant::from_std);
             tokio::select! {
                 _ = activity_heartbeat.tick(), if gateway.has_active_turns() => {
                     gateway.observe_active_turns_heartbeat();
+                }
+                _ = async {
+                    if let Some(deadline) = pending_deadline {
+                        tokio::time::sleep_until(deadline).await;
+                    }
+                }, if pending_deadline.is_some() => {
+                    gateway.expire_pending_error_terminals(std::time::Instant::now());
                 }
                 client = client_rx.recv() => {
                     let Some(message) = client else { break };

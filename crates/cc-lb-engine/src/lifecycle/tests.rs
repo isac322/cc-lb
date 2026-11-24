@@ -8343,6 +8343,363 @@ async fn responses_websocket_subscription_preference_provides_ordered_fallbacks_
 }
 
 #[tokio::test]
+async fn responses_websocket_subscription_preference_keeps_api_key_fallback_rechecks_quota_and_plans_hybrid_reasoning()
+ {
+    struct StaticQuotaCache {
+        snapshots: Mutex<HashMap<Uuid, Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot>>>,
+    }
+
+    impl cc_lb_control::SubscriptionQuotaCacheLike for StaticQuotaCache {
+        fn upsert_observation(&self, _record: &cc_lb_storage_api::SubscriptionQuotaSample) {}
+
+        fn snapshot_for_upstream(
+            &self,
+            upstream_id: Uuid,
+            _now_unix_millis: u64,
+            _max_staleness_secs: u64,
+        ) -> Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot> {
+            self.snapshots
+                .lock()
+                .expect("quota cache lock")
+                .get(&upstream_id)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    const NOW_SECS: u64 = 1_700_000_000;
+    let quota_snapshot = |window: &str, utilization: f64, status: &str, reset: u64| {
+        cc_lb_domain::SubscriptionQuotaCandidateSnapshot {
+            window: window.to_owned(),
+            state: cc_lb_domain::SubscriptionQuotaDataState::Fresh,
+            source: Some("ws-fallback-test".to_owned()),
+            utilization: Some(utilization),
+            status: Some(status.to_owned()),
+            resets_at_unix_secs: Some(reset),
+            surpassed_threshold: None,
+            representative_claim: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            credits: None,
+            observed_at_unix_millis: Some(NOW_SECS * 1_000),
+            max_staleness_secs: 60,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+        }
+    };
+
+    let mut upstreams = Vec::new();
+    let mut oauth_ids = Vec::new();
+    for idx in 1..=18_u128 {
+        let id = Uuid::from_u128(500 + idx);
+        oauth_ids.push(id);
+        upstreams.push(UpstreamRecord {
+            id,
+            name: format!("codex-oauth-{idx}"),
+            kind: StorageRecordKind::OpenaiOauth,
+            enabled: true,
+            ..Default::default()
+        });
+    }
+    let api_key_id = Uuid::from_u128(600);
+    upstreams.push(UpstreamRecord {
+        id: api_key_id,
+        name: "openai-api-key".to_owned(),
+        kind: StorageRecordKind::OpenaiApiKey,
+        enabled: true,
+        ..Default::default()
+    });
+
+    let filter: Arc<dyn FilterPlugin> = Arc::new(
+        crate::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::new(),
+    );
+    let pipeline = Arc::new(RouterPipelineCache {
+        user_filters: vec![filter],
+        terminal: TerminalStrategy::FirstPick,
+        instantiation_error: None,
+        provider_filters: None,
+    });
+    let principal_view = failure_principal_view(
+        "principal-test",
+        (
+            Some(pipeline),
+            cc_lb_control::api_keys::principal_view::DialectCache::Inherit,
+        ),
+    );
+    let quota_cache = Arc::new(StaticQuotaCache {
+        snapshots: Mutex::new(HashMap::new()),
+    });
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(TestSignerFactory))
+        .principal_view(principal_view)
+        .subscription_quota_cache(quota_cache.clone())
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(upstreams)
+        .build();
+    let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+    let config = LifecycleConfig {
+        unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy::Hybrid,
+        ..Default::default()
+    };
+    struct EmptyAffinityStore;
+
+    #[async_trait]
+    impl UpstreamAffinityStore for EmptyAffinityStore {
+        async fn resolve_upstream_affinities(
+            &self,
+            _keys: &[UpstreamAffinityKey],
+            _now_unix_secs: u64,
+            _ttl_secs: u64,
+        ) -> cc_lb_storage_api::StorageResult<Vec<UpstreamAffinityBinding>> {
+            Ok(Vec::new())
+        }
+
+        async fn read_upstream_owner_epoch(
+            &self,
+            _upstream_id: cc_lb_storage_api::UpstreamRecordId,
+            _expected_spec_revision: u64,
+        ) -> cc_lb_storage_api::StorageResult<Option<u64>> {
+            Ok(Some(0))
+        }
+
+        async fn bind_upstream_affinities(
+            &self,
+            _bindings: &[UpstreamAffinityBinding],
+            _now_unix_secs: u64,
+            _ttl_secs: u64,
+        ) -> cc_lb_storage_api::StorageResult<()> {
+            Ok(())
+        }
+
+        async fn purge_expired_upstream_affinities(
+            &self,
+            _now_unix_secs: u64,
+            _ttl_secs: u64,
+            _batch_size: usize,
+        ) -> cc_lb_storage_api::StorageResult<u64> {
+            Ok(0)
+        }
+    }
+
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        failure_authn(),
+        Arc::new(DynamicViewHolder::new(view)),
+        Arc::new(QueueDispatch::new(Vec::new())),
+        config,
+        Arc::new(cc_lb_clock::TestClock::new_at_secs(NOW_SECS)),
+    )
+    .with_event_bus(bus)
+    .with_upstream_affinity_store(Arc::new(EmptyAffinityStore));
+
+    let frame = Bytes::from_static(br#"{"model":"gpt-6.2-sol","store":false}"#);
+    let body = Arc::new(serde_json::from_slice::<Value>(&frame).expect("frame parses"));
+    let request = failure_request(Bytes::new());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("request authenticates");
+
+    // 1. Public WS keeps an eligible API-key fallback even behind >16 OAuth candidates.
+    let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
+    let public_turn = lifecycle
+        .prepare_websocket_turn_with_surface(
+            &auth,
+            WebSocketIngress {
+                headers: request.headers(),
+                frame: &frame,
+                query: None,
+            },
+            body.clone(),
+            None,
+            observer,
+            &request_id,
+            false,
+        )
+        .await
+        .expect("public turn prepares");
+    assert!(
+        public_turn
+            .candidates
+            .iter()
+            .any(|c| c.upstream_id == api_key_id && c.is_api_key),
+        "public WS must retain eligible API-key fallback beyond 16 OAuth candidates"
+    );
+
+    // Native Codex remains strictly OAuth-only.
+    let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
+    let codex_turn = lifecycle
+        .prepare_websocket_turn_with_surface(
+            &auth,
+            WebSocketIngress {
+                headers: request.headers(),
+                frame: &frame,
+                query: None,
+            },
+            body.clone(),
+            None,
+            observer,
+            &request_id,
+            true,
+        )
+        .await
+        .expect("codex turn prepares");
+    assert!(
+        !codex_turn
+            .candidates
+            .iter()
+            .any(|c| c.upstream_id == api_key_id || c.is_api_key),
+        "native Codex WS must remain OAuth-only"
+    );
+
+    // 2. Fresh quota exhaustion rejects unpinned fallback revalidation while keeping pinned continuations working.
+    quota_cache.snapshots.lock().expect("quota lock").insert(
+        oauth_ids[1],
+        vec![
+            quota_snapshot("5h", 0.0, "allowed", NOW_SECS + 1_800),
+            quota_snapshot("7d", 1.0, "rejected", NOW_SECS + 86_400),
+        ],
+    );
+    let fallback_err = lifecycle
+        .validate_websocket_turn_with_policy(
+            &auth,
+            WebSocketIngress {
+                headers: request.headers(),
+                frame: &frame,
+                query: None,
+            },
+            body.as_ref(),
+            oauth_ids[1],
+            false,
+            true,
+        )
+        .await
+        .expect_err("unpinned fallback must reject freshly exhausted OAuth candidate");
+    assert_eq!(fallback_err.status, 503);
+    lifecycle
+        .validate_websocket_turn_with_policy(
+            &auth,
+            WebSocketIngress {
+                headers: request.headers(),
+                frame: &frame,
+                query: None,
+            },
+            body.as_ref(),
+            oauth_ids[1],
+            false,
+            false,
+        )
+        .await
+        .expect("pinned continuation must still be allowed on exhausted candidate");
+
+    // 3. Hybrid reasoning uses the full dispatchable pool under subscription-preference:
+    //    multi-upstream unpinned -> StrippedUpfront; single-owner or lone healthy -> RetryStripAll.
+    let reasoning_frame = Bytes::from_static(
+        br#"{"model":"gpt-6.2-sol","store":false,"input":[{"type":"reasoning","id":"rs_foreign","encrypted_content":"gAAAAABforeign_reason","summary":[]},{"type":"message","role":"user","content":"hi"}]}"#,
+    );
+    let reasoning_body = Arc::new(
+        serde_json::from_slice::<Value>(&reasoning_frame).expect("reasoning frame parses"),
+    );
+    let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
+    let multi_turn = lifecycle
+        .prepare_websocket_turn_with_surface(
+            &auth,
+            WebSocketIngress {
+                headers: request.headers(),
+                frame: &reasoning_frame,
+                query: None,
+            },
+            reasoning_body.clone(),
+            None,
+            observer,
+            &request_id,
+            true,
+        )
+        .await
+        .expect("multi-upstream codex turn prepares");
+    assert!(
+        matches!(
+            multi_turn.unknown_reasoning_plan,
+            WsUnknownReasoningPlan::StrippedUpfront { .. }
+        ),
+        "multi-upstream subscription-preference pool must strip unestablished reasoning upfront"
+    );
+
+    let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
+    let pinned_turn = lifecycle
+        .prepare_websocket_turn_with_surface(
+            &auth,
+            WebSocketIngress {
+                headers: request.headers(),
+                frame: &reasoning_frame,
+                query: None,
+            },
+            reasoning_body.clone(),
+            Some(oauth_ids[0]),
+            observer,
+            &request_id,
+            true,
+        )
+        .await
+        .expect("pinned codex turn prepares");
+    assert!(
+        matches!(
+            pinned_turn.unknown_reasoning_plan,
+            WsUnknownReasoningPlan::RetryStripAll { .. }
+        ),
+        "single-owner turn must preserve RetryStripAll behavior"
+    );
+
+    // Mark all OAuth accounts except oauth_ids[0] exhausted so only 1 upstream is dispatchable.
+    {
+        let mut guard = quota_cache.snapshots.lock().expect("quota lock");
+        guard.insert(
+            oauth_ids[0],
+            vec![
+                quota_snapshot("5h", 0.1, "allowed", NOW_SECS + 1_800),
+                quota_snapshot("7d", 0.1, "allowed", NOW_SECS + 86_400),
+            ],
+        );
+        for id in &oauth_ids[1..] {
+            guard.insert(
+                *id,
+                vec![
+                    quota_snapshot("5h", 0.0, "allowed", NOW_SECS + 1_800),
+                    quota_snapshot("7d", 1.0, "rejected", NOW_SECS + 86_400),
+                ],
+            );
+        }
+    }
+    let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
+    let single_healthy_turn = lifecycle
+        .prepare_websocket_turn_with_surface(
+            &auth,
+            WebSocketIngress {
+                headers: request.headers(),
+                frame: &reasoning_frame,
+                query: None,
+            },
+            reasoning_body,
+            None,
+            observer,
+            &request_id,
+            true,
+        )
+        .await
+        .expect("single healthy codex turn prepares");
+    assert!(
+        matches!(
+            single_healthy_turn.unknown_reasoning_plan,
+            WsUnknownReasoningPlan::RetryStripAll { .. }
+        ),
+        "single healthy OAuth upstream without non-blocked fallbacks must keep RetryStripAll"
+    );
+}
+
+#[tokio::test]
 async fn responses_websocket_signs_native_codex_connection_urls() {
     for (base_url, expected) in [
         (None, "wss://chatgpt.com/backend-api/codex/responses"),
