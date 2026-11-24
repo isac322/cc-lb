@@ -24,8 +24,8 @@ use cc_lb_scheduler::worker::{
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    AnthropicCompatibilityKvStore, Storage, StorageError, UpstreamRecord, UpstreamStatusUpdate,
-    UpstreamStore,
+    AnthropicCompatibilityKvStore, Storage, StorageError, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaWindow, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore,
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -46,8 +46,9 @@ use cc_lb_control::gemini_period_unknown_quota::{
 };
 
 use crate::scheduler_dispatch::http::{
-    RefreshRequestError, decrypt_bundle, fetch_gemini_account_metadata, fetch_gemini_quota,
-    fetch_usage, gemini_summary_groups, request_refresh, upstream_base_url,
+    RefreshRequestError, build_refresh_request, decrypt_bundle, fetch_gemini_account_metadata,
+    fetch_gemini_quota, fetch_usage, gemini_summary_groups, send_refresh_request,
+    upstream_base_url,
 };
 use crate::scheduler_dispatch::storage::storage_scheduler_error;
 use crate::scheduler_dispatch::time::now_unix_millis;
@@ -573,22 +574,26 @@ impl SchedulerDispatch {
                 .await?;
             return Ok(RefreshOutcome::NotRefreshable);
         }
-        if let Some(lease_slot) = lease_slot
-            && let Some(active) = lease_slot.lock().await.as_mut()
-        {
-            active.mark_provider_exchange_started();
-        }
-        let response = match request_refresh(
-            &self.http,
+        let request = build_refresh_request(
             self.oauth_cfg.as_ref(),
             &self.config,
             upstream.kind,
             bundle.oauth_profile,
-            cancel,
             &bundle.refresh_token,
-        )
-        .await
-        {
+        )?;
+        if cancel.is_cancelled() {
+            return Err(SchedulerError::Job("oauth refresh cancelled".to_owned()));
+        }
+        if let Some(lease_slot) = lease_slot {
+            let mut guard = lease_slot.lock().await;
+            if cancel.is_cancelled() {
+                return Err(SchedulerError::Job("oauth refresh cancelled".to_owned()));
+            }
+            if let Some(active) = guard.as_mut() {
+                active.mark_provider_exchange_started();
+            }
+        }
+        let response = match send_refresh_request(&self.http, request, cancel).await {
             Ok(response) => response,
             Err(RefreshRequestError::Endpoint { status, body })
                 if is_terminal_refresh_failure(status.as_u16(), &body) =>
@@ -874,10 +879,15 @@ impl SchedulerDispatch {
         let (mut records, cedar_ember, affected_main_published, raw_updates) = if is_anthropic {
             let (records, cedar_ember) =
                 parse_usage_body(upstream.id, &response.body, observed_at_unix_millis)?;
+            let affected_main_published = records.iter().any(|sample| {
+                sample.window != SubscriptionQuotaWindow::Overage
+                    && sample.sample_kind != SubscriptionQuotaSampleKind::Absent
+                    && (sample.utilization.is_some() || sample.status.is_some())
+            });
             (
                 records,
                 cedar_ember,
-                true,
+                affected_main_published,
                 super::usage::GeminiRawUpdates::default(),
             )
         } else {

@@ -1119,6 +1119,15 @@ impl AnthropicResetServer {
                 }),
             )
             .route(
+                "/api/oauth/profile",
+                axum::routing::get(|| async {
+                    axum::Json(json!({
+                        "account": {"uuid": "account-a"},
+                        "organization": {"uuid": "org-shared"}
+                    }))
+                }),
+            )
+            .route(
                 "/v1/messages",
                 axum::routing::post({
                     let srv = srv.clone();
@@ -1419,4 +1428,103 @@ async fn anthropic_header_probe_mid_flight_reset_epoch_change_cannot_overwrite_n
         "stale header probe must fail epoch fence validation"
     );
     assert_eq!(selected(&fixture, &upstream), upstream.id);
+}
+
+#[tokio::test]
+async fn anthropic_empty_or_coupon_only_usage_poll_does_not_claim_main_quota_published() {
+    use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollObservation;
+
+    let server = AnthropicResetServer::new(100).await;
+    let fixture = DispatchFixture::new().await;
+    let upstream = server.upstream(&fixture).await;
+
+    for (label, body) in [
+        ("empty object", json!({})),
+        (
+            "coupon-only",
+            json!({
+                "cedar_ember": {
+                    "eligible": true,
+                    "at_limit": true,
+                    "grants": [{"id": "grant_01", "resets_left": 1}],
+                    "next_grant_id": "grant_01"
+                }
+            }),
+        ),
+        (
+            "overage-only",
+            json!({
+                "extra_usage": {
+                    "is_enabled": true,
+                    "monthly_limit": 30000,
+                    "used_credits": 1500
+                }
+            }),
+        ),
+        (
+            "null-utilization main window",
+            json!({
+                "five_hour": {"utilization": null, "resets_at": null}
+            }),
+        ),
+    ] {
+        *server.state.usage_body.lock().unwrap() = body;
+        let observation = fixture
+            .dispatch
+            .poll_usage(upstream.id, None)
+            .await
+            .expect("poll succeeds");
+        assert!(
+            matches!(
+                observation,
+                OAuthUsagePollObservation::Success {
+                    affected_main_quota_published: false,
+                    ..
+                }
+            ),
+            "{label}: expected affected_main_quota_published == false, got {observation:?}"
+        );
+        assert_eq!(
+            refresh(&fixture, &upstream).await,
+            LimitResetUsageRefresh::Failed,
+            "{label}: post-reset refresh must not treat missing main windows as refreshed"
+        );
+    }
+
+    for (label, body) in [
+        (
+            "five_hour window",
+            json!({
+                "five_hour": {"utilization": 25.0, "resets_at": 1_700_018_000}
+            }),
+        ),
+        (
+            "seven_day window",
+            json!({
+                "seven_day": {"utilization": 10.0, "resets_at": 1_700_500_000}
+            }),
+        ),
+    ] {
+        *server.state.usage_body.lock().unwrap() = body;
+        let observation = fixture
+            .dispatch
+            .poll_usage(upstream.id, None)
+            .await
+            .expect("poll succeeds");
+        assert!(
+            matches!(
+                observation,
+                OAuthUsagePollObservation::Success {
+                    affected_main_quota_published: true,
+                    ..
+                }
+            ),
+            "{label}: expected affected_main_quota_published == true, got {observation:?}"
+        );
+        assert_eq!(
+            refresh(&fixture, &upstream).await,
+            LimitResetUsageRefresh::Refreshed,
+            "{label}: post-reset refresh must succeed when main quota is published"
+        );
+    }
 }
