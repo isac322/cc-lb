@@ -362,6 +362,7 @@ impl SchedulerDispatch {
             let lease_fenced_conflict = Arc::new(AtomicBool::new(false));
             let committed_generation = Arc::new(AtomicU64::new(starting_generation));
             let snapshot_superseded = Arc::new(AtomicBool::new(false));
+            let definite_no_rotation = Arc::new(AtomicBool::new(false));
             let fenced_upstreams = FencedOAuthRefreshUpstreams {
                 storage: dispatch.storage.clone(),
                 lease: Arc::clone(&lease_slot),
@@ -373,6 +374,7 @@ impl SchedulerDispatch {
             let lease_cancel_for_refresh = lease_cancel.clone();
             let committed_for_schedule = Arc::clone(&committed_generation);
             let superseded_for_check = Arc::clone(&snapshot_superseded);
+            let definite_no_rotation_for_refresh = Arc::clone(&definite_no_rotation);
             let dispatch_for_refresh = dispatch.clone();
             let lease_slot_for_refresh = Arc::clone(&lease_slot);
             let outcome = OAuthRefreshJobHandler::new(fenced_upstreams, replica_id)
@@ -383,6 +385,7 @@ impl SchedulerDispatch {
                         let dispatch = dispatch_for_refresh.clone();
                         let lease_slot = Arc::clone(&lease_slot_for_refresh);
                         let lease_cancel = lease_cancel_for_refresh.clone();
+                        let definite_no_rotation = Arc::clone(&definite_no_rotation_for_refresh);
                         async move {
                             if upstream.oauth_token_generation != starting_generation
                                 || oauth_refresh_job_is_superseded(
@@ -399,6 +402,7 @@ impl SchedulerDispatch {
                                     upstream,
                                     &lease_cancel,
                                     Some(&lease_slot),
+                                    Some(&definite_no_rotation),
                                 )
                                 .await
                         }
@@ -420,9 +424,16 @@ impl SchedulerDispatch {
                     .ok()
                     .flatten();
             let final_generation = observed_generation.unwrap_or(starting_generation);
+            let generation_advanced =
+                observed_generation.is_some_and(|current| current > starting_generation);
             let was_lost = if let Some(active) = lease_slot.lock().await.take() {
                 let lost = active.is_lost().await;
-                if let Err(error) = active.release(final_generation).await {
+                if active.provider_exchange_started()
+                    && !generation_advanced
+                    && !definite_no_rotation.load(Ordering::SeqCst)
+                {
+                    active.retire_without_release().await;
+                } else if let Err(error) = active.release(final_generation).await {
                     tracing::warn!(
                         error = %error,
                         upstream_id = %upstream_id,
@@ -433,8 +444,6 @@ impl SchedulerDispatch {
             } else {
                 false
             };
-            let generation_advanced =
-                observed_generation.is_some_and(|current| current > starting_generation);
             if snapshot_superseded.load(Ordering::SeqCst)
                 || (matches!(outcome, Ok(JobOutcome::Retry { .. }) | Err(_))
                     && (generation_advanced
@@ -459,7 +468,7 @@ impl SchedulerDispatch {
         &self,
         upstream: UpstreamRecord,
     ) -> SchedulerResult<RefreshOutcome> {
-        self.refresh_upstream_with_cancel(upstream, &self.cancel, None)
+        self.refresh_upstream_with_cancel(upstream, &self.cancel, None, None)
             .await
     }
 
@@ -468,6 +477,7 @@ impl SchedulerDispatch {
         upstream: UpstreamRecord,
         cancel: &CancellationToken,
         lease_slot: Option<&tokio::sync::Mutex<Option<ActiveOAuthRefreshLease>>>,
+        definite_no_rotation: Option<&AtomicBool>,
     ) -> SchedulerResult<RefreshOutcome> {
         if refresh_requires_reconnect(upstream.last_apply_error.as_deref()) {
             return Ok(RefreshOutcome::NotRefreshable);
@@ -506,6 +516,9 @@ impl SchedulerDispatch {
             Err(RefreshRequestError::Endpoint { status, body })
                 if is_terminal_refresh_failure(status.as_u16(), &body) =>
             {
+                if let Some(flag) = definite_no_rotation {
+                    flag.store(true, Ordering::SeqCst);
+                }
                 let reason = if status == http::StatusCode::UNAUTHORIZED {
                     "status_401"
                 } else {
@@ -515,6 +528,9 @@ impl SchedulerDispatch {
                 return Ok(RefreshOutcome::NotRefreshable);
             }
             Err(RefreshRequestError::Endpoint { status, .. }) => {
+                if let Some(flag) = definite_no_rotation {
+                    flag.store(true, Ordering::SeqCst);
+                }
                 return Err(SchedulerError::Job(format!(
                     "oauth token endpoint returned {status}"
                 )));

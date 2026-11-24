@@ -765,6 +765,10 @@ impl ActiveOAuthRefreshLease {
         self.provider_exchange_started = true;
     }
 
+    pub(crate) fn provider_exchange_started(&self) -> bool {
+        self.provider_exchange_started
+    }
+
     pub(crate) async fn is_lost(&self) -> bool {
         matches!(&*self.state.lock().await, LeaseHeartbeatState::Lost { .. })
     }
@@ -784,13 +788,24 @@ impl ActiveOAuthRefreshLease {
         }
     }
 
-    pub(crate) async fn mark_committed_and_released(&mut self) {
+    async fn retire_heartbeat(&mut self) {
         self.released = true;
         self.stop_heartbeat.cancel();
         if let Some(handle) = self.heartbeat.take() {
             let _ = handle.await;
         }
         *self.state.lock().await = LeaseHeartbeatState::Released;
+    }
+
+    pub(crate) async fn mark_committed_and_released(&mut self) {
+        self.retire_heartbeat().await;
+    }
+
+    /// Stops heartbeat renewals and disarms Drop cleanup without clearing the
+    /// persisted `held:...` lease row so exclusive ownership holds until the
+    /// existing TTL expires when a post-send failure leaves rotation uncertain.
+    pub(crate) async fn retire_without_release(mut self) {
+        self.retire_heartbeat().await;
     }
 
     fn spawn_release(
@@ -2071,7 +2086,12 @@ impl LazyRefresher {
                 .flatten()
                 .unwrap_or(starting_generation),
         };
-        if let Err(error) = active_lease.release(final_generation).await {
+        if active_lease.provider_exchange_started()
+            && final_generation == starting_generation
+            && refresh_outcome_is_ambiguous_after_send(&outcome)
+        {
+            active_lease.retire_without_release().await;
+        } else if let Err(error) = active_lease.release(final_generation).await {
             tracing::warn!(
                 error = %error,
                 upstream_id = %upstream_id,
@@ -2303,6 +2323,19 @@ pub enum RefreshError {
     /// access-only imports and Anthropic long-lived grants from rotation.
     #[error("long-lived oauth credential must not be refreshed; reauthorization required")]
     NotRefreshable,
+}
+
+fn refresh_outcome_is_ambiguous_after_send(outcome: &Result<u64, RefreshError>) -> bool {
+    matches!(
+        outcome,
+        Err(RefreshError::Cancelled
+            | RefreshError::Http(_)
+            | RefreshError::Parse(_)
+            | RefreshError::Encrypt
+            | RefreshError::Storage(_)
+            | RefreshError::LeaseLost
+            | RefreshError::MetadataHook(_))
+    )
 }
 
 async fn check_refresh_allowed(
@@ -7515,6 +7548,86 @@ mod tests {
             gen2,
         )
         .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lazy_refresher_retains_fallback_lease_when_shutdown_cancels_after_provider_accepts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (fixture, upstream_id, starting_generation) = setup_killed_oauth_job_fixture().await?;
+        fixture.hold_refresh_response();
+        let lease_key = super::oauth_refresh_lease_meta_key(upstream_id);
+        let claims = Arc::new(super::ApalisLazyRefreshClaimGuard::new(
+            fixture.scheduler_backend.clone(),
+            fixture.storage.clone(),
+        ));
+        let build_refresher = |cancel, wait| {
+            LazyRefresher::new_with_claim_guard_for_tests(
+                LazyRefresherDeps {
+                    google_config: Default::default(),
+                    stores: fixture.stores.clone(),
+                    aead: fixture.aead.clone(),
+                    oauth_cfg: fixture.oauth_cfg.clone(),
+                    clock: fixture.clock.clone(),
+                },
+                Uuid::new_v4(),
+                None,
+                cancel,
+                claims.clone(),
+                LazyRefreshContentionConfig::for_tests(wait, Duration::from_millis(5)),
+                fixture.scheduler_backend.clone(),
+            )
+        };
+        let shutdown_cancel = CancellationToken::new();
+        let refresher = build_refresher(shutdown_cancel.clone(), Duration::from_secs(5));
+
+        let caller_task = tokio::spawn(async move { refresher.refresh_one(upstream_id).await });
+        tokio::time::timeout(Duration::from_secs(2), fixture.wait_for_refresh_start())
+            .await
+            .expect("provider request starts within 2s");
+
+        let held_before = fixture
+            .storage
+            .get_meta_value(&lease_key)
+            .await?
+            .ok_or("expected held lease while provider request is in flight")?;
+        assert!(held_before.starts_with(&format!("held:{starting_generation}:")));
+
+        shutdown_cancel.cancel();
+
+        let first_outcome = tokio::time::timeout(Duration::from_secs(2), caller_task)
+            .await
+            .expect("cancelled fallback finishes within 2s")
+            .expect("fallback task joins");
+        assert!(first_outcome.is_err());
+
+        let retained = fixture
+            .storage
+            .get_meta_value(&lease_key)
+            .await?
+            .ok_or("expected held lease to remain after post-send shutdown cancellation")?;
+        assert_eq!(retained, held_before);
+
+        // A second claimant on another replica observes the retained lease and never re-sends.
+        let peer = build_refresher(CancellationToken::new(), Duration::from_millis(40));
+        let peer_outcome =
+            tokio::time::timeout(Duration::from_secs(2), peer.refresh_one(upstream_id))
+                .await
+                .expect("peer contention check finishes within 2s");
+        assert!(peer_outcome.is_err());
+        assert_eq!(fixture.refresh_call_count(), 1);
+
+        let direct_claim = super::try_acquire_oauth_refresh_lease_cancellation_safe(
+            fixture.storage.clone(),
+            fixture.storage.clone(),
+            upstream_id,
+            starting_generation,
+            cc_lb_clock::unix_secs(fixture.clock.now()),
+        )
+        .await?;
+        assert!(direct_claim.is_none());
+
+        fixture.release_refresh_response();
         Ok(())
     }
 

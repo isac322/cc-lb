@@ -1805,65 +1805,74 @@ async fn oauth_refresh_watchdog_reconciles_anthropic_metadata_even_when_refresh_
     assert_eq!(recovery_count, 1);
 }
 
-#[tokio::test]
-async fn scheduled_oauth_refresh_timeout_after_provider_request_preserves_ownership_and_persists_rotation()
- {
-    use tokio::sync::watch;
-
-    async fn controlled_token_server(
-        allow_response: watch::Receiver<bool>,
-    ) -> (
-        Url,
-        Arc<AtomicUsize>,
-        watch::Receiver<bool>,
-        watch::Receiver<bool>,
-        tokio::task::JoinHandle<()>,
-    ) {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let (entered_tx, entered_rx) = watch::channel(false);
-        let (sent_tx, sent_rx) = watch::channel(false);
-        let recorded = Arc::clone(&calls);
-        let app = axum::Router::new().route(
-            "/oauth/token",
-            axum::routing::post(move || {
-                let recorded = Arc::clone(&recorded);
-                let entered_tx = entered_tx.clone();
-                let sent_tx = sent_tx.clone();
-                let mut allow = allow_response.clone();
-                async move {
-                    recorded.fetch_add(1, Ordering::SeqCst);
-                    entered_tx.send_replace(true);
-                    let _ = allow.wait_for(|&go| go).await;
-                    sent_tx.send_replace(true);
+async fn spawn_controlled_token_server(
+    allow_response: tokio::sync::watch::Receiver<bool>,
+    response_status: StatusCode,
+) -> (
+    Url,
+    Arc<AtomicUsize>,
+    tokio::sync::watch::Receiver<bool>,
+    tokio::sync::watch::Receiver<bool>,
+    tokio::task::JoinHandle<()>,
+) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (entered_tx, entered_rx) = tokio::sync::watch::channel(false);
+    let (sent_tx, sent_rx) = tokio::sync::watch::channel(false);
+    let recorded = Arc::clone(&calls);
+    let app = axum::Router::new().route(
+        "/oauth/token",
+        axum::routing::post(move || {
+            let recorded = Arc::clone(&recorded);
+            let entered_tx = entered_tx.clone();
+            let sent_tx = sent_tx.clone();
+            let mut allow = allow_response.clone();
+            async move {
+                recorded.fetch_add(1, Ordering::SeqCst);
+                entered_tx.send_replace(true);
+                let _ = allow.wait_for(|&go| go).await;
+                sent_tx.send_replace(true);
+                if response_status.is_success() {
                     (
                         StatusCode::OK,
                         [("content-type", "application/json")],
                         r#"{"access_token":"rotated-access","refresh_token":"rotated-refresh","token_type":"Bearer","expires_in":3600}"#,
                     )
+                } else {
+                    (
+                        response_status,
+                        [("content-type", "application/json")],
+                        r#"{"error":"server_error"}"#,
+                    )
                 }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind controlled token server");
+    let endpoint = Url::parse(&format!(
+        "http://{}/oauth/token",
+        listener.local_addr().expect("token server address")
+    ))
+    .expect("token URL");
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
             .await
-            .expect("bind controlled token server");
-        let endpoint = Url::parse(&format!(
-            "http://{}/oauth/token",
-            listener.local_addr().expect("token server address")
-        ))
-        .expect("token URL");
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("serve controlled token endpoint");
-        });
-        (endpoint, calls, entered_rx, sent_rx, task)
-    }
+            .expect("serve controlled token endpoint");
+    });
+    (endpoint, calls, entered_rx, sent_rx, task)
+}
+
+#[tokio::test]
+async fn scheduled_oauth_refresh_timeout_after_provider_request_preserves_ownership_and_persists_rotation()
+ {
+    use tokio::sync::watch;
 
     // Sub-case A: `spawn_leased_oauth_refresh` continues owning lease + completing fenced
     // rotation if the caller drops or times out while `/oauth/token` response is in flight.
     let (allow_tx1, allow_rx1) = watch::channel(false);
     let (endpoint1, calls1, mut entered_rx1, _sent_rx1, server1) =
-        controlled_token_server(allow_rx1).await;
+        spawn_controlled_token_server(allow_rx1, StatusCode::OK).await;
     let mut fixture1 = DispatchFixture::new().await;
     set_token_endpoint(&mut fixture1, endpoint1);
     let upstream1 = fixture1.oauth_upstream(false).await;
@@ -1949,7 +1958,7 @@ async fn scheduled_oauth_refresh_timeout_after_provider_request_preserves_owners
     // ENTITY_TIMEOUT) leaves the lease held and blocks concurrent retries from re-sending.
     let (allow_tx2, allow_rx2) = watch::channel(false);
     let (endpoint2, calls2, mut entered_rx2, mut sent_rx2, server2) =
-        controlled_token_server(allow_rx2).await;
+        spawn_controlled_token_server(allow_rx2, StatusCode::OK).await;
     let mut fixture2 = DispatchFixture::new().await;
     set_token_endpoint(&mut fixture2, endpoint2);
     let upstream2 = fixture2.oauth_upstream(false).await;
@@ -1995,4 +2004,146 @@ async fn scheduled_oauth_refresh_timeout_after_provider_request_preserves_owners
     .expect("provider response sent within 2s")
     .expect("sent watch stays open");
     drop(server2);
+}
+
+#[tokio::test]
+async fn scheduled_oauth_refresh_retains_lease_when_shutdown_cancels_after_provider_accepts() {
+    use tokio::sync::watch;
+
+    // Sub-case A: Shutdown cancels `dispatch.cancel` while provider `/oauth/token` response is
+    // still pending -> ambiguous exchange retains `held:...` lease until TTL expiry so a peer
+    // replica cannot re-send the rotating refresh token.
+    let (_allow_tx1, allow_rx1) = watch::channel(false);
+    let (endpoint1, calls1, mut entered_rx1, _sent_rx1, server1) =
+        spawn_controlled_token_server(allow_rx1, StatusCode::OK).await;
+    let mut fixture1 = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture1, endpoint1);
+    let upstream1 = fixture1.oauth_upstream(false).await;
+    let starting_gen1 = upstream1.oauth_token_generation;
+    let lease_key1 = crate::refresh::oauth_refresh_lease_meta_key(upstream1.id);
+    let now1 = cc_lb_clock::unix_secs(fixture1.clock.now());
+    let lease1 = crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+        fixture1.storage.clone(),
+        fixture1.storage.clone(),
+        upstream1.id,
+        starting_gen1,
+        now1,
+    )
+    .await
+    .expect("lease acquire succeeds")
+    .expect("lease 1 is free");
+
+    let exchange_handle1 = fixture1.dispatch.spawn_leased_oauth_refresh(
+        OAuthRefreshJob::new(upstream1.id),
+        lease1,
+        fixture1.dispatch.replica_id.expect("replica id set"),
+        starting_gen1,
+        None,
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        entered_rx1.wait_for(|&entered| entered),
+    )
+    .await
+    .expect("provider request enters within 2s")
+    .expect("entered watch stays open");
+
+    let held_before1 = fixture1
+        .storage
+        .get_meta_value(&lease_key1)
+        .await
+        .expect("read held meta")
+        .expect("lease row exists");
+    assert!(held_before1.starts_with(&format!("held:{starting_gen1}:")));
+
+    fixture1.dispatch.cancel.cancel();
+
+    let cancelled_outcome1 =
+        tokio::time::timeout(std::time::Duration::from_secs(2), exchange_handle1)
+            .await
+            .expect("cancelled scheduled refresh completes within 2s")
+            .expect("spawned task joins")
+            .expect("cancelled refresh returns Retry instead of hard failing");
+    assert!(matches!(cancelled_outcome1, JobOutcome::Retry { .. }));
+    assert_eq!(
+        fixture1
+            .storage
+            .get_meta_value(&lease_key1)
+            .await
+            .expect("read retained meta")
+            .as_deref(),
+        Some(held_before1.as_str())
+    );
+
+    let second_claim = crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+        fixture1.storage.clone(),
+        fixture1.storage.clone(),
+        upstream1.id,
+        starting_gen1,
+        now1,
+    )
+    .await
+    .expect("second claimant check succeeds");
+    assert!(second_claim.is_none());
+    assert_eq!(calls1.load(Ordering::SeqCst), 1);
+    server1.abort();
+
+    // Sub-case B: An explicit non-2xx HTTP rejection (`RefreshRequestError::Endpoint`) proves no
+    // rotation occurred and releases the lease immediately back to `idle:{starting_gen}`.
+    let (_allow_tx2, allow_rx2) = watch::channel(true);
+    let (endpoint2, calls2, _entered_rx2, mut sent_rx2, server2) =
+        spawn_controlled_token_server(allow_rx2, StatusCode::SERVICE_UNAVAILABLE).await;
+    let mut fixture2 = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture2, endpoint2);
+    let upstream2 = fixture2.oauth_upstream(false).await;
+    let starting_gen2 = upstream2.oauth_token_generation;
+    let lease_key2 = crate::refresh::oauth_refresh_lease_meta_key(upstream2.id);
+    let now2 = cc_lb_clock::unix_secs(fixture2.clock.now());
+    let lease2 = crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+        fixture2.storage.clone(),
+        fixture2.storage.clone(),
+        upstream2.id,
+        starting_gen2,
+        now2,
+    )
+    .await
+    .expect("lease acquire succeeds")
+    .expect("lease 2 is free");
+
+    let outcome2 = fixture2
+        .dispatch
+        .spawn_leased_oauth_refresh(
+            OAuthRefreshJob::new(upstream2.id),
+            lease2,
+            fixture2.dispatch.replica_id.expect("replica id set"),
+            starting_gen2,
+            None,
+        )
+        .await
+        .expect("spawned task joins")
+        .expect("503 response maps to Retry");
+    assert_eq!(
+        outcome2,
+        JobOutcome::Retry {
+            delay: Some(std::time::Duration::from_secs(30)),
+        }
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sent_rx2.wait_for(|&sent| sent),
+    )
+    .await
+    .expect("503 response sent within 2s")
+    .expect("sent watch stays open");
+    assert_eq!(calls2.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture2
+            .storage
+            .get_meta_value(&lease_key2)
+            .await
+            .expect("read released meta")
+            .as_deref(),
+        Some(format!("idle:{starting_gen2}").as_str())
+    );
+    server2.abort();
 }
