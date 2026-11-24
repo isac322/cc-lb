@@ -1241,7 +1241,7 @@ async fn drain_buffered_ws_events_snapshot(
     downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     max_events: usize,
 ) -> bool {
-    let mut buffered = Vec::with_capacity(max_events.min(MAX_WS_EVENT_DRAIN_BATCH));
+    let mut buffered = Vec::with_capacity(max_events.min(event_rx.max_capacity()));
     while buffered.len() < max_events {
         match event_rx.try_recv() {
             Ok(event) => buffered.push(event),
@@ -1266,16 +1266,17 @@ pub(super) async fn drain_buffered_ws_events_before_expiry(
     downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     now: std::time::Instant,
 ) -> bool {
-    let snapshot_limit = event_rx.max_capacity().clamp(1, MAX_WS_EVENT_DRAIN_BATCH);
-    if !drain_buffered_ws_events_snapshot(
-        event_rx,
-        gateway,
-        connections,
-        dispatches,
-        downstream_sink,
-        snapshot_limit,
-    )
-    .await
+    let snapshot_limit = event_rx.len();
+    if snapshot_limit > 0
+        && !drain_buffered_ws_events_snapshot(
+            event_rx,
+            gateway,
+            connections,
+            dispatches,
+            downstream_sink,
+            snapshot_limit,
+        )
+        .await
     {
         return false;
     }
@@ -1432,16 +1433,17 @@ async fn relay_responses_websocket(
                 // Drain a finite snapshot of provider events already buffered
                 // before parking in `select!`, so sustained provider traffic
                 // never starves client controls, heartbeats, or expiry timers.
-                let snapshot_limit = capacity.clamp(1, MAX_WS_EVENT_DRAIN_BATCH);
-                if !drain_buffered_ws_events_snapshot(
-                    &mut event_rx,
-                    &mut gateway,
-                    &mut connections,
-                    &mut dispatches,
-                    &mut downstream_sink,
-                    snapshot_limit,
-                )
-                .await
+                let snapshot_limit = event_rx.len().min(MAX_WS_EVENT_DRAIN_BATCH);
+                if snapshot_limit > 0
+                    && !drain_buffered_ws_events_snapshot(
+                        &mut event_rx,
+                        &mut gateway,
+                        &mut connections,
+                        &mut dispatches,
+                        &mut downstream_sink,
+                        snapshot_limit,
+                    )
+                    .await
                 {
                     break 'relay;
                 }

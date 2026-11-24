@@ -618,4 +618,14 @@ impl LazyRefreshClaimGuard for DoneOnWait {
     async fn task_state(&self, _idempotency_key: &str) -> StorageResult<LazyRefreshTaskState> {
         Ok(LazyRefreshTaskState::Done)
     }
+
+    async fn try_claim_fallback(
+        &self,
+        _upstream_id: Uuid,
+        _holder: &str,
+        _idempotency_key: &str,
+        _allow_done: bool,
+    ) -> StorageResult<bool> {
+        Ok(true)
+    }
 }

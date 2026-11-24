@@ -1808,6 +1808,199 @@ async fn websocket_relay_delivers_buffered_response_failed_before_pending_expiry
 }
 
 #[tokio::test]
+async fn websocket_relay_expiry_drains_full_channel_snapshot_past_drain_batch() {
+    use futures_util::StreamExt as _;
+
+    // Obtain a real axum WebSocket `SplitSink` by upgrading a loopback socket.
+    let (sink_tx, sink_rx) = tokio::sync::oneshot::channel();
+    let sink_tx = Arc::new(std::sync::Mutex::new(Some(sink_tx)));
+    let app = axum::Router::new().route(
+        "/ws",
+        axum::routing::get(move |ws: axum::extract::ws::WebSocketUpgrade| {
+            let sink_tx = sink_tx.clone();
+            async move {
+                ws.on_upgrade(move |socket| async move {
+                    let (sink, _stream) = socket.split();
+                    if let Some(tx) = sink_tx.lock().unwrap().take() {
+                        let _ = tx.send(sink);
+                    }
+                    std::future::pending::<()>().await;
+                })
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let (mut client_ws, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
+    let mut downstream_sink = sink_rx.await.unwrap();
+
+    let up_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up_addr = up_listener.local_addr().unwrap();
+    let up_url = Url::parse(&format!("http://{up_addr}/")).unwrap();
+    let up_task = tokio::spawn(async move {
+        let Ok((socket, _)) = up_listener.accept().await else {
+            return;
+        };
+        let Ok(mut provider) = accept_async(socket).await else {
+            return;
+        };
+        while let Some(Ok(message)) = provider.next().await {
+            if message.is_text() {
+                let _ = provider
+                    .send(UpstreamMessage::Text(
+                        r#"{"type":"response.created","response":{"id":"healthy","store":false}}"#
+                            .into(),
+                    ))
+                    .await;
+                break;
+            }
+        }
+        while let Some(Ok(_)) = provider.next().await {}
+    });
+    let up = websocket_upstream(1, "provider-a", up_url);
+    let relay_state = websocket_test_state(
+        vec![up.clone()],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let mut r_headers = HeaderMap::new();
+    r_headers.insert("x-api-key", HeaderValue::from_str(TEST_KEY.plaintext.as_str()).unwrap());
+    let r_auth = relay_state.lifecycle.authenticate(&r_headers).await.unwrap();
+    let mut r_gateway = cc_lb_engine::responses_websocket::ResponsesWebSocketGateway::new(
+        relay_state.lifecycle.clone(),
+        &r_auth,
+        r_headers,
+        relay_state.body_caps.messages,
+        8,
+    );
+    let d1 = r_gateway
+        .client_message(
+            r_auth,
+            Bytes::from_static(
+                br#"{"type":"response.create","model":"gpt-test","store":false,"input":[]}"#,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    // Default provider event queue holds 100 events (> MAX_WS_EVENT_DRAIN_BATCH = 64).
+    let (events, mut event_rx) = tokio::sync::mpsc::channel(100);
+    let mut connections = HashMap::new();
+    let mut next_conn_id = 1;
+    let (_ready, errs) = responses_websocket::dispatch_responses_websocket_with_limits(
+        &mut r_gateway,
+        d1,
+        &relay_state,
+        &mut connections,
+        &events,
+        &mut next_conn_id,
+        8,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+        1,
+    )
+    .await;
+    assert!(errs.is_empty());
+
+    let conn_id = *connections.keys().next().unwrap();
+    let first_created = loop {
+        match event_rx.recv().await.unwrap() {
+            responses_websocket::WsProviderEvent::Frame { bytes, .. } => break bytes,
+            _ => continue,
+        }
+    };
+    assert!(r_gateway.provider_message(conn_id, &first_created).await.unwrap().forward);
+    let statusless_err = Bytes::from_static(
+        br#"{"type":"error","response_id":"healthy","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Overloaded"}}"#,
+    );
+    assert!(r_gateway.provider_message(conn_id, &statusless_err).await.unwrap().forward);
+    let past_deadline = r_gateway
+        .next_pending_error_deadline()
+        .expect("pending terminal scheduled")
+        + Duration::from_secs(1);
+
+    // Enqueue 70 benign frames followed by a genuine `response.failed` at position 71,
+    // beyond the 64-event ordinary drain batch.
+    for _ in 0..70 {
+        events
+            .send(responses_websocket::WsProviderEvent::Frame {
+                connection_id: conn_id,
+                bytes: Bytes::from_static(
+                    br#"{"type":"responsesapi.websocket_timing","timing":{"stage":"ttft","duration_ms":1}}"#,
+                ),
+                text: true,
+            })
+            .await
+            .unwrap();
+    }
+    events
+        .send(responses_websocket::WsProviderEvent::Frame {
+            connection_id: conn_id,
+            bytes: Bytes::from_static(
+                br#"{"type":"response.failed","response":{"id":"healthy","status":"failed","error":{"code":"server_is_overloaded","message":"Overloaded"},"usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}}}"#,
+            ),
+            text: true,
+        })
+        .await
+        .unwrap();
+
+    let mut dispatches = VecDeque::new();
+    assert!(
+        responses_websocket::drain_buffered_ws_events_before_expiry(
+            &mut event_rx,
+            &mut r_gateway,
+            &mut connections,
+            &mut dispatches,
+            &mut downstream_sink,
+            past_deadline,
+        )
+        .await
+    );
+    assert!(
+        r_gateway.next_pending_error_deadline().is_none(),
+        "full channel snapshot drain must deliver response.failed past position 64"
+    );
+
+    let mut seen_timing = 0_usize;
+    let mut seen_failed = false;
+    for _ in 0..71 {
+        let frame = tokio::time::timeout(Duration::from_secs(5), client_ws.next())
+            .await
+            .expect("buffered frame arrives")
+            .unwrap()
+            .unwrap();
+        let json: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        match json["type"].as_str() {
+            Some("responsesapi.websocket_timing") => seen_timing += 1,
+            Some("response.failed") => {
+                assert_eq!(json["response"]["usage"]["input_tokens"], 12);
+                seen_failed = true;
+            }
+            other => panic!("unexpected frame {other:?}: {json}"),
+        }
+    }
+    assert_eq!(seen_timing, 70);
+    assert!(seen_failed);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), client_ws.next())
+            .await
+            .is_err(),
+        "expiry must not synthesize a duplicate error after delivering genuine response.failed"
+    );
+
+    let _ = client_ws.close(None).await;
+    server_task.abort();
+    up_task.abort();
+}
+
+#[tokio::test]
 async fn websocket_relay_bounded_drain_delivers_client_interrupt_under_continuous_provider_stream() {
     use futures_util::{SinkExt as _, StreamExt as _};
 
