@@ -1806,3 +1806,132 @@ async fn websocket_relay_delivers_buffered_response_failed_before_pending_expiry
     server_task.abort();
     up_task.abort();
 }
+
+#[tokio::test]
+async fn websocket_relay_bounded_drain_delivers_client_interrupt_under_continuous_provider_stream() {
+    use futures_util::{SinkExt as _, StreamExt as _};
+
+    let interrupt_seen = Arc::new(tokio::sync::Notify::new());
+    let interrupt_seen_task = interrupt_seen.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider_addr = listener.local_addr().unwrap();
+    let provider_url = Url::parse(&format!("http://{provider_addr}/")).unwrap();
+
+    let provider_task = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let (mut provider_sink, mut provider_stream) = accept_async(socket).await.unwrap().split();
+        while let Some(Ok(message)) = provider_stream.next().await {
+            if message.is_text() {
+                provider_sink
+                    .send(UpstreamMessage::Text(
+                        r#"{"type":"response.created","response":{"id":"r_stream","status":"in_progress","store":false}}"#
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+                break;
+            }
+        }
+        // Continuously emit deltas so the relay's provider queue stays replenished while waiting
+        // for `response.interrupt`.
+        let mut seq = 0_u64;
+        loop {
+            let incoming = tokio::select! {
+                biased;
+                msg = provider_stream.next() => Some(msg),
+                send_res = async {
+                    seq = seq.saturating_add(1);
+                    let delta = format!(
+                        r#"{{"type":"response.output_text.delta","response_id":"r_stream","item_id":"item_1","output_index":0,"content_index":0,"sequence_number":{seq},"delta":"x"}}"#
+                    );
+                    provider_sink.send(UpstreamMessage::Text(delta.into())).await
+                } => {
+                    if send_res.is_err() {
+                        break;
+                    }
+                    None
+                }
+            };
+            if let Some(msg) = incoming {
+                match msg {
+                    Some(Ok(UpstreamMessage::Text(text)))
+                        if text.contains("\"response.interrupt\"") =>
+                    {
+                        interrupt_seen_task.notify_one();
+                        let _ = provider_sink
+                            .send(UpstreamMessage::Text(
+                                r#"{"type":"response.incomplete","response":{"id":"r_stream","status":"incomplete","incomplete_details":{"reason":"interrupted"}}}"#
+                                    .into(),
+                            ))
+                            .await;
+                        break;
+                    }
+                    Some(Ok(UpstreamMessage::Close(_))) | Some(Err(_)) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let router = websocket_test_router(
+        vec![websocket_upstream(1, "openai", provider_url)],
+        TerminalStrategy::FirstPick,
+    )
+    .await;
+    let (proxy_address, proxy_task) = spawn_proxy_router(router).await;
+    let (mut client, _) = connect_async(websocket_request(proxy_address))
+        .await
+        .expect("downstream handshake succeeds");
+
+    client
+        .send(UpstreamMessage::Text(RESPONSE_CREATE.into()))
+        .await
+        .unwrap();
+
+    // Wait for `response.created`, then immediately send `response.interrupt` while continuing
+    // to read deltas so backpressure never blocks the socket.
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("created frame arrives")
+            .unwrap()
+            .unwrap();
+        if let UpstreamMessage::Text(text) = msg
+            && text.contains("\"response.created\"")
+        {
+            break;
+        }
+    }
+
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.interrupt","response_id":"r_stream"}"#.into(),
+        ))
+        .await
+        .unwrap();
+
+    let notified = interrupt_seen.notified();
+    tokio::pin!(notified);
+    let mut saw_interrupt = false;
+    let mut got_incomplete = false;
+    while !(saw_interrupt && got_incomplete) {
+        tokio::select! {
+            biased;
+            _ = &mut notified, if !saw_interrupt => {
+                saw_interrupt = true;
+            }
+            msg = tokio::time::timeout(Duration::from_secs(5), client.next()) => {
+                let msg = msg.expect("downstream read does not stall").unwrap().unwrap();
+                if let UpstreamMessage::Text(text) = msg
+                    && text.contains("\"response.incomplete\"")
+                {
+                    got_incomplete = true;
+                }
+            }
+        }
+    }
+    assert!(saw_interrupt && got_incomplete, "interrupt and incomplete terminal must both arrive");
+    let _ = client.close(None).await;
+    proxy_task.abort();
+    provider_task.abort();
+}

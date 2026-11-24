@@ -136,6 +136,7 @@ fn acquire_websocket_breaker_permit(
 
 pub(super) const DEFAULT_WS_PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const WS_PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_WS_EVENT_DRAIN_BATCH: usize = 64;
 
 pub(super) async fn connect_provider_websocket(
     state: &ProxyState,
@@ -1073,6 +1074,15 @@ async fn handle_ws_provider_event(
                     dispatches.extend(result.dispatches);
                 }
                 Err(error) => {
+                    for pending_error in gateway.take_pending_errors() {
+                        if downstream_sink
+                            .send(websocket_error_message(&pending_error))
+                            .await
+                            .is_err()
+                        {
+                            return false;
+                        }
+                    }
                     let native_connection_error = matches!(
                         error.code,
                         "websocket_connection_limit_reached" | "unattributed_upstream_error"
@@ -1187,6 +1197,67 @@ async fn handle_ws_provider_event(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn flush_pending_ws_dispatches(
+    gateway: &mut ResponsesWebSocketGateway,
+    state: &ProxyState,
+    connections: &mut HashMap<u64, WsProviderConnection>,
+    events: &tokio::sync::mpsc::Sender<WsProviderEvent>,
+    next_connection_id: &mut u64,
+    capacity: usize,
+    dispatches: &mut VecDeque<WebSocketDispatch>,
+    downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+) -> bool {
+    while let Some(dispatch) = dispatches.pop_front() {
+        let (ready, errors) = dispatch_responses_websocket(
+            gateway,
+            dispatch,
+            state,
+            connections,
+            events,
+            next_connection_id,
+            capacity,
+        )
+        .await;
+        dispatches.extend(ready);
+        for error in errors {
+            if downstream_sink
+                .send(websocket_error_message(&error))
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+async fn drain_buffered_ws_events_snapshot(
+    event_rx: &mut tokio::sync::mpsc::Receiver<WsProviderEvent>,
+    gateway: &mut ResponsesWebSocketGateway,
+    connections: &mut HashMap<u64, WsProviderConnection>,
+    dispatches: &mut VecDeque<WebSocketDispatch>,
+    downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    max_events: usize,
+) -> bool {
+    let mut buffered = Vec::with_capacity(max_events.min(MAX_WS_EVENT_DRAIN_BATCH));
+    while buffered.len() < max_events {
+        match event_rx.try_recv() {
+            Ok(event) => buffered.push(event),
+            Err(_) => break,
+        }
+    }
+    for provider in buffered {
+        if !handle_ws_provider_event(provider, gateway, connections, dispatches, downstream_sink)
+            .await
+        {
+            return false;
+        }
+    }
+    true
+}
+
 pub(super) async fn drain_buffered_ws_events_before_expiry(
     event_rx: &mut tokio::sync::mpsc::Receiver<WsProviderEvent>,
     gateway: &mut ResponsesWebSocketGateway,
@@ -1195,12 +1266,18 @@ pub(super) async fn drain_buffered_ws_events_before_expiry(
     downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     now: std::time::Instant,
 ) -> bool {
-    while let Ok(provider) = event_rx.try_recv() {
-        if !handle_ws_provider_event(provider, gateway, connections, dispatches, downstream_sink)
-            .await
-        {
-            return false;
-        }
+    let snapshot_limit = event_rx.max_capacity().clamp(1, MAX_WS_EVENT_DRAIN_BATCH);
+    if !drain_buffered_ws_events_snapshot(
+        event_rx,
+        gateway,
+        connections,
+        dispatches,
+        downstream_sink,
+        snapshot_limit,
+    )
+    .await
+    {
+        return false;
     }
     for error in gateway.expire_pending_error_terminals(now) {
         if downstream_sink
@@ -1336,46 +1413,51 @@ async fn relay_responses_websocket(
 
     let body = async {
         'relay: loop {
-            loop {
-                while let Some(dispatch) = dispatches.pop_front() {
-                    let (ready, errors) = dispatch_responses_websocket(
-                        &mut gateway,
-                        dispatch,
-                        &state,
-                        &mut connections,
-                        &events,
-                        &mut next_connection_id,
-                        capacity,
-                    )
-                    .await;
-                    dispatches.extend(ready);
-                    for error in errors {
-                        if downstream_sink
-                            .send(websocket_error_message(&error))
-                            .await
-                            .is_err()
-                        {
-                            break 'relay;
-                        }
-                    }
+            let dispatched_any = !dispatches.is_empty();
+            if !flush_pending_ws_dispatches(
+                &mut gateway,
+                &state,
+                &mut connections,
+                &events,
+                &mut next_connection_id,
+                capacity,
+                &mut dispatches,
+                &mut downstream_sink,
+            )
+            .await
+            {
+                break 'relay;
+            }
+            if dispatched_any {
+                // Drain a finite snapshot of provider events already buffered
+                // before parking in `select!`, so sustained provider traffic
+                // never starves client controls, heartbeats, or expiry timers.
+                let snapshot_limit = capacity.clamp(1, MAX_WS_EVENT_DRAIN_BATCH);
+                if !drain_buffered_ws_events_snapshot(
+                    &mut event_rx,
+                    &mut gateway,
+                    &mut connections,
+                    &mut dispatches,
+                    &mut downstream_sink,
+                    snapshot_limit,
+                )
+                .await
+                {
+                    break 'relay;
                 }
-                // Drain any provider events already buffered during prior dispatches
-                // before evaluating the pending-error expiration timer.
-                while let Ok(provider) = event_rx.try_recv() {
-                    if !handle_ws_provider_event(
-                        provider,
-                        &mut gateway,
-                        &mut connections,
-                        &mut dispatches,
-                        &mut downstream_sink,
-                    )
-                    .await
-                    {
-                        break 'relay;
-                    }
-                }
-                if dispatches.is_empty() {
-                    break;
+                if !flush_pending_ws_dispatches(
+                    &mut gateway,
+                    &state,
+                    &mut connections,
+                    &events,
+                    &mut next_connection_id,
+                    capacity,
+                    &mut dispatches,
+                    &mut downstream_sink,
+                )
+                .await
+                {
+                    break 'relay;
                 }
             }
 

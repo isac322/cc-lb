@@ -175,6 +175,46 @@ async fn lazy_refresh_waits_across_rescheduled_pending_retry_until_generation_ad
             }
             Ok(state)
         }
+
+        async fn try_claim_fallback(
+            &self,
+            upstream_id: Uuid,
+            holder: &str,
+            idempotency_key: &str,
+            now_unix_secs: u64,
+            allow_done: bool,
+        ) -> StorageResult<bool> {
+            self.inner
+                .try_claim_fallback(
+                    upstream_id,
+                    holder,
+                    idempotency_key,
+                    now_unix_secs,
+                    allow_done,
+                )
+                .await
+        }
+
+        async fn finish_fallback_claim(
+            &self,
+            upstream_id: Uuid,
+            holder: &str,
+            idempotency_key: &str,
+            succeeded: bool,
+            restore_done: bool,
+            now_unix_secs: u64,
+        ) -> StorageResult<()> {
+            self.inner
+                .finish_fallback_claim(
+                    upstream_id,
+                    holder,
+                    idempotency_key,
+                    succeeded,
+                    restore_done,
+                    now_unix_secs,
+                )
+                .await
+        }
     }
 
     struct RunningTasks {

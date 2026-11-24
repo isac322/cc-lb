@@ -33,6 +33,12 @@ use crate::upstream_affinity::{
 use crate::usage_parser::{UsageCounts, observe_non_stream_json_value_for_shape};
 use cc_lb_upstream::{Signer, SseEvent, TransformSseEventRequest, TransformSseEventResult};
 
+#[derive(Clone, Debug, Default)]
+struct WebSocketErrorExtra {
+    response_id: Option<Box<str>>,
+    provider_headers: Box<[(String, String)]>,
+}
+
 #[derive(Clone, Debug)]
 pub struct WebSocketError {
     pub status: u16,
@@ -42,7 +48,7 @@ pub struct WebSocketError {
     pub message: String,
     pub stream_id: Option<String>,
     pub param: Option<Box<str>>,
-    provider_headers: Box<[(String, String)]>,
+    extra: Option<Box<WebSocketErrorExtra>>,
 }
 
 impl WebSocketError {
@@ -54,7 +60,7 @@ impl WebSocketError {
             native_code: None,
             message: message.into(),
             stream_id: None,
-            provider_headers: Box::default(),
+            extra: None,
         }
     }
 
@@ -73,9 +79,29 @@ impl WebSocketError {
         self
     }
 
+    pub fn with_response_id(mut self, response_id: impl Into<String>) -> Self {
+        self.extra.get_or_insert_with(Default::default).response_id =
+            Some(response_id.into().into_boxed_str());
+        self
+    }
+
+    pub fn response_id(&self) -> Option<&str> {
+        self.extra
+            .as_deref()
+            .and_then(|extra| extra.response_id.as_deref())
+    }
+
+    fn provider_headers(&self) -> &[(String, String)] {
+        self.extra
+            .as_deref()
+            .map_or(&[], |extra| &extra.provider_headers)
+    }
+
     /// Retain only bounded, non-sensitive provider response headers.
     pub fn with_provider_headers(mut self, headers: &HeaderMap) -> Self {
-        let mut retained = std::mem::take(&mut self.provider_headers).into_vec();
+        let mut retained = self.extra.as_mut().map_or_else(Vec::new, |extra| {
+            std::mem::take(&mut extra.provider_headers).into_vec()
+        });
         for (name, value) in headers {
             if retained.len() >= 32 {
                 break;
@@ -96,7 +122,11 @@ impl WebSocketError {
             }
             retained.push((name, value.to_owned()));
         }
-        self.provider_headers = retained.into_boxed_slice();
+        if !retained.is_empty() {
+            self.extra
+                .get_or_insert_with(Default::default)
+                .provider_headers = retained.into_boxed_slice();
+        }
         self
     }
 
@@ -115,12 +145,15 @@ impl WebSocketError {
                 "param": self.param,
             },
         });
+        if let Some(response_id) = self.response_id() {
+            error["response_id"] = Value::String(response_id.to_owned());
+        }
         if let Some(stream_id) = self.stream_id.as_ref() {
             error["stream_id"] = Value::String(stream_id.clone());
         }
-        if !self.provider_headers.is_empty() {
-            let headers = self
-                .provider_headers
+        let provider_headers = self.provider_headers();
+        if !provider_headers.is_empty() {
+            let headers = provider_headers
                 .iter()
                 .map(|(name, value)| (name.clone(), Value::String(value.clone())))
                 .collect::<BTreeMap<_, _>>();
@@ -130,7 +163,7 @@ impl WebSocketError {
         Bytes::from(serde_json::to_vec(&error).expect("WebSocket error contains only JSON values"))
     }
     pub fn copy_provider_headers(&self, headers: &mut http::HeaderMap) {
-        for (name, value) in &self.provider_headers {
+        for (name, value) in self.provider_headers() {
             if let (Ok(name), Ok(value)) = (
                 http::HeaderName::from_bytes(name.as_bytes()),
                 http::HeaderValue::from_str(value),
@@ -642,6 +675,7 @@ pub struct ResponsesWebSocketGateway {
     lanes: HashMap<Option<String>, Lane>,
     turns: HashMap<u64, Turn>,
     pending_error_terminals: HashMap<String, PendingErrorTerminal>,
+    pending_eviction_errors: Vec<WebSocketError>,
     retired_terminals: VecDeque<(u64, Option<String>, String)>,
     owners: HashMap<String, ResponseOwner>,
     recent: HashMap<(u64, Option<String>), String>,
@@ -676,6 +710,7 @@ impl ResponsesWebSocketGateway {
             lanes: HashMap::new(),
             turns: HashMap::new(),
             pending_error_terminals: HashMap::new(),
+            pending_eviction_errors: Vec::new(),
             retired_terminals: VecDeque::new(),
             owners: HashMap::new(),
             recent: HashMap::new(),
@@ -2153,6 +2188,11 @@ impl ResponsesWebSocketGateway {
                 quota_turn,
             )
             .await?;
+        let mut pending_errors = self.take_pending_errors();
+        if !pending_errors.is_empty() {
+            pending_errors.append(&mut result.errors);
+            result.errors = pending_errors;
+        }
         match transformed {
             Ok((_, Some(frames))) => {
                 if result.forward {
@@ -2567,22 +2607,34 @@ impl ResponsesWebSocketGateway {
         {
             if kind == "response.failed"
                 && let Some(id) = response_id
-                && let Some(mut pending) = self.pending_error_terminals.remove(id)
+                && self.pending_error_terminals.contains_key(id)
             {
-                if let Some(owner) = self.owners.get_mut(id) {
-                    owner.terminal_delivery = TerminalDelivery::ResponseTerminalDelivered;
-                }
-                if let Some(response) = response
-                    && let Some((usage, complete)) = observed_response_usage(response)
-                {
-                    pending.turn.usage = Some(usage);
-                    pending.turn.usage_complete = complete;
-                }
+                // Keep the parked turn registered until affinity binding resolves so
+                // cancellation or drain during storage I/O still settles measured usage.
+                let usage_update = response.and_then(observed_response_usage);
+                let upstream_result = {
+                    let pending = self
+                        .pending_error_terminals
+                        .get_mut(id)
+                        .expect("pending error terminal exists");
+                    if let Some((usage, complete)) = usage_update {
+                        pending.turn.usage = Some(usage);
+                        pending.turn.usage_complete = complete;
+                    }
+                    pending.turn.upstream_id.map(|upstream_id| {
+                        let stored = pending.turn.prepared.store
+                            && response
+                                .and_then(|resp| resp.get("store"))
+                                .and_then(Value::as_bool)
+                                .unwrap_or(true);
+                        (pending.turn.auth.clone(), upstream_id, stored)
+                    })
+                };
                 if transform_error.is_none()
                     && let Some(resp) = response
                 {
-                    let upstream_id = match pending.turn.upstream_id {
-                        Some(id) => id,
+                    let (auth, upstream_id, stored) = match upstream_result {
+                        Some(tuple) => tuple,
                         None => {
                             let err = WebSocketError::new(
                                 502,
@@ -2590,16 +2642,20 @@ impl ResponsesWebSocketGateway {
                                 "Response upstream is unavailable",
                             )
                             .with_stream(lane);
-                            self.settle_turn(pending.turn, Some(&err));
+                            if let Some(owner) = self.owners.get_mut(id) {
+                                owner.terminal_delivery =
+                                    TerminalDelivery::ResponseTerminalDelivered;
+                            }
+                            if let Some(pending) = self.pending_error_terminals.remove(id) {
+                                self.settle_turn(pending.turn, Some(&err));
+                            }
                             return Err(err);
                         }
                     };
-                    let stored = pending.turn.prepared.store
-                        && resp.get("store").and_then(Value::as_bool).unwrap_or(true);
                     if let Err(err) = self
                         .lifecycle
                         .bind_websocket_response_with_pending(
-                            &pending.turn.auth,
+                            &auth,
                             upstream_id,
                             resp,
                             None,
@@ -2609,10 +2665,22 @@ impl ResponsesWebSocketGateway {
                         .await
                     {
                         let err = err.with_stream(lane);
-                        self.settle_turn(pending.turn, Some(&err));
+                        if let Some(owner) = self.owners.get_mut(id) {
+                            owner.terminal_delivery = TerminalDelivery::ResponseTerminalDelivered;
+                        }
+                        if let Some(pending) = self.pending_error_terminals.remove(id) {
+                            self.settle_turn(pending.turn, Some(&err));
+                        }
                         return Err(err);
                     }
                 }
+                if let Some(owner) = self.owners.get_mut(id) {
+                    owner.terminal_delivery = TerminalDelivery::ResponseTerminalDelivered;
+                }
+                let pending = self
+                    .pending_error_terminals
+                    .remove(id)
+                    .expect("pending error terminal exists");
                 let signer = self.connection_signers.get(&connection_id).map(Arc::as_ref);
                 let effective_error = if let Some(error) = transform_error {
                     Some(error.clone())
@@ -2769,7 +2837,6 @@ impl ResponsesWebSocketGateway {
                 }
             }
         }
-        let mut emitted_errors = Vec::new();
         if let Some(id) = response_id {
             if turn.response_id.as_deref().is_some_and(|bound| bound != id) {
                 return Err(WebSocketError::new(
@@ -2815,7 +2882,7 @@ impl ResponsesWebSocketGateway {
                     turn.previous_response_id = None;
                 }
                 self.collect_owner(previous.as_deref());
-                emitted_errors.extend(self.bind_owner(
+                self.bind_owner(
                     id,
                     ResponseOwner {
                         connection_id,
@@ -2830,7 +2897,7 @@ impl ResponsesWebSocketGateway {
                         terminal_delivery: TerminalDelivery::None,
                     },
                     &lane,
-                )?);
+                )?;
                 let turn = self
                     .turns
                     .get_mut(&turn_id)
@@ -2918,7 +2985,6 @@ impl ResponsesWebSocketGateway {
         }
         let mut result = WebSocketEventResult {
             forward: true,
-            errors: emitted_errors,
             ..Default::default()
         };
         if terminal {
@@ -2974,15 +3040,49 @@ impl ResponsesWebSocketGateway {
         Ok(result)
     }
 
+    pub fn take_pending_errors(&mut self) -> Vec<WebSocketError> {
+        std::mem::take(&mut self.pending_eviction_errors)
+    }
+
+    fn reclaimable_pending_owner_budget(&self) -> (usize, usize) {
+        let mut slots = 0_usize;
+        let mut bytes = 0_usize;
+        let mut seen_owners = HashSet::new();
+        for (id, pending) in &self.pending_error_terminals {
+            bytes = bytes.saturating_add(pending.turn.charged_bytes);
+            for candidate in [
+                Some(id.as_str()),
+                pending.turn.response_id.as_deref(),
+                pending.turn.previous_response_id.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !seen_owners.insert(candidate) {
+                    continue;
+                }
+                let still_pinned = self.turns.values().any(|turn| {
+                    turn.response_id.as_deref() == Some(candidate)
+                        || turn.previous_response_id.as_deref() == Some(candidate)
+                }) || self.recent.values().any(|recent| recent == candidate);
+                if !still_pinned && let Some(owner) = self.owners.get(candidate) {
+                    slots = slots.saturating_add(1);
+                    bytes = bytes.saturating_add(owner_bytes(candidate, owner));
+                }
+            }
+        }
+        (slots, bytes)
+    }
+
     fn bind_owner(
         &mut self,
         id: &str,
         owner: ResponseOwner,
         lane: &Option<String>,
-    ) -> Result<Vec<WebSocketError>, WebSocketError> {
+    ) -> Result<(), WebSocketError> {
         if let Some(existing) = self.owners.get(id) {
             if existing.turn_id == owner.turn_id && existing.connection_id == owner.connection_id {
-                return Ok(Vec::new());
+                return Ok(());
             }
             return Err(WebSocketError::new(
                 502,
@@ -2995,15 +3095,28 @@ impl ResponsesWebSocketGateway {
         let old = self.recent.remove(&recent_key);
         self.collect_owner(old.as_deref());
         let cost = owner_bytes(id, &owner);
-        let mut evicted_errors = Vec::new();
-        while self.owners.len() >= self.slot_cap
-            || cost > self.byte_cap.saturating_sub(self.used_bytes)
-        {
-            let Some(emitted) = self.evict_oldest_pending_error_terminal() else {
-                break;
-            };
-            if let Some(err) = emitted {
-                evicted_errors.push(err);
+        let needed_slots = (self.owners.len() + 1).saturating_sub(self.slot_cap);
+        let available_bytes = self.byte_cap.saturating_sub(self.used_bytes);
+        let needed_bytes = cost.saturating_sub(available_bytes);
+        if needed_slots > 0 || needed_bytes > 0 {
+            let (reclaimable_slots, reclaimable_bytes) = self.reclaimable_pending_owner_budget();
+            if reclaimable_slots < needed_slots || reclaimable_bytes < needed_bytes {
+                return Err(WebSocketError::new(
+                    503,
+                    "overloaded_error",
+                    "WebSocket response ownership budget is full",
+                )
+                .with_stream(lane.clone()));
+            }
+            while self.owners.len() >= self.slot_cap
+                || cost > self.byte_cap.saturating_sub(self.used_bytes)
+            {
+                let Some(emitted) = self.evict_oldest_pending_error_terminal() else {
+                    break;
+                };
+                if let Some(err) = emitted {
+                    self.pending_eviction_errors.push(err);
+                }
             }
         }
         if self.owners.len() >= self.slot_cap
@@ -3019,7 +3132,7 @@ impl ResponsesWebSocketGateway {
         self.used_bytes = self.used_bytes.saturating_add(cost);
         self.recent.insert(recent_key, id.to_owned());
         self.owners.insert(id.to_owned(), owner);
-        Ok(evicted_errors)
+        Ok(())
     }
 
     fn collect_owner(&mut self, id: Option<&str>) {
@@ -3449,26 +3562,54 @@ impl ResponsesWebSocketGateway {
         lane: &Option<String>,
         response_id: &str,
     ) -> bool {
+        let effective_lane = if lane.is_none()
+            && !self.codex_backend
+            && self
+                .connection_oauth
+                .get(&connection_id)
+                .copied()
+                .unwrap_or(false)
+        {
+            self.connection_lanes.get(&connection_id).unwrap_or(lane)
+        } else {
+            lane
+        };
         self.retired_terminals
             .iter()
             .any(|(conn, retired_lane, retired_id)| {
-                *conn == connection_id && retired_lane == lane && retired_id == response_id
+                *conn == connection_id
+                    && retired_lane == effective_lane
+                    && retired_id == response_id
             })
     }
 
-    fn terminal_error_for_pending(pending: &PendingErrorTerminal) -> Option<WebSocketError> {
+    fn synthetic_terminal_error(
+        response_id: &str,
+        lane: Option<String>,
+        error: Option<WebSocketError>,
+    ) -> WebSocketError {
+        error
+            .unwrap_or_else(|| {
+                WebSocketError::new(
+                    502,
+                    "upstream_connection_closed",
+                    "Upstream response failed without a terminal event",
+                )
+            })
+            .with_stream(lane)
+            .with_response_id(response_id)
+    }
+
+    fn terminal_error_for_pending(
+        response_id: &str,
+        pending: &PendingErrorTerminal,
+    ) -> Option<WebSocketError> {
         pending.missing_status.then(|| {
-            pending
-                .error
-                .clone()
-                .unwrap_or_else(|| {
-                    WebSocketError::new(
-                        502,
-                        "upstream_connection_closed",
-                        "Upstream response failed without a terminal event",
-                    )
-                })
-                .with_stream(pending.turn.lane.clone())
+            Self::synthetic_terminal_error(
+                response_id,
+                pending.turn.lane.clone(),
+                pending.error.clone(),
+            )
         })
     }
 
@@ -3520,7 +3661,7 @@ impl ResponsesWebSocketGateway {
             .min_by_key(|(_, pending)| (pending.expires_at, pending.turn_id))
             .map(|(id, _)| id.clone())?;
         let pending = self.pending_error_terminals.remove(&oldest_id)?;
-        let emitted = Self::terminal_error_for_pending(&pending);
+        let emitted = Self::terminal_error_for_pending(&oldest_id, &pending);
         if let Some(owner) = self.owners.get_mut(&oldest_id) {
             owner.terminal_delivery = TerminalDelivery::ResponseTerminalDelivered;
         }
@@ -3549,18 +3690,7 @@ impl ResponsesWebSocketGateway {
                 owner.terminal_delivery = TerminalDelivery::ResponseTerminalDelivered;
             }
             let emitted = missing_status
-                .then(|| {
-                    error
-                        .clone()
-                        .unwrap_or_else(|| {
-                            WebSocketError::new(
-                                502,
-                                "upstream_connection_closed",
-                                "Upstream response failed without a terminal event",
-                            )
-                        })
-                        .with_stream(turn.lane.clone())
-                })
+                .then(|| Self::synthetic_terminal_error(&resp_id, turn.lane.clone(), error.clone()))
                 .into_iter()
                 .collect();
             self.settle_turn(turn, error.as_ref());
@@ -3633,7 +3763,7 @@ impl ResponsesWebSocketGateway {
         let mut emitted = Vec::new();
         for (_, _, id) in expired {
             if let Some(pending) = self.pending_error_terminals.remove(&id) {
-                if let Some(err) = Self::terminal_error_for_pending(&pending) {
+                if let Some(err) = Self::terminal_error_for_pending(&id, &pending) {
                     emitted.push(err);
                 }
                 if let Some(owner) = self.owners.get_mut(&id) {
@@ -3687,7 +3817,8 @@ impl ResponsesWebSocketGateway {
             ) {
                 result.errors.push(
                     WebSocketError::new(502, "upstream_connection_closed", reason)
-                        .with_stream(lane),
+                        .with_stream(lane)
+                        .with_response_id(&id),
                 );
             }
             self.collect_owner(Some(&id));
@@ -3763,6 +3894,7 @@ impl ResponsesWebSocketGateway {
             self.settle_turn(item.turn, Some(effective));
         }
         self.lanes.clear();
+        self.pending_eviction_errors.clear();
         self.retired_terminals.clear();
         self.owners.clear();
         self.recent.clear();
@@ -6935,5 +7067,527 @@ pub(crate) mod tests {
         fixture
             .assert_settled(&reservation_a_id, "ws-openai-known", 4_010, 1_000, 1)
             .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pending_error_delayed_response_failed_drop_during_affinity_await_settles_on_close() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+        use cc_lb_storage_api::upstream_affinity::UpstreamAffinityBinding;
+        use cc_lb_storage_api::{StorageResult, UpstreamAffinityStore, UpstreamRecordId};
+
+        let _guard = DIRECT_PRICING_LOCK.lock().await;
+        install_direct_pricing();
+
+        struct StallingAffinityStore {
+            stall: Arc<AtomicBool>,
+            started: Arc<tokio::sync::Notify>,
+            blocked: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl UpstreamAffinityStore for StallingAffinityStore {
+            async fn read_upstream_owner_epoch(
+                &self,
+                _upstream_id: UpstreamRecordId,
+                _expected_spec_revision: u64,
+            ) -> StorageResult<Option<u64>> {
+                Ok(Some(0))
+            }
+
+            async fn resolve_upstream_affinities(
+                &self,
+                _keys: &[UpstreamAffinityKey],
+                _now_unix_secs: u64,
+                _ttl_secs: u64,
+            ) -> StorageResult<Vec<UpstreamAffinityBinding>> {
+                Ok(Vec::new())
+            }
+
+            async fn bind_upstream_affinities(
+                &self,
+                _bindings: &[UpstreamAffinityBinding],
+                _now_unix_secs: u64,
+                _ttl_secs: u64,
+            ) -> StorageResult<()> {
+                if self.stall.load(AtomicOrdering::SeqCst) {
+                    self.started.notify_one();
+                    self.blocked.notified().await;
+                }
+                Ok(())
+            }
+
+            async fn purge_expired_upstream_affinities(
+                &self,
+                _now_unix_secs: u64,
+                _ttl_secs: u64,
+                _batch_size: usize,
+            ) -> StorageResult<u64> {
+                Ok(0)
+            }
+        }
+
+        let placeholder = DirectAccountingFixture::new().await;
+        placeholder.usage_handle.shutdown().await;
+        let fixture = DirectAccountingFixture::new().await;
+        let reservation = fixture.reserve("ws-openai-known");
+        let reservation_id = reservation.id().to_owned();
+        let stall = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let blocked = Arc::new(tokio::sync::Notify::new());
+        let store = Arc::new(StallingAffinityStore {
+            stall: stall.clone(),
+            started: started.clone(),
+            blocked: blocked.clone(),
+        });
+        let mut turn = make_synthetic_turn(&fixture, None, None, true, false, Some(true), None);
+        turn.response_id = None;
+        turn.prepared.model = "ws-openai-known".to_owned();
+        turn.prepared.store = true;
+        turn.prepared.reservation = Some(reservation);
+        turn.prepared.limit_engine = Some(fixture.engine.clone());
+
+        let auth = fixture.auth;
+        let lifecycle = Arc::new(
+            Arc::try_unwrap(fixture.lifecycle)
+                .unwrap_or_else(|_| panic!("single lifecycle owner"))
+                .with_upstream_affinity_store(store),
+        );
+        let mut gateway =
+            ResponsesWebSocketGateway::new(lifecycle, &auth, HeaderMap::new(), 65_536, 8);
+        gateway.connections.insert(1, Uuid::nil());
+        gateway.connection_lanes.insert(1, None);
+        gateway.turns.insert(1, turn);
+        gateway.lanes.insert(
+            None,
+            Lane {
+                active: Some(1),
+                ..Default::default()
+            },
+        );
+
+        let created = Bytes::from_static(
+            br#"{"type":"response.created","response":{"id":"resp_stall","status":"in_progress","store":true}}"#,
+        );
+        assert!(gateway.provider_message(1, &created).await.unwrap().forward);
+        let err = Bytes::from_static(
+            br#"{"type":"error","response_id":"resp_stall","status":503,"error":{"code":"server_is_overloaded","message":"Overloaded"}}"#,
+        );
+        assert!(gateway.provider_message(1, &err).await.unwrap().forward);
+
+        stall.store(true, AtomicOrdering::SeqCst);
+        let failed = Bytes::from_static(
+            br#"{"type":"response.failed","response":{"id":"resp_stall","status":"failed","store":true,"output":[{"type":"reasoning","encrypted_content":"gAAAAABstall_reasoning"}],"usage":{"input_tokens":21000,"output_tokens":1,"input_tokens_details":{"cached_tokens":20000}},"error":{"code":"server_is_overloaded","message":"Overloaded"}}}"#,
+        );
+        {
+            let mut fut = Box::pin(gateway.provider_message(1, &failed));
+            tokio::select! {
+                res = &mut fut => panic!("affinity await unexpectedly completed (ok={})", res.is_ok()),
+                _ = started.notified() => {}
+            }
+            // Drop `fut` mid-await (simulating relay cancellation / shutdown), while the parked turn
+            // with measured usage stays registered for `close()` -> `finish_session`.
+        }
+
+        gateway.close();
+        drop(gateway);
+        let check_fixture = DirectAccountingFixture {
+            engine: fixture.engine,
+            view: fixture.view,
+            record: fixture.record,
+            concurrency: fixture.concurrency,
+            lifecycle: placeholder.lifecycle,
+            auth,
+            storage: fixture.storage,
+            usage_handle: fixture.usage_handle,
+        };
+        check_fixture
+            .assert_settled(&reservation_id, "ws-openai-known", 4_010, 1_000, 1)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn statusless_pending_error_expiry_identifies_response_id_after_successor_binds() {
+        let fixture = DirectAccountingFixture::new().await;
+        let mut gateway = terminal_fixture_gateway(&fixture, None);
+        gateway.connections.insert(1, Uuid::nil());
+        gateway
+            .connection_lanes
+            .insert(1, Some("lane-a".to_owned()));
+        let turn_a = gateway.turns.get_mut(&1).unwrap();
+        turn_a.lane = Some("lane-a".to_owned());
+        turn_a.response_id = None;
+        gateway.lanes.clear();
+        let mut lane_queue = VecDeque::new();
+        lane_queue.push_back(2);
+        gateway.lanes.insert(
+            Some("lane-a".to_owned()),
+            Lane {
+                active: Some(1),
+                queued: lane_queue,
+            },
+        );
+        let mut turn_b = make_synthetic_turn(
+            &fixture,
+            None,
+            Some("lane-a".to_owned()),
+            false,
+            false,
+            Some(false),
+            None,
+        );
+        turn_b.response_id = None;
+        turn_b.upstream_id = None;
+        turn_b.connection_id = None;
+        gateway.turns.insert(2, turn_b);
+
+        let created_a = Bytes::from_static(
+            br#"{"type":"response.created","stream_id":"lane-a","response":{"id":"resp_a_id","status":"in_progress","store":false}}"#,
+        );
+        assert!(
+            gateway
+                .provider_message(1, &created_a)
+                .await
+                .unwrap()
+                .forward
+        );
+        let statusless_err = Bytes::from_static(
+            br#"{"type":"error","stream_id":"lane-a","response_id":"resp_a_id","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Overloaded"}}"#,
+        );
+        let err_res = gateway.provider_message(1, &statusless_err).await.unwrap();
+        assert!(err_res.forward);
+        assert_eq!(err_res.dispatches.len(), 1);
+        assert_eq!(err_res.dispatches[0].turn_id, 2);
+
+        // Turn B binds and starts on the same lane before A expires.
+        gateway.assign_connection(2, 1, Uuid::nil(), "assigned");
+        gateway.turns.get_mut(&2).unwrap().sent = true;
+        let created_b = Bytes::from_static(
+            br#"{"type":"response.created","stream_id":"lane-a","response":{"id":"resp_b_id","status":"in_progress","store":false}}"#,
+        );
+        assert!(
+            gateway
+                .provider_message(1, &created_b)
+                .await
+                .unwrap()
+                .forward
+        );
+
+        let deadline =
+            gateway.next_pending_error_deadline().unwrap() + std::time::Duration::from_secs(1);
+        let expired = gateway.expire_pending_error_terminals(deadline);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].response_id(), Some("resp_a_id"));
+        assert_eq!(expired[0].stream_id.as_deref(), Some("lane-a"));
+        let wire: Value = serde_json::from_slice(&expired[0].to_bytes()).unwrap();
+        assert_eq!(wire["response_id"], "resp_a_id");
+        assert_eq!(wire["stream_id"], "lane-a");
+        assert!(
+            gateway.turns.contains_key(&2),
+            "active successor Turn B must remain undisturbed"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_owner_avoids_futile_eviction_and_preserves_evicted_error_on_late_failure() {
+        use cc_lb_storage_api::upstream_affinity::UpstreamAffinityBinding;
+        use cc_lb_storage_api::{
+            StorageError, StorageResult, UpstreamAffinityStore, UpstreamRecordId,
+        };
+
+        // Part A: When remaining owners are pinned by `turns`/`recent` (cross-connection),
+        // evicting A cannot free enough slots (`slot_cap=1`) -> `bind_owner` must fail upfront
+        // with `overloaded_error` without evicting A.
+        let fixture = DirectAccountingFixture::new().await;
+        let mut gateway = ResponsesWebSocketGateway::new(
+            fixture.lifecycle.clone(),
+            &fixture.auth,
+            HeaderMap::new(),
+            65_536,
+            1,
+        );
+        gateway.connections.insert(1, Uuid::nil());
+        gateway.connections.insert(2, Uuid::nil());
+        gateway.connection_lanes.insert(1, None);
+        gateway.connection_lanes.insert(2, None);
+        let mut turn_a = make_synthetic_turn(&fixture, None, None, true, false, Some(false), None);
+        turn_a.connection_id = Some(1);
+        let mut turn_b = make_synthetic_turn(&fixture, None, None, true, false, Some(false), None);
+        turn_b.connection_id = Some(2);
+        turn_b.response_id = None;
+        gateway.turns.insert(1, turn_a);
+        gateway.turns.insert(2, turn_b);
+        gateway.lanes.insert(
+            None,
+            Lane {
+                active: Some(1),
+                ..Default::default()
+            },
+        );
+
+        let created_a = Bytes::from_static(
+            br#"{"type":"response.created","response":{"id":"resp_keep","status":"in_progress","store":false}}"#,
+        );
+        assert!(
+            gateway
+                .provider_message(1, &created_a)
+                .await
+                .unwrap()
+                .forward
+        );
+        let statusless_a = Bytes::from_static(
+            br#"{"type":"error","response_id":"resp_keep","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Overloaded"}}"#,
+        );
+        assert!(
+            gateway
+                .provider_message(1, &statusless_a)
+                .await
+                .unwrap()
+                .forward
+        );
+
+        gateway.lanes.get_mut(&None).unwrap().active = Some(2);
+        let created_b = Bytes::from_static(
+            br#"{"type":"response.created","response":{"id":"resp_reject","status":"in_progress","store":false}}"#,
+        );
+        let Err(overload) = gateway.provider_message(2, &created_b).await else {
+            panic!(
+                "expected overloaded_error when eviction cannot free cross-connection owner slot"
+            );
+        };
+        assert_eq!(overload.code, "overloaded_error");
+        assert!(
+            gateway.pending_error_terminals.contains_key("resp_keep"),
+            "A must stay registered when eviction cannot make room for B"
+        );
+        let failed_a = Bytes::from_static(
+            br#"{"type":"response.failed","response":{"id":"resp_keep","status":"failed","error":{"code":"server_is_overloaded","message":"Overloaded"}}}"#,
+        );
+        assert!(
+            gateway
+                .provider_message(1, &failed_a)
+                .await
+                .unwrap()
+                .forward
+        );
+
+        // Part B: When eviction DOES free A (same recent key, slot_cap=1) and B subsequently
+        // fails affinity binding in `observe_provider_message`, A's eviction terminal must be
+        // preserved in `take_pending_errors()`.
+        struct FailBindStore;
+        #[async_trait::async_trait]
+        impl UpstreamAffinityStore for FailBindStore {
+            async fn read_upstream_owner_epoch(
+                &self,
+                _upstream_id: UpstreamRecordId,
+                _expected_spec_revision: u64,
+            ) -> StorageResult<Option<u64>> {
+                Ok(Some(0))
+            }
+
+            async fn resolve_upstream_affinities(
+                &self,
+                _keys: &[UpstreamAffinityKey],
+                _now_unix_secs: u64,
+                _ttl_secs: u64,
+            ) -> StorageResult<Vec<UpstreamAffinityBinding>> {
+                Ok(Vec::new())
+            }
+
+            async fn bind_upstream_affinities(
+                &self,
+                _bindings: &[UpstreamAffinityBinding],
+                _now_unix_secs: u64,
+                _ttl_secs: u64,
+            ) -> StorageResult<()> {
+                Err(StorageError::Unavailable {
+                    message: "affinity down".to_owned(),
+                })
+            }
+
+            async fn purge_expired_upstream_affinities(
+                &self,
+                _now_unix_secs: u64,
+                _ttl_secs: u64,
+                _batch_size: usize,
+            ) -> StorageResult<u64> {
+                Ok(0)
+            }
+        }
+
+        let fixture = DirectAccountingFixture::new().await;
+        let turn_a = make_synthetic_turn(&fixture, None, None, true, false, Some(false), None);
+        let mut turn_b = make_synthetic_turn(&fixture, None, None, false, false, Some(true), None);
+        turn_b.response_id = None;
+        turn_b.upstream_id = None;
+        turn_b.connection_id = None;
+        let auth = fixture.auth;
+        let lifecycle = Arc::new(
+            Arc::try_unwrap(fixture.lifecycle)
+                .unwrap_or_else(|_| panic!("single lifecycle owner"))
+                .with_upstream_affinity_store(Arc::new(FailBindStore)),
+        );
+        let _keep = (
+            fixture.storage,
+            fixture.usage_handle,
+            fixture.engine,
+            fixture.view,
+            fixture.concurrency,
+        );
+        let mut gateway =
+            ResponsesWebSocketGateway::new(lifecycle, &auth, HeaderMap::new(), 65_536, 1);
+        gateway.connections.insert(1, Uuid::nil());
+        gateway.connection_lanes.insert(1, None);
+        gateway.turns.insert(1, turn_a);
+        gateway.turns.insert(2, turn_b);
+        let mut q = VecDeque::new();
+        q.push_back(2);
+        gateway.lanes.insert(
+            None,
+            Lane {
+                active: Some(1),
+                queued: q,
+            },
+        );
+        let created_a2 = Bytes::from_static(
+            br#"{"type":"response.created","response":{"id":"resp_evict_me","status":"in_progress","store":false}}"#,
+        );
+        assert!(
+            gateway
+                .provider_message(1, &created_a2)
+                .await
+                .unwrap()
+                .forward
+        );
+        let statusless_a2 = Bytes::from_static(
+            br#"{"type":"error","response_id":"resp_evict_me","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Overloaded"}}"#,
+        );
+        assert!(
+            gateway
+                .provider_message(1, &statusless_a2)
+                .await
+                .unwrap()
+                .forward
+        );
+        gateway.assign_connection(2, 1, Uuid::nil(), "assigned");
+        gateway.turns.get_mut(&2).unwrap().sent = true;
+        let created_b2 = Bytes::from_static(
+            br#"{"type":"response.created","response":{"id":"resp_b_fails_aff","status":"in_progress","store":true}}"#,
+        );
+        let Err(aff_err) = gateway.provider_message(1, &created_b2).await else {
+            panic!("expected affinity error after evicting resp_evict_me");
+        };
+        assert_eq!(aff_err.code, "upstream_affinity_unavailable");
+        let preserved = gateway.take_pending_errors();
+        assert_eq!(preserved.len(), 1);
+        assert_eq!(preserved[0].response_id(), Some("resp_evict_me"));
+    }
+
+    #[tokio::test]
+    async fn public_oauth_retired_terminal_matches_connection_lane_when_omitted_and_rejects_mismatch()
+     {
+        let fixture = DirectAccountingFixture::new().await;
+        let mut gateway = terminal_fixture_gateway(&fixture, None);
+        gateway.codex_backend = false;
+        gateway.connections.insert(1, Uuid::nil());
+        gateway.connection_oauth.insert(1, true);
+        gateway
+            .connection_lanes
+            .insert(1, Some("lane-pub".to_owned()));
+        let turn_a = gateway.turns.get_mut(&1).unwrap();
+        turn_a.lane = Some("lane-pub".to_owned());
+        turn_a.prepared.oauth_transport = true;
+        turn_a.response_id = None;
+        gateway.lanes.clear();
+        let mut q = VecDeque::new();
+        q.push_back(2);
+        gateway.lanes.insert(
+            Some("lane-pub".to_owned()),
+            Lane {
+                active: Some(1),
+                queued: q,
+            },
+        );
+        let mut turn_b = make_synthetic_turn(
+            &fixture,
+            None,
+            Some("lane-pub".to_owned()),
+            false,
+            true,
+            Some(false),
+            None,
+        );
+        turn_b.response_id = None;
+        turn_b.upstream_id = None;
+        turn_b.connection_id = None;
+        gateway.turns.insert(2, turn_b);
+
+        let created_a = Bytes::from_static(
+            br#"{"type":"response.created","response":{"id":"resp_pub_a","status":"in_progress","store":false}}"#,
+        );
+        assert!(
+            gateway
+                .provider_message(1, &created_a)
+                .await
+                .unwrap()
+                .frames
+                .is_some()
+        );
+        let completed_a = Bytes::from_static(
+            br#"{"type":"response.completed","response":{"id":"resp_pub_a","status":"completed"}}"#,
+        );
+        assert!(
+            gateway
+                .provider_message(1, &completed_a)
+                .await
+                .unwrap()
+                .frames
+                .is_some()
+        );
+
+        // Successor B completes on the same lane so the lane is now completely idle and
+        // `recent[(1, "lane-pub")]` has moved past `resp_pub_a`.
+        gateway.assign_connection(2, 1, Uuid::nil(), "assigned");
+        gateway.turns.get_mut(&2).unwrap().sent = true;
+        let created_b = Bytes::from_static(
+            br#"{"type":"response.created","response":{"id":"resp_pub_b","status":"in_progress","store":false}}"#,
+        );
+        assert!(
+            gateway
+                .provider_message(1, &created_b)
+                .await
+                .unwrap()
+                .frames
+                .is_some()
+        );
+        let completed_b = Bytes::from_static(
+            br#"{"type":"response.completed","response":{"id":"resp_pub_b","status":"completed"}}"#,
+        );
+        assert!(
+            gateway
+                .provider_message(1, &completed_b)
+                .await
+                .unwrap()
+                .frames
+                .is_some()
+        );
+
+        // Duplicate native terminal for A omits `stream_id`; must match via `connection_lanes[1]`.
+        let dup_omitted_lane = Bytes::from_static(
+            br#"{"type":"response.failed","response":{"id":"resp_pub_a","status":"failed","error":{"code":"server_is_overloaded","message":"Overloaded"}}}"#,
+        );
+        let dup_res = gateway
+            .provider_message(1, &dup_omitted_lane)
+            .await
+            .unwrap();
+        assert!(!dup_res.forward);
+        assert!(dup_res.frames.is_none());
+        assert!(dup_res.errors.is_empty());
+
+        // Explicit mismatched `stream_id` must still be rejected.
+        let dup_wrong_lane = Bytes::from_static(
+            br#"{"type":"response.failed","stream_id":"other-lane","response":{"id":"resp_pub_a","status":"failed","error":{"code":"server_is_overloaded","message":"Overloaded"}}}"#,
+        );
+        assert!(gateway.provider_message(1, &dup_wrong_lane).await.is_err());
     }
 }
