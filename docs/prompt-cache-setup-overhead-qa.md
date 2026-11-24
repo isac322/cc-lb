@@ -150,8 +150,8 @@ Use focused tests during the change and run the full verification once at the en
 cargo fmt --all -- --check
 cargo test -p cc-lb-engine <focused cases>
 cargo test -p cc-lb-observability
-bun --cwd crates/cc-lb-admin/web test <latency tests>
-bun --cwd crates/cc-lb-admin/web run check
+bun --cwd web test <latency tests>
+bun --cwd web run check
 cargo nextest run --workspace
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```

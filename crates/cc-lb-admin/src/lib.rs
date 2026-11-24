@@ -11,6 +11,7 @@ pub mod ports;
 mod response_cache;
 pub mod routes;
 pub mod settings;
+#[cfg(feature = "embed-spa")]
 mod static_assets;
 pub mod subscription_quotas;
 pub mod v1;

@@ -21,7 +21,7 @@ import type { E2eState } from './harness';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const webDir = path.resolve(here, '../..');
-const repoRoot = path.resolve(webDir, '../../..');
+const repoRoot = path.resolve(webDir, '..');
 
 const ADMIN_TOKEN = 'e2e-admin-token-api-key-suite';
 const MASTER_KEY = '0'.repeat(64);

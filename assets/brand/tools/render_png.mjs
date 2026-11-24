@@ -5,7 +5,7 @@
 //
 // - Transparent background (omitBackground).
 // - deviceScaleFactor 1: the PNG is exactly <w>x<h> pixels.
-// - Playwright is resolved from crates/cc-lb-admin/web/node_modules.
+// - Playwright is resolved from web/node_modules.
 // - --scheme emulates prefers-color-scheme (for assets like favicon.svg
 //   that adapt via @media queries). Default: light.
 
@@ -16,7 +16,7 @@ import path from 'node:path';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(
-  path.join(here, '../../../crates/cc-lb-admin/web/package.json'),
+  path.join(here, '../../../web/package.json'),
 );
 const { chromium } = require('playwright');
 

@@ -16,6 +16,39 @@ export type AuthRequiredEventDetail = {
 
 export const AUTH_REQUIRED_EVENT = 'cclb:auth-required';
 
+export function normalizeAdminApiBaseUrl(raw: string | undefined): string {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed || trimmed === '/') {
+    return '';
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) || trimmed.startsWith('//')) {
+    throw new Error(
+      `Unsupported VITE_ADMIN_API_BASE_URL "${trimmed}": cross-origin Admin API base URLs are rejected because cc-lb-admin does not serve CORS preflight responses. Use an empty string or a same-origin path prefix such as "/control" behind a reverse proxy.`,
+    );
+  }
+  if (!trimmed.startsWith('/')) {
+    throw new Error(
+      `Invalid VITE_ADMIN_API_BASE_URL "${trimmed}": expected an empty string or a leading-slash same-origin path prefix such as "/control".`,
+    );
+  }
+  return trimmed.replace(/\/+$/, '');
+}
+
+export const ADMIN_API_BASE_URL = normalizeAdminApiBaseUrl(
+  import.meta.env.VITE_ADMIN_API_BASE_URL,
+);
+
+export function resolveAdminApiUrl(
+  path: string,
+  baseUrl: string = ADMIN_API_BASE_URL,
+): string {
+  if (!baseUrl || /^https?:\/\//i.test(path)) {
+    return path;
+  }
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${baseUrl}${normalizedPath}`;
+}
+
 function notifyAuthRequired(
   authMode: AdminAuthMode | null,
   hadToken: boolean,
@@ -131,7 +164,7 @@ export async function fetchWithAuth(
   const timeoutId = setTimeout(() => controller.abort(), 30000);
 
   try {
-    const res = await fetch(path, {
+    const res = await fetch(resolveAdminApiUrl(path), {
       ...requestOptions,
       headers,
       signal: controller.signal,

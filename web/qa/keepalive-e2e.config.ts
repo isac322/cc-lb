@@ -5,7 +5,7 @@ import { defineConfig } from '@playwright/test';
 
 const qaDir = path.dirname(fileURLToPath(import.meta.url));
 const webDir = path.resolve(qaDir, '..');
-const repoRoot = path.resolve(qaDir, '../../../..');
+const repoRoot = path.resolve(qaDir, '../..');
 
 function requiredEnv(name: string): string {
   const value = process.env[name];

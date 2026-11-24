@@ -9,11 +9,11 @@ build = "build.rs"
 autotests = false
 
 [features]
-default = ["sqlite"]
+default = ["sqlite", "embed-spa"]
+embed-spa = ["cc-lb-admin/embed-spa"]
 sqlite = [
     "cc-lb-scheduler/default",
     "cc-lb-scheduler/sqlite",
-    "cc-lb-admin/default",
     "cc-lb-admin/sqlite",
     "dep:apalis-sqlite",
     "dep:cc-lb-scheduler",

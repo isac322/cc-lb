@@ -3,14 +3,14 @@ name: web
 on:
   pull_request:
     paths:
-      - 'crates/cc-lb-admin/web/**'
+      - 'web/**'
       - '.github/workflows/web.yml'
       - '.github/actions/setup-web/**'
   push:
     branches:
       - master
     paths:
-      - 'crates/cc-lb-admin/web/**'
+      - 'web/**'
       - '.github/workflows/web.yml'
       - '.github/actions/setup-web/**'
 
@@ -24,7 +24,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: crates/cc-lb-admin/web
+        working-directory: web
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-web
@@ -117,7 +117,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: crates/cc-lb-admin/web
+        working-directory: web
     steps:
       - uses: actions/checkout@v7
       - name: Configure container workspace
@@ -164,21 +164,26 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           git worktree add --detach "$base_root" "$BASE_SHA"
           git config --global --add safe.directory "$base_root"
-          if cmp -s bun.lock "$base_root/crates/cc-lb-admin/web/bun.lock" && \
-             cmp -s package.json "$base_root/crates/cc-lb-admin/web/package.json"; then
-            ln -s "$PWD/node_modules" "$base_root/crates/cc-lb-admin/web/node_modules"
+          if [ -d "$base_root/web" ]; then
+            base_web_dir="$base_root/web"
           else
-            bun install --frozen-lockfile --cwd "$base_root/crates/cc-lb-admin/web"
+            base_web_dir="$base_root/crates/cc-lb-admin/web"
           fi
-          (cd "$base_root/crates/cc-lb-admin/web" && bun run --shell=bun build)
-          test -s "$base_root/crates/cc-lb-admin/web/dist/index.html"
+          if cmp -s bun.lock "$base_web_dir/bun.lock" && \
+             cmp -s package.json "$base_web_dir/package.json"; then
+            ln -s "$PWD/node_modules" "$base_web_dir/node_modules"
+          else
+            bun install --frozen-lockfile --cwd "$base_web_dir"
+          fi
+          (cd "$base_web_dir" && bun run --shell=bun build)
+          test -s "$base_web_dir/dist/index.html"
 
           bun qa/capture-codex-credit-baseline.ts \
-            "$base_root/crates/cc-lb-admin/web" \
+            "$base_web_dir" \
             "$RUNNER_TEMP/codex-credit-visuals/before" "$BASE_SHA" 5174 &
           pid_1=$!
           bun qa/capture-issue-1282-baseline.ts \
-            "$base_root/crates/cc-lb-admin/web" \
+            "$base_web_dir" \
             "$RUNNER_TEMP/issue-1282-visuals/before" "$BASE_SHA" 5175 &
           pid_2=$!
           rc=0
@@ -221,7 +226,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: crates/cc-lb-admin/web
+        working-directory: web
     steps:
       - uses: actions/checkout@v7
       - name: Configure container workspace
@@ -287,7 +292,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: crates/cc-lb-admin/web
+        working-directory: web
     steps:
       - uses: actions/checkout@v7
       - name: Configure container workspace
@@ -341,7 +346,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: crates/cc-lb-admin/web
+        working-directory: web
     steps:
       - uses: actions/checkout@v7
       - name: Configure container workspace
@@ -367,16 +372,21 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           git worktree add --detach "$base_root" "$BASE_SHA"
           git config --global --add safe.directory "$base_root"
-          if cmp -s bun.lock "$base_root/crates/cc-lb-admin/web/bun.lock" && \
-             cmp -s package.json "$base_root/crates/cc-lb-admin/web/package.json"; then
-            ln -s "$PWD/node_modules" "$base_root/crates/cc-lb-admin/web/node_modules"
+          if [ -d "$base_root/web" ]; then
+            base_web_dir="$base_root/web"
           else
-            bun install --frozen-lockfile --cwd "$base_root/crates/cc-lb-admin/web"
+            base_web_dir="$base_root/crates/cc-lb-admin/web"
           fi
-          (cd "$base_root/crates/cc-lb-admin/web" && bun run --shell=bun build)
-          test -s "$base_root/crates/cc-lb-admin/web/dist/index.html"
+          if cmp -s bun.lock "$base_web_dir/bun.lock" && \
+             cmp -s package.json "$base_web_dir/package.json"; then
+            ln -s "$PWD/node_modules" "$base_web_dir/node_modules"
+          else
+            bun install --frozen-lockfile --cwd "$base_web_dir"
+          fi
+          (cd "$base_web_dir" && bun run --shell=bun build)
+          test -s "$base_web_dir/dist/index.html"
           bun qa/capture-issue-1280-baseline.ts \
-            "$base_root/crates/cc-lb-admin/web" \
+            "$base_web_dir" \
             "$RUNNER_TEMP/issue-1280-visuals/before" "$BASE_SHA" 5176 "$CI_MERGE_SHA" "$PR_HEAD_SHA"
       - name: Stage pricing before visuals for bun-checks bundle
         if: always()

@@ -763,7 +763,7 @@ describe('config editor information architecture', () => {
   it('assigns every real schema leaf to exactly one section or the unassigned fallback', () => {
     const realSchema = JSON.parse(
       readFileSync(
-        `${import.meta.dirname}/../../../../../config-schema.json`,
+        `${import.meta.dirname}/../../../config-schema.json`,
         'utf-8',
       ),
     ) as ConfigSchema;
@@ -799,10 +799,7 @@ describe('config editor information architecture', () => {
 
 describe('config field guidance', () => {
   const realSchema = JSON.parse(
-    readFileSync(
-      `${import.meta.dirname}/../../../../../config-schema.json`,
-      'utf-8',
-    ),
+    readFileSync(`${import.meta.dirname}/../../../config-schema.json`, 'utf-8'),
   ) as ConfigSchema;
 
   it('resolves explicit guidance with numeric trade-offs', () => {

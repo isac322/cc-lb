@@ -32,9 +32,10 @@
 !**/*.sql
 
 # 6) cc-lb-admin dashboard SPA sources. `crates/cc-lb-admin/build.rs` builds and
-#    embeds `web/dist` via Bun at compile time, so the web sources must be
-#    present. Its own `node_modules` / build output are (re)generated in-image.
-!crates/cc-lb-admin/web/**
+#    embeds `web/dist` via Bun at compile time when `embed-spa` is enabled, so
+#    the web sources must be present. Its own `node_modules` / build output are
+#    (re)generated in-image.
+!web/**
 
 # 7) Re-exclude heavy or generated trees that the broad negations above would
 #    otherwise pull back in. `.dockerignore` does NOT consult `.gitignore`, so a
@@ -42,9 +43,9 @@
 #    these rules come last so they win.
 **/target/**
 **/node_modules/**
-crates/cc-lb-admin/web/dist/**
-crates/cc-lb-admin/web/dist-ssr/**
-crates/cc-lb-admin/web/.vite/**
+web/dist/**
+web/dist-ssr/**
+web/.vite/**
 **/*.tsbuildinfo
 
 # The fuzz tree is a separate workspace, not built by `-p cc-lb-server`.

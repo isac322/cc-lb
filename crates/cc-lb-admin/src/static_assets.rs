@@ -7,7 +7,7 @@ use axum::{
 use rust_embed::{EmbeddedFile, RustEmbed};
 
 #[derive(RustEmbed)]
-#[folder = "web/dist/"]
+#[folder = "../../web/dist/"]
 struct Assets;
 
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";

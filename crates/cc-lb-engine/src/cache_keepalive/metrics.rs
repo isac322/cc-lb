@@ -105,7 +105,7 @@ mod tests {
         assert_eq!(enumerated, declared, "enumerate every canonical variant");
 
         let contract: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../cc-lb-admin/web/src/lib/__contract__/cache_keepalive_vocabulary.json"
+            "../../../../web/src/lib/__contract__/cache_keepalive_vocabulary.json"
         ))
         .expect("shared keepalive vocabulary JSON");
         let wire: Vec<&str> = reasons.iter().map(|reason| reason.as_str()).collect();

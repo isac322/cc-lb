@@ -162,7 +162,7 @@ const paritySurfacePaths = [
   'README.md',
   'PRODUCT.md',
   'positioning.yml',
-  'crates/cc-lb-admin/web/PRODUCT.md',
+  'web/PRODUCT.md',
   'docs/runtime-management.md',
   'docs/cc-lb-guide.html',
   'docs/adr/0015-vertex-ai-gemini-upstreams.md',

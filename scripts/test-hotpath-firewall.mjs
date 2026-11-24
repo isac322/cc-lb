@@ -256,3 +256,58 @@ test('rejects quoted dependency keys and transitive edges through non-crates wor
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('enforces Phase-4 optional rust-embed and proxy rust-embed exclusion rules', () => {
+  const badCases = [
+    [
+      'crates/cc-lb-engine/Cargo.toml',
+      '[package]\nname = "cc-lb-engine"\n[dependencies]\nrust-embed.workspace = true\n',
+      /rust-embed/,
+    ],
+    [
+      'crates/cc-lb-control/Cargo.toml',
+      '[package]\nname = "cc-lb-control"\n[dependencies]\nrust-embed.workspace = true\n',
+      /rust-embed/,
+    ],
+    [
+      'crates/cc-lb-admin/Cargo.toml',
+      '[package]\nname = "cc-lb-admin"\n[features]\ndefault = ["sqlite"]\n[dependencies]\nrust-embed.workspace = true\n',
+      /optional = true/,
+    ],
+  ];
+
+  for (const [file, manifest, expected] of badCases) {
+    const dir = makeTempRepo({ [file]: manifest });
+    try {
+      const result = checkHotpathFirewall(dir);
+      assert.equal(result.ok, false, `Expected failure for ${file}`);
+      assert.match(result.violations.join('\n'), expected);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const aliasedRustEmbedDir = makeTempRepo({
+    'Cargo.toml': '[workspace.dependencies]\nspa-embed = { package = "rust-embed", version = "8" }\n',
+    'crates/cc-lb-engine/Cargo.toml':
+      '[package]\nname = "cc-lb-engine"\n[dependencies]\nspa-embed.workspace = true\n',
+  });
+  try {
+    const result = checkHotpathFirewall(aliasedRustEmbedDir);
+    assert.equal(result.ok, false);
+    assert.match(result.violations.join('\n'), /rust-embed.*aliased as `spa-embed`/);
+  } finally {
+    rmSync(aliasedRustEmbedDir, { recursive: true, force: true });
+  }
+
+  const goodDir = makeTempRepo({
+    'crates/cc-lb-admin/Cargo.toml':
+      '[package]\nname = "cc-lb-admin"\n[features]\nembed-spa = ["dep:rust-embed"]\n[dependencies]\nrust-embed = { workspace = true, optional = true }\n',
+  });
+  try {
+    const result = checkHotpathFirewall(goodDir);
+    assert.equal(result.ok, true, `Unexpected violations:\n${result.violations.join('\n')}`);
+  } finally {
+    rmSync(goodDir, { recursive: true, force: true });
+  }
+});

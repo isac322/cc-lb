@@ -279,7 +279,7 @@ mod tests {
         }
 
         let contract: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../web/src/lib/__contract__/cache_keepalive_vocabulary.json"
+            "../../../../../web/src/lib/__contract__/cache_keepalive_vocabulary.json"
         ))
         .expect("shared keepalive vocabulary JSON");
         assert_eq!(

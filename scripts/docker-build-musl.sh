@@ -123,7 +123,7 @@ mkdir -p "$CARGO_HOME_DIR" "$target_profile_dir"
 # Guard against stale rust-embed assets in cached target/ because
 # crates/cc-lb-admin/build.rs skips web/dist rerun-if-changed directives when
 # CC_LB_ADMIN_PREBUILT_SPA=1.
-dist_dir="$repo_root/crates/cc-lb-admin/web/dist"
+dist_dir="$repo_root/web/dist"
 spa_hash_file="$target_profile_dir/.web-dist-hash"
 spa_hash=""
 if [ "$SKIP_SPA" != "1" ]; then
@@ -231,11 +231,16 @@ export GIT_CONFIG_GLOBAL=/tmp/gitconfig
 
 unset SOURCE_DATE_EPOCH
 
+effective_features="${FEATURES}"
 if [ "${SKIP_SPA}" = "1" ]; then
-  rm -rf /src/crates/cc-lb-admin/web/dist
+  rm -rf /src/web/dist
   export CC_LB_ADMIN_SKIP_SPA=1
 else
   export CC_LB_ADMIN_PREBUILT_SPA=1
+  case ",${effective_features}," in
+    *,embed-spa,*) ;;
+    *) effective_features="${effective_features:+${effective_features},}embed-spa" ;;
+  esac
 fi
 
 RUSTUP_TOOLCHAIN="$(cd /tmp && rustup default | cut -d' ' -f1)"
@@ -260,7 +265,7 @@ cargo metadata --no-deps --format-version 1 > /target/.cargo-metadata.json
 
 set -- build --release --locked \
   -p cc-lb-server --bin cc-lb \
-  --no-default-features --features "${FEATURES}" \
+  --no-default-features --features "${effective_features}" \
   --config 'target."cfg(all())".rustflags = ["-C", "link-arg=-Wl,--threads=4"]' \
   --target-dir /target
 

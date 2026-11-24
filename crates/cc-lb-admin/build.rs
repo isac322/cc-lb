@@ -5,12 +5,18 @@ use std::{
 };
 
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    if env::var_os("CARGO_FEATURE_EMBED_SPA").is_none() {
+        return;
+    }
+
     let manifest_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is required"));
-    let web_dir = manifest_dir.join("web");
+    let web_dir = manifest_dir.join("../..").join("web");
     let dist_dir = web_dir.join("dist");
 
-    emit_common_rerun_directives();
+    emit_spa_env_rerun_directives();
 
     let skip_spa = env::var("CC_LB_ADMIN_SKIP_SPA").as_deref() == Ok("1");
     let prebuilt_spa = env::var("CC_LB_ADMIN_PREBUILT_SPA").as_deref() == Ok("1");
@@ -74,9 +80,7 @@ fn main() {
     validate_dist(&dist_dir, "bun run --shell=bun build");
 }
 
-fn emit_common_rerun_directives() {
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=Cargo.toml");
+fn emit_spa_env_rerun_directives() {
     println!("cargo:rerun-if-env-changed=CC_LB_ADMIN_SKIP_SPA");
     println!("cargo:rerun-if-env-changed=CC_LB_ADMIN_PREBUILT_SPA");
     println!("cargo:rerun-if-env-changed=DOCS_RS");
@@ -105,7 +109,7 @@ fn emit_rerun_tree(web_dir: &Path, relative_path: &Path) {
     let path = web_dir.join(relative_path);
     println!(
         "cargo:rerun-if-changed={}",
-        Path::new("web").join(relative_path).display()
+        Path::new("../../web").join(relative_path).display()
     );
 
     if path.is_file() {
@@ -214,7 +218,7 @@ fn validate_dist(dist_dir: &Path, source: &str) {
 }
 
 fn write_skip_placeholder(dist_dir: &Path) {
-    println!("cargo:rerun-if-changed=web/dist/index.html");
+    println!("cargo:rerun-if-changed=../../web/dist/index.html");
     const INDEX_HTML: &[u8] = br#"<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -271,7 +275,7 @@ fn write_skip_placeholder(dist_dir: &Path) {
     fs::write(assets_dir.join("index-skip.js"), INDEX_JS)
         .expect("failed to write cc-lb-admin SPA skip script");
 
-    // Backdate newly created placeholder files so `cargo:rerun-if-changed=web/dist/index.html`
+    // Backdate newly created placeholder files so `cargo:rerun-if-changed=../../web/dist/index.html`
     // does not compare newer than the current build script's `run/stdout` mtime.
     if let Some(past) = std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(2))
     {

@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-ROOT = Path(__file__).resolve().parents[4]
+ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = ROOT / "target" / "keepalive-qa" / "admin-web-fixtures"
 DEFAULT_MANIFEST = DEFAULT_ROOT / "fixture-manifest.json"
 FIXTURE_VERSION = 2
@@ -64,9 +64,9 @@ KEEPALIVE_CONFIG = {
 SCENARIOS = {
     "principal_keys": ".agents/skills/user-flow-qa/references/scenarios/principal-api-key-issuance.md",
     "plugins": ".agents/skills/user-flow-qa/references/scenarios/plugin-upload-replacement-and-refs.md",
-    "browser_recorder": "crates/cc-lb-admin/web/qa/admin-web-browser-recorder.js",
+    "browser_recorder": "web/qa/admin-web-browser-recorder.js",
     "frontend_boundaries": ".agents/skills/user-flow-qa/references/scenarios/frontend-state-boundaries.md",
-    "keepalive_runner": "crates/cc-lb-admin/web/qa/keepalive-qa-runner.py",
+    "keepalive_runner": "web/qa/keepalive-qa-runner.py",
 }
 
 INVENTORY_RECONCILIATION = {
@@ -383,17 +383,17 @@ def load_manifest(raw: str) -> tuple[Path, dict[str, Any]]:
         preexisting_key.pop("plaintext_sha256_prefix", None)
     commands = manifest.setdefault("main_owned_commands", {})
     commands["refresh_manifest"] = (
-        f"python3 crates/cc-lb-admin/web/qa/admin-web-fixtures.py "
+        f"python3 web/qa/admin-web-fixtures.py "
         f"refresh-manifest --manifest {path}"
     )
     commands["configure_oauth"] = (
-        f"python3 crates/cc-lb-admin/web/qa/admin-web-fixtures.py "
+        f"python3 web/qa/admin-web-fixtures.py "
         f"configure-oauth --manifest {path} --origin http://127.0.0.1:19081 "
         "--confirm-stopped"
     )
     if manifest.get("engine") == "postgres":
         commands["configure_postgres_pool"] = (
-            f"python3 crates/cc-lb-admin/web/qa/admin-web-fixtures.py "
+            f"python3 web/qa/admin-web-fixtures.py "
             f"configure-postgres-pool --manifest {path} "
             "--postgres-container <owned-qa-container> --confirm-stopped"
         )
@@ -753,12 +753,12 @@ def init_fixture(args: argparse.Namespace) -> None:
         },
         "main_owned_commands": {
             "serve": f"target/debug/cc-lb serve --config {config_path}",
-            "vite": "cd crates/cc-lb-admin/web && CC_LB_ADMIN_URL=<admin_origin> bun run dev --host 127.0.0.1 --port <vite_port>",
-            "prepare": f"python3 crates/cc-lb-admin/web/qa/admin-web-fixtures.py prepare --manifest {manifest_path}",
-            "empty_snapshot": f"python3 crates/cc-lb-admin/web/qa/admin-web-fixtures.py snapshot --manifest {manifest_path} --name empty --confirm-stopped",
-            "populated_snapshot": f"python3 crates/cc-lb-admin/web/qa/admin-web-fixtures.py snapshot --manifest {manifest_path} --name populated --confirm-stopped",
-            "reset": f"python3 crates/cc-lb-admin/web/qa/admin-web-fixtures.py reset --manifest {manifest_path} --name <empty|populated> --confirm-stopped",
-            "proof": f"python3 crates/cc-lb-admin/web/qa/admin-web-fixtures.py proof --manifest {manifest_path}",
+            "vite": "cd web && CC_LB_ADMIN_URL=<admin_origin> bun run dev --host 127.0.0.1 --port <vite_port>",
+            "prepare": f"python3 web/qa/admin-web-fixtures.py prepare --manifest {manifest_path}",
+            "empty_snapshot": f"python3 web/qa/admin-web-fixtures.py snapshot --manifest {manifest_path} --name empty --confirm-stopped",
+            "populated_snapshot": f"python3 web/qa/admin-web-fixtures.py snapshot --manifest {manifest_path} --name populated --confirm-stopped",
+            "reset": f"python3 web/qa/admin-web-fixtures.py reset --manifest {manifest_path} --name <empty|populated> --confirm-stopped",
+            "proof": f"python3 web/qa/admin-web-fixtures.py proof --manifest {manifest_path}",
         },
         "execution_contract": {
             "empty_order": ["init", "start isolated app so migrations complete", "snapshot --name empty"],

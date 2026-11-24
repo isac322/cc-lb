@@ -29,14 +29,13 @@ SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 ARG BUILDOS
 ARG BUILDARCH
 ARG SKIP_SPA="0"
-WORKDIR /src/crates/cc-lb-admin/web
+WORKDIR /src/web
 
 # Resolve dependencies separately so source-only changes retain the frozen
 # install layer. Bun's cache contains native packages, so key it by the native
 # build platform even though this stage is shared by every target platform.
-# SKIP_SPA retains its no-Bun behavior while leaving an empty dist handoff for
-# the Rust build script to replace with the established placeholder.
-COPY crates/cc-lb-admin/web/package.json crates/cc-lb-admin/web/bun.lock ./
+# SKIP_SPA retains its no-Bun behavior while omitting embed-spa from Rust compilation.
+COPY web/package.json web/bun.lock ./
 RUN --mount=type=cache,id=bun-${BUILDOS}-${BUILDARCH},target=/root/.bun/install/cache \
     if [ "${SKIP_SPA}" = "1" ]; then \
       mkdir -p dist; \
@@ -44,7 +43,7 @@ RUN --mount=type=cache,id=bun-${BUILDOS}-${BUILDARCH},target=/root/.bun/install/
       bun install --frozen-lockfile; \
     fi
 
-COPY crates/cc-lb-admin/web/ ./
+COPY web/ ./
 COPY Cargo.toml /src/Cargo.toml
 RUN if [ "${SKIP_SPA}" != "1" ]; then \
       cc_lb_version="$(sed -n '/^\[workspace.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' /src/Cargo.toml)"; \
@@ -94,7 +93,7 @@ ARG SOURCE_DATE_EPOCH=""
 # Optional Cargo parallelism override; unset lets Cargo size itself to the builder.
 ARG CARGO_BUILD_JOBS
 ARG FEATURES="sqlite,postgres"
-# Set to 1 to embed the existing placeholder page instead of the built dashboard.
+# Set to 1 to build without embedding the dashboard SPA (drops `embed-spa`).
 ARG SKIP_SPA="0"
 # sccache BuildKit cache mount backend. Hosted CI and release builds pass
 # SCCACHE_LOCAL_MOUNT=1 and REQUIRE_SCCACHE=1 so cache failures are visible;
@@ -109,7 +108,7 @@ COPY . .
 
 # The BUILDPLATFORM SPA is a target-independent input. BuildKit evaluates its
 # stage once, then reuses this dist tree across the multi-platform Rust fan-out.
-COPY --link --from=admin-spa /src/crates/cc-lb-admin/web/dist /src/crates/cc-lb-admin/web/dist
+COPY --link --from=admin-spa /src/web/dist /src/web/dist
 
 # The repository's x86_64-musl linker is for standalone Cargo builds. When an
 # x86_64 Alpine builder also targets linux/amd64, Cargo applies that target
@@ -176,11 +175,16 @@ if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
 else
   export CARGO_BUILD_JOBS
 fi
+effective_features="${FEATURES}"
 if [ "${SKIP_SPA}" = "1" ]; then
-  rm -rf /src/crates/cc-lb-admin/web/dist
+  rm -rf /src/web/dist
   export CC_LB_ADMIN_SKIP_SPA=1
 else
   export CC_LB_ADMIN_PREBUILT_SPA=1
+  case ",${effective_features}," in
+    *,embed-spa,*) ;;
+    *) effective_features="${effective_features:+${effective_features},}embed-spa" ;;
+  esac
 fi
 # Install and verify the target in the same snapshot Cargo uses. Resolve rustc
 # to its concrete binary before sccache receives it: the daemon must not
@@ -222,7 +226,7 @@ fi
 build_status=0
 xx-cargo build --release --locked \
   -p cc-lb-server \
-  --no-default-features --features "${FEATURES}" \
+  --no-default-features --features "${effective_features}" \
   --config 'target."cfg(all())".rustflags = ["-C", "link-arg=-Wl,--threads=2"]' \
   --target-dir /src/target || build_status=$?
  # Finish all asynchronous S3 writes before the container exits. Bound the flush

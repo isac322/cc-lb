@@ -72,8 +72,10 @@ mod principals_openai_oauth_compat_roundtrip;
 mod reorder_rebalance_revalidates_slot;
 #[path = "snapshot_audit_query.rs"]
 mod snapshot_audit_query;
+#[cfg(feature = "embed-spa")]
 #[path = "static_assets_cache.rs"]
 mod static_assets_cache;
+#[cfg(feature = "embed-spa")]
 #[path = "static_assets_served.rs"]
 mod static_assets_served;
 #[path = "subscription_quota_slim_parity.rs"]

@@ -13,7 +13,7 @@ Two equally weighted halves:
 - Use an isolated cc-lb instance. Do not mutate a shared/prod DB for cascade-delete tests.
 - Browser QA must use `agent-browser` only: run `agent-browser skills get core`, then drive the dashboard with `agent-browser` commands. Do not use Playwright/Puppeteer/Selenium directly.
 - Admin auth: set `localStorage['cc-lb-admin-token']` to the test admin token; API calls use `Authorization: Bearer $TOKEN`.
-- Build frontend changes before embedded-SPA QA: from `crates/cc-lb-admin/web`, run `bun run build`, then rebuild/restart the test server. For Vite QA, serve the current admin web with `bun run dev --host 0.0.0.0` and point it at the isolated admin API.
+- Build frontend changes before embedded-SPA QA: from `web`, run `bun run build`, then rebuild/restart the test server. For Vite QA, serve the current admin web with `bun run dev --host 0.0.0.0` and point it at the isolated admin API.
 - For API assertions, save raw responses under `/tmp/cclb-plugin-qa/` and inspect with `jq`; do not paste full raw dumps into reports.
 
 ## 1. Fixture setup
@@ -145,7 +145,7 @@ cargo fmt --check
 cargo test -p cc-lb-storage-conformance --no-default-features --features sqlite plugin_registry -- --nocapture
 cargo test -p cc-lb-admin --test integration --no-default-features --features sqlite wasm_upload -- --nocapture
 cargo test -p cc-lb-admin --test integration --no-default-features --features sqlite v1_plugins::registry_ -- --nocapture
-(cd crates/cc-lb-admin/web && bun run lint && bun run typecheck && bun run test src/routes/-plugins.test.tsx)
+(cd web && bun run lint && bun run typecheck && bun run test src/routes/-plugins.test.tsx)
 ```
 
 For browser evidence, include the `agent-browser` transcript or screenshots showing direct wasm file upload, the new library row/detail, replacement confirmation, references preview, and `Delete and remove uses` completion.

@@ -65,7 +65,7 @@ runs:
       uses: actions/download-artifact@v7
       with:
         name: admin-spa-dist
-        path: crates/cc-lb-admin/web/dist
+        path: web/dist
 
     - name: Cache shared Cargo registry and git db (amd64 primary)
       if: inputs.key == 'amd64'

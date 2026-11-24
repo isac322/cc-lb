@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { defineConfig } from '@playwright/test';
 
 const qaDir = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(qaDir, '../../../..');
+const repoRoot = path.resolve(qaDir, '../..');
 
 function required(name: string): string {
   const value = process.env[name]?.trim();

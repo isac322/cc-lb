@@ -183,7 +183,7 @@ jobs:
             --prune-build-objects
           node scripts/ws-mtimes.mjs record \
             --out target/aarch64-unknown-linux-musl/release/.ws-mtimes.json \
-            --extra-dir crates/cc-lb-admin/web/dist
+            --extra-dir web/dist
           du -sh target || true
           du -sh target/aarch64-unknown-linux-musl/release/* 2>/dev/null || true
           du -sh target/release 2>/dev/null || true

@@ -42,6 +42,7 @@ vi.mock('../../auth', () => ({
 
 vi.mock('../../api', () => ({
   getJson: vi.fn(),
+  resolveAdminApiUrl: (path: string) => path,
   RequestEventUpdateSchema: {
     safeParse: vi.fn((data: unknown) => ({ success: true, data })),
   },

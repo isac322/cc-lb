@@ -21,6 +21,7 @@ export const FORBIDDEN_NORMAL_DEPS = new Map([
       'opentelemetry',
       'tracing-opentelemetry',
       'tiktoken-rs',
+      'rust-embed',
       'cc-lb-admin',
       'cc-lb-event-pipeline',
       'cc-lb-storage-sqlite',
@@ -38,6 +39,7 @@ export const FORBIDDEN_NORMAL_DEPS = new Map([
       'hyper-util',
       'hickory-resolver',
       'rustls',
+      'rust-embed',
       'cc-lb-storage-api',
       'cc-lb-storage-sqlite',
       'cc-lb-storage-postgres',
@@ -56,6 +58,7 @@ export const FORBIDDEN_NORMAL_DEPS = new Map([
       'sqlx',
       'axum',
       'tiktoken-rs',
+      'rust-embed',
       'cc-lb-storage-api',
       'cc-lb-storage-sqlite',
       'cc-lb-storage-postgres',
@@ -69,6 +72,14 @@ export const FORBIDDEN_NORMAL_DEPS = new Map([
     ]),
   ],
   [
+    'crates/cc-lb-control/Cargo.toml',
+    new Set([
+      'rust-embed',
+      'cc-lb-admin',
+      'cc-lb-server',
+    ]),
+  ],
+  [
     'crates/cc-lb-event-pipeline/Cargo.toml',
     new Set([
       'cc-lb-admin',
@@ -77,6 +88,7 @@ export const FORBIDDEN_NORMAL_DEPS = new Map([
       'axum',
       'hyper',
       'rustls',
+      'rust-embed',
       'tiktoken-rs',
       'opentelemetry',
     ]),
@@ -95,6 +107,7 @@ export const FORBIDDEN_NORMAL_DEPS = new Map([
       'sqlx',
       'axum',
       'hyper',
+      'rust-embed',
       'tiktoken-rs',
       'opentelemetry',
     ]),
@@ -111,6 +124,7 @@ export const FORBIDDEN_NORMAL_DEPS = new Map([
       'sqlx',
       'axum',
       'hyper',
+      'rust-embed',
       'tiktoken-rs',
       'opentelemetry',
     ]),
@@ -131,6 +145,7 @@ export const FORBIDDEN_NORMAL_DEPS = new Map([
       'sqlx',
       'axum',
       'hyper',
+      'rust-embed',
       'tiktoken-rs',
       'opentelemetry',
     ]),
@@ -150,6 +165,7 @@ export const FORBIDDEN_NORMAL_DEPS = new Map([
       'sqlx',
       'axum',
       'hyper',
+      'rust-embed',
       'tiktoken-rs',
       'opentelemetry',
     ]),
@@ -169,6 +185,7 @@ export const FORBIDDEN_NORMAL_DEPS = new Map([
       'sqlx',
       'axum',
       'hyper',
+      'rust-embed',
       'tiktoken-rs',
       'opentelemetry',
     ]),
@@ -188,6 +205,7 @@ export const FORBIDDEN_NORMAL_DEPS = new Map([
       'sqlx',
       'axum',
       'hyper',
+      'rust-embed',
       'tiktoken-rs',
       'opentelemetry',
     ]),
@@ -207,6 +225,7 @@ export const FORBIDDEN_NORMAL_DEPS = new Map([
       'sqlx',
       'axum',
       'hyper',
+      'rust-embed',
       'tiktoken-rs',
       'opentelemetry',
     ]),
@@ -222,6 +241,7 @@ export const FORBIDDEN_NORMAL_DEPS = new Map([
       'sqlx',
       'axum',
       'hyper',
+      'rust-embed',
       'tiktoken-rs',
       'opentelemetry',
     ]),
@@ -233,6 +253,7 @@ export const FORBIDDEN_TRANSITIVE_NORMAL_DEPS = new Map([
     'crates/cc-lb-engine/Cargo.toml',
     new Set([
       'sqlx',
+      'rust-embed',
       'cc-lb-admin',
       'cc-lb-event-pipeline',
       'cc-lb-storage-sqlite',
@@ -250,6 +271,7 @@ export const FORBIDDEN_TRANSITIVE_NORMAL_DEPS = new Map([
       'hyper-util',
       'hickory-resolver',
       'rustls',
+      'rust-embed',
       'cc-lb-storage-api',
       'cc-lb-storage-sqlite',
       'cc-lb-storage-postgres',
@@ -264,8 +286,12 @@ export const FORBIDDEN_TRANSITIVE_NORMAL_DEPS = new Map([
   ],
   ['crates/cc-lb-proxy-telemetry/Cargo.toml', FORBIDDEN_NORMAL_DEPS.get('crates/cc-lb-proxy-telemetry/Cargo.toml')],
   [
+    'crates/cc-lb-control/Cargo.toml',
+    FORBIDDEN_NORMAL_DEPS.get('crates/cc-lb-control/Cargo.toml'),
+  ],
+  [
     'crates/cc-lb-event-pipeline/Cargo.toml',
-    new Set(['cc-lb-admin', 'cc-lb-server', 'cc-lb-scheduler']),
+    new Set(['rust-embed', 'cc-lb-admin', 'cc-lb-server', 'cc-lb-scheduler']),
   ],
   ['crates/cc-lb-domain/Cargo.toml', FORBIDDEN_NORMAL_DEPS.get('crates/cc-lb-domain/Cargo.toml')],
   [
@@ -914,6 +940,38 @@ function checkTransitiveDeps(
   }
 }
 
+function checkAdminEmbedSpaOptional(relPath, raw, workspaceAliases, violations) {
+  let embedSpaRhs = null;
+  for (const stmt of collectTomlStatements(raw)) {
+    if (stmt.kind === 'entry' && classifyHeader(stmt.header).kind === 'features') {
+      const m = /^embed-spa\s*=\s*(.+)$/.exec(stmt.text);
+      if (m) embedSpaRhs = m[1];
+    }
+  }
+
+  const rustEmbedDeps = extractNormalDeps(raw, workspaceAliases).filter(
+    (dep) => dep.name === 'rust-embed',
+  );
+  for (const dep of rustEmbedDeps) {
+    if (!dep.optional) {
+      violations.push(
+        `${relPath}:${dep.line}: \`rust-embed\` (key \`${dep.rawKey}\`) must set \`optional = true\` behind \`embed-spa\``,
+      );
+    }
+    if (!embedSpaRhs || !embedSpaRhs.includes(`dep:${dep.rawKey}`)) {
+      violations.push(
+        `${relPath}:${dep.line}: \`embed-spa\` feature must gate \`dep:${dep.rawKey}\``,
+      );
+    }
+  }
+
+  if (rustEmbedDeps.length === 0 && (!embedSpaRhs || !embedSpaRhs.includes('dep:rust-embed'))) {
+    violations.push(
+      `${relPath}: missing \`embed-spa\` feature gating \`dep:rust-embed\``,
+    );
+  }
+}
+
 export function checkHotpathFirewall(rootDir = ROOT) {
   const violations = [];
   const workspaceAliases = extractWorkspaceDepAliases(rootDir);
@@ -939,6 +997,14 @@ export function checkHotpathFirewall(rootDir = ROOT) {
   }
 
   checkTransitiveDeps(rootDir, workspaceAliases, metadataNormalDeps, reportedDirectByRel, violations);
+
+  const adminRel = 'crates/cc-lb-admin/Cargo.toml';
+  try {
+    const raw = readFileSync(path.join(rootDir, adminRel), 'utf8');
+    checkAdminEmbedSpaOptional(adminRel, raw, workspaceAliases, violations);
+  } catch {
+    // Missing only inside synthetic test fixtures that omit cc-lb-admin.
+  }
 
   const eventBusRel = 'crates/cc-lb-control/src/event_bus.rs';
   try {

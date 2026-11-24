@@ -16,7 +16,7 @@ Two equally-weighted halves:
 
 ## 0. Environment & tooling
 
-- Service `cc-lb.service`; admin API + embedded SPA at `http://127.0.0.1:52252` (proxy `:52251`, metrics `:52253`). SPA embedded via `rust-embed` (`web/dist`); frontend changes need `bun run build` (in `crates/cc-lb-admin/web`) + `touch crates/cc-lb-admin/src/static_assets.rs` + binary rebuild + redeploy.
+- Service `cc-lb.service`; admin API + embedded SPA at `http://127.0.0.1:52252` (proxy `:52251`, metrics `:52253`). SPA embedded via `rust-embed` (`web/dist`); frontend changes need `bun run build` (in `web`) + `touch crates/cc-lb-admin/src/static_assets.rs` + binary rebuild + redeploy.
 - Auth: `localStorage['cc-lb-admin-token']` = env `CC_LB_ADMIN_TOKEN` (never echo). Header: `Authorization: Bearer $TOKEN`.
 - Browser: `agent-browser` (`open`; `snapshot -i -c`; `click @eN`; `screenshot`; `wait --load networkidle`). Prefer fresh-snapshot `@eN` refs.
 - API: `curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:52252<path>`.
@@ -260,8 +260,8 @@ cargo test -p cc-lb-server --lib scheduler_dispatch::usage::tests::codex
 cargo test -p cc-lb-engine --lib builtin_filters::subscription_preference::tests::provider_quota_rules
 cargo test -p cc-lb-storage-conformance --test integration upstream_subscription_quota
 cargo test -p cc-lb-server --test integration reconcile_subscription_quota_hydration
-bun run --cwd crates/cc-lb-admin/web test --run src/components/upstreams/codexCredits.test.tsx
-bun run --cwd crates/cc-lb-admin/web e2e e2e/codex-credits.spec.ts
+bun run --cwd web test --run src/components/upstreams/codexCredits.test.tsx
+bun run --cwd web e2e e2e/codex-credits.spec.ts
 ```
 
 The browser suite covers Overview and upstream detail at 390, 768, and 1440px, including source conflicts, one summary, exact units, no credit meter, preserved base meters, and overflow. Its admin API fixtures model wire state; the Rust hydration test separately proves real SQLite → cache → authenticated latest API. For manual native-server captures, seed only a disposable database, restart after direct SQL so the cache reloads, and compare the same six states with the latest API. Do not count a screenshot as evidence of live provider eligibility: exhausted-base plus usable credits remains an unmeasured provider scenario.
@@ -276,7 +276,7 @@ The `web` CI workflow runs the same fixed-UI suite without retries and captures 
 - Checkpoint dedup/fingerprint + range/anchor: `crates/cc-lb-storage-api/tests/subscription_quota_checkpoint.rs`, `crates/cc-lb-storage-conformance/tests/scenarios/upstream_subscription_quota_store.rs` (transition-heavy, including Fable storage conformance).
 - Cleanup/backfill idempotency + writer-continues-after-drop: `crates/cc-lb-server/tests/subscription_quota_checkpoint_{cleanup,backfill,writer}.rs`.
 - Storage roundtrips: `crates/cc-lb-storage-sqlite/tests/storage_roundtrips_sqlite.rs` (+ postgres).
-- Frontend chart transform + carry-forward/no-zeroes: `crates/cc-lb-admin/web/src/components/upstreams/buildQuotaChartData.test.ts`; card/legend: ApiUsageCard/QuotaObservedAt tests.
+- Frontend chart transform + carry-forward/no-zeroes: `web/src/components/upstreams/buildQuotaChartData.test.ts`; card/legend: ApiUsageCard/QuotaObservedAt tests.
 - OAuth ingestion and `is_active` semantics: `crates/cc-lb-server/src/scheduler_dispatch/usage/tests.rs` (`is_active` marks the binding limit; weekly-scoped Fable observations are ingested regardless).
 - Unified header parsing: `crates/cc-lb-engine/src/rate_limit_headers.rs`.
 - Fable routing preference: `crates/cc-lb-engine/src/builtin_filters/subscription_preference/tests.rs`.

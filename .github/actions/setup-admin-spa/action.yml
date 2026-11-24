@@ -5,7 +5,7 @@ inputs:
   working-directory:
     description: Web package directory containing bun.lock
     required: false
-    default: crates/cc-lb-admin/web
+    default: web
 
 outputs:
   version:

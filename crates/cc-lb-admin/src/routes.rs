@@ -14,11 +14,12 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::Instrument as _;
 
+#[cfg(feature = "embed-spa")]
+use crate::static_assets::{serve_asset, serve_index};
 use crate::{
     AdminState,
     audit::{AdminAuditEvent, record_admin_audit},
     auth::{AdminAction, AdminIdentity, authorize, require_admin_auth},
-    static_assets::{serve_asset, serve_index},
     v1::post_commit::{PostCommitAborted, complete_after_commit},
 };
 
@@ -81,12 +82,14 @@ pub fn build_router(state: AdminState) -> Router {
         ))
         .layer(middleware::map_response(json_extractor_rejection));
 
-    Router::new()
+    let router = Router::new()
         .merge(protected_routes)
+        .route("/admin/health", get(health));
+    #[cfg(feature = "embed-spa")]
+    let router = router
         .route("/", get(serve_index))
-        .route("/{*file}", get(serve_asset))
-        .route("/admin/health", get(health))
-        .with_state(state)
+        .route("/{*file}", get(serve_asset));
+    router.with_state(state)
 }
 
 async fn admin_request_middleware(request: Request<Body>, next: Next) -> Response<Body> {

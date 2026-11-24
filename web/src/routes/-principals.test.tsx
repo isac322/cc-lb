@@ -1019,16 +1019,33 @@ test('complex chain forces Advanced and disables Basic with tooltip', () => {
     isPending: false,
   } as unknown as ReturnType<typeof queries.useDeleteChainEntry>);
 
-  renderWithProviders(<RouterSlotEditor principal={principalFixture()} />);
+  const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+  vi.useFakeTimers();
+  try {
+    const view = renderWithProviders(
+      <RouterSlotEditor principal={principalFixture()} />,
+    );
+    const basicTab = screen.getByRole('tab', { name: 'Basic' });
+    expect(basicTab.getAttribute('aria-disabled')).toBe('true');
 
-  const basicTab = screen.getByRole('tab', { name: 'Basic' });
-  expect(basicTab.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(basicTab);
+    expect(screen.getByRole('button', { name: 'Dismiss' })).toBeDefined();
+    expect(
+      screen
+        .getByRole('tab', { name: 'Advanced' })
+        .getAttribute('aria-selected'),
+    ).toBe('true');
 
-  fireEvent.click(basicTab);
-  expect(screen.getByRole('button', { name: 'Dismiss' })).toBeDefined();
-  expect(
-    screen.getByRole('tab', { name: 'Advanced' }).getAttribute('aria-selected'),
-  ).toBe('true');
+    view.unmount();
+    expect(clearTimeoutSpy).toHaveBeenCalled();
+    vi.advanceTimersByTime(4500);
+    expect(consoleError).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+    clearTimeoutSpy.mockRestore();
+    consoleError.mockRestore();
+  }
 });
 
 test('Subscription preference toggle removes the built-in chain entry', async () => {
@@ -2190,8 +2207,9 @@ test('bulk revoke reports partial failures in exactly one toast', async () => {
   vi.stubGlobal('fetch', fetchMock);
   const error = vi.spyOn(toast, 'error');
 
+  let view: ReturnType<typeof render> | undefined;
   try {
-    render(
+    view = render(
       <QueryClientProvider client={appQueryClient}>
         <ApiKeysCard principal={principal} />
       </QueryClientProvider>,
@@ -2211,9 +2229,11 @@ test('bulk revoke reports partial failures in exactly one toast', async () => {
         'Revoked 1 of 2 keys. Failed: ···9f00',
       ),
     );
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(error).toHaveBeenCalledTimes(1);
   } finally {
+    view?.unmount();
     vi.unstubAllGlobals();
     appQueryClient.clear();
   }

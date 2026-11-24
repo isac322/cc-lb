@@ -5,6 +5,7 @@ use axum::{
 };
 use cc_lb_config::Config;
 use cc_lb_server::app::build_app_for_testing;
+#[cfg(feature = "embed-spa")]
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -38,6 +39,7 @@ async fn get(router: axum::Router, uri: &str) -> Response {
         .unwrap()
 }
 
+#[cfg(feature = "embed-spa")]
 async fn get_with_if_none_match(router: axum::Router, uri: &str, etag: &str) -> Response {
     router
         .oneshot(
@@ -52,6 +54,7 @@ async fn get_with_if_none_match(router: axum::Router, uri: &str, etag: &str) -> 
         .unwrap()
 }
 
+#[cfg(feature = "embed-spa")]
 async fn get_with_accept_encoding(router: axum::Router, uri: &str, encoding: &str) -> Response {
     router
         .oneshot(
@@ -82,17 +85,20 @@ async fn post_messages(router: axum::Router) -> Response {
         .unwrap()
 }
 
+#[cfg(feature = "embed-spa")]
 async fn body_text(response: Response) -> String {
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
+#[cfg(feature = "embed-spa")]
 fn is_spa_skip_placeholder(index_html: &str) -> bool {
     index_html
         .split(['"', '\''])
         .any(|part| part == "/assets/index-skip.js")
 }
 
+#[cfg(feature = "embed-spa")]
 fn discover_index_asset(index_html: &str) -> String {
     index_html
         .split(['"', '\''])
@@ -101,6 +107,7 @@ fn discover_index_asset(index_html: &str) -> String {
         .to_owned()
 }
 
+#[cfg(feature = "embed-spa")]
 fn discover_bootstrap_asset(index_html: &str) -> String {
     index_html
         .split(['"', '\''])
@@ -109,6 +116,7 @@ fn discover_bootstrap_asset(index_html: &str) -> String {
         .to_owned()
 }
 
+#[cfg(feature = "embed-spa")]
 fn assert_scripts_are_external(index_html: &str) {
     let mut script_count = 0;
     for script in index_html.split("<script").skip(1) {
@@ -148,49 +156,60 @@ async fn admin_responses_include_browser_security_headers() {
         .await
         .unwrap();
 
-    let html = get(app.admin_router.clone(), "/").await;
-    assert_eq!(html.status(), StatusCode::OK);
-    assert_security_headers(&html);
-    let index_html = body_text(html).await;
-    assert_scripts_are_external(&index_html);
-    if !is_spa_skip_placeholder(&index_html) {
-        let bootstrap_path = discover_bootstrap_asset(&index_html);
-        let bootstrap = get(app.admin_router.clone(), &bootstrap_path).await;
-        assert_eq!(bootstrap.status(), StatusCode::OK);
-        assert_eq!(
-            bootstrap
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("text/javascript")
-        );
-        assert_security_headers(&bootstrap);
-    }
-    let asset_path = discover_index_asset(&index_html);
+    #[cfg(feature = "embed-spa")]
+    {
+        let html = get(app.admin_router.clone(), "/").await;
+        assert_eq!(html.status(), StatusCode::OK);
+        assert_security_headers(&html);
+        let index_html = body_text(html).await;
+        assert_scripts_are_external(&index_html);
+        if !is_spa_skip_placeholder(&index_html) {
+            let bootstrap_path = discover_bootstrap_asset(&index_html);
+            let bootstrap = get(app.admin_router.clone(), &bootstrap_path).await;
+            assert_eq!(bootstrap.status(), StatusCode::OK);
+            assert_eq!(
+                bootstrap
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok()),
+                Some("text/javascript")
+            );
+            assert_security_headers(&bootstrap);
+        }
+        let asset_path = discover_index_asset(&index_html);
 
-    let asset = get(app.admin_router.clone(), &asset_path).await;
-    assert_eq!(asset.status(), StatusCode::OK);
-    assert_security_headers(&asset);
-    let etag = asset
-        .headers()
-        .get(header::ETAG)
-        .and_then(|value| value.to_str().ok())
-        .unwrap()
-        .to_owned();
-
-    let encoded_asset = get_with_accept_encoding(app.admin_router.clone(), &asset_path, "br").await;
-    assert_eq!(encoded_asset.status(), StatusCode::OK);
-    assert!(encoded_asset.headers().contains_key(header::ETAG));
-    assert!(
-        !encoded_asset
+        let asset = get(app.admin_router.clone(), &asset_path).await;
+        assert_eq!(asset.status(), StatusCode::OK);
+        assert_security_headers(&asset);
+        let etag = asset
             .headers()
-            .contains_key(header::CONTENT_ENCODING),
-        "ETagged static assets must not be dynamically compressed"
-    );
+            .get(header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .unwrap()
+            .to_owned();
 
-    let cached = get_with_if_none_match(app.admin_router.clone(), &asset_path, &etag).await;
-    assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
-    assert_security_headers(&cached);
+        let encoded_asset =
+            get_with_accept_encoding(app.admin_router.clone(), &asset_path, "br").await;
+        assert_eq!(encoded_asset.status(), StatusCode::OK);
+        assert!(encoded_asset.headers().contains_key(header::ETAG));
+        assert!(
+            !encoded_asset
+                .headers()
+                .contains_key(header::CONTENT_ENCODING),
+            "ETagged static assets must not be dynamically compressed"
+        );
+
+        let cached = get_with_if_none_match(app.admin_router.clone(), &asset_path, &etag).await;
+        assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+        assert_security_headers(&cached);
+    }
+
+    #[cfg(not(feature = "embed-spa"))]
+    {
+        let not_found = get(app.admin_router.clone(), "/").await;
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+        assert_security_headers(&not_found);
+    }
 
     let json = get(app.admin_router, "/admin/health").await;
     assert_eq!(json.status(), StatusCode::OK);

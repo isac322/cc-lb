@@ -1,7 +1,7 @@
 """Outlined glyph data for the cc-lb wordmark and tagline.
 
 Generated once from the Hanken Grotesk variable font shipped with the admin
-web (crates/cc-lb-admin/web/node_modules/@fontsource-variable/hanken-grotesk,
+web (web/node_modules/@fontsource-variable/hanken-grotesk,
 files/hanken-grotesk-latin-wght-normal.woff2, wght axis 100-900, default 400).
 
 - W600: wght=600 instance (SemiBold) - the "cc-lb" wordmark.

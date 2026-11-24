@@ -3,7 +3,7 @@
 Reproducible QA for **every** subscription-quota surface in the cc-lb admin web.
 A reader with zero prior context can execute this end to end and reach the same verdict.
 
-Fix under test: `crates/cc-lb-admin/web/src/routes/upstreams.tsx` Quota History `<XAxis>`
+Fix under test: `web/src/routes/upstreams.tsx` Quota History `<XAxis>`
 gained `allowDataOverflow` so recharts **clips** the numeric x-domain to
 `[sinceUnixSecs, nowUnixSecs]` instead of extending it to fit the checkpoint
 Root cause: the series API switched from dense raw observations to sparse checkpoints plus a left-anchor (the last checkpoint before `since`); without `allowDataOverflow` recharts stretched the axis back to the anchor, so every range (1h/6h/24h/7d) rendered the same span.
@@ -15,7 +15,7 @@ Root cause: the series API switched from dense raw observations to sparse checkp
 - Service: local `cc-lb.service`; admin API + embedded SPA at `http://127.0.0.1:52252`.
   - Proxy `:52251`, admin `:52252`, metrics `:52253`.
 - The SPA is served from the binary via `rust-embed` (`web/dist`); a **frontend change
-  requires `bun run build` in `crates/cc-lb-admin/web` + a binary rebuild + redeploy**
+  requires `bun run build` in `web` + a binary rebuild + redeploy**
   before it is visible at `:52252`. (For dev-only iteration: `bun run dev` in that dir.)
 - Auth: SPA login gate stores the admin bearer token in `localStorage['cc-lb-admin-token']`.
   Token value comes from the environment variable `CC_LB_ADMIN_TOKEN`; never echo the value.
@@ -142,7 +142,7 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
 
 ### TC-10 — Range-scoped stale window visibility (Desktop & Mobile)
 - Surface: Upstream detail page → "Subscription Quota" → "Quota History" chart + snapshot card grid.
-- Fix under test: `crates/cc-lb-admin/web/src/components/upstreams/quotaWindowVisibility.ts` (`selectVisibleGraphWindows`, `selectQuotaCardSnapshots`) wired into `upstreams.tsx` Legend, markers, Area, and card grid. Root cause: the chart legend/Area and the card grid derived their window set from the latest snapshot regardless of the selected range, so a window that stopped receiving data kept showing (a flat carried-forward line + a stale card). Freshness truth is per-window `observed_at_unix_millis` (MILLISECONDS) from the `/latest` sidecar, not `state` (which goes fresh→stale but never →missing for abandoned windows).
+- Fix under test: `web/src/components/upstreams/quotaWindowVisibility.ts` (`selectVisibleGraphWindows`, `selectQuotaCardSnapshots`) wired into `upstreams.tsx` Legend, markers, Area, and card grid. Root cause: the chart legend/Area and the card grid derived their window set from the latest snapshot regardless of the selected range, so a window that stopped receiving data kept showing (a flat carried-forward line + a stale card). Freshness truth is per-window `observed_at_unix_millis` (MILLISECONDS) from the `/latest` sidecar, not `state` (which goes fresh→stale but never →missing for abandoned windows).
 - Seed (isolated instance): one OAuth upstream with, relative to now —
   - `5h`: fresh (observed_at = now), in-range checkpoint.
   - `7d`: fresh (observed_at = now), in-range checkpoint.
@@ -186,8 +186,8 @@ PASS/FAIL is determined only from the isolated run's evidence.
 - Checkpoint dedup/fingerprint + range/anchor: `crates/cc-lb-storage-api/tests/subscription_quota_checkpoint.rs`, `crates/cc-lb-storage-conformance/tests/scenarios/upstream_subscription_quota_store.rs` (transition-heavy, including Fable storage conformance).
 - Cleanup/backfill idempotency + writer-continues-after-drop: `crates/cc-lb-server/tests/subscription_quota_checkpoint_{cleanup,backfill,writer}.rs`.
 - Storage roundtrips: `crates/cc-lb-storage-sqlite/tests/storage_roundtrips_sqlite.rs` (+ postgres).
-- Frontend chart transform + carry-forward/no-zeroes: `crates/cc-lb-admin/web/src/components/upstreams/buildQuotaChartData.test.ts`; card/legend: ApiUsageCard/QuotaObservedAt tests.
-- Frontend range/freshness window gating (graph + card visibility selectors): `crates/cc-lb-admin/web/src/components/upstreams/quotaWindowVisibility.test.ts` (point-in-time + range-sweep and one-week-cutoff transitions).
+- Frontend chart transform + carry-forward/no-zeroes: `web/src/components/upstreams/buildQuotaChartData.test.ts`; card/legend: ApiUsageCard/QuotaObservedAt tests.
+- Frontend range/freshness window gating (graph + card visibility selectors): `web/src/components/upstreams/quotaWindowVisibility.test.ts` (point-in-time + range-sweep and one-week-cutoff transitions).
 - OAuth ingestion from active limits: `crates/cc-lb-server/src/scheduler_dispatch/usage/tests.rs`.
 - Unified header parsing: `crates/cc-lb-engine/src/rate_limit_headers.rs`.
 - Fable routing preference: `crates/cc-lb-engine/src/builtin_filters/subscription_preference/tests.rs`.

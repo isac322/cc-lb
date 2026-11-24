@@ -177,7 +177,7 @@ pub struct RequestEventHistogramQuery {
 /// range, including buckets with no matching events. `error_count` includes
 /// rows where `list_status >= 500` or where `list_status` is 2xx and
 /// `error_code = 'upstream_stream_error'`. This matches the admin UI's danger
-/// tone in `crates/cc-lb-admin/web/src/lib/format.ts`; 4xx rows are excluded.
+/// tone in `web/src/lib/format.ts`; 4xx rows are excluded.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct RequestEventHistogramBucket {
     pub bucket_start_unix_secs: u64,

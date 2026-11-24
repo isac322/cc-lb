@@ -8,7 +8,7 @@ TOOLS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BRAND="$(cd "$TOOLS/.." && pwd)"
 ROOT="$(cd "$BRAND/../.." && pwd)"
 RENDER="$TOOLS/render_png.mjs"
-PUBLIC="$ROOT/crates/cc-lb-admin/web/public"
+PUBLIC="$ROOT/web/public"
 
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
