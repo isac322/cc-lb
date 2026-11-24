@@ -49,10 +49,13 @@ cc-lb-scheduler = { path = "../cc-lb-scheduler", default-features = false }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-upstream.workspace = true
 clap = { workspace = true, features = ["derive"] }
+hyper = { workspace = true, features = ["server"] }
+hyper-util = { workspace = true, features = ["http1", "http2", "server-auto", "service", "tokio"] }
 rustls.workspace = true
 thiserror.workspace = true
 tikv-jemallocator = "0.7"
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tower = { workspace = true, features = ["util"] }
 tracing.workspace = true
 url.workspace = true
 uuid = { workspace = true, features = ["v4"] }
@@ -63,4 +66,3 @@ cc-lb-workspace-hack.workspace = true
 http-body-util.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-tower = { workspace = true, features = ["util"] }

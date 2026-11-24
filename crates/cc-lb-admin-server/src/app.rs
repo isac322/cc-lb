@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axum::Router;
+use axum::body::Body;
+use axum::http::Request as HttpRequest;
 use axum::middleware;
 use cc_lb_admin::auth::{AdminAuthenticator, build_providers};
 use cc_lb_admin::{AdminBuildInfo, AdminPorts, AdminState, StartupConfigOverrides};
@@ -33,10 +35,15 @@ use cc_lb_scheduler::admin::SchedulerAdminHandle;
 use cc_lb_scheduler::factory::{OpenedScheduler, SchedulerFactoryError, open_scheduler_storage};
 use cc_lb_storage_api::{ManagedKeyStore, Storage};
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, Signer, SignerError, SignerFactory};
+use hyper::body::Incoming;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as HyperAutoBuilder;
+use hyper_util::service::TowerToHyperService;
 use thiserror::Error;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
+use tower::ServiceExt as _;
 
 const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -96,40 +103,57 @@ impl AdminApp {
 
     async fn serve_with_listener<F>(
         self,
-        listener: TcpListener,
+        mut listener: TcpListener,
         shutdown: F,
         drain_timeout: Duration,
     ) -> Result<(), AdminBuildError>
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        let (stop_tx, mut stop_rx) = watch::channel(false);
-        let mut serve_task = tokio::spawn(async move {
-            axum::serve(listener, self.admin_router)
-                .with_graceful_shutdown(async move {
-                    let _ = stop_rx.wait_for(|stopped| *stopped).await;
-                })
-                .await
-        });
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let mut shutdown = std::pin::pin!(shutdown);
+        let mut conn_tasks = JoinSet::new();
+        let router = self.admin_router;
 
-        let serve_result = tokio::select! {
-            result = &mut serve_task => map_serve_join_result(result),
-            _ = shutdown => {
-                let _ = stop_tx.send(true);
-                match tokio::time::timeout(drain_timeout, &mut serve_task).await {
-                    Ok(result) => map_serve_join_result(result),
-                    Err(_) => {
-                        tracing::warn!(
-                            timeout_ms = drain_timeout.as_millis() as u64,
-                            "split admin graceful drain elapsed with active connections (e.g. SSE stream); aborting listener",
-                        );
-                        serve_task.abort();
-                        let _ = serve_task.await;
-                        Ok(())
-                    }
+        loop {
+            tokio::select! {
+                Some(_) = conn_tasks.join_next(), if !conn_tasks.is_empty() => {}
+                (stream, remote_addr) = axum::serve::Listener::accept(&mut listener) => {
+                    spawn_connection(
+                        &mut conn_tasks,
+                        &router,
+                        stop_rx.clone(),
+                        stream,
+                        remote_addr,
+                    );
+                }
+                _ = &mut shutdown => {
+                    let _ = stop_tx.send(true);
+                    break;
                 }
             }
-        };
+        }
+
+        // Stop accepting new peers and drop our router handle so only live connections
+        // still hold clones of shared state and broadcast channels during drain.
+        drop(listener);
+        drop(router);
+
+        if !conn_tasks.is_empty()
+            && tokio::time::timeout(drain_timeout, async {
+                while conn_tasks.join_next().await.is_some() {}
+            })
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                timeout_ms = drain_timeout.as_millis() as u64,
+                active_connections = conn_tasks.len(),
+                "split admin graceful drain elapsed with active connections (e.g. SSE stream); aborting connections",
+            );
+            conn_tasks.abort_all();
+            while conn_tasks.join_next().await.is_some() {}
+        }
 
         if let Some(tx) = self.event_fanout_shutdown_tx {
             let _ = tx.send(true);
@@ -137,17 +161,49 @@ impl AdminApp {
         for task in self.event_fanout_tasks {
             await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
         }
-        serve_result
+        Ok(())
     }
 }
 
-fn map_serve_join_result(
-    result: Result<io::Result<()>, tokio::task::JoinError>,
-) -> Result<(), AdminBuildError> {
-    match result {
-        Ok(inner) => inner.map_err(AdminBuildError::Io),
-        Err(error) => Err(AdminBuildError::Io(io::Error::other(error))),
-    }
+fn spawn_connection(
+    conn_tasks: &mut JoinSet<()>,
+    router: &Router,
+    mut stop_rx: watch::Receiver<bool>,
+    stream: TcpStream,
+    remote_addr: SocketAddr,
+) {
+    let tower_service = router
+        .clone()
+        .map_request(|req: HttpRequest<Incoming>| req.map(Body::new));
+    let hyper_service = TowerToHyperService::new(tower_service);
+    let io = TokioIo::new(stream);
+
+    conn_tasks.spawn(async move {
+        let mut builder = HyperAutoBuilder::new(TokioExecutor::new());
+        builder.http2().enable_connect_protocol();
+        let mut conn = std::pin::pin!(builder.serve_connection_with_upgrades(io, hyper_service));
+        let mut graceful_sent = false;
+
+        loop {
+            tokio::select! {
+                result = conn.as_mut() => {
+                    if let Err(err) = result {
+                        tracing::trace!(
+                            peer = %remote_addr,
+                            error = %err,
+                            "split admin connection closed with error",
+                        );
+                    }
+                    break;
+                }
+                wait_res = stop_rx.wait_for(|stopped| *stopped), if !graceful_sent => {
+                    graceful_sent = true;
+                    let _ = wait_res;
+                    conn.as_mut().graceful_shutdown();
+                }
+            }
+        }
+    });
 }
 
 pub async fn run_admin_serve(
@@ -233,6 +289,7 @@ async fn build_admin_app_with_path_inner(
         aead,
         opened_scheduler,
         clock,
+        None,
     )
     .await
 }
@@ -259,6 +316,7 @@ pub async fn build_admin_app_with_storage(
         aead,
         opened_scheduler,
         clock,
+        None,
     )
     .await
 }
@@ -273,6 +331,7 @@ async fn build_admin_app_with_storage_inner(
     aead: Arc<AeadService>,
     opened_scheduler: OpenedScheduler,
     clock: ClockHandle,
+    admin_auth_override: Option<Arc<AdminAuthenticator>>,
 ) -> Result<AdminApp, AdminBuildError> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let _ = cc_lb_providers::builtin_provider_registry();
@@ -370,11 +429,16 @@ async fn build_admin_app_with_storage_inner(
 
     let admin_addr = config.listener.admin_addr;
     let admin_config = Arc::new(config);
-    let admin_auth = Arc::new(AdminAuthenticator::new(
-        build_providers(&admin_config.admin.auth).map_err(|error| AdminBuildError::AdminAuth {
-            message: error.to_string(),
-        })?,
-    ));
+    let admin_auth = match admin_auth_override {
+        Some(auth) => auth,
+        None => Arc::new(AdminAuthenticator::new(
+            build_providers(&admin_config.admin.auth).map_err(|error| {
+                AdminBuildError::AdminAuth {
+                    message: error.to_string(),
+                }
+            })?,
+        )),
+    };
     let meta = BuildMeta::current();
     let admin_state = AdminState {
         build: AdminBuildInfo {
@@ -519,22 +583,211 @@ impl SignerFactory for NoopAdminSignerFactory {
     }
 }
 
-#[cfg(all(test, feature = "sqlite"))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_config::AdminAuthProviderConfig;
-    use cc_lb_storage_api::MetaStore as _;
-    use tokio::net::TcpStream;
+
+    async fn write_raw_request(stream: &TcpStream, req: &str) {
+        stream.writable().await.expect("writable");
+        let mut written = 0;
+        while written < req.len() {
+            match stream.try_write(&req.as_bytes()[written..]) {
+                Ok(n) => written += n,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    stream.writable().await.expect("writable retry");
+                }
+                Err(e) => panic!("write http request failed: {e}"),
+            }
+        }
+    }
+
+    async fn read_until_contains(stream: &TcpStream, needle: &str) -> String {
+        let mut buf = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let remaining = deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .unwrap_or(Duration::ZERO);
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for `{needle}`; got: {}",
+                String::from_utf8_lossy(&buf)
+            );
+            let mut tmp = [0u8; 1024];
+            tokio::time::timeout(remaining, stream.readable())
+                .await
+                .expect("readable timeout")
+                .expect("readable");
+            match stream.try_read(&mut tmp) {
+                Ok(0) => {
+                    let text = String::from_utf8_lossy(&buf).into_owned();
+                    assert!(
+                        text.contains(needle),
+                        "unexpected EOF before `{needle}`; got: {text}"
+                    );
+                    return text;
+                }
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if String::from_utf8_lossy(&buf).contains(needle) {
+                        return String::from_utf8_lossy(&buf).into_owned();
+                    }
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => panic!("read http response failed: {e}"),
+            }
+        }
+    }
+
+    async fn assert_peer_closed(stream: &TcpStream) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let mut buf = [0u8; 1024];
+        loop {
+            let remaining = deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .unwrap_or(Duration::ZERO);
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for peer TCP connection to close after server shutdown",
+            );
+            tokio::time::timeout(remaining, stream.readable())
+                .await
+                .expect("timed out waiting for peer socket readiness on close")
+                .expect("peer socket readable failed");
+            match stream.try_read(&mut buf) {
+                Ok(0) => return,
+                Ok(_) => continue,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(ref e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::BrokenPipe
+                            | io::ErrorKind::ConnectionAborted
+                    ) =>
+                {
+                    return;
+                }
+                Err(e) => panic!("unexpected peer read error after shutdown: {e}"),
+            }
+        }
+    }
 
     #[tokio::test]
+    async fn serve_with_listener_gracefully_drains_in_flight_request_before_timeout() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let started_tx = Arc::new(std::sync::Mutex::new(Some(started_tx)));
+        let release_rx = Arc::new(tokio::sync::Mutex::new(Some(release_rx)));
+
+        let router = Router::new().route(
+            "/slow",
+            axum::routing::get(move || {
+                let started_tx = started_tx.clone();
+                let release_rx = release_rx.clone();
+                async move {
+                    if let Some(tx) = started_tx.lock().expect("lock").take() {
+                        let _ = tx.send(());
+                    }
+                    let rx = release_rx.lock().await.take();
+                    if let Some(rx) = rx {
+                        let _ = rx.await;
+                    }
+                    "done"
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let app = AdminApp {
+            admin_router: router,
+            admin_addr: addr,
+            event_fanout_shutdown_tx: None,
+            event_fanout_tasks: Vec::new(),
+        };
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            app.serve_with_listener(
+                listener,
+                async move {
+                    let _ = shutdown_rx.await;
+                },
+                Duration::from_secs(2),
+            )
+            .await
+        });
+
+        let stream = TcpStream::connect(addr).await.expect("connect");
+        write_raw_request(
+            &stream,
+            &format!("GET /slow HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        started_rx.await.expect("handler started");
+
+        let _ = shutdown_tx.send(());
+        let _ = release_tx.send(());
+
+        let body = read_until_contains(&stream, "done").await;
+        assert!(
+            body.starts_with("HTTP/1.1 200 OK"),
+            "unexpected response: {body}"
+        );
+        assert_peer_closed(&stream).await;
+
+        let serve_res = tokio::time::timeout(Duration::from_secs(2), server_task)
+            .await
+            .expect("graceful drain timed out")
+            .expect("server task panicked");
+        serve_res.expect("serve_with_listener must succeed");
+    }
+
+    #[cfg(feature = "sqlite")]
+    struct FixedTokenAuthProvider(&'static str);
+
+    #[cfg(feature = "sqlite")]
+    #[async_trait]
+    impl cc_lb_admin::auth::AdminAuthProvider for FixedTokenAuthProvider {
+        fn id(&self) -> &str {
+            "fixed-test-token"
+        }
+
+        fn is_static_token(&self) -> bool {
+            true
+        }
+
+        async fn authenticate(
+            &self,
+            headers: &axum::http::HeaderMap,
+        ) -> cc_lb_admin::auth::ProviderOutcome {
+            let expected = format!("Bearer {}", self.0);
+            let provided = headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok());
+            if provided == Some(expected.as_str()) {
+                cc_lb_admin::auth::ProviderOutcome::Verified(cc_lb_admin::auth::AdminIdentity {
+                    authority: "test".to_owned(),
+                    subject: "shutdown-test".to_owned(),
+                    kind: cc_lb_admin::auth::AdminActorKind::Service,
+                    provider_id: self.id().to_owned(),
+                    email: None,
+                    display_name: None,
+                    groups: Vec::new(),
+                    expires_at_unix_secs: None,
+                })
+            } else {
+                cc_lb_admin::auth::ProviderOutcome::NotPresent
+            }
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
     async fn admin_app_shutdown_is_bounded_with_active_sse_stream() {
-        let (token_env, token_value) = std::env::vars()
-            .find(|(k, v)| {
-                !k.is_empty() && !v.is_empty() && v.bytes().all(|b| b.is_ascii_graphic())
-            })
-            .expect(
-                "at least one non-empty process env var must exist for StaticToken test config",
-            );
+        use cc_lb_storage_api::MetaStore as _;
+        const SYNTHETIC_TOKEN: &str = "cc-lb-synthetic-shutdown-test-token";
 
         let dir = tempfile::TempDir::new().expect("tempdir");
         let sqlite_path = dir.path().join("storage.sqlite");
@@ -561,16 +814,32 @@ mod tests {
         config.aead.key_env = "__CC_LB_TEST_SHUTDOWN_KEY__".to_owned();
         config.runtime.data_dir = Some(dir.path().to_path_buf());
         config.event_bus.storage_tail_poll_interval_ms = 25;
-        config.admin.auth.providers = vec![AdminAuthProviderConfig::StaticToken {
-            id: "split-shutdown-test".to_owned(),
-            token_env,
-        }];
 
+        let opened_scheduler =
+            open_scheduler_storage(&config.storage, &config.scheduler, clock.clone())
+                .await
+                .expect("open scheduler storage");
+        let synthetic_auth = Arc::new(AdminAuthenticator::new(vec![Arc::new(
+            FixedTokenAuthProvider(SYNTHETIC_TOKEN),
+        )]));
         let managed_store: Arc<dyn ManagedKeyStore> = storage_arc.clone();
         let storage: Arc<dyn Storage> = storage_arc.clone();
-        let app = build_admin_app_with_storage(config, None, managed_store, storage, aead, clock)
-            .await
-            .expect("build_admin_app_with_storage");
+        let app = build_admin_app_with_storage_inner(
+            config,
+            None,
+            StartupConfigOverrides {
+                split_mode_read_only_config: true,
+                ..Default::default()
+            },
+            managed_store,
+            storage,
+            aead,
+            opened_scheduler,
+            clock,
+            Some(synthetic_auth),
+        )
+        .await
+        .expect("build_admin_app_with_storage_inner");
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let server_task = tokio::spawn(async move {
@@ -586,56 +855,25 @@ mod tests {
 
         let stream = TcpStream::connect(addr).await.expect("connect to admin");
         let req = format!(
-            "GET /admin/v1/events/stream HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token_value}\r\nAccept: text/event-stream\r\n\r\n"
+            "GET /admin/v1/events/stream HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {SYNTHETIC_TOKEN}\r\nAccept: text/event-stream\r\n\r\n"
         );
-        stream.writable().await.expect("writable");
-        let mut written = 0;
-        while written < req.len() {
-            match stream.try_write(&req.as_bytes()[written..]) {
-                Ok(n) => written += n,
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    stream.writable().await.expect("writable retry");
-                }
-                Err(e) => panic!("write sse request failed: {e}"),
-            }
-        }
+        write_raw_request(&stream, &req).await;
+        let _ = read_until_contains(&stream, ": connected").await;
 
-        let mut buf = Vec::new();
-        let read_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        loop {
-            assert!(
-                tokio::time::Instant::now() < read_deadline,
-                "timed out waiting for SSE : connected header/comment; got: {}",
-                String::from_utf8_lossy(&buf)
-            );
-            let mut tmp = [0u8; 1024];
-            tokio::time::timeout(Duration::from_secs(2), stream.readable())
-                .await
-                .expect("sse readable timeout")
-                .expect("sse readable");
-            match stream.try_read(&mut tmp) {
-                Ok(0) => panic!(
-                    "unexpected EOF before SSE connected; got: {}",
-                    String::from_utf8_lossy(&buf)
-                ),
-                Ok(n) => {
-                    buf.extend_from_slice(&tmp[..n]);
-                    if String::from_utf8_lossy(&buf).contains(": connected") {
-                        break;
-                    }
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(e) => panic!("read sse failed: {e}"),
-            }
-        }
-
-        // Trigger shutdown while keeping `_stream` open to prove the drain bound fires.
+        // Trigger shutdown while keeping `stream` open and keeping this runtime alive.
         let _ = shutdown_tx.send(());
         let serve_res = tokio::time::timeout(Duration::from_secs(2), server_task)
             .await
             .expect("split admin server must finish bounded shutdown despite active SSE stream")
             .expect("server task panicked");
         serve_res.expect("serve_with_listener must succeed");
-        drop(stream);
+
+        // Prove both the active connection task and the listening socket closed
+        // before `serve_with_listener` returned, without dropping the caller runtime.
+        assert_peer_closed(&stream).await;
+        assert!(
+            TcpStream::connect(addr).await.is_err(),
+            "admin listener must stop accepting new connections after shutdown"
+        );
     }
 }

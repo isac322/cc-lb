@@ -717,6 +717,8 @@ dependencies = [
  "cc-lb-workspace-hack",
  "clap",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "rustls",
  "serde_json",
  "tempfile",
