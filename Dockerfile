@@ -314,8 +314,15 @@ RUN /usr/local/bin/cc-lb --version && \
       /usr/local/bin/cc-lb --version | grep -Fq "$EXPECTED_VERSION"; \
     fi
 
+# ---- Seed nonroot-owned runtime data directory (for fresh Docker volumes) ----
+FROM --platform=$BUILDPLATFORM alpine:3.24 AS runtime-dirs
+RUN mkdir -p /rootfs/var/lib/cc-lb && \
+    chown 65532:65532 /rootfs/var/lib/cc-lb && \
+    chmod 0700 /rootfs/var/lib/cc-lb
+
 # ---- Shared distroless nonroot runtime image ----
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS distroless-runtime
+COPY --link --from=runtime-dirs /rootfs/var/lib /var/lib
 USER 65532:65532
 
 # ---- Split runtime target: proxy/worker data plane ----

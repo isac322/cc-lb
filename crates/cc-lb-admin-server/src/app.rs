@@ -90,10 +90,46 @@ impl AdminApp {
             admin_addr = %self.admin_addr,
             "starting split cc-lb admin control-plane server",
         );
-        let serve_result = axum::serve(listener, self.admin_router)
-            .with_graceful_shutdown(shutdown_signal())
+        self.serve_with_listener(listener, shutdown_signal(), SHUTDOWN_TASK_TIMEOUT)
             .await
-            .map_err(AdminBuildError::Io);
+    }
+
+    async fn serve_with_listener<F>(
+        self,
+        listener: TcpListener,
+        shutdown: F,
+        drain_timeout: Duration,
+    ) -> Result<(), AdminBuildError>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let (stop_tx, mut stop_rx) = watch::channel(false);
+        let mut serve_task = tokio::spawn(async move {
+            axum::serve(listener, self.admin_router)
+                .with_graceful_shutdown(async move {
+                    let _ = stop_rx.wait_for(|stopped| *stopped).await;
+                })
+                .await
+        });
+
+        let serve_result = tokio::select! {
+            result = &mut serve_task => map_serve_join_result(result),
+            _ = shutdown => {
+                let _ = stop_tx.send(true);
+                match tokio::time::timeout(drain_timeout, &mut serve_task).await {
+                    Ok(result) => map_serve_join_result(result),
+                    Err(_) => {
+                        tracing::warn!(
+                            timeout_ms = drain_timeout.as_millis() as u64,
+                            "split admin graceful drain elapsed with active connections (e.g. SSE stream); aborting listener",
+                        );
+                        serve_task.abort();
+                        let _ = serve_task.await;
+                        Ok(())
+                    }
+                }
+            }
+        };
 
         if let Some(tx) = self.event_fanout_shutdown_tx {
             let _ = tx.send(true);
@@ -102,6 +138,15 @@ impl AdminApp {
             await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
         }
         serve_result
+    }
+}
+
+fn map_serve_join_result(
+    result: Result<io::Result<()>, tokio::task::JoinError>,
+) -> Result<(), AdminBuildError> {
+    match result {
+        Ok(inner) => inner.map_err(AdminBuildError::Io),
+        Err(error) => Err(AdminBuildError::Io(io::Error::other(error))),
     }
 }
 
@@ -471,5 +516,126 @@ impl SignerFactory for NoopAdminSignerFactory {
         Err(SignerError::MissingCredentials {
             reason: "split admin server does not sign proxy requests".to_owned(),
         })
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    use super::*;
+    use cc_lb_config::AdminAuthProviderConfig;
+    use cc_lb_storage_api::MetaStore as _;
+    use tokio::net::TcpStream;
+
+    #[tokio::test]
+    async fn admin_app_shutdown_is_bounded_with_active_sse_stream() {
+        let (token_env, token_value) = std::env::vars()
+            .find(|(k, v)| {
+                !k.is_empty() && !v.is_empty() && v.bytes().all(|b| b.is_ascii_graphic())
+            })
+            .expect(
+                "at least one non-empty process env var must exist for StaticToken test config",
+            );
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let sqlite_path = dir.path().join("storage.sqlite");
+        let aead = Arc::new(AeadService::from_master_key([0u8; 32]));
+        let clock: ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+        let database_url = format!("sqlite://{}", sqlite_path.display());
+        let storage_arc = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+                .await
+                .expect("open sqlite"),
+        );
+        storage_arc.initialize().await.expect("init sqlite");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+
+        let mut config = Config {
+            storage: StorageConfig::Sqlite {
+                path: sqlite_path.clone(),
+            },
+            ..Config::default()
+        };
+        config.listener.admin_addr = addr;
+        config.aead.key_env = "__CC_LB_TEST_SHUTDOWN_KEY__".to_owned();
+        config.runtime.data_dir = Some(dir.path().to_path_buf());
+        config.event_bus.storage_tail_poll_interval_ms = 25;
+        config.admin.auth.providers = vec![AdminAuthProviderConfig::StaticToken {
+            id: "split-shutdown-test".to_owned(),
+            token_env,
+        }];
+
+        let managed_store: Arc<dyn ManagedKeyStore> = storage_arc.clone();
+        let storage: Arc<dyn Storage> = storage_arc.clone();
+        let app = build_admin_app_with_storage(config, None, managed_store, storage, aead, clock)
+            .await
+            .expect("build_admin_app_with_storage");
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            app.serve_with_listener(
+                listener,
+                async move {
+                    let _ = shutdown_rx.await;
+                },
+                Duration::from_millis(100),
+            )
+            .await
+        });
+
+        let stream = TcpStream::connect(addr).await.expect("connect to admin");
+        let req = format!(
+            "GET /admin/v1/events/stream HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token_value}\r\nAccept: text/event-stream\r\n\r\n"
+        );
+        stream.writable().await.expect("writable");
+        let mut written = 0;
+        while written < req.len() {
+            match stream.try_write(&req.as_bytes()[written..]) {
+                Ok(n) => written += n,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    stream.writable().await.expect("writable retry");
+                }
+                Err(e) => panic!("write sse request failed: {e}"),
+            }
+        }
+
+        let mut buf = Vec::new();
+        let read_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            assert!(
+                tokio::time::Instant::now() < read_deadline,
+                "timed out waiting for SSE : connected header/comment; got: {}",
+                String::from_utf8_lossy(&buf)
+            );
+            let mut tmp = [0u8; 1024];
+            tokio::time::timeout(Duration::from_secs(2), stream.readable())
+                .await
+                .expect("sse readable timeout")
+                .expect("sse readable");
+            match stream.try_read(&mut tmp) {
+                Ok(0) => panic!(
+                    "unexpected EOF before SSE connected; got: {}",
+                    String::from_utf8_lossy(&buf)
+                ),
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if String::from_utf8_lossy(&buf).contains(": connected") {
+                        break;
+                    }
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => panic!("read sse failed: {e}"),
+            }
+        }
+
+        // Trigger shutdown while keeping `_stream` open to prove the drain bound fires.
+        let _ = shutdown_tx.send(());
+        let serve_res = tokio::time::timeout(Duration::from_secs(2), server_task)
+            .await
+            .expect("split admin server must finish bounded shutdown despite active SSE stream")
+            .expect("server task panicked");
+        serve_res.expect("serve_with_listener must succeed");
+        drop(stream);
     }
 }

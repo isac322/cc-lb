@@ -10,7 +10,6 @@ MULTI_REPLICA_MODE="${CC_LB_MULTI_REPLICA_MODE:-monolith}"
 POSTGRES_URL="${CC_LB_MULTI_REPLICA_POSTGRES_URL:-}"
 ADMIN_TOKEN="00000000-0000-4000-8000-000000000037"
 MASTER_KEY="0000000000000000000000000000000000000000000000000000000000000000"
-CLUSTER_TOKEN="00000000-0000-4000-8000-000000000038"
 UPSTREAM_NAME="multi-replica-oauth"
 PRINCIPAL_NAME="multi-replica-principal"
 PROXY_API_KEY=""
@@ -289,9 +288,6 @@ acquire_timeout_secs = 10
 statement_timeout_secs = 25
 sslmode = "disable"
 
-[cluster]
-instance_url = "http://127.0.0.1:$admin_port"
-
 [aead]
 key_env = "CC_LB_MASTER_KEY"
 
@@ -362,7 +358,6 @@ start_split_admin() {
 start_replica_a() {
   if [ "$MULTI_REPLICA_MODE" = "split" ]; then
     CC_LB_MASTER_KEY="$MASTER_KEY" \
-    CC_LB_CLUSTER_TOKEN="$CLUSTER_TOKEN" \
     CC_LB_DATA_DIR="$TMP_DIR/A-data" \
     RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
     cargo run -q -p cc-lb-proxy --no-default-features --features postgres -- serve --config "$TMP_DIR/A.toml" --data-dir "$TMP_DIR/A-data" --role proxy-worker \
@@ -371,7 +366,6 @@ start_replica_a() {
   else
     CC_LB_MASTER_KEY="$MASTER_KEY" \
     CC_LB_ADMIN_TOKEN="$ADMIN_TOKEN" \
-    CC_LB_CLUSTER_TOKEN="$CLUSTER_TOKEN" \
     CC_LB_DATA_DIR="$TMP_DIR/A-data" \
     RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
     cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$TMP_DIR/A.toml" --data-dir "$TMP_DIR/A-data" \
@@ -383,7 +377,6 @@ start_replica_a() {
 start_replica_b() {
   if [ "$MULTI_REPLICA_MODE" = "split" ]; then
     CC_LB_MASTER_KEY="$MASTER_KEY" \
-    CC_LB_CLUSTER_TOKEN="$CLUSTER_TOKEN" \
     CC_LB_DATA_DIR="$TMP_DIR/B-data" \
     RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
     cargo run -q -p cc-lb-proxy --no-default-features --features postgres -- serve --config "$TMP_DIR/B.toml" --data-dir "$TMP_DIR/B-data" --role proxy \
@@ -392,7 +385,6 @@ start_replica_b() {
   else
     CC_LB_MASTER_KEY="$MASTER_KEY" \
     CC_LB_ADMIN_TOKEN="$ADMIN_TOKEN" \
-    CC_LB_CLUSTER_TOKEN="$CLUSTER_TOKEN" \
     CC_LB_DATA_DIR="$TMP_DIR/B-data" \
     RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
     cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$TMP_DIR/B.toml" --data-dir "$TMP_DIR/B-data" \
