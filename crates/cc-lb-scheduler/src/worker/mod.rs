@@ -28,7 +28,9 @@ pub use backend::SchedulerBackend;
 pub use backend::{PostgresApalisStorage, PostgresSchedulerBackend};
 #[cfg(feature = "sqlite")]
 pub use backend::{SqliteApalisStorage, SqliteSchedulerBackend};
-pub use backend_api::{Filter, SchedulerPushTask, SchedulerTaskRow, TaskStatus};
+pub use backend_api::{
+    AdaptiveTaskKeyState, Filter, SchedulerPushTask, SchedulerTaskRow, TaskStatus,
+};
 pub use jobs::{AdaptiveJob, CronJob};
 pub use layers::{AdaptiveWorker, CronWorker, build_cron_worker};
 

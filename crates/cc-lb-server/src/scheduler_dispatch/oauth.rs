@@ -1,5 +1,8 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
 use bytes::Bytes;
-use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
+use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_clock::unix_secs;
 use cc_lb_oauth_protocol::{
     ANTIGRAVITY_OAUTH_USER_AGENT, ExistingTokenParts, GeminiOAuthProfile, OAuthAccountIdentity,
@@ -10,17 +13,24 @@ use cc_lb_oauth_protocol::{
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::{
-    OAuthRefreshJob, OAuthRefreshJobHandler, RefreshOutcome, RefreshedOAuthTokens,
+    OAuthRefreshJob, OAuthRefreshJobHandler, OAuthRefreshUpstreams, RefreshOutcome,
+    RefreshedOAuthTokens,
 };
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollObservation;
 use cc_lb_scheduler::retry::JobOutcome;
-use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
+use cc_lb_scheduler::worker::{
+    AdaptiveJob, AdaptiveTaskKeyState, Filter, SchedulerPushTask, TaskStatus,
+};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    AnthropicCompatibilityKvStore, StorageError, UpstreamRecord, UpstreamStatusUpdate,
+    AnthropicCompatibilityKvStore, Storage, StorageError, UpstreamRecord, UpstreamStatusUpdate,
     UpstreamStore,
 };
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+use crate::refresh::ActiveOAuthRefreshLease;
 
 use cc_lb_control::anthropic_compat::{
     CLAUDE_CODE_LATEST_VERSION_FALLBACK, CLAUDE_CODE_LATEST_VERSION_KEY, claude_code_user_agent,
@@ -39,7 +49,7 @@ use crate::scheduler_dispatch::http::{
     RefreshRequestError, decrypt_bundle, fetch_gemini_account_metadata, fetch_gemini_quota,
     fetch_usage, gemini_summary_groups, request_refresh, upstream_base_url,
 };
-use crate::scheduler_dispatch::storage::{StorageHandle, storage_scheduler_error};
+use crate::scheduler_dispatch::storage::storage_scheduler_error;
 use crate::scheduler_dispatch::time::now_unix_millis;
 use crate::scheduler_dispatch::usage::parse_usage_body;
 
@@ -55,7 +65,200 @@ const TOKEN_REFRESH_LOOKAHEAD_SECS: u64 = 60;
 /// pinned here: 8 * 60 * 60.
 const LONG_LIVED_METADATA_REFRESH_BUCKET_SECS: u64 = 28_800;
 
+fn oauth_refresh_job_is_superseded(
+    job: &OAuthRefreshJob,
+    upstream: &UpstreamRecord,
+    aead: &AeadService,
+) -> bool {
+    if job
+        .expected_generation
+        .is_some_and(|expected| upstream.oauth_token_generation != expected)
+    {
+        return true;
+    }
+    if let Some(expected_expires_at) = job.expected_expires_at_unix_secs
+        && let Ok(bundle) = decrypt_bundle(upstream, aead)
+        && bundle.expires_at_unix_secs != expected_expires_at
+    {
+        return true;
+    }
+    false
+}
+
+struct FencedOAuthRefreshUpstreams {
+    storage: Arc<dyn Storage>,
+    lease: Arc<tokio::sync::Mutex<Option<ActiveOAuthRefreshLease>>>,
+    lease_fenced_conflict: Arc<AtomicBool>,
+    committed_generation: Arc<AtomicU64>,
+}
+
+impl OAuthRefreshUpstreams for FencedOAuthRefreshUpstreams {
+    async fn get_by_id(&self, id: Uuid) -> SchedulerResult<Option<UpstreamRecord>> {
+        UpstreamStore::get_by_id(self.storage.as_ref(), id)
+            .await
+            .map_err(storage_scheduler_error)
+    }
+
+    async fn complete_refresh(
+        &self,
+        id: Uuid,
+        holder: Uuid,
+        tokens: EncryptedOAuthTokens,
+    ) -> SchedulerResult<UpstreamRecord> {
+        let mut guard = self.lease.lock().await;
+        let Some(active) = guard.as_mut() else {
+            self.lease_fenced_conflict.store(true, Ordering::SeqCst);
+            return Err(SchedulerError::Job(
+                "oauth refresh lease is unavailable for commit".to_owned(),
+            ));
+        };
+        let fence = match active.fence().await {
+            Ok(Some(fence)) => fence,
+            Ok(None) | Err(()) => {
+                self.lease_fenced_conflict.store(true, Ordering::SeqCst);
+                return Err(SchedulerError::Job(
+                    "oauth refresh lease ownership lost before commit".to_owned(),
+                ));
+            }
+        };
+        let updated = match UpstreamStore::complete_refresh_fenced(
+            self.storage.as_ref(),
+            id,
+            holder,
+            tokens,
+            &fence,
+        )
+        .await
+        {
+            Ok(updated) => updated,
+            Err(StorageError::Conflict { .. }) => {
+                self.lease_fenced_conflict.store(true, Ordering::SeqCst);
+                return Err(SchedulerError::Job(
+                    "oauth refresh lease ownership lost before commit".to_owned(),
+                ));
+            }
+            Err(error) => return Err(storage_scheduler_error(error)),
+        };
+        active.mark_committed_and_released().await;
+        self.committed_generation
+            .store(updated.oauth_token_generation, Ordering::SeqCst);
+        Ok(updated)
+    }
+}
+
 impl SchedulerDispatch {
+    async fn has_active_tagged_oauth_refresh_job(
+        &self,
+        upstream_id: Uuid,
+        expected_generation: u64,
+    ) -> SchedulerResult<bool> {
+        const PAGE_SIZE: u32 = 500;
+        for status in [
+            TaskStatus::Pending,
+            TaskStatus::Queued,
+            TaskStatus::Running,
+            TaskStatus::Failed,
+        ] {
+            let is_failed = status == TaskStatus::Failed;
+            let mut page = 1;
+            loop {
+                let filter = Filter {
+                    status: Some(status.clone()),
+                    page,
+                    page_size: Some(PAGE_SIZE),
+                };
+                let tasks = self.backend.list_adaptive_tasks(&filter).await?;
+                for task in &tasks {
+                    if is_failed && task.attempts >= task.max_attempts {
+                        continue;
+                    }
+                    if let AdaptiveJob::OAuthRefresh(candidate) = &task.args
+                        && candidate.upstream_id == upstream_id
+                        && candidate.expected_generation == Some(expected_generation)
+                    {
+                        return Ok(true);
+                    }
+                }
+                if tasks.len() < PAGE_SIZE as usize {
+                    break;
+                }
+                page += 1;
+            }
+        }
+        Ok(false)
+    }
+
+    async fn reconcile_post_commit_work(
+        &self,
+        upstream: &UpstreamRecord,
+        traceparent: Option<&str>,
+    ) -> SchedulerResult<()> {
+        if upstream.deleted_at_unix_secs.is_some()
+            || upstream.oauth_credentials.is_none()
+            || upstream.oauth_never_refresh
+            || refresh_requires_reconnect(upstream.last_apply_error.as_deref())
+            || !matches!(
+                upstream.kind,
+                UpstreamKind::AnthropicOauth
+                    | UpstreamKind::OpenaiOauth
+                    | UpstreamKind::GeminiOauth
+            )
+        {
+            return Ok(());
+        }
+        let bundle = decrypt_bundle(upstream, self.aead.as_ref())?;
+        if bundle.never_refresh {
+            return Ok(());
+        }
+        if upstream.kind == UpstreamKind::AnthropicOauth {
+            let mut metadata_job =
+                MetadataRefreshJob::new(upstream.id, upstream.oauth_token_generation);
+            metadata_job.traceparent = traceparent.map(str::to_owned);
+            self.enqueue_metadata_refresh(metadata_job).await?;
+        }
+        self.push_next_oauth_refresh_task(
+            upstream.id,
+            upstream.oauth_token_generation,
+            bundle.expires_at_unix_secs,
+        )
+        .await
+    }
+
+    async fn reconcile_and_skip(
+        &self,
+        upstream: &UpstreamRecord,
+        traceparent: Option<&str>,
+    ) -> SchedulerResult<JobOutcome> {
+        match self.reconcile_post_commit_work(upstream, traceparent).await {
+            Ok(()) => Ok(JobOutcome::Skip),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    upstream_id = %upstream.id,
+                    generation = upstream.oauth_token_generation,
+                    "failed to reconcile post-commit oauth refresh work; retrying without token exchange",
+                );
+                Ok(JobOutcome::Retry {
+                    delay: Some(std::time::Duration::from_secs(30)),
+                })
+            }
+        }
+    }
+
+    async fn reconcile_reloaded_and_skip(
+        &self,
+        upstream_id: Uuid,
+        traceparent: Option<&str>,
+    ) -> SchedulerResult<JobOutcome> {
+        let Some(current) = UpstreamStore::get_by_id(self.storage.as_ref(), upstream_id)
+            .await
+            .map_err(storage_scheduler_error)?
+        else {
+            return Ok(JobOutcome::Skip);
+        };
+        self.reconcile_and_skip(&current, traceparent).await
+    }
+
     pub(super) async fn dispatch_oauth_refresh(
         &self,
         job: OAuthRefreshJob,
@@ -63,20 +266,296 @@ impl SchedulerDispatch {
         let replica_id = self
             .replica_id
             .ok_or_else(|| SchedulerError::Job("scheduler replica id is unavailable".to_owned()))?;
-        OAuthRefreshJobHandler::new(StorageHandle::new(self.storage.clone()), replica_id)
-            .handle(
-                job,
-                unix_secs(self.clock.now()),
-                |upstream| self.refresh_upstream(upstream),
-                |metadata_job| self.enqueue_metadata_refresh(metadata_job),
-                |upstream_id, expires_at_unix_secs| {
-                    self.push_next_oauth_refresh_task(upstream_id, expires_at_unix_secs)
-                },
+        let Some(upstream) = UpstreamStore::get_by_id(self.storage.as_ref(), job.upstream_id)
+            .await
+            .map_err(storage_scheduler_error)?
+        else {
+            return Ok(JobOutcome::Skip);
+        };
+        let traceparent = job.traceparent.clone();
+        if oauth_refresh_job_is_superseded(&job, &upstream, self.aead.as_ref()) {
+            return self
+                .reconcile_and_skip(&upstream, traceparent.as_deref())
+                .await;
+        }
+        // Legacy untagged rows serialized before generation/expiry tagging
+        // must retire cleanly once the current generation is already covered or
+        // holds a fresh non-due replacement credential.
+        if job.expected_generation.is_none() && job.expected_expires_at_unix_secs.is_none() {
+            let now = unix_secs(self.clock.now());
+            let covered = self
+                .has_active_tagged_oauth_refresh_job(upstream.id, upstream.oauth_token_generation)
+                .await?;
+            let fresh_replacement = !upstream.oauth_never_refresh
+                && decrypt_bundle(&upstream, self.aead.as_ref())
+                    .ok()
+                    .is_some_and(|bundle| {
+                        !bundle.never_refresh
+                            && now
+                                < OAuthRefreshJob::run_at_for_expires_at(
+                                    bundle.expires_at_unix_secs,
+                                )
+                    });
+            if covered || fresh_replacement {
+                return self
+                    .reconcile_and_skip(&upstream, traceparent.as_deref())
+                    .await;
+            }
+        }
+        let starting_generation = upstream.oauth_token_generation;
+        let Some(lease) = crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+            self.storage.clone(),
+            self.storage.clone(),
+            job.upstream_id,
+            starting_generation,
+            unix_secs(self.clock.now()),
+        )
+        .await
+        .map_err(storage_scheduler_error)?
+        else {
+            let now = unix_secs(self.clock.now());
+            match UpstreamStore::read_oauth_token_generation(self.storage.as_ref(), job.upstream_id)
+                .await
+                .map_err(storage_scheduler_error)?
+            {
+                None => return Ok(JobOutcome::Skip),
+                Some(current_generation) if current_generation > starting_generation => {
+                    return self
+                        .reconcile_reloaded_and_skip(job.upstream_id, traceparent.as_deref())
+                        .await;
+                }
+                Some(_) => {}
+            }
+            let observed_expires_at = crate::refresh::read_oauth_refresh_lease_expires_at(
+                self.storage.as_ref(),
+                job.upstream_id,
             )
+            .await
+            .ok()
+            .flatten();
+            let retry_delay =
+                crate::refresh::oauth_refresh_lease_retry_delay(now, observed_expires_at);
+            tracing::info!(
+                upstream_id = %job.upstream_id,
+                generation = starting_generation,
+                retry_delay_secs = retry_delay.as_secs(),
+                "oauth refresh credential lease is held by another worker or fallback; retrying after lease expiry",
+            );
+            return Ok(JobOutcome::Retry {
+                delay: Some(retry_delay),
+            });
+        };
+        self.spawn_leased_oauth_refresh(job, lease, replica_id, starting_generation, traceparent)
+            .await
+            .map_err(|error| SchedulerError::Job(format!("oauth refresh task aborted: {error}")))?
+    }
+
+    async fn retry_delay_for_retained_lease(
+        &self,
+        upstream_id: Uuid,
+        retained_expires_at: Option<u64>,
+        base_delay: std::time::Duration,
+    ) -> std::time::Duration {
+        let now = unix_secs(self.clock.now());
+        let stored =
+            crate::refresh::read_oauth_refresh_lease_expires_at(self.storage.as_ref(), upstream_id)
+                .await
+                .ok()
+                .flatten();
+        let observed_expires_at = match (retained_expires_at, stored) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        };
+        observed_expires_at.map_or(base_delay, |expires_at| {
+            crate::refresh::oauth_refresh_lease_retry_delay(now, Some(expires_at)).max(base_delay)
+        })
+    }
+
+    fn spawn_leased_oauth_refresh(
+        &self,
+        job: OAuthRefreshJob,
+        lease: crate::refresh::OAuthRefreshLease,
+        replica_id: Uuid,
+        starting_generation: u64,
+        traceparent: Option<String>,
+    ) -> tokio::task::JoinHandle<SchedulerResult<JobOutcome>> {
+        let dispatch = self.clone();
+        tokio::spawn(async move {
+            let upstream_id = job.upstream_id;
+            let active_lease = ActiveOAuthRefreshLease::start(
+                dispatch.storage.clone(),
+                dispatch.clock.clone(),
+                dispatch.cancel.clone(),
+                lease,
+                starting_generation,
+            );
+            let lease_cancel = active_lease.cancel_token();
+            let lease_slot = Arc::new(tokio::sync::Mutex::new(Some(active_lease)));
+            let lease_fenced_conflict = Arc::new(AtomicBool::new(false));
+            let committed_generation = Arc::new(AtomicU64::new(starting_generation));
+            let snapshot_superseded = Arc::new(AtomicBool::new(false));
+            let definite_no_rotation = Arc::new(AtomicBool::new(false));
+            let fenced_upstreams = FencedOAuthRefreshUpstreams {
+                storage: dispatch.storage.clone(),
+                lease: Arc::clone(&lease_slot),
+                lease_fenced_conflict: Arc::clone(&lease_fenced_conflict),
+                committed_generation: Arc::clone(&committed_generation),
+            };
+            let job_for_check = job.clone();
+            let aead_for_check = Arc::clone(&dispatch.aead);
+            let lease_cancel_for_refresh = lease_cancel.clone();
+            let committed_for_schedule = Arc::clone(&committed_generation);
+            let superseded_for_check = Arc::clone(&snapshot_superseded);
+            let definite_no_rotation_for_refresh = Arc::clone(&definite_no_rotation);
+            let dispatch_for_refresh = dispatch.clone();
+            let lease_slot_for_refresh = Arc::clone(&lease_slot);
+            let outcome = OAuthRefreshJobHandler::new(fenced_upstreams, replica_id)
+                .handle(
+                    job,
+                    unix_secs(dispatch.clock.now()),
+                    move |upstream| {
+                        let dispatch = dispatch_for_refresh.clone();
+                        let lease_slot = Arc::clone(&lease_slot_for_refresh);
+                        let lease_cancel = lease_cancel_for_refresh.clone();
+                        let definite_no_rotation = Arc::clone(&definite_no_rotation_for_refresh);
+                        async move {
+                            if upstream.oauth_token_generation != starting_generation
+                                || oauth_refresh_job_is_superseded(
+                                    &job_for_check,
+                                    &upstream,
+                                    aead_for_check.as_ref(),
+                                )
+                            {
+                                superseded_for_check.store(true, Ordering::SeqCst);
+                                return Ok(RefreshOutcome::NotRefreshable);
+                            }
+                            dispatch
+                                .refresh_upstream_with_cancel(
+                                    upstream,
+                                    &lease_cancel,
+                                    Some(&lease_slot),
+                                    Some(&definite_no_rotation),
+                                )
+                                .await
+                        }
+                    },
+                    |metadata_job| dispatch.enqueue_metadata_refresh(metadata_job),
+                    |upstream_id, expires_at_unix_secs| {
+                        let expected_generation = committed_for_schedule.load(Ordering::SeqCst);
+                        dispatch.push_next_oauth_refresh_task(
+                            upstream_id,
+                            expected_generation,
+                            expires_at_unix_secs,
+                        )
+                    },
+                )
+                .await;
+            let observed_generation_result =
+                UpstreamStore::read_oauth_token_generation(dispatch.storage.as_ref(), upstream_id)
+                    .await
+                    .ok();
+            let upstream_deleted = matches!(observed_generation_result, Some(None));
+            let observed_generation = observed_generation_result.flatten();
+            let final_generation = observed_generation.unwrap_or(starting_generation);
+            let generation_advanced =
+                observed_generation.is_some_and(|current| current > starting_generation);
+            let (was_lost, retained_expires_at) =
+                if let Some(active) = lease_slot.lock().await.take() {
+                    let lost = active.is_lost().await;
+                    let retained_expires_at = if active.provider_exchange_started()
+                        && !generation_advanced
+                        && !definite_no_rotation.load(Ordering::SeqCst)
+                    {
+                        active.retire_without_release().await
+                    } else {
+                        if let Err(error) = active.release(final_generation).await {
+                            tracing::warn!(
+                                error = %error,
+                                upstream_id = %upstream_id,
+                                "failed to release scheduled oauth refresh lease",
+                            );
+                        }
+                        None
+                    };
+                    (lost, retained_expires_at)
+                } else {
+                    (false, None)
+                };
+            if snapshot_superseded.load(Ordering::SeqCst)
+                || (matches!(outcome, Ok(JobOutcome::Retry { .. }) | Err(_))
+                    && (generation_advanced
+                        || was_lost
+                        || lease_fenced_conflict.load(Ordering::SeqCst)))
+            {
+                if upstream_deleted || generation_advanced {
+                    return dispatch
+                        .reconcile_reloaded_and_skip(upstream_id, traceparent.as_deref())
+                        .await;
+                }
+                let base_delay = match outcome {
+                    Ok(JobOutcome::Retry { delay: Some(delay) }) => delay,
+                    _ => std::time::Duration::from_secs(30),
+                };
+                let retry_delay = dispatch
+                    .retry_delay_for_retained_lease(upstream_id, retained_expires_at, base_delay)
+                    .await;
+                return Ok(JobOutcome::Retry {
+                    delay: Some(retry_delay),
+                });
+            }
+            match outcome {
+                Ok(JobOutcome::Retry { delay }) if retained_expires_at.is_some() => {
+                    let base_delay = delay.unwrap_or_else(|| std::time::Duration::from_secs(30));
+                    let retry_delay = dispatch
+                        .retry_delay_for_retained_lease(
+                            upstream_id,
+                            retained_expires_at,
+                            base_delay,
+                        )
+                        .await;
+                    Ok(JobOutcome::Retry {
+                        delay: Some(retry_delay),
+                    })
+                }
+                Err(error) if retained_expires_at.is_some() => {
+                    tracing::warn!(
+                        error = %error,
+                        upstream_id = %upstream_id,
+                        "oauth refresh failed after provider send while lease is retained; deferring retry past lease expiry",
+                    );
+                    let retry_delay = dispatch
+                        .retry_delay_for_retained_lease(
+                            upstream_id,
+                            retained_expires_at,
+                            std::time::Duration::from_secs(30),
+                        )
+                        .await;
+                    Ok(JobOutcome::Retry {
+                        delay: Some(retry_delay),
+                    })
+                }
+                other => other,
+            }
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) async fn refresh_upstream(
+        &self,
+        upstream: UpstreamRecord,
+    ) -> SchedulerResult<RefreshOutcome> {
+        self.refresh_upstream_with_cancel(upstream, &self.cancel, None, None)
             .await
     }
 
-    async fn refresh_upstream(&self, upstream: UpstreamRecord) -> SchedulerResult<RefreshOutcome> {
+    async fn refresh_upstream_with_cancel(
+        &self,
+        upstream: UpstreamRecord,
+        cancel: &CancellationToken,
+        lease_slot: Option<&tokio::sync::Mutex<Option<ActiveOAuthRefreshLease>>>,
+        definite_no_rotation: Option<&AtomicBool>,
+    ) -> SchedulerResult<RefreshOutcome> {
         if refresh_requires_reconnect(upstream.last_apply_error.as_deref()) {
             return Ok(RefreshOutcome::NotRefreshable);
         }
@@ -94,13 +573,18 @@ impl SchedulerDispatch {
                 .await?;
             return Ok(RefreshOutcome::NotRefreshable);
         }
+        if let Some(lease_slot) = lease_slot
+            && let Some(active) = lease_slot.lock().await.as_mut()
+        {
+            active.mark_provider_exchange_started();
+        }
         let response = match request_refresh(
             &self.http,
             self.oauth_cfg.as_ref(),
             &self.config,
             upstream.kind,
             bundle.oauth_profile,
-            &self.cancel,
+            cancel,
             &bundle.refresh_token,
         )
         .await
@@ -109,6 +593,11 @@ impl SchedulerDispatch {
             Err(RefreshRequestError::Endpoint { status, body })
                 if is_terminal_refresh_failure(status.as_u16(), &body) =>
             {
+                if crate::refresh::oauth_refresh_http_status_proves_no_rotation(status)
+                    && let Some(flag) = definite_no_rotation
+                {
+                    flag.store(true, Ordering::SeqCst);
+                }
                 let reason = if status == http::StatusCode::UNAUTHORIZED {
                     "status_401"
                 } else {
@@ -118,6 +607,11 @@ impl SchedulerDispatch {
                 return Ok(RefreshOutcome::NotRefreshable);
             }
             Err(RefreshRequestError::Endpoint { status, .. }) => {
+                if crate::refresh::oauth_refresh_http_status_proves_no_rotation(status)
+                    && let Some(flag) = definite_no_rotation
+                {
+                    flag.store(true, Ordering::SeqCst);
+                }
                 return Err(SchedulerError::Job(format!(
                     "oauth token endpoint returned {status}"
                 )));
@@ -175,10 +669,61 @@ impl SchedulerDispatch {
         }
     }
 
-    async fn enqueue_metadata_refresh(&self, job: MetadataRefreshJob) -> SchedulerResult<()> {
-        self.backend
-            .push_job(AdaptiveJob::MetadataRefresh(job))
-            .await
+    pub(super) async fn enqueue_metadata_refresh(
+        &self,
+        job: MetadataRefreshJob,
+    ) -> SchedulerResult<()> {
+        let idempotency_key = job.idempotency_key();
+        let task = SchedulerPushTask {
+            args: AdaptiveJob::MetadataRefresh(job),
+            idempotency_key: Some(idempotency_key),
+            run_at_unix_secs: None,
+            max_attempts: None,
+        };
+        match self.backend.push_adaptive_task(task).await {
+            Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) async fn reconcile_metadata_refresh(
+        &self,
+        job: MetadataRefreshJob,
+        tick_unix_secs: u64,
+    ) -> SchedulerResult<()> {
+        let canonical_key = job.idempotency_key();
+        let task = SchedulerPushTask {
+            args: AdaptiveJob::MetadataRefresh(job.clone()),
+            idempotency_key: Some(canonical_key.clone()),
+            run_at_unix_secs: None,
+            max_attempts: None,
+        };
+        match self.backend.push_adaptive_task(task).await {
+            Ok(()) => Ok(()),
+            Err(SchedulerError::Conflict(_)) => {
+                match self
+                    .backend
+                    .adaptive_task_key_family_state(&canonical_key)
+                    .await?
+                {
+                    AdaptiveTaskKeyState::Active | AdaptiveTaskKeyState::Done => Ok(()),
+                    AdaptiveTaskKeyState::Missing | AdaptiveTaskKeyState::TerminalFailure => {
+                        let recovery_key = format!("{canonical_key}:watchdog:{tick_unix_secs}");
+                        let recovery_task = SchedulerPushTask {
+                            args: AdaptiveJob::MetadataRefresh(job),
+                            idempotency_key: Some(recovery_key),
+                            run_at_unix_secs: None,
+                            max_attempts: None,
+                        };
+                        match self.backend.push_adaptive_task(recovery_task).await {
+                            Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
+                            Err(error) => Err(error),
+                        }
+                    }
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Enqueues a metadata refresh for a long-lived credential, which never
@@ -218,10 +763,13 @@ impl SchedulerDispatch {
     async fn push_next_oauth_refresh_task(
         &self,
         upstream_id: uuid::Uuid,
+        expected_generation: u64,
         expires_at_unix_secs: u64,
     ) -> SchedulerResult<()> {
-        let job = OAuthRefreshJob::new(upstream_id);
-        let idempotency_key = job.idempotency_key(expires_at_unix_secs);
+        let job =
+            OAuthRefreshJob::for_credential(upstream_id, expected_generation, expires_at_unix_secs);
+        let idempotency_key =
+            job.generation_idempotency_key(expected_generation, expires_at_unix_secs);
         let task = SchedulerPushTask {
             args: AdaptiveJob::OAuthRefresh(job),
             idempotency_key: Some(idempotency_key),

@@ -979,6 +979,91 @@ async fn gemini_cached_content_binding_rejects_non_api_key_owners() -> TestResul
     fixture.drop_schema().await
 }
 
+#[tokio::test]
+#[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
+async fn postgres_complete_refresh_fenced_matches_renewed_prefix_and_rejects_stale()
+-> TestResult<()> {
+    use cc_lb_aead::EncryptedOAuthTokens;
+    use cc_lb_storage_api::OAuthRefreshFence;
+
+    let Some(fixture) = Fixture::create().await? else {
+        return Ok(());
+    };
+    let storage = fixture.store();
+    storage.initialize().await?;
+
+    let owner = create_upstream(&storage, "fenced-owner").await?;
+    let key = format!("oauth_refresh_lease:v1:{owner}");
+    let prefix = "held:0:holder-a:".to_owned();
+    storage
+        .put_meta_value(&key, "held:0:holder-a:1800000180")
+        .await?;
+
+    // Empty prefix fails closed without mutating generation or meta.
+    assert!(matches!(
+        storage
+            .complete_refresh_fenced(
+                owner,
+                Uuid::new_v4(),
+                EncryptedOAuthTokens::from_ciphertext(vec![1, 2, 3]),
+                &OAuthRefreshFence {
+                    expected_generation: 0,
+                    lease_meta_key: key.clone(),
+                    expected_lease_prefix: String::new(),
+                },
+            )
+            .await
+            .expect_err("empty prefix must fail closed"),
+        StorageError::Conflict { .. }
+    ));
+
+    // Renewed timestamp of same holder matches prefix (`starts_with`) and commits generation 0 -> 1.
+    let updated = storage
+        .complete_refresh_fenced(
+            owner,
+            Uuid::new_v4(),
+            EncryptedOAuthTokens::from_ciphertext(vec![4, 5, 6]),
+            &OAuthRefreshFence {
+                expected_generation: 0,
+                lease_meta_key: key.clone(),
+                expected_lease_prefix: prefix.clone(),
+            },
+        )
+        .await?;
+    assert_eq!(updated.oauth_token_generation, 1);
+    assert_eq!(
+        storage.get_meta_value(&key).await?.as_deref(),
+        Some("idle:1")
+    );
+
+    // Competitor lease holder or stale generation is rejected with Conflict.
+    storage
+        .put_meta_value(&key, "held:1:holder-b:1800000240")
+        .await?;
+    assert!(matches!(
+        storage
+            .complete_refresh_fenced(
+                owner,
+                Uuid::new_v4(),
+                EncryptedOAuthTokens::from_ciphertext(vec![7, 8, 9]),
+                &OAuthRefreshFence {
+                    expected_generation: 1,
+                    lease_meta_key: key.clone(),
+                    expected_lease_prefix: "held:1:holder-a:".to_owned(),
+                },
+            )
+            .await
+            .expect_err("competitor lease must fail closed"),
+        StorageError::Conflict { .. }
+    ));
+    assert_eq!(
+        storage.get_meta_value(&key).await?.as_deref(),
+        Some("held:1:holder-b:1800000240")
+    );
+
+    fixture.drop_schema().await
+}
+
 async fn create_upstream(storage: &PostgresStorage, name: &str) -> TestResult<Uuid> {
     create_upstream_kind(storage, name, UpstreamKind::AnthropicOauth, None).await
 }

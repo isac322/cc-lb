@@ -173,6 +173,16 @@ pub struct UpstreamStatusUpdate {
     pub expected_spec_revision: Option<u64>,
 }
 
+/// Ownership and generation predicate guarding [`UpstreamStore::complete_refresh_fenced`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthRefreshFence {
+    pub expected_generation: u64,
+    pub lease_meta_key: String,
+    /// Stable holder prefix across heartbeat renewals (e.g. `held:{generation}:{holder}:`).
+    /// Must be non-empty.
+    pub expected_lease_prefix: String,
+}
+
 #[async_trait]
 pub trait UpstreamStore: Send + Sync {
     async fn create(&self, create: UpstreamCreate) -> StorageResult<UpstreamRecord>;
@@ -203,6 +213,17 @@ pub trait UpstreamStore: Send + Sync {
         holder: Uuid,
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord>;
+    async fn complete_refresh_fenced(
+        &self,
+        _id: Uuid,
+        _holder: Uuid,
+        _tokens: EncryptedOAuthTokens,
+        _fence: &OAuthRefreshFence,
+    ) -> StorageResult<UpstreamRecord> {
+        Err(crate::StorageError::Fatal {
+            message: "complete_refresh_fenced requires an atomic storage implementation".to_owned(),
+        })
+    }
     async fn read_oauth_token_generation(&self, id: Uuid) -> StorageResult<Option<u64>> {
         Ok(self
             .get_by_id(id)

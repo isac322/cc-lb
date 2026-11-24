@@ -1,6 +1,7 @@
 use cc_lb_aead::AeadService;
 use cc_lb_oauth_protocol::refresh_requires_reconnect;
 use cc_lb_scheduler::error::Result as SchedulerResult;
+use cc_lb_scheduler::jobs::watchdog::OAuthRefreshWatchdogTarget;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{UpstreamRecord, UpstreamStore, WarmupLane};
 use uuid::Uuid;
@@ -24,11 +25,54 @@ impl SchedulerDispatch {
         self.list_watchdog_upstream_ids(filter).await
     }
 
+    #[cfg(test)]
     pub(super) async fn list_oauth_refresh_watchdog_upstream_ids(
         &self,
     ) -> SchedulerResult<Vec<Uuid>> {
         self.list_watchdog_upstream_ids(WatchdogUpstreamFilter::OAuth)
             .await
+    }
+
+    pub(super) async fn list_oauth_refresh_watchdog_targets(
+        &self,
+    ) -> SchedulerResult<Vec<OAuthRefreshWatchdogTarget>> {
+        let mut targets = Vec::new();
+        let mut after = None;
+        loop {
+            let page = UpstreamStore::list(self.storage.as_ref(), after, UPSTREAM_PAGE_LIMIT)
+                .await
+                .map_err(storage_scheduler_error)?;
+            if page.is_empty() {
+                break;
+            }
+            for upstream in &page {
+                if !WatchdogUpstreamFilter::OAuth.matches(upstream, self.aead.as_ref()) {
+                    continue;
+                }
+                let bundle = match decrypt_bundle(upstream, self.aead.as_ref()) {
+                    Ok(bundle) => bundle,
+                    Err(error) => {
+                        tracing::warn!(
+                            upstream_id = %upstream.id,
+                            %error,
+                            "oauth refresh watchdog skipped upstream: credential decrypt failed"
+                        );
+                        continue;
+                    }
+                };
+                targets.push(OAuthRefreshWatchdogTarget {
+                    upstream_id: upstream.id,
+                    expected_generation: upstream.oauth_token_generation,
+                    expected_expires_at_unix_secs: bundle.expires_at_unix_secs,
+                    is_anthropic_oauth: upstream.kind == UpstreamKind::AnthropicOauth,
+                });
+            }
+            after = page.last().map(|upstream| upstream.id);
+            if page.len() < UPSTREAM_PAGE_LIMIT {
+                break;
+            }
+        }
+        Ok(targets)
     }
 
     pub(super) async fn list_oauth_usage_poll_upstream_ids(&self) -> SchedulerResult<Vec<Uuid>> {

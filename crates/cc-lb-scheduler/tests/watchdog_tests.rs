@@ -320,3 +320,217 @@ fn entity_job(kind: WatchdogEntityKind, upstream_id: Uuid) -> AdaptiveJob {
         ),
     }
 }
+
+#[tokio::test]
+async fn oauth_refresh_watchdog_ignores_obsolete_generation_job_and_seeds_current_successor()
+-> TestResult<()> {
+    use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
+    use cc_lb_scheduler::jobs::watchdog::{OAuthRefreshWatchdogTarget, run_oauth_refresh_watchdog};
+
+    let fixture = Fixture::new().await?;
+    let upstream_id = Uuid::new_v4();
+    let old_job = OAuthRefreshJob::for_credential(upstream_id, 1, 100);
+    let old_key = old_job.generation_idempotency_key(1, 100);
+    fixture
+        .backend
+        .push_adaptive_task(SchedulerPushTask {
+            args: AdaptiveJob::OAuthRefresh(old_job),
+            idempotency_key: Some(old_key),
+            run_at_unix_secs: Some(RUN_AT_UNIX_SECS),
+            max_attempts: None,
+        })
+        .await?;
+
+    let target_expires = TICK_UNIX_SECS + 3600;
+    let targets = [OAuthRefreshWatchdogTarget {
+        upstream_id,
+        expected_generation: 2,
+        expected_expires_at_unix_secs: target_expires,
+        is_anthropic_oauth: true,
+    }];
+
+    // Generation-1 job must NOT mask missing generation-2 successor.
+    let first = run_oauth_refresh_watchdog(&fixture.backend, &targets, TICK_UNIX_SECS).await?;
+    assert_eq!(first.seeded, 1);
+    assert_eq!(first.seeded_targets, targets);
+
+    let expected_key =
+        OAuthRefreshJob::new(upstream_id).generation_idempotency_key(2, target_expires);
+    assert_eq!(fixture.count_key(&expected_key).await?, 1);
+    let run_at: i64 = sqlx::query_scalar("SELECT run_at FROM Jobs WHERE idempotency_key = ?1")
+        .bind(&expected_key)
+        .fetch_one(&fixture.pool)
+        .await?;
+    assert_eq!(
+        u64::try_from(run_at)?,
+        OAuthRefreshJob::run_at_for_expires_at(target_expires)
+    );
+
+    // Subsequent watchdog run sees the active generation-2 successor and does not re-seed.
+    let second =
+        run_oauth_refresh_watchdog(&fixture.backend, &targets, TICK_UNIX_SECS + 60).await?;
+    assert_eq!(second.seeded, 0);
+    assert!(second.seeded_targets.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn oauth_refresh_watchdog_recovers_exhausted_failed_and_killed_same_generation_rows()
+-> TestResult<()> {
+    use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
+    use cc_lb_scheduler::jobs::watchdog::{OAuthRefreshWatchdogTarget, run_oauth_refresh_watchdog};
+
+    for terminal_status in ["Failed", "Killed"] {
+        let fixture = Fixture::new().await?;
+        let upstream_id = Uuid::new_v4();
+        let target_expires = TICK_UNIX_SECS + 3_600;
+        let generation = 3;
+        let canonical_job =
+            OAuthRefreshJob::for_credential(upstream_id, generation, target_expires);
+        let canonical_key = canonical_job.generation_idempotency_key(generation, target_expires);
+
+        fixture
+            .backend
+            .push_adaptive_task(SchedulerPushTask {
+                args: AdaptiveJob::OAuthRefresh(canonical_job.clone()),
+                idempotency_key: Some(canonical_key.clone()),
+                run_at_unix_secs: Some(OAuthRefreshJob::run_at_for_expires_at(target_expires)),
+                max_attempts: Some(5),
+            })
+            .await?;
+
+        // Retryable Failed (attempts < max_attempts) must remain covered and NOT re-seed.
+        sqlx::query(
+            "UPDATE Jobs SET status = 'Failed', attempts = 2, max_attempts = 5 WHERE idempotency_key = ?1",
+        )
+        .bind(&canonical_key)
+        .execute(&fixture.pool)
+        .await?;
+        let target = OAuthRefreshWatchdogTarget {
+            upstream_id,
+            expected_generation: generation,
+            expected_expires_at_unix_secs: target_expires,
+            is_anthropic_oauth: false,
+        };
+        let retryable =
+            run_oauth_refresh_watchdog(&fixture.backend, &[target], TICK_UNIX_SECS).await?;
+        assert_eq!(
+            retryable.seeded, 0,
+            "{terminal_status}: retryable Failed should stay covered"
+        );
+
+        // Mark canonical row terminal (`Killed` or exhausted `Failed`).
+        let attempts = if terminal_status == "Failed" { 5 } else { 1 };
+        sqlx::query(
+            "UPDATE Jobs SET status = ?1, attempts = ?2, max_attempts = 5 WHERE idempotency_key = ?3",
+        )
+        .bind(terminal_status)
+        .bind(attempts)
+        .bind(&canonical_key)
+        .execute(&fixture.pool)
+        .await?;
+
+        let first = run_oauth_refresh_watchdog(&fixture.backend, &[target], TICK_UNIX_SECS).await?;
+        assert_eq!(first.seeded, 1, "{terminal_status}: recovery must seed");
+        assert_eq!(first.seeded_targets, vec![target]);
+
+        let recovery_key_1 = canonical_job.watchdog_recovery_idempotency_key(
+            generation,
+            target_expires,
+            TICK_UNIX_SECS,
+        );
+        assert_eq!(fixture.count_key(&recovery_key_1).await?, 1);
+        let payload = fixture.job_payload(&recovery_key_1).await?;
+        assert_eq!(
+            payload,
+            serde_json::to_value(AdaptiveJob::OAuthRefresh(canonical_job.clone()))?,
+            "recovery job must retain generation and expiry fences"
+        );
+        let run_at: i64 = sqlx::query_scalar("SELECT run_at FROM Jobs WHERE idempotency_key = ?1")
+            .bind(&recovery_key_1)
+            .fetch_one(&fixture.pool)
+            .await?;
+        assert_eq!(
+            u64::try_from(run_at)?,
+            OAuthRefreshJob::run_at_for_expires_at(target_expires)
+        );
+
+        // Single-snapshot family helpers observe the active recovery row even while
+        // the canonical row is terminal, and switch to Running/Pending reschedules seamlessly.
+        assert_eq!(
+            fixture
+                .backend
+                .adaptive_task_key_family_state(&canonical_key)
+                .await?,
+            cc_lb_scheduler::worker::AdaptiveTaskKeyState::Active
+        );
+        assert_eq!(
+            fixture
+                .backend
+                .find_active_adaptive_key_in_family(&canonical_key)
+                .await?
+                .as_deref(),
+            Some(recovery_key_1.as_str())
+        );
+
+        // Next tick sees the active recovery row and does NOT seed again.
+        let second =
+            run_oauth_refresh_watchdog(&fixture.backend, &[target], TICK_UNIX_SECS + 60).await?;
+        assert_eq!(second.seeded, 0);
+
+        // Rescheduling recovery row from Running back to retryable Pending remains Active
+        // across single-snapshot family queries.
+        sqlx::query(
+            "UPDATE Jobs SET status = 'Pending', attempts = 1, max_attempts = 5 WHERE idempotency_key = ?1",
+        )
+        .bind(&recovery_key_1)
+        .execute(&fixture.pool)
+        .await?;
+        assert_eq!(
+            fixture
+                .backend
+                .adaptive_task_key_family_state(&recovery_key_1)
+                .await?,
+            cc_lb_scheduler::worker::AdaptiveTaskKeyState::Active
+        );
+
+        // If the first recovery row also exhausts, family becomes TerminalFailure and a later
+        // tick seeds a fresh recovery row.
+        sqlx::query(
+            "UPDATE Jobs SET status = 'Failed', attempts = 5, max_attempts = 5 WHERE idempotency_key = ?1",
+        )
+        .bind(&recovery_key_1)
+        .execute(&fixture.pool)
+        .await?;
+        assert_eq!(
+            fixture
+                .backend
+                .adaptive_task_key_family_state(&canonical_key)
+                .await?,
+            cc_lb_scheduler::worker::AdaptiveTaskKeyState::TerminalFailure
+        );
+        let third =
+            run_oauth_refresh_watchdog(&fixture.backend, &[target], TICK_UNIX_SECS + 120).await?;
+        assert_eq!(third.seeded, 1);
+        let recovery_key_2 = canonical_job.watchdog_recovery_idempotency_key(
+            generation,
+            target_expires,
+            TICK_UNIX_SECS + 120,
+        );
+        assert_eq!(fixture.count_key(&recovery_key_2).await?, 1);
+
+        // Marking recovery_key_2 Done promotes family state (`Active < Done < TerminalFailure` -> `Done`).
+        sqlx::query("UPDATE Jobs SET status = 'Done' WHERE idempotency_key = ?1")
+            .bind(&recovery_key_2)
+            .execute(&fixture.pool)
+            .await?;
+        assert_eq!(
+            fixture
+                .backend
+                .adaptive_task_key_family_state(&canonical_key)
+                .await?,
+            cc_lb_scheduler::worker::AdaptiveTaskKeyState::Done
+        );
+    }
+    Ok(())
+}

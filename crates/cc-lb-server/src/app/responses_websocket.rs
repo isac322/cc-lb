@@ -64,7 +64,7 @@ pub(super) async fn responses_websocket_handler(
 type WsProviderSink =
     futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, UpstreamMessage>;
 
-struct WsProviderConnection {
+pub(super) struct WsProviderConnection {
     upstream_id: uuid::Uuid,
     upstream_name: String,
     sink: WsProviderSink,
@@ -79,7 +79,7 @@ impl Drop for WsProviderConnection {
     }
 }
 
-enum WsProviderEvent {
+pub(super) enum WsProviderEvent {
     Frame {
         connection_id: u64,
         bytes: Bytes,
@@ -116,6 +116,28 @@ pub(super) struct WsConnectTimings {
     pub(super) connect_ms: Option<u64>,
 }
 
+fn acquire_websocket_breaker_permit(
+    state: &ProxyState,
+    upstream_id: uuid::Uuid,
+) -> Result<cc_lb_engine::Permit, WebSocketError> {
+    let breaker = state.breaker_registry.breaker(
+        websocket_breaker_key(upstream_id),
+        state.breaker_config,
+        state.clock.clone(),
+    );
+    breaker.permit().map_err(|_| {
+        WebSocketError::new(
+            502,
+            "upstream_unavailable",
+            "provider WebSocket connection is unavailable",
+        )
+    })
+}
+
+pub(super) const DEFAULT_WS_PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const WS_PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_WS_EVENT_DRAIN_BATCH: usize = 64;
+
 pub(super) async fn connect_provider_websocket(
     state: &ProxyState,
     upstream_id: uuid::Uuid,
@@ -130,18 +152,32 @@ pub(super) async fn connect_provider_websocket(
     ),
     WebSocketError,
 > {
-    let breaker = state.breaker_registry.breaker(
-        websocket_breaker_key(upstream_id),
-        state.breaker_config,
-        state.clock.clone(),
-    );
-    let permit = breaker.permit().map_err(|_| {
-        WebSocketError::new(
-            502,
-            "upstream_unavailable",
-            "provider WebSocket connection is unavailable",
-        )
-    })?;
+    let permit = acquire_websocket_breaker_permit(state, upstream_id)?;
+    connect_provider_websocket_with_permit(
+        permit,
+        state.body_caps.messages,
+        request,
+        bulkhead_guard,
+        DEFAULT_WS_PROVIDER_CONNECT_TIMEOUT,
+    )
+    .await
+}
+
+async fn connect_provider_websocket_with_permit(
+    permit: cc_lb_engine::Permit,
+    message_cap: usize,
+    request: http::Request<()>,
+    bulkhead_guard: cc_lb_engine::OwnedBulkheadGuard,
+    connect_timeout: Duration,
+) -> Result<
+    (
+        WebSocketStream<MaybeTlsStream<TcpStream>>,
+        HeaderMap,
+        cc_lb_engine::OwnedBulkheadGuard,
+        WsConnectTimings,
+    ),
+    WebSocketError,
+> {
     let Some(host) = request.uri().host().map(str::to_owned) else {
         drop(permit);
         return Err(WebSocketError::new(
@@ -157,8 +193,8 @@ pub(super) async fn connect_provider_websocket(
             80
         }
     });
-    let ws_config = responses_websocket_config(state.body_caps.messages);
-    let result = tokio::time::timeout(WS_PROVIDER_CONNECT_TIMEOUT, async move {
+    let ws_config = responses_websocket_config(message_cap);
+    let result = tokio::time::timeout(connect_timeout, async move {
         let mut connect_timings = WsConnectTimings::default();
         let ip_literal = host
             .trim_start_matches('[')
@@ -249,10 +285,13 @@ pub(super) async fn connect_provider_websocket(
         }
     }
 }
-pub(super) const WS_PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const WS_DISPATCH_CONNECT_BUDGET: Duration = Duration::from_secs(30);
+pub(super) const WS_MAX_UPSTREAM_ATTEMPTS: usize = 3;
 
-struct ResponsesProviderParams<'a> {
-    state: &'a ProxyState,
+struct ResponsesProviderParams {
+    message_cap: usize,
+    permit: cc_lb_engine::Permit,
+    connect_timeout: Duration,
     request: http::Request<()>,
     connection_id: u64,
     upstream_id: uuid::Uuid,
@@ -263,10 +302,12 @@ struct ResponsesProviderParams<'a> {
 }
 
 async fn start_responses_provider(
-    params: ResponsesProviderParams<'_>,
+    params: ResponsesProviderParams,
 ) -> Result<(WsProviderConnection, WsConnectTimings), WebSocketError> {
     let ResponsesProviderParams {
-        state,
+        message_cap,
+        permit,
+        connect_timeout,
         request,
         connection_id,
         upstream_id,
@@ -276,7 +317,14 @@ async fn start_responses_provider(
         events,
     } = params;
     let (upstream, _response_headers, bulkhead_guard, connect_timings) =
-        connect_provider_websocket(state, upstream_id, request, bulkhead_guard).await?;
+        connect_provider_websocket_with_permit(
+            permit,
+            message_cap,
+            request,
+            bulkhead_guard,
+            connect_timeout,
+        )
+        .await?;
     let (sink, mut stream) = upstream.split();
     let task = tokio::spawn(async move {
         let reason = loop {
@@ -368,12 +416,88 @@ pub(super) fn websocket_error_message(error: &WebSocketError) -> Message {
     )
 }
 
+async fn write_dispatched_frame(
+    gateway: &mut ResponsesWebSocketGateway,
+    dispatch: WebSocketDispatch,
+    connection_id: u64,
+    connections: &mut HashMap<u64, WsProviderConnection>,
+    dispatch_timings: cc_lb_engine::responses_websocket::ResponsesDispatchTimings,
+) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
+    let Some(connection) = connections.get_mut(&connection_id) else {
+        let result = gateway.connection_closed(connection_id, "provider connection is unavailable");
+        return (result.dispatches, result.errors);
+    };
+    let frame = match gateway.frame_for_send(&dispatch) {
+        Ok(frame) => match String::from_utf8(frame.to_vec()) {
+            Ok(frame) => UpstreamMessage::Text(frame.into()),
+            Err(_) => {
+                let error = WebSocketError::new(
+                    502,
+                    "response_transform_error",
+                    "Shape plugin returned a non-UTF-8 WebSocket frame",
+                )
+                .with_stream(dispatch.stream_id.clone());
+                let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
+                return (ready, vec![error]);
+            }
+        },
+        Err(error) => {
+            let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
+            return (ready, vec![error]);
+        }
+    };
+    let send_started = std::time::Instant::now();
+    // After the first write is attempted, failure may have reached the
+    // provider. Never retry or replay it on a different connection.
+    if connection.sink.send(frame).await.is_err() {
+        if let Some(connection) = connections.remove(&connection_id) {
+            connection.task.abort();
+        }
+        let result = gateway.connection_closed(connection_id, "provider write failed");
+        return (result.dispatches, result.errors);
+    }
+    (
+        gateway.sent_with_timings(dispatch.turn_id, dispatch_timings, send_started),
+        Vec::new(),
+    )
+}
+
+async fn commit_and_send_responses_dispatch(
+    gateway: &mut ResponsesWebSocketGateway,
+    dispatch: WebSocketDispatch,
+    connection_id: u64,
+    connections: &mut HashMap<u64, WsProviderConnection>,
+    dispatch_timings: cc_lb_engine::responses_websocket::ResponsesDispatchTimings,
+) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
+    let Some(connection) = connections.get(&connection_id) else {
+        let result = gateway.connection_closed(connection_id, "provider connection is unavailable");
+        return (result.dispatches, result.errors);
+    };
+    gateway.assign_connection(
+        dispatch.turn_id,
+        connection_id,
+        connection.upstream_id,
+        &connection.upstream_name,
+    );
+    gateway.record_dispatch_timings(dispatch.turn_id, dispatch_timings);
+    gateway.commit_send_attempt(dispatch.turn_id);
+    write_dispatched_frame(
+        gateway,
+        dispatch,
+        connection_id,
+        connections,
+        dispatch_timings,
+    )
+    .await
+}
+
 async fn send_responses_dispatch(
     gateway: &mut ResponsesWebSocketGateway,
     dispatch: WebSocketDispatch,
     connection_id: u64,
     connections: &mut HashMap<u64, WsProviderConnection>,
     dispatch_timings: cc_lb_engine::responses_websocket::ResponsesDispatchTimings,
+    deadline: tokio::time::Instant,
 ) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
     let Some(connection) = connections.get_mut(&connection_id) else {
         let mut result =
@@ -438,50 +562,59 @@ async fn send_responses_dispatch(
         }
         return (Vec::new(), Vec::new());
     }
-    gateway.assign_connection(
-        dispatch.turn_id,
-        connection_id,
-        connection.upstream_id,
-        &connection.upstream_name,
-    );
-    gateway.record_dispatch_timings(dispatch.turn_id, dispatch_timings);
-    if let Err(error) = gateway.validate_send(dispatch.turn_id).await {
-        let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
-        return (ready, vec![error]);
-    }
-    let frame = match gateway.frame_for_send(&dispatch) {
-        Ok(frame) => match String::from_utf8(frame.to_vec()) {
-            Ok(frame) => UpstreamMessage::Text(frame.into()),
-            Err(_) => {
-                let error = WebSocketError::new(
-                    502,
-                    "response_transform_error",
-                    "Shape plugin returned a non-UTF-8 WebSocket frame",
-                )
-                .with_stream(dispatch.stream_id.clone());
-                let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
-                return (ready, vec![error]);
-            }
-        },
-        Err(error) => {
+    let upstream_id = connection.upstream_id;
+    match tokio::time::timeout_at(
+        deadline,
+        gateway.validate_candidate_for_send(
+            dispatch.turn_id,
+            upstream_id,
+            Some(connection_id),
+            false,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
             let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
             return (ready, vec![error]);
         }
-    };
-    let send_started = std::time::Instant::now();
-    // After the first write is attempted, failure may have reached the
-    // provider. Never retry or replay it on a different connection.
-    if connection.sink.send(frame).await.is_err() {
-        if let Some(connection) = connections.remove(&connection_id) {
-            connection.task.abort();
+        Err(_) => {
+            let error = WebSocketError::new(
+                504,
+                "upstream_unavailable",
+                "provider WebSocket connection timed out",
+            )
+            .with_stream(dispatch.stream_id.clone());
+            let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
+            return (ready, vec![error]);
         }
-        let result = gateway.connection_closed(connection_id, "provider write failed");
-        return (result.dispatches, result.errors);
     }
-    (
-        gateway.sent_with_timings(dispatch.turn_id, dispatch_timings, send_started),
-        Vec::new(),
+    commit_and_send_responses_dispatch(
+        gateway,
+        dispatch,
+        connection_id,
+        connections,
+        dispatch_timings,
     )
+    .await
+}
+
+fn has_remaining_ws_candidates(
+    pending: &VecDeque<cc_lb_engine::responses_websocket::WebSocketCandidate>,
+    connections: &HashMap<u64, WsProviderConnection>,
+    stream_id: Option<&str>,
+    attempts: usize,
+    max_attempts: usize,
+) -> bool {
+    !pending.is_empty()
+        && (attempts < max_attempts
+            || pending.iter().any(|next| {
+                connections.values().any(|conn| {
+                    conn.upstream_id == next.upstream_id
+                        && (!next.socket_per_lane || conn.lane.as_deref() == stream_id)
+                })
+            }))
 }
 
 async fn dispatch_responses_websocket(
@@ -493,6 +626,37 @@ async fn dispatch_responses_websocket(
     next_connection_id: &mut u64,
     connection_capacity: usize,
 ) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
+    dispatch_responses_websocket_with_limits(
+        gateway,
+        dispatch,
+        state,
+        connections,
+        events,
+        next_connection_id,
+        connection_capacity,
+        WS_PROVIDER_CONNECT_TIMEOUT,
+        WS_DISPATCH_CONNECT_BUDGET,
+        WS_MAX_UPSTREAM_ATTEMPTS,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn dispatch_responses_websocket_with_limits(
+    gateway: &mut ResponsesWebSocketGateway,
+    dispatch: WebSocketDispatch,
+    state: &ProxyState,
+    connections: &mut HashMap<u64, WsProviderConnection>,
+    events: &tokio::sync::mpsc::Sender<WsProviderEvent>,
+    next_connection_id: &mut u64,
+    connection_capacity: usize,
+    per_attempt_timeout: Duration,
+    connect_budget: Duration,
+    max_attempts: usize,
+) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
+    let mut last_error = None;
+    let mut attempts = 0usize;
+    let deadline = tokio::time::Instant::now() + connect_budget;
     if let Some(connection_id) = dispatch.connection_id {
         return send_responses_dispatch(
             gateway,
@@ -500,26 +664,93 @@ async fn dispatch_responses_websocket(
             connection_id,
             connections,
             cc_lb_engine::responses_websocket::ResponsesDispatchTimings::reused(),
+            deadline,
         )
         .await;
     }
 
-    let mut last_error = None;
-    for candidate in &dispatch.candidates {
+    let mut pending: VecDeque<cc_lb_engine::responses_websocket::WebSocketCandidate> =
+        dispatch.candidates.iter().cloned().collect();
+    while !pending.is_empty() {
+        let reserve_api_key = max_attempts > 1
+            && attempts + 1 == max_attempts
+            && dispatch.prefer_api_key_on_final_attempt;
+        let candidate = if reserve_api_key && !pending[0].is_api_key {
+            if let Some(pos) = pending.iter().position(|candidate| candidate.is_api_key) {
+                pending.remove(pos).expect("api-key candidate exists")
+            } else {
+                pending.pop_front().expect("pending queue is non-empty")
+            }
+        } else {
+            pending.pop_front().expect("pending queue is non-empty")
+        };
         let existing = connections.iter().find_map(|(id, connection)| {
             (connection.upstream_id == candidate.upstream_id
                 && (!candidate.socket_per_lane || connection.lane == dispatch.stream_id))
                 .then_some(*id)
         });
         if let Some(connection_id) = existing {
-            return send_responses_dispatch(
-                gateway,
-                dispatch,
-                connection_id,
+            if deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .is_zero()
+            {
+                last_error.get_or_insert_with(|| {
+                    WebSocketError::new(
+                        504,
+                        "upstream_unavailable",
+                        "provider WebSocket connection timed out",
+                    )
+                });
+                break;
+            }
+            let has_remaining_candidates = has_remaining_ws_candidates(
+                &pending,
                 connections,
-                cc_lb_engine::responses_websocket::ResponsesDispatchTimings::reused(),
+                dispatch.stream_id.as_deref(),
+                attempts,
+                max_attempts,
+            );
+            match tokio::time::timeout_at(
+                deadline,
+                gateway.validate_candidate_for_send(
+                    dispatch.turn_id,
+                    candidate.upstream_id,
+                    Some(connection_id),
+                    has_remaining_candidates,
+                ),
             )
-            .await;
+            .await
+            {
+                Ok(Ok(())) => {
+                    return commit_and_send_responses_dispatch(
+                        gateway,
+                        dispatch,
+                        connection_id,
+                        connections,
+                        cc_lb_engine::responses_websocket::ResponsesDispatchTimings::reused(),
+                    )
+                    .await;
+                }
+                Ok(Err(error)) => {
+                    let fatal = matches!(
+                        error.code,
+                        "authentication_error" | "reservation_expired" | "response_not_found"
+                    );
+                    last_error = Some(error);
+                    if fatal {
+                        break;
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    last_error = Some(WebSocketError::new(
+                        504,
+                        "upstream_unavailable",
+                        "provider WebSocket connection timed out",
+                    ));
+                    break;
+                }
+            }
         }
         if connections.len() >= connection_capacity {
             last_error = Some(WebSocketError::new(
@@ -529,33 +760,127 @@ async fn dispatch_responses_websocket(
             ));
             break;
         }
+        // Skip open circuit breakers without burning a retry slot or bulkhead/signing work.
+        let permit = match acquire_websocket_breaker_permit(state, candidate.upstream_id) {
+            Ok(permit) => permit,
+            Err(error) => {
+                last_error = Some(error);
+                continue;
+            }
+        };
+        if attempts >= max_attempts {
+            drop(permit);
+            break;
+        }
+        if deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .is_zero()
+        {
+            drop(permit);
+            last_error.get_or_insert_with(|| {
+                WebSocketError::new(
+                    504,
+                    "upstream_unavailable",
+                    "provider WebSocket connection timed out",
+                )
+            });
+            break;
+        }
+        // Recheck fresh quota and routing eligibility before burning an attempt
+        // slot or acquiring the bulkhead so an unpinned fallback whose quota just
+        // exhausted skips cleanly to the next eligible upstream.
+        match tokio::time::timeout_at(
+            deadline,
+            gateway.validate_fallback_candidate(&dispatch, &candidate),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                drop(permit);
+                let fatal = matches!(
+                    error.code,
+                    "authentication_error" | "reservation_expired" | "response_not_found"
+                );
+                last_error = Some(error);
+                if fatal {
+                    break;
+                }
+                continue;
+            }
+            Err(_) => {
+                drop(permit);
+                last_error = Some(WebSocketError::new(
+                    504,
+                    "upstream_unavailable",
+                    "provider WebSocket connection timed out",
+                ));
+                break;
+            }
+        }
+        attempts += 1;
+        let attempt_deadline = (tokio::time::Instant::now() + per_attempt_timeout).min(deadline);
         let mut bulkhead_config = state.websocket_bulkhead_config;
         bulkhead_config.semaphore_permits = bulkhead_config.max_conns_per_upstream;
         let bulkhead = state
             .websocket_bulkheads
             .bulkhead(candidate.upstream_name.clone(), bulkhead_config);
         let bulkhead_started = std::time::Instant::now();
-        let bulkhead_guard = match bulkhead.acquire_owned().await {
-            Ok(guard) => guard,
-            Err(error) => {
-                last_error = Some(WebSocketError::new(
-                    503,
-                    "overloaded_error",
-                    error.to_string(),
-                ));
-                break;
-            }
-        };
+        let bulkhead_guard =
+            match tokio::time::timeout_at(attempt_deadline, bulkhead.acquire_owned()).await {
+                Ok(Ok(guard)) => guard,
+                Ok(Err(error)) => {
+                    drop(permit);
+                    last_error = Some(WebSocketError::new(
+                        503,
+                        "overloaded_error",
+                        error.to_string(),
+                    ));
+                    break;
+                }
+                Err(_) => {
+                    drop(permit);
+                    last_error = Some(WebSocketError::new(
+                        504,
+                        "upstream_unavailable",
+                        "provider WebSocket connection timed out",
+                    ));
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    continue;
+                }
+            };
         let bulkhead_wait_ms = bulkhead_started
             .elapsed()
             .as_millis()
             .min(u128::from(u64::MAX)) as u64;
-        let prepared = match gateway.prepare_connection(&dispatch, candidate).await {
-            Ok(prepared) => prepared,
-            Err(error) => {
+        let prepared = match tokio::time::timeout_at(
+            attempt_deadline,
+            gateway.prepare_connection(&dispatch, &candidate),
+        )
+        .await
+        {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(error)) => {
+                drop(bulkhead_guard);
+                drop(permit);
                 let authentication_failed = error.code == "authentication_error";
                 last_error = Some(error);
                 if authentication_failed {
+                    break;
+                }
+                continue;
+            }
+            Err(_) => {
+                drop(bulkhead_guard);
+                drop(permit);
+                last_error = Some(WebSocketError::new(
+                    504,
+                    "upstream_unavailable",
+                    "provider WebSocket connection timed out",
+                ));
+                if tokio::time::Instant::now() >= deadline {
                     break;
                 }
                 continue;
@@ -564,11 +889,30 @@ async fn dispatch_responses_websocket(
         let request = match responses_websocket_request(prepared.0, prepared.1) {
             Ok(request) => request,
             Err(error) => {
+                drop(bulkhead_guard);
+                drop(permit);
                 last_error = Some(WebSocketError::new(502, "upstream_unavailable", error));
                 continue;
             }
         };
+        let attempt_timeout =
+            attempt_deadline.saturating_duration_since(tokio::time::Instant::now());
+        if attempt_timeout.is_zero() {
+            drop(bulkhead_guard);
+            drop(permit);
+            last_error = Some(WebSocketError::new(
+                504,
+                "upstream_unavailable",
+                "provider WebSocket connection timed out",
+            ));
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            continue;
+        }
         let Some(next_id) = next_connection_id.checked_add(1) else {
+            drop(bulkhead_guard);
+            drop(permit);
             last_error = Some(WebSocketError::new(
                 503,
                 "overloaded_error",
@@ -580,7 +924,9 @@ async fn dispatch_responses_websocket(
         *next_connection_id = next_id;
         let (connection, connect_timings) =
             match start_responses_provider(ResponsesProviderParams {
-                state,
+                message_cap: state.body_caps.messages,
+                permit,
+                connect_timeout: attempt_timeout,
                 request,
                 connection_id,
                 upstream_id: candidate.upstream_id,
@@ -603,15 +949,60 @@ async fn dispatch_responses_websocket(
             dns_ms: connect_timings.dns_ms,
             connect_ms: connect_timings.connect_ms,
         };
-        connections.insert(connection_id, connection);
-        return send_responses_dispatch(
-            gateway,
-            dispatch,
-            connection_id,
+        let has_remaining_candidates = has_remaining_ws_candidates(
+            &pending,
             connections,
-            dispatch_timings,
+            dispatch.stream_id.as_deref(),
+            attempts,
+            max_attempts,
+        );
+        match tokio::time::timeout_at(
+            attempt_deadline,
+            gateway.validate_candidate_for_send(
+                dispatch.turn_id,
+                candidate.upstream_id,
+                None,
+                has_remaining_candidates,
+            ),
         )
-        .await;
+        .await
+        {
+            Ok(Ok(())) => {
+                connections.insert(connection_id, connection);
+                return commit_and_send_responses_dispatch(
+                    gateway,
+                    dispatch,
+                    connection_id,
+                    connections,
+                    dispatch_timings,
+                )
+                .await;
+            }
+            Ok(Err(error)) => {
+                drop(connection);
+                let fatal = matches!(
+                    error.code,
+                    "authentication_error" | "reservation_expired" | "response_not_found"
+                );
+                last_error = Some(error);
+                if fatal {
+                    break;
+                }
+                continue;
+            }
+            Err(_) => {
+                drop(connection);
+                last_error = Some(WebSocketError::new(
+                    504,
+                    "upstream_unavailable",
+                    "provider WebSocket connection timed out",
+                ));
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                continue;
+            }
+        }
     }
     let error = last_error
         .unwrap_or_else(|| {
@@ -624,6 +1015,281 @@ async fn dispatch_responses_websocket(
         .with_stream(dispatch.stream_id);
     let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
     (ready, vec![error])
+}
+
+async fn handle_ws_provider_event(
+    provider: WsProviderEvent,
+    gateway: &mut ResponsesWebSocketGateway,
+    connections: &mut HashMap<u64, WsProviderConnection>,
+    dispatches: &mut VecDeque<WebSocketDispatch>,
+    downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+) -> bool {
+    match provider {
+        WsProviderEvent::Frame {
+            connection_id,
+            bytes,
+            text,
+        } => {
+            if !connections.contains_key(&connection_id) {
+                return true;
+            }
+            match gateway.provider_message(connection_id, &bytes).await {
+                Ok(result) => {
+                    let sending_downstream =
+                        result.frames.is_some() || result.forward || !result.errors.is_empty();
+                    if sending_downstream {
+                        gateway.begin_downstream_send(connection_id);
+                    }
+                    if let Some(frames) = result.frames {
+                        for frame in frames {
+                            let message = Message::Text(
+                                frame.try_into().expect("transformed event is UTF-8"),
+                            );
+                            if downstream_sink.send(message).await.is_err() {
+                                return false;
+                            }
+                        }
+                    } else if result.forward {
+                        let message = if text {
+                            Message::Text(bytes.try_into().expect("provider text is UTF-8"))
+                        } else {
+                            Message::Binary(bytes)
+                        };
+                        if downstream_sink.send(message).await.is_err() {
+                            return false;
+                        }
+                    }
+                    for error in result.errors {
+                        if downstream_sink
+                            .send(websocket_error_message(&error))
+                            .await
+                            .is_err()
+                        {
+                            return false;
+                        }
+                    }
+                    if sending_downstream {
+                        gateway.finish_downstream_send(connection_id);
+                    }
+                    dispatches.extend(result.dispatches);
+                }
+                Err(error) => {
+                    for pending_error in gateway.take_pending_errors() {
+                        if downstream_sink
+                            .send(websocket_error_message(&pending_error))
+                            .await
+                            .is_err()
+                        {
+                            return false;
+                        }
+                    }
+                    let native_connection_error = matches!(
+                        error.code,
+                        "websocket_connection_limit_reached" | "unattributed_upstream_error"
+                    );
+                    let affinity_error = error.code == "upstream_affinity_unavailable";
+                    if native_connection_error {
+                        let message = if text {
+                            Message::Text(bytes.try_into().expect("provider text is UTF-8"))
+                        } else {
+                            Message::Binary(bytes)
+                        };
+                        if downstream_sink.send(message).await.is_err() {
+                            return false;
+                        }
+                    }
+                    if affinity_error
+                        && downstream_sink
+                            .send(websocket_error_message(&error))
+                            .await
+                            .is_err()
+                    {
+                        return false;
+                    }
+                    connections.remove(&connection_id);
+                    let result = gateway.connection_closed(connection_id, &error.message);
+                    // A native connection-level error already
+                    // represents all affected turns on the wire.
+                    if !native_connection_error {
+                        if result.errors.is_empty() {
+                            if !affinity_error
+                                && downstream_sink
+                                    .send(websocket_error_message(&error))
+                                    .await
+                                    .is_err()
+                            {
+                                return false;
+                            }
+                        } else {
+                            let mut suppress_affinity_duplicate = affinity_error;
+                            for closed_error in result.errors {
+                                if suppress_affinity_duplicate
+                                    && closed_error.stream_id == error.stream_id
+                                {
+                                    suppress_affinity_duplicate = false;
+                                    continue;
+                                }
+                                if downstream_sink
+                                    .send(websocket_error_message(&closed_error))
+                                    .await
+                                    .is_err()
+                                {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                    dispatches.extend(result.dispatches);
+                }
+            }
+        }
+        WsProviderEvent::Ping {
+            connection_id,
+            bytes,
+        } => {
+            if !connections.contains_key(&connection_id) {
+                return true;
+            }
+            gateway.observe_provider_ping(connection_id);
+            if let Some(connection) = connections.get_mut(&connection_id)
+                && connection
+                    .sink
+                    .send(UpstreamMessage::Pong(bytes))
+                    .await
+                    .is_err()
+            {
+                if let Some(connection) = connections.remove(&connection_id) {
+                    connection.task.abort();
+                }
+                let result = gateway.connection_closed(connection_id, "provider pong failed");
+                for error in result.errors {
+                    if downstream_sink
+                        .send(websocket_error_message(&error))
+                        .await
+                        .is_err()
+                    {
+                        return false;
+                    }
+                }
+                dispatches.extend(result.dispatches);
+            }
+        }
+        WsProviderEvent::Closed {
+            connection_id,
+            reason,
+        } => {
+            if connections.remove(&connection_id).is_none() {
+                return true;
+            }
+            let result = gateway.connection_closed(connection_id, &reason);
+            for error in result.errors {
+                if downstream_sink
+                    .send(websocket_error_message(&error))
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+            dispatches.extend(result.dispatches);
+        }
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn flush_pending_ws_dispatches(
+    gateway: &mut ResponsesWebSocketGateway,
+    state: &ProxyState,
+    connections: &mut HashMap<u64, WsProviderConnection>,
+    events: &tokio::sync::mpsc::Sender<WsProviderEvent>,
+    next_connection_id: &mut u64,
+    capacity: usize,
+    dispatches: &mut VecDeque<WebSocketDispatch>,
+    downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+) -> bool {
+    while let Some(dispatch) = dispatches.pop_front() {
+        let (ready, errors) = dispatch_responses_websocket(
+            gateway,
+            dispatch,
+            state,
+            connections,
+            events,
+            next_connection_id,
+            capacity,
+        )
+        .await;
+        dispatches.extend(ready);
+        for error in errors {
+            if downstream_sink
+                .send(websocket_error_message(&error))
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+async fn drain_buffered_ws_events_snapshot(
+    event_rx: &mut tokio::sync::mpsc::Receiver<WsProviderEvent>,
+    gateway: &mut ResponsesWebSocketGateway,
+    connections: &mut HashMap<u64, WsProviderConnection>,
+    dispatches: &mut VecDeque<WebSocketDispatch>,
+    downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    max_events: usize,
+) -> bool {
+    let mut buffered = Vec::with_capacity(max_events.min(event_rx.max_capacity()));
+    while buffered.len() < max_events {
+        match event_rx.try_recv() {
+            Ok(event) => buffered.push(event),
+            Err(_) => break,
+        }
+    }
+    for provider in buffered {
+        if !handle_ws_provider_event(provider, gateway, connections, dispatches, downstream_sink)
+            .await
+        {
+            return false;
+        }
+    }
+    true
+}
+
+pub(super) async fn drain_buffered_ws_events_before_expiry(
+    event_rx: &mut tokio::sync::mpsc::Receiver<WsProviderEvent>,
+    gateway: &mut ResponsesWebSocketGateway,
+    connections: &mut HashMap<u64, WsProviderConnection>,
+    dispatches: &mut VecDeque<WebSocketDispatch>,
+    downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    now: std::time::Instant,
+) -> bool {
+    let snapshot_limit = event_rx.len();
+    if snapshot_limit > 0
+        && !drain_buffered_ws_events_snapshot(
+            event_rx,
+            gateway,
+            connections,
+            dispatches,
+            downstream_sink,
+            snapshot_limit,
+        )
+        .await
+    {
+        return false;
+    }
+    for error in gateway.expire_pending_error_terminals(now) {
+        if downstream_sink
+            .send(websocket_error_message(&error))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
 }
 
 pub(super) struct WsDownstreamReader {
@@ -748,32 +1414,79 @@ async fn relay_responses_websocket(
 
     let body = async {
         'relay: loop {
-            while let Some(dispatch) = dispatches.pop_front() {
-                let (ready, errors) = dispatch_responses_websocket(
+            let dispatched_any = !dispatches.is_empty();
+            if !flush_pending_ws_dispatches(
+                &mut gateway,
+                &state,
+                &mut connections,
+                &events,
+                &mut next_connection_id,
+                capacity,
+                &mut dispatches,
+                &mut downstream_sink,
+            )
+            .await
+            {
+                break 'relay;
+            }
+            if dispatched_any {
+                // Drain a finite snapshot of provider events already buffered
+                // before parking in `select!`, so sustained provider traffic
+                // never starves client controls, heartbeats, or expiry timers.
+                let snapshot_limit = event_rx.len().min(MAX_WS_EVENT_DRAIN_BATCH);
+                if snapshot_limit > 0
+                    && !drain_buffered_ws_events_snapshot(
+                        &mut event_rx,
+                        &mut gateway,
+                        &mut connections,
+                        &mut dispatches,
+                        &mut downstream_sink,
+                        snapshot_limit,
+                    )
+                    .await
+                {
+                    break 'relay;
+                }
+                if !flush_pending_ws_dispatches(
                     &mut gateway,
-                    dispatch,
                     &state,
                     &mut connections,
                     &events,
                     &mut next_connection_id,
                     capacity,
+                    &mut dispatches,
+                    &mut downstream_sink,
                 )
-                .await;
-                dispatches.extend(ready);
-                for error in errors {
-                    if downstream_sink
-                        .send(websocket_error_message(&error))
-                        .await
-                        .is_err()
-                    {
-                        break 'relay;
-                    }
+                .await
+                {
+                    break 'relay;
                 }
             }
 
+            let pending_deadline = gateway
+                .next_pending_error_deadline()
+                .map(tokio::time::Instant::from_std);
             tokio::select! {
                 _ = activity_heartbeat.tick(), if gateway.has_active_turns() => {
                     gateway.observe_active_turns_heartbeat();
+                }
+                _ = async {
+                    if let Some(deadline) = pending_deadline {
+                        tokio::time::sleep_until(deadline).await;
+                    }
+                }, if pending_deadline.is_some() => {
+                    if !drain_buffered_ws_events_before_expiry(
+                        &mut event_rx,
+                        &mut gateway,
+                        &mut connections,
+                        &mut dispatches,
+                        &mut downstream_sink,
+                        std::time::Instant::now(),
+                    )
+                    .await
+                    {
+                        break 'relay;
+                    }
                 }
                 client = client_rx.recv() => {
                     let Some(message) = client else { break };
@@ -827,122 +1540,16 @@ async fn relay_responses_websocket(
                 }
                 provider = event_rx.recv() => {
                     let Some(provider) = provider else { break };
-                    match provider {
-                        WsProviderEvent::Frame { connection_id, bytes, text } => {
-                            if !connections.contains_key(&connection_id) {
-                                continue;
-                            }
-                            match gateway.provider_message(connection_id, &bytes).await {
-                                Ok(result) => {
-                                    let sending_downstream = result.frames.is_some()
-                                        || result.forward
-                                        || !result.errors.is_empty();
-                                    if sending_downstream {
-                                        gateway.begin_downstream_send(connection_id);
-                                    }
-                                    if let Some(frames) = result.frames {
-                                        for frame in frames {
-                                            let message = Message::Text(
-                                                frame.try_into().expect("transformed event is UTF-8"),
-                                            );
-                                            if downstream_sink.send(message).await.is_err() {
-                                                break 'relay;
-                                            }
-                                        }
-                                    } else if result.forward {
-                                        let message = if text {
-                                            Message::Text(bytes.try_into().expect("provider text is UTF-8"))
-                                        } else {
-                                            Message::Binary(bytes)
-                                        };
-                                        if downstream_sink.send(message).await.is_err() {
-                                            break 'relay;
-                                        }
-                                    }
-                                    for error in result.errors {
-                                        if downstream_sink.send(websocket_error_message(&error)).await.is_err() {
-                                            break 'relay;
-                                        }
-                                    }
-                                    if sending_downstream {
-                                        gateway.finish_downstream_send(connection_id);
-                                    }
-                                    dispatches.extend(result.dispatches);
-                                }
-                                Err(error) => {
-                                    let native_connection_error = matches!(
-                                        error.code,
-                                        "websocket_connection_limit_reached" | "unattributed_upstream_error"
-                                    );
-                                    let affinity_error = error.code == "upstream_affinity_unavailable";
-                                    if native_connection_error {
-                                        let message = if text {
-                                            Message::Text(bytes.try_into().expect("provider text is UTF-8"))
-                                        } else {
-                                            Message::Binary(bytes)
-                                        };
-                                        if downstream_sink.send(message).await.is_err() {
-                                            break 'relay;
-                                        }
-                                    }
-                                    if affinity_error
-                                        && downstream_sink.send(websocket_error_message(&error)).await.is_err()
-                                    {
-                                        break 'relay;
-                                    }
-                                    connections.remove(&connection_id);
-                                    let result = gateway.connection_closed(connection_id, &error.message);
-                                    // A native connection-level error already
-                                    // represents all affected turns on the wire.
-                                    if !native_connection_error {
-                                        if result.errors.is_empty() {
-                                            if !affinity_error && downstream_sink.send(websocket_error_message(&error)).await.is_err() {
-                                                break 'relay;
-                                            }
-                                        } else {
-                                            let mut suppress_affinity_duplicate = affinity_error;
-                                            for closed_error in result.errors {
-                                                if suppress_affinity_duplicate && closed_error.stream_id == error.stream_id {
-                                                    suppress_affinity_duplicate = false;
-                                                    continue;
-                                                }
-                                                if downstream_sink.send(websocket_error_message(&closed_error)).await.is_err() {
-                                                    break 'relay;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    dispatches.extend(result.dispatches);
-                                }
-                            }
-                        }
-                        WsProviderEvent::Ping { connection_id, bytes } => {
-                            gateway.observe_provider_ping(connection_id);
-                            if let Some(connection) = connections.get_mut(&connection_id)
-                                && connection.sink.send(UpstreamMessage::Pong(bytes)).await.is_err()
-                            {
-                                if let Some(connection) = connections.remove(&connection_id) {
-                                    connection.task.abort();
-                                }
-                                let result = gateway.connection_closed(connection_id, "provider pong failed");
-                                for error in result.errors {
-                                    if downstream_sink.send(websocket_error_message(&error)).await.is_err() {
-                                        break 'relay;
-                                    }
-                                }
-                                dispatches.extend(result.dispatches);
-                            }
-                        }
-                        WsProviderEvent::Closed { connection_id, reason } => {
-                            connections.remove(&connection_id);
-                            let result = gateway.connection_closed(connection_id, &reason);
-                            for error in result.errors {
-                                if downstream_sink.send(websocket_error_message(&error)).await.is_err() {
-                                    break 'relay;
-                                }
-                            }
-                            dispatches.extend(result.dispatches);
-                        }
+                    if !handle_ws_provider_event(
+                        provider,
+                        &mut gateway,
+                        &mut connections,
+                        &mut dispatches,
+                        &mut downstream_sink,
+                    )
+                    .await
+                    {
+                        break 'relay;
                     }
                 }
             }

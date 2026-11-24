@@ -736,6 +736,7 @@ pub(super) async fn build_runtime_with_storage_core(
                 metadata_hook: subscription_metadata_hook.clone(),
                 cancel: refresh_cancel.clone(),
                 apalis_handle: scheduler_lazy_handle.clone(),
+                meta: storage.clone(),
             })),
         });
     let lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>> =
@@ -1818,8 +1819,10 @@ pub async fn open_storage(
     let opened_scheduler =
         crate::scheduler_factory::open_scheduler_storage(&config.storage, &config.scheduler, clock)
             .await?;
-    let lazy_refresh_claim_guard =
-        crate::refresh::lazy_refresh_claim_guard_from_scheduler(&opened_scheduler.backend);
+    let lazy_refresh_claim_guard = crate::refresh::lazy_refresh_claim_guard_from_scheduler(
+        &opened_scheduler.backend,
+        opened.storage.clone(),
+    );
     Ok((
         opened.managed_key_store,
         opened.storage,

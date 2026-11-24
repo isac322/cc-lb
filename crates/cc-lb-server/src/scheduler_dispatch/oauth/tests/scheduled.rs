@@ -254,18 +254,48 @@ async fn transient_refresh_responses_keep_existing_retry_policy() {
         let mut fixture = DispatchFixture::new().await;
         set_token_endpoint(&mut fixture, endpoint);
         let upstream = fixture.oauth_upstream(false).await;
-        for _ in 0..2 {
+        let expected_retry_delay = if status.is_server_error() {
+            std::time::Duration::from_secs(crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1)
+        } else {
+            std::time::Duration::from_secs(30)
+        };
+        assert_eq!(
+            fixture
+                .dispatch
+                .dispatch_oauth_refresh(OAuthRefreshJob::new(upstream.id))
+                .await
+                .expect("retryable response"),
+            JobOutcome::Retry {
+                delay: Some(expected_retry_delay),
+            }
+        );
+        if status.is_server_error() {
+            // Ambiguous 5xx responses keep the held lease until TTL expiry and defer retries past it.
             assert_eq!(
                 fixture
                     .dispatch
                     .dispatch_oauth_refresh(OAuthRefreshJob::new(upstream.id))
                     .await
-                    .expect("retryable response"),
+                    .expect("held 5xx lease retries after expiry without calling provider"),
                 JobOutcome::Retry {
-                    delay: Some(std::time::Duration::from_secs(30)),
+                    delay: Some(expected_retry_delay),
                 }
             );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            fixture
+                .clock
+                .advance_secs(crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1);
         }
+        assert_eq!(
+            fixture
+                .dispatch
+                .dispatch_oauth_refresh(OAuthRefreshJob::new(upstream.id))
+                .await
+                .expect("retryable response after rejection or lease expiry"),
+            JobOutcome::Retry {
+                delay: Some(expected_retry_delay),
+            }
+        );
         let stored = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
             .await
             .expect("load transient state")
@@ -460,7 +490,9 @@ async fn network_refresh_failure_keeps_existing_retry_policy() {
             .await
             .expect("network failure is retryable"),
         JobOutcome::Retry {
-            delay: Some(std::time::Duration::from_secs(30)),
+            delay: Some(std::time::Duration::from_secs(
+                crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1,
+            )),
         }
     );
     let stored = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
@@ -1259,4 +1291,1097 @@ async fn poll_usage_post_refresh_401_via_http_token_exchange_records_status_401(
         usage_srv.abort();
         token_srv.abort();
     }
+}
+
+#[tokio::test]
+async fn scheduled_oauth_refresh_retries_without_calling_provider_while_lease_is_held() {
+    use cc_lb_storage_api::MetaStore;
+
+    let (endpoint, calls, server) = token_server(
+        StatusCode::OK,
+        r#"{"access_token":"leased-access","refresh_token":"leased-refresh","token_type":"Bearer","expires_in":3600}"#,
+    )
+    .await;
+    let mut fixture = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture, endpoint);
+    let upstream = fixture.oauth_upstream(false).await;
+    let now = cc_lb_clock::unix_secs(fixture.clock.now());
+    let lease = crate::refresh::try_acquire_oauth_refresh_lease(
+        fixture.storage.as_ref(),
+        upstream.id,
+        upstream.oauth_token_generation,
+        now,
+    )
+    .await
+    .expect("lease lookup")
+    .expect("acquire external lease");
+
+    let contended = fixture
+        .dispatch
+        .dispatch_oauth_refresh(OAuthRefreshJob::new(upstream.id))
+        .await
+        .expect("contended dispatch returns Retry");
+    assert!(matches!(contended, JobOutcome::Retry { .. }));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "scheduled dispatch must not contact /oauth/token while fallback lease is live"
+    );
+
+    crate::refresh::release_oauth_refresh_lease(
+        fixture.storage.as_ref(),
+        upstream.id,
+        &lease.token,
+        upstream.oauth_token_generation,
+    )
+    .await
+    .expect("release lease");
+
+    let completed = fixture
+        .dispatch
+        .dispatch_oauth_refresh(OAuthRefreshJob::new(upstream.id))
+        .await
+        .expect("uncontended dispatch completes");
+    assert_eq!(completed, JobOutcome::Done);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let refreshed = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
+        .await
+        .expect("load refreshed")
+        .expect("upstream exists");
+    assert_eq!(
+        refreshed.oauth_token_generation,
+        upstream.oauth_token_generation + 1
+    );
+    let expected_idle = format!("idle:{}", refreshed.oauth_token_generation);
+    let lease_value = fixture
+        .storage
+        .get_meta_value(&format!("oauth_refresh_lease:v1:{}", upstream.id))
+        .await
+        .expect("read released lease");
+    assert_eq!(lease_value.as_deref(), Some(expected_idle.as_str()));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn obsolete_oauth_refresh_job_skips_after_fallback_rotates_token_and_preserves_successor() {
+    let (endpoint, calls, server) = token_server(
+        StatusCode::OK,
+        r#"{"access_token":"late-access","refresh_token":"late-refresh","token_type":"Bearer","expires_in":3600}"#,
+    )
+    .await;
+    let mut fixture = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture, endpoint);
+    let upstream = fixture.oauth_upstream(false).await;
+    let original_generation = upstream.oauth_token_generation;
+    let obsolete_job = OAuthRefreshJob::for_credential(upstream.id, original_generation, 1);
+
+    // Simulate lazy fallback advancing N -> N+1 with a newer expiry before the
+    // previously pending worker job resumes and executes.
+    let replacement = EncryptedOAuthTokens::encrypt(
+        fixture.dispatch.aead.as_ref(),
+        &OAuthTokenBundle {
+            oauth_profile: Default::default(),
+            access_token: "fallback-access".to_owned(),
+            refresh_token: "fallback-refresh".to_owned(),
+            expires_at_unix_secs: 9_999_999_999,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: None,
+            scopes: vec!["messages".to_owned()],
+            never_refresh: false,
+        },
+        upstream.id.as_bytes(),
+    )
+    .expect("encrypt replacement");
+    let rotated = UpstreamStore::complete_refresh(
+        fixture.storage.as_ref(),
+        upstream.id,
+        Uuid::new_v4(),
+        replacement,
+    )
+    .await
+    .expect("fallback rotates credential");
+    assert_eq!(rotated.oauth_token_generation, original_generation + 1);
+
+    let outcome = fixture
+        .dispatch
+        .dispatch_oauth_refresh(obsolete_job)
+        .await
+        .expect("obsolete job dispatch");
+    assert_eq!(outcome, JobOutcome::Skip);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "obsolete job must never exchange the replacement credential",
+    );
+
+    let current = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
+        .await
+        .expect("reload upstream")
+        .expect("upstream present");
+    assert_eq!(
+        current.oauth_token_generation,
+        original_generation + 1,
+        "obsolete job must leave the replacement generation untouched",
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn scheduled_oauth_refresh_rejects_stale_lease_after_generation_advances() {
+    use cc_lb_storage_api::MetaStore;
+
+    let (endpoint, calls, server) = token_server(
+        StatusCode::OK,
+        r#"{"access_token":"stale-access","refresh_token":"stale-refresh","token_type":"Bearer","expires_in":3600}"#,
+    )
+    .await;
+    let mut fixture = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture, endpoint);
+    let upstream = fixture.oauth_upstream(false).await;
+    let old_gen = upstream.oauth_token_generation;
+    let now = cc_lb_clock::unix_secs(fixture.clock.now());
+    let lease_key = crate::refresh::oauth_refresh_lease_meta_key(upstream.id);
+
+    // Another runner committed N+1 and published `idle:{N+1}`.
+    let advanced_idle = format!("idle:{}", old_gen + 1);
+    fixture
+        .storage
+        .put_meta_value(&lease_key, &advanced_idle)
+        .await
+        .expect("seed idle:N+1");
+
+    // A stale lease claim for `old_gen` must be rejected and leave `idle:{N+1}` intact.
+    let stale_attempt = crate::refresh::try_acquire_oauth_refresh_lease(
+        fixture.storage.as_ref(),
+        upstream.id,
+        old_gen,
+        now,
+    )
+    .await
+    .expect("stale lease attempt");
+    assert!(
+        stale_attempt.is_none(),
+        "stale lease generation N must not overwrite idle:(N+1)",
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .get_meta_value(&lease_key)
+            .await
+            .expect("read meta")
+            .as_deref(),
+        Some(advanced_idle.as_str())
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    // Dispatching a legacy/generation-unbound job after `idle:{N+1}` also fails
+    // to steal ownership for generation `old_gen` and skips once generation > old_gen,
+    // OR completes only if uncontended at N+1. Specifically verify an N-bound job
+    // skips cleanly with 0 token calls even if metadata says `idle:N+1`.
+    let replacement = EncryptedOAuthTokens::encrypt(
+        fixture.dispatch.aead.as_ref(),
+        &OAuthTokenBundle {
+            oauth_profile: Default::default(),
+            access_token: "fresh-access".to_owned(),
+            refresh_token: "fresh-refresh".to_owned(),
+            expires_at_unix_secs: 9_999_999_999,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: None,
+            scopes: vec!["messages".to_owned()],
+            never_refresh: false,
+        },
+        upstream.id.as_bytes(),
+    )
+    .expect("encrypt fresh");
+    UpstreamStore::complete_refresh(
+        fixture.storage.as_ref(),
+        upstream.id,
+        Uuid::new_v4(),
+        replacement,
+    )
+    .await
+    .expect("commit generation N+1");
+
+    let stale_job = OAuthRefreshJob::with_expected_generation(upstream.id, old_gen);
+    let outcome = fixture
+        .dispatch
+        .dispatch_oauth_refresh(stale_job)
+        .await
+        .expect("stale job dispatch");
+    assert_eq!(outcome, JobOutcome::Skip);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture
+            .storage
+            .get_meta_value(&lease_key)
+            .await
+            .expect("read meta after skip")
+            .as_deref(),
+        Some(advanced_idle.as_str())
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn legacy_untagged_oauth_refresh_job_retires_and_reconciles_after_fallback_rotates_token() {
+    let (endpoint, calls, server) = token_server(
+        StatusCode::OK,
+        r#"{"access_token":"legacy-late","refresh_token":"legacy-refresh","token_type":"Bearer","expires_in":3600}"#,
+    )
+    .await;
+    let mut fixture = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture, endpoint);
+    let upstream = fixture.oauth_upstream(false).await;
+    let now = cc_lb_clock::unix_secs(fixture.clock.now());
+    let new_expiry = now + 7_200;
+
+    // Simulate lazy fallback having rotated N -> N+1 to a fresh token (due at new_expiry - 300),
+    // WITHOUT having enqueued the N+1 successor yet (or while a persisted pre-upgrade untagged job
+    // without `expected_generation` / `expected_expires_at_unix_secs` remained Pending).
+    let replacement = EncryptedOAuthTokens::encrypt(
+        fixture.dispatch.aead.as_ref(),
+        &OAuthTokenBundle {
+            oauth_profile: Default::default(),
+            access_token: "fallback-fresh-access".to_owned(),
+            refresh_token: "fallback-fresh-refresh".to_owned(),
+            expires_at_unix_secs: new_expiry,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: None,
+            scopes: vec!["messages".to_owned()],
+            never_refresh: false,
+        },
+        upstream.id.as_bytes(),
+    )
+    .expect("encrypt fresh fallback token");
+    let rotated = UpstreamStore::complete_refresh(
+        fixture.storage.as_ref(),
+        upstream.id,
+        Uuid::new_v4(),
+        replacement,
+    )
+    .await
+    .expect("fallback rotates token");
+    let new_gen = rotated.oauth_token_generation;
+
+    // Deserialize a persisted pre-upgrade payload with no expected fields.
+    let raw_legacy = serde_json::json!({
+        "upstream_id": upstream.id,
+        "traceparent": null
+    });
+    let legacy_job: OAuthRefreshJob =
+        serde_json::from_value(raw_legacy).expect("deserialize legacy untagged job");
+    assert_eq!(legacy_job.expected_generation, None);
+    assert_eq!(legacy_job.expected_expires_at_unix_secs, None);
+
+    let outcome = fixture
+        .dispatch
+        .dispatch_oauth_refresh(legacy_job.clone())
+        .await
+        .expect("legacy job retires cleanly");
+    assert_eq!(outcome, JobOutcome::Skip);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    // Canonical successor for N+1 was reconciled!
+    let expected_key = legacy_job.generation_idempotency_key(new_gen, new_expiry);
+    let pending = fixture
+        .dispatch
+        .backend
+        .list_adaptive_tasks(&Filter {
+            status: Some(TaskStatus::Pending),
+            page: 1,
+            page_size: Some(50),
+        })
+        .await
+        .expect("list pending");
+    assert!(
+        pending.iter().any(|task| {
+            task.idempotency_key.as_deref() == Some(expected_key.as_str())
+                && matches!(
+                    &task.args,
+                    AdaptiveJob::OAuthRefresh(j)
+                        if j.expected_generation == Some(new_gen)
+                            && j.expected_expires_at_unix_secs == Some(new_expiry)
+                )
+        }),
+        "legacy retirement must reconcile canonical generation-tagged successor"
+    );
+
+    // Even when a credential later becomes due, an active canonical generation-tagged job
+    // still causes a legacy untagged job to retire without calling `/oauth/token`.
+    fixture.clock.advance_secs(7_100);
+    let second_outcome = fixture
+        .dispatch
+        .dispatch_oauth_refresh(legacy_job)
+        .await
+        .expect("legacy job covered by tagged successor retries/retires");
+    assert_eq!(second_outcome, JobOutcome::Skip);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    server.abort();
+}
+
+#[tokio::test]
+async fn superseded_oauth_refresh_job_repairs_missing_metadata_and_successor_without_provider_call()
+{
+    let (endpoint, calls, server) = token_server(
+        StatusCode::OK,
+        r#"{"access_token":"never-called","refresh_token":"never-called","token_type":"Bearer","expires_in":3600}"#,
+    )
+    .await;
+    let mut fixture = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture, endpoint);
+    let upstream = fixture.oauth_upstream(false).await;
+    let old_gen = upstream.oauth_token_generation;
+    let now = cc_lb_clock::unix_secs(fixture.clock.now());
+    let new_expiry = now + 5_000;
+
+    // Commit generation N+1 as if token persistence succeeded right before metadata/successor
+    // enqueue failed. Neither MetadataRefreshJob(N+1) nor OAuthRefreshJob(N+1) exists yet.
+    let replacement = EncryptedOAuthTokens::encrypt(
+        fixture.dispatch.aead.as_ref(),
+        &OAuthTokenBundle {
+            oauth_profile: Default::default(),
+            access_token: "committed-access".to_owned(),
+            refresh_token: "committed-refresh".to_owned(),
+            expires_at_unix_secs: new_expiry,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: None,
+            scopes: vec!["messages".to_owned()],
+            never_refresh: false,
+        },
+        upstream.id.as_bytes(),
+    )
+    .expect("encrypt committed tokens");
+    let committed = UpstreamStore::complete_refresh(
+        fixture.storage.as_ref(),
+        upstream.id,
+        Uuid::new_v4(),
+        replacement,
+    )
+    .await
+    .expect("commit generation N+1");
+    let new_gen = committed.oauth_token_generation;
+
+    let superseded_job = OAuthRefreshJob::for_credential(upstream.id, old_gen, 1);
+    let outcome = fixture
+        .dispatch
+        .dispatch_oauth_refresh(superseded_job)
+        .await
+        .expect("superseded job repairs post-commit work");
+    assert_eq!(outcome, JobOutcome::Skip);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "repairing missing post-commit work must not exchange the token again",
+    );
+
+    let pending = fixture
+        .dispatch
+        .backend
+        .list_adaptive_tasks(&Filter {
+            status: Some(TaskStatus::Pending),
+            page: 1,
+            page_size: Some(50),
+        })
+        .await
+        .expect("list pending after repair");
+    let expected_oauth_key =
+        OAuthRefreshJob::new(upstream.id).generation_idempotency_key(new_gen, new_expiry);
+    assert!(
+        pending.iter().any(|task| {
+            task.idempotency_key.as_deref() == Some(expected_oauth_key.as_str())
+                && matches!(
+                    &task.args,
+                    AdaptiveJob::OAuthRefresh(j)
+                        if j.expected_generation == Some(new_gen)
+                            && j.expected_expires_at_unix_secs == Some(new_expiry)
+                )
+        }),
+        "missing successor OAuthRefreshJob must be repaired"
+    );
+    assert!(
+        pending.iter().any(|task| matches!(
+            &task.args,
+            AdaptiveJob::MetadataRefresh(m)
+                if m.upstream_id == upstream.id && m.credential_generation == new_gen
+        )),
+        "missing MetadataRefreshJob for Anthropic OAuth generation N+1 must be repaired"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn oauth_refresh_watchdog_reconciles_anthropic_metadata_even_when_refresh_job_already_exists()
+{
+    use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
+    use cc_lb_scheduler::jobs::watchdog::OAuthRefreshWatchdogJob;
+    use cc_lb_scheduler::worker::{CronJob, SchedulerBackend};
+
+    let fixture = DispatchFixture::new().await;
+    let upstream = fixture.oauth_upstream(false).await;
+    let generation = upstream.oauth_token_generation;
+    let expires_at =
+        crate::scheduler_dispatch::http::decrypt_bundle(&upstream, fixture.dispatch.aead.as_ref())
+            .expect("decrypt bundle")
+            .expires_at_unix_secs;
+
+    // Seed the canonical OAuthRefreshJob for the current generation BEFORE running the watchdog,
+    // leaving MetadataRefreshJob missing (as if metadata enqueue failed on the prior run).
+    let refresh_job = OAuthRefreshJob::for_credential(upstream.id, generation, expires_at);
+    let refresh_key = refresh_job.generation_idempotency_key(generation, expires_at);
+    fixture
+        .dispatch
+        .backend
+        .push_adaptive_task(SchedulerPushTask {
+            args: AdaptiveJob::OAuthRefresh(refresh_job),
+            idempotency_key: Some(refresh_key),
+            run_at_unix_secs: Some(OAuthRefreshJob::run_at_for_expires_at(expires_at)),
+            max_attempts: None,
+        })
+        .await
+        .expect("seed active current-generation refresh job");
+
+    let tick1 = cc_lb_clock::unix_secs(fixture.clock.now());
+    let outcome1 = fixture
+        .dispatch
+        .dispatch_singleton(CronJob::OAuthRefreshWatchdog(OAuthRefreshWatchdogJob::new(
+            tick1,
+        )))
+        .await
+        .expect("watchdog reconciles metadata even when refresh job exists");
+    assert_eq!(outcome1, JobOutcome::Done);
+
+    let metadata_job = MetadataRefreshJob::new(upstream.id, generation);
+    let canonical_meta_key = metadata_job.idempotency_key();
+    let pending = fixture
+        .dispatch
+        .backend
+        .list_adaptive_tasks(&Filter {
+            status: Some(TaskStatus::Pending),
+            page: 1,
+            page_size: Some(50),
+        })
+        .await
+        .expect("list pending after first watchdog tick");
+    assert!(
+        pending.iter().any(|task| {
+            task.idempotency_key.as_deref() == Some(canonical_meta_key.as_str())
+                && matches!(
+                    &task.args,
+                    AdaptiveJob::MetadataRefresh(m)
+                        if m.upstream_id == upstream.id && m.credential_generation == generation
+                )
+        }),
+        "watchdog must enqueue missing MetadataRefreshJob even though OAuthRefreshJob is already active"
+    );
+
+    #[allow(irrefutable_let_patterns)]
+    let SchedulerBackend::Sqlite(sqlite) = &fixture.dispatch.backend else {
+        panic!("expected sqlite backend");
+    };
+
+    // Once MetadataRefreshJob is Done, a subsequent watchdog tick must NOT duplicate it.
+    sqlx::query("UPDATE Jobs SET status = 'Done', done_at = ?1 WHERE idempotency_key = ?2")
+        .bind(i64::try_from(tick1).expect("tick1 fits i64"))
+        .bind(&canonical_meta_key)
+        .execute(sqlite.pool())
+        .await
+        .expect("mark canonical metadata job Done");
+
+    let outcome2 = fixture
+        .dispatch
+        .dispatch_singleton(CronJob::OAuthRefreshWatchdog(OAuthRefreshWatchdogJob::new(
+            tick1 + 100,
+        )))
+        .await
+        .expect("watchdog after Done metadata");
+    assert_eq!(outcome2, JobOutcome::Done);
+
+    let meta_rows_after_done: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM Jobs WHERE idempotency_key LIKE ?1")
+            .bind(format!("{canonical_meta_key}%"))
+            .fetch_one(sqlite.pool())
+            .await
+            .expect("count metadata rows after Done");
+    assert_eq!(meta_rows_after_done, 1);
+
+    // If the canonical MetadataRefreshJob is Killed/exhausted, the watchdog seeds a distinct
+    // recovery metadata job for the current generation.
+    sqlx::query("UPDATE Jobs SET status = 'Killed' WHERE idempotency_key = ?1")
+        .bind(&canonical_meta_key)
+        .execute(sqlite.pool())
+        .await
+        .expect("mark canonical metadata job Killed");
+
+    let tick3 = tick1 + 200;
+    let outcome3 = fixture
+        .dispatch
+        .dispatch_singleton(CronJob::OAuthRefreshWatchdog(OAuthRefreshWatchdogJob::new(
+            tick3,
+        )))
+        .await
+        .expect("watchdog recovers killed metadata job");
+    assert_eq!(outcome3, JobOutcome::Done);
+
+    let recovery_meta_key = format!("{canonical_meta_key}:watchdog:{tick3}");
+    let recovery_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM Jobs WHERE idempotency_key = ?1")
+            .bind(&recovery_meta_key)
+            .fetch_one(sqlite.pool())
+            .await
+            .expect("count recovery metadata job");
+    assert_eq!(recovery_count, 1);
+}
+
+async fn spawn_controlled_token_server(
+    allow_response: tokio::sync::watch::Receiver<bool>,
+    response_status: StatusCode,
+    response_body: &'static str,
+) -> (
+    Url,
+    Arc<AtomicUsize>,
+    tokio::sync::watch::Receiver<bool>,
+    tokio::sync::watch::Receiver<bool>,
+    tokio::task::JoinHandle<()>,
+) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (entered_tx, entered_rx) = tokio::sync::watch::channel(false);
+    let (sent_tx, sent_rx) = tokio::sync::watch::channel(false);
+    let recorded = Arc::clone(&calls);
+    let app = axum::Router::new().route(
+        "/oauth/token",
+        axum::routing::post(move || {
+            let recorded = Arc::clone(&recorded);
+            let entered_tx = entered_tx.clone();
+            let sent_tx = sent_tx.clone();
+            let mut allow = allow_response.clone();
+            async move {
+                recorded.fetch_add(1, Ordering::SeqCst);
+                entered_tx.send_replace(true);
+                let _ = allow.wait_for(|&go| go).await;
+                sent_tx.send_replace(true);
+                (
+                    response_status,
+                    [("content-type", "application/json")],
+                    response_body,
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind controlled token server");
+    let endpoint = Url::parse(&format!(
+        "http://{}/oauth/token",
+        listener.local_addr().expect("token server address")
+    ))
+    .expect("token URL");
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve controlled token endpoint");
+    });
+    (endpoint, calls, entered_rx, sent_rx, task)
+}
+
+#[tokio::test]
+async fn scheduled_oauth_refresh_timeout_after_provider_request_preserves_ownership_and_persists_rotation()
+ {
+    use tokio::sync::watch;
+
+    const OK_ROTATED_BODY: &str = r#"{"access_token":"rotated-access","refresh_token":"rotated-refresh","token_type":"Bearer","expires_in":3600}"#;
+
+    // Sub-case A: `spawn_leased_oauth_refresh` continues owning lease + completing fenced
+    // rotation if the caller drops or times out while `/oauth/token` response is in flight.
+    let (allow_tx1, allow_rx1) = watch::channel(false);
+    let (endpoint1, calls1, mut entered_rx1, _sent_rx1, server1) =
+        spawn_controlled_token_server(allow_rx1, StatusCode::OK, OK_ROTATED_BODY).await;
+    let mut fixture1 = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture1, endpoint1);
+    let upstream1 = fixture1.oauth_upstream(false).await;
+    let starting_gen1 = upstream1.oauth_token_generation;
+    let lease_key1 = crate::refresh::oauth_refresh_lease_meta_key(upstream1.id);
+    let now1 = cc_lb_clock::unix_secs(fixture1.clock.now());
+    let lease1 = crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+        fixture1.storage.clone(),
+        fixture1.storage.clone(),
+        upstream1.id,
+        starting_gen1,
+        now1,
+    )
+    .await
+    .expect("lease acquire succeeds")
+    .expect("lease 1 is free");
+
+    let exchange_handle1 = fixture1.dispatch.spawn_leased_oauth_refresh(
+        OAuthRefreshJob::new(upstream1.id),
+        lease1,
+        fixture1.dispatch.replica_id.expect("replica id set"),
+        starting_gen1,
+        None,
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        entered_rx1.wait_for(|&entered| entered),
+    )
+    .await
+    .expect("provider request enters within 2s")
+    .expect("entered watch stays open");
+
+    let peer_outcome1 = fixture1
+        .dispatch
+        .dispatch_oauth_refresh(OAuthRefreshJob::new(upstream1.id))
+        .await
+        .expect("peer observes held lease and retries");
+    assert!(matches!(peer_outcome1, JobOutcome::Retry { .. }));
+    assert_eq!(calls1.load(Ordering::SeqCst), 1);
+    let held_value1 = fixture1
+        .storage
+        .get_meta_value(&lease_key1)
+        .await
+        .expect("read meta")
+        .expect("lease row exists");
+    assert!(held_value1.starts_with(&format!("held:{starting_gen1}:")));
+
+    allow_tx1.send_replace(true);
+    let completed_outcome1 =
+        tokio::time::timeout(std::time::Duration::from_secs(2), exchange_handle1)
+            .await
+            .expect("detached scheduled refresh completes within 2s")
+            .expect("spawned task joins")
+            .expect("detached scheduled refresh returns Done");
+    assert_eq!(completed_outcome1, JobOutcome::Done);
+    assert_eq!(calls1.load(Ordering::SeqCst), 1);
+
+    let stored1 = UpstreamStore::get_by_id(fixture1.storage.as_ref(), upstream1.id)
+        .await
+        .expect("load rotated upstream")
+        .expect("upstream exists");
+    assert_eq!(stored1.oauth_token_generation, starting_gen1 + 1);
+    let decrypted1 = stored1
+        .oauth_credentials
+        .as_ref()
+        .expect("encrypted credentials present")
+        .decrypt(fixture1.dispatch.aead.as_ref(), upstream1.id.as_bytes())
+        .expect("decrypt rotated credentials");
+    assert_eq!(decrypted1.access_token, "rotated-access");
+    assert_eq!(decrypted1.refresh_token, "rotated-refresh");
+    assert_eq!(
+        fixture1
+            .storage
+            .get_meta_value(&lease_key1)
+            .await
+            .expect("read released meta")
+            .as_deref(),
+        Some(format!("idle:{}", starting_gen1 + 1).as_str())
+    );
+    server1.abort();
+
+    // Sub-case B: Dropping `dispatch_oauth_refresh` mid-provider-request (simulating worker
+    // ENTITY_TIMEOUT) leaves the lease held and blocks concurrent retries from re-sending.
+    let (allow_tx2, allow_rx2) = watch::channel(false);
+    let (endpoint2, calls2, mut entered_rx2, mut sent_rx2, server2) =
+        spawn_controlled_token_server(allow_rx2, StatusCode::OK, OK_ROTATED_BODY).await;
+    let mut fixture2 = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture2, endpoint2);
+    let upstream2 = fixture2.oauth_upstream(false).await;
+    let starting_gen2 = upstream2.oauth_token_generation;
+    let lease_key2 = crate::refresh::oauth_refresh_lease_meta_key(upstream2.id);
+
+    tokio::select! {
+        biased;
+        outcome = fixture2.dispatch.dispatch_oauth_refresh(OAuthRefreshJob::new(upstream2.id)) => {
+            panic!("paused dispatch should not finish before allow_response: {outcome:?}");
+        }
+        wait_res = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            entered_rx2.wait_for(|&entered| entered),
+        ) => {
+            wait_res
+                .expect("provider request enters within 2s")
+                .expect("entered watch stays open");
+        }
+    }
+
+    let peer_outcome2 = fixture2
+        .dispatch
+        .dispatch_oauth_refresh(OAuthRefreshJob::new(upstream2.id))
+        .await
+        .expect("concurrent retry sees exclusive lease still held");
+    assert!(matches!(peer_outcome2, JobOutcome::Retry { .. }));
+    assert_eq!(calls2.load(Ordering::SeqCst), 1);
+    let held_value2 = fixture2
+        .storage
+        .get_meta_value(&lease_key2)
+        .await
+        .expect("read meta")
+        .expect("lease row exists");
+    assert!(held_value2.starts_with(&format!("held:{starting_gen2}:")));
+
+    allow_tx2.send_replace(true);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sent_rx2.wait_for(|&sent| sent),
+    )
+    .await
+    .expect("provider response sent within 2s")
+    .expect("sent watch stays open");
+    drop(server2);
+}
+
+#[tokio::test]
+async fn scheduled_oauth_refresh_retains_lease_when_shutdown_cancels_after_provider_accepts() {
+    use tokio::sync::watch;
+
+    // Sub-case A: Shutdown cancels `dispatch.cancel` while provider `/oauth/token` response is
+    // still pending -> ambiguous exchange retains `held:...` lease until TTL expiry so a peer
+    // replica cannot re-send the rotating refresh token.
+    let (_allow_tx1, allow_rx1) = watch::channel(false);
+    let (endpoint1, calls1, mut entered_rx1, _sent_rx1, server1) =
+        spawn_controlled_token_server(allow_rx1, StatusCode::OK, r#"{"access_token":"rotated"}"#)
+            .await;
+    let mut fixture1 = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture1, endpoint1);
+    let upstream1 = fixture1.oauth_upstream(false).await;
+    let starting_gen1 = upstream1.oauth_token_generation;
+    let lease_key1 = crate::refresh::oauth_refresh_lease_meta_key(upstream1.id);
+    let now1 = cc_lb_clock::unix_secs(fixture1.clock.now());
+    let lease1 = crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+        fixture1.storage.clone(),
+        fixture1.storage.clone(),
+        upstream1.id,
+        starting_gen1,
+        now1,
+    )
+    .await
+    .expect("lease acquire succeeds")
+    .expect("lease 1 is free");
+
+    let exchange_handle1 = fixture1.dispatch.spawn_leased_oauth_refresh(
+        OAuthRefreshJob::new(upstream1.id),
+        lease1,
+        fixture1.dispatch.replica_id.expect("replica id set"),
+        starting_gen1,
+        None,
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        entered_rx1.wait_for(|&entered| entered),
+    )
+    .await
+    .expect("provider request enters within 2s")
+    .expect("entered watch stays open");
+
+    let held_before1 = fixture1
+        .storage
+        .get_meta_value(&lease_key1)
+        .await
+        .expect("read held meta")
+        .expect("lease row exists");
+    assert!(held_before1.starts_with(&format!("held:{starting_gen1}:")));
+
+    fixture1.dispatch.cancel.cancel();
+
+    let cancelled_outcome1 =
+        tokio::time::timeout(std::time::Duration::from_secs(2), exchange_handle1)
+            .await
+            .expect("cancelled scheduled refresh completes within 2s")
+            .expect("spawned task joins")
+            .expect("cancelled refresh returns Retry instead of hard failing");
+    assert_eq!(
+        cancelled_outcome1,
+        JobOutcome::Retry {
+            delay: Some(std::time::Duration::from_secs(
+                crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1,
+            )),
+        }
+    );
+    assert_eq!(
+        fixture1
+            .storage
+            .get_meta_value(&lease_key1)
+            .await
+            .expect("read retained meta")
+            .as_deref(),
+        Some(held_before1.as_str())
+    );
+
+    let second_claim = crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+        fixture1.storage.clone(),
+        fixture1.storage.clone(),
+        upstream1.id,
+        starting_gen1,
+        now1,
+    )
+    .await
+    .expect("second claimant check succeeds");
+    assert!(second_claim.is_none());
+    assert_eq!(calls1.load(Ordering::SeqCst), 1);
+    server1.abort();
+
+    // Sub-case B: Gateway timeout (`504 Gateway Timeout`) leaves downstream uncertain whether
+    // upstream rotated the refresh token, so the lease stays held until TTL expiry.
+    let (_allow_tx2, allow_rx2) = watch::channel(true);
+    let (endpoint2, calls2, _entered_rx2, mut sent_rx2, server2) = spawn_controlled_token_server(
+        allow_rx2,
+        StatusCode::GATEWAY_TIMEOUT,
+        r#"{"error":"gateway_timeout"}"#,
+    )
+    .await;
+    let mut fixture2 = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture2, endpoint2);
+    let upstream2 = fixture2.oauth_upstream(false).await;
+    let starting_gen2 = upstream2.oauth_token_generation;
+    let lease_key2 = crate::refresh::oauth_refresh_lease_meta_key(upstream2.id);
+    let now2 = cc_lb_clock::unix_secs(fixture2.clock.now());
+    let lease2 = crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+        fixture2.storage.clone(),
+        fixture2.storage.clone(),
+        upstream2.id,
+        starting_gen2,
+        now2,
+    )
+    .await
+    .expect("lease acquire succeeds")
+    .expect("lease 2 is free");
+
+    let outcome2 = fixture2
+        .dispatch
+        .spawn_leased_oauth_refresh(
+            OAuthRefreshJob::new(upstream2.id),
+            lease2,
+            fixture2.dispatch.replica_id.expect("replica id set"),
+            starting_gen2,
+            None,
+        )
+        .await
+        .expect("spawned task joins")
+        .expect("504 response maps to Retry");
+    assert_eq!(
+        outcome2,
+        JobOutcome::Retry {
+            delay: Some(std::time::Duration::from_secs(
+                crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1,
+            )),
+        }
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sent_rx2.wait_for(|&sent| sent),
+    )
+    .await
+    .expect("504 response sent within 2s")
+    .expect("sent watch stays open");
+    assert_eq!(calls2.load(Ordering::SeqCst), 1);
+    let held_after_504 = fixture2
+        .storage
+        .get_meta_value(&lease_key2)
+        .await
+        .expect("read retained 504 meta")
+        .expect("504 lease row exists");
+    assert!(held_after_504.starts_with(&format!("held:{starting_gen2}:")));
+    assert!(
+        crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+            fixture2.storage.clone(),
+            fixture2.storage.clone(),
+            upstream2.id,
+            starting_gen2,
+            now2,
+        )
+        .await
+        .expect("check retained 504 claim")
+        .is_none()
+    );
+    assert!(
+        crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+            fixture2.storage.clone(),
+            fixture2.storage.clone(),
+            upstream2.id,
+            starting_gen2,
+            now2 + crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1,
+        )
+        .await
+        .expect("check claim after 504 TTL expiry")
+        .is_some()
+    );
+    server2.abort();
+
+    // Sub-case C: Conclusive OAuth 4xx rejections (`429`, `401`) prove no rotation occurred and
+    // immediately release the lease back to `idle:{starting_gen}`.
+    for (status, body, expected_outcome, expected_error) in [
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":"rate_limited"}"#,
+            JobOutcome::Retry {
+                delay: Some(std::time::Duration::from_secs(30)),
+            },
+            None,
+        ),
+        (
+            StatusCode::UNAUTHORIZED,
+            r#"{"error":"invalid_grant"}"#,
+            JobOutcome::Skip,
+            Some("status_401"),
+        ),
+    ] {
+        let (_allow_tx, allow_rx) = watch::channel(true);
+        let (endpoint, calls, _entered_rx, mut sent_rx, server) =
+            spawn_controlled_token_server(allow_rx, status, body).await;
+        let mut fixture = DispatchFixture::new().await;
+        set_token_endpoint(&mut fixture, endpoint);
+        let upstream = fixture.oauth_upstream(false).await;
+        let starting_gen = upstream.oauth_token_generation;
+        let lease_key = crate::refresh::oauth_refresh_lease_meta_key(upstream.id);
+        let now = cc_lb_clock::unix_secs(fixture.clock.now());
+        let lease = crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+            fixture.storage.clone(),
+            fixture.storage.clone(),
+            upstream.id,
+            starting_gen,
+            now,
+        )
+        .await
+        .expect("lease acquire succeeds")
+        .expect("lease is free");
+
+        let outcome = fixture
+            .dispatch
+            .spawn_leased_oauth_refresh(
+                OAuthRefreshJob::new(upstream.id),
+                lease,
+                fixture.dispatch.replica_id.expect("replica id set"),
+                starting_gen,
+                None,
+            )
+            .await
+            .expect("spawned task joins")
+            .expect("4xx response yields expected outcome");
+        assert_eq!(outcome, expected_outcome);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sent_rx.wait_for(|&sent| sent),
+        )
+        .await
+        .expect("4xx response sent within 2s")
+        .expect("sent watch stays open");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture
+                .storage
+                .get_meta_value(&lease_key)
+                .await
+                .expect("read released meta")
+                .as_deref(),
+            Some(format!("idle:{starting_gen}").as_str())
+        );
+        assert!(
+            crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+                fixture.storage.clone(),
+                fixture.storage.clone(),
+                upstream.id,
+                starting_gen,
+                now,
+            )
+            .await
+            .expect("check immediate reacquisition")
+            .is_some()
+        );
+        let stored = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
+            .await
+            .expect("load upstream")
+            .expect("upstream exists");
+        assert_eq!(stored.last_apply_error.as_deref(), expected_error);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn scheduled_oauth_refresh_uses_persisted_lease_expiry_after_lost_renewal_ack() {
+    use cc_lb_storage_api::MetaStore;
+    use tokio::sync::watch;
+
+    let (allow_tx, allow_rx) = watch::channel(false);
+    let (endpoint, calls, mut entered_rx, _sent_rx, server) = spawn_controlled_token_server(
+        allow_rx,
+        StatusCode::GATEWAY_TIMEOUT,
+        r#"{"error":"gateway_timeout"}"#,
+    )
+    .await;
+    let mut fixture = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture, endpoint);
+    let upstream = fixture.oauth_upstream(false).await;
+    let starting_gen = upstream.oauth_token_generation;
+    let lease_key = crate::refresh::oauth_refresh_lease_meta_key(upstream.id);
+    let now = cc_lb_clock::unix_secs(fixture.clock.now());
+    let lease = crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+        fixture.storage.clone(),
+        fixture.storage.clone(),
+        upstream.id,
+        starting_gen,
+        now,
+    )
+    .await
+    .expect("lease acquire succeeds")
+    .expect("lease is free");
+
+    let exchange_handle = fixture.dispatch.spawn_leased_oauth_refresh(
+        OAuthRefreshJob::new(upstream.id),
+        lease,
+        fixture.dispatch.replica_id.expect("replica id set"),
+        starting_gen,
+        None,
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        entered_rx.wait_for(|&entered| entered),
+    )
+    .await
+    .expect("provider request enters within 2s")
+    .expect("entered watch stays open");
+
+    // Simulate a renewal committed in storage at now+115 whose acknowledgement and probe both
+    // failed, leaving the local heartbeat with an earlier now+90 expiry.
+    let initial_held = fixture
+        .storage
+        .get_meta_value(&lease_key)
+        .await
+        .expect("read initial lease")
+        .expect("initial lease present");
+    let parts: Vec<&str> = initial_held.split(':').collect();
+    assert_eq!(parts.len(), 4);
+    let renewed_expiry = now + 115;
+    let renewed_held = format!("held:{}:{}:{renewed_expiry}", parts[1], parts[2]);
+    fixture
+        .storage
+        .put_meta_value(&lease_key, &renewed_held)
+        .await
+        .expect("persist renewed expiry in storage");
+
+    allow_tx.send_replace(true);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), exchange_handle)
+        .await
+        .expect("scheduled refresh completes within 2s")
+        .expect("spawned task joins")
+        .expect("504 response maps to Retry");
+    assert_eq!(
+        outcome,
+        JobOutcome::Retry {
+            delay: Some(std::time::Duration::from_secs(116)),
+        }
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture
+            .storage
+            .get_meta_value(&lease_key)
+            .await
+            .expect("read retained renewed meta")
+            .as_deref(),
+        Some(renewed_held.as_str())
+    );
+    server.abort();
 }

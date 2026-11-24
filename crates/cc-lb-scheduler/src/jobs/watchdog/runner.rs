@@ -7,7 +7,9 @@ use uuid::Uuid;
 use crate::error::{Result, SchedulerError};
 use crate::jobs::oauth_refresh::OAuthRefreshJob;
 use crate::jobs::warmup::UpstreamWarmupJob;
-use crate::worker::{AdaptiveJob, SchedulerBackend, SchedulerPushTask, TaskStatus};
+use crate::worker::{
+    AdaptiveJob, AdaptiveTaskKeyState, SchedulerBackend, SchedulerPushTask, TaskStatus,
+};
 
 const PAGE_SIZE: u32 = 500;
 const ACTIVE_STATUSES: [TaskStatus; 4] = [
@@ -78,6 +80,95 @@ pub struct WatchdogSeedStats {
     pub seeded: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OAuthRefreshWatchdogTarget {
+    pub upstream_id: Uuid,
+    pub expected_generation: u64,
+    pub expected_expires_at_unix_secs: u64,
+    pub is_anthropic_oauth: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OAuthRefreshWatchdogResult {
+    pub seeded: usize,
+    pub seeded_targets: Vec<OAuthRefreshWatchdogTarget>,
+}
+
+pub async fn run_oauth_refresh_watchdog(
+    backend: &SchedulerBackend,
+    targets: &[OAuthRefreshWatchdogTarget],
+    tick_unix_secs: u64,
+) -> Result<OAuthRefreshWatchdogResult> {
+    let active_jobs = active_oauth_refresh_jobs(backend).await?;
+    let mut seeded = 0;
+    let mut seeded_targets = Vec::new();
+    for target in targets {
+        let covered = active_jobs.iter().any(|job| {
+            job.upstream_id == target.upstream_id
+                && job.expected_generation == Some(target.expected_generation)
+                && job
+                    .expected_expires_at_unix_secs
+                    .is_none_or(|exp| exp == target.expected_expires_at_unix_secs)
+        });
+        if covered {
+            continue;
+        }
+        let job = OAuthRefreshJob::for_credential(
+            target.upstream_id,
+            target.expected_generation,
+            target.expected_expires_at_unix_secs,
+        );
+        let run_at = OAuthRefreshJob::run_at_for_expires_at(target.expected_expires_at_unix_secs);
+        let primary_key = job.generation_idempotency_key(
+            target.expected_generation,
+            target.expected_expires_at_unix_secs,
+        );
+        let primary_task = SchedulerPushTask {
+            args: AdaptiveJob::OAuthRefresh(job.clone()),
+            idempotency_key: Some(primary_key.clone()),
+            run_at_unix_secs: Some(run_at),
+            max_attempts: None,
+        };
+        let pushed = match backend.push_adaptive_task(primary_task).await {
+            Ok(()) => true,
+            Err(SchedulerError::Conflict(_)) => {
+                match backend.adaptive_task_key_state(&primary_key).await? {
+                    AdaptiveTaskKeyState::Active => false,
+                    AdaptiveTaskKeyState::Missing
+                    | AdaptiveTaskKeyState::Done
+                    | AdaptiveTaskKeyState::TerminalFailure => {
+                        let recovery_key = job.watchdog_recovery_idempotency_key(
+                            target.expected_generation,
+                            target.expected_expires_at_unix_secs,
+                            tick_unix_secs,
+                        );
+                        let recovery_task = SchedulerPushTask {
+                            args: AdaptiveJob::OAuthRefresh(job),
+                            idempotency_key: Some(recovery_key),
+                            run_at_unix_secs: Some(run_at),
+                            max_attempts: None,
+                        };
+                        match backend.push_adaptive_task(recovery_task).await {
+                            Ok(()) => true,
+                            Err(SchedulerError::Conflict(_)) => false,
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        if pushed {
+            seeded += 1;
+            seeded_targets.push(*target);
+        }
+    }
+    Ok(OAuthRefreshWatchdogResult {
+        seeded,
+        seeded_targets,
+    })
+}
+
 pub async fn run_entity_watchdog(
     backend: &SchedulerBackend,
     kind: WatchdogEntityKind,
@@ -106,11 +197,10 @@ pub async fn run_entity_watchdog(
     Ok(WatchdogSeedStats { seeded })
 }
 
-async fn active_entity_ids(
-    backend: &SchedulerBackend,
-    kind: WatchdogEntityKind,
-) -> Result<HashSet<Uuid>> {
-    let mut active = HashSet::new();
+async fn scan_active_adaptive_tasks<F>(backend: &SchedulerBackend, mut on_task: F) -> Result<()>
+where
+    F: FnMut(&crate::worker::SchedulerTaskRow<AdaptiveJob>),
+{
     for status in ACTIVE_STATUSES {
         let is_failed = status == TaskStatus::Failed;
         let mut page = 1;
@@ -125,11 +215,7 @@ async fn active_entity_ids(
                 if is_failed && task.attempts >= task.max_attempts {
                     continue;
                 }
-                if let Some(key) = task.idempotency_key.as_deref()
-                    && let Some(upstream_id) = parse_entity_uuid(kind, key)
-                {
-                    active.insert(upstream_id);
-                }
+                on_task(task);
             }
             if tasks.len() < PAGE_SIZE as usize {
                 break;
@@ -137,6 +223,33 @@ async fn active_entity_ids(
             page += 1;
         }
     }
+    Ok(())
+}
+
+async fn active_oauth_refresh_jobs(backend: &SchedulerBackend) -> Result<Vec<OAuthRefreshJob>> {
+    let mut jobs = Vec::new();
+    scan_active_adaptive_tasks(backend, |task| {
+        if let AdaptiveJob::OAuthRefresh(job) = &task.args {
+            jobs.push(job.clone());
+        }
+    })
+    .await?;
+    Ok(jobs)
+}
+
+async fn active_entity_ids(
+    backend: &SchedulerBackend,
+    kind: WatchdogEntityKind,
+) -> Result<HashSet<Uuid>> {
+    let mut active = HashSet::new();
+    scan_active_adaptive_tasks(backend, |task| {
+        if let Some(key) = task.idempotency_key.as_deref()
+            && let Some(upstream_id) = parse_entity_uuid(kind, key)
+        {
+            active.insert(upstream_id);
+        }
+    })
+    .await?;
     Ok(active)
 }
 

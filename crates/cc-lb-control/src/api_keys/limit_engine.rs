@@ -176,12 +176,9 @@ impl Reservation {
         self.forgotten = true;
     }
 
-    /// Hand a finished response's usage/cost liability to its subscriber.
-    ///
-    /// Concurrency ends at the response boundary, not when asynchronous pricing
-    /// arrives. Keep token/cost reservations alive, but release only this
-    /// response's concurrent guards before another turn can be admitted.
-    pub fn handoff_after_response(mut self) {
+    /// Release only this reservation's concurrent-request guards while keeping
+    /// token and cost liability open until terminal reconciliation or expiry.
+    pub fn release_concurrent_guards(&self) {
         let guards = self.engine.upgrade().and_then(|engine| {
             let mut reservations = engine.reservations.lock();
             reservations
@@ -191,6 +188,15 @@ impl Reservation {
         // Durable hold destruction may enqueue its existing storage cleanup.
         // Do not run it while holding the reservation map lock.
         drop(guards);
+    }
+
+    /// Hand a finished response's usage/cost liability to its subscriber.
+    ///
+    /// Concurrency ends at the response boundary, not when asynchronous pricing
+    /// arrives. Keep token/cost reservations alive, but release only this
+    /// response's concurrent guards before another turn can be admitted.
+    pub fn handoff_after_response(mut self) {
+        self.release_concurrent_guards();
         self.forgotten = true;
     }
 }

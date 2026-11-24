@@ -5,6 +5,7 @@ use cc_lb_scheduler::jobs::apalis_housekeeping::{
     ApalisHousekeepingConfig, ApalisHousekeepingJobHandler,
 };
 use cc_lb_scheduler::jobs::compat::handle_anthropic_compat_refresh_job_with_core_fetcher;
+use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_usage_poll::{
     NETWORK_FAILURE_STATUS, OAuthUsagePollCronJob, OAuthUsagePollObservation,
 };
@@ -16,6 +17,7 @@ use cc_lb_scheduler::jobs::usage_prune::handle_usage_prune_job;
 use cc_lb_scheduler::jobs::usage_rollup::handle_usage_rollup_job;
 use cc_lb_scheduler::jobs::watchdog::{
     OAuthRefreshWatchdogJob, WarmupWatchdogJob, WatchdogEntityKind, run_entity_watchdog,
+    run_oauth_refresh_watchdog,
 };
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::state_stores::{
@@ -174,18 +176,37 @@ impl SchedulerDispatch {
         &self,
         job: OAuthRefreshWatchdogJob,
     ) -> SchedulerResult<JobOutcome> {
-        let upstream_ids = self.list_oauth_refresh_watchdog_upstream_ids().await?;
-        let stats = run_entity_watchdog(
-            &self.backend,
-            WatchdogEntityKind::OAuthRefresh,
-            &upstream_ids,
-            job.tick_unix_secs,
-            unix_secs(self.clock.now()),
-        )
-        .await?;
+        let targets = self.list_oauth_refresh_watchdog_targets().await?;
+        let result =
+            run_oauth_refresh_watchdog(&self.backend, &targets, job.tick_unix_secs).await?;
+        let mut first_metadata_error = None;
+        for target in &targets {
+            if !target.is_anthropic_oauth {
+                continue;
+            }
+            if let Err(error) = self
+                .reconcile_metadata_refresh(
+                    MetadataRefreshJob::new(target.upstream_id, target.expected_generation),
+                    job.tick_unix_secs,
+                )
+                .await
+            {
+                tracing::warn!(
+                    tick_unix_secs = job.tick_unix_secs,
+                    upstream_id = %target.upstream_id,
+                    generation = target.expected_generation,
+                    %error,
+                    "oauth refresh watchdog metadata reconciliation failed",
+                );
+                first_metadata_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = first_metadata_error {
+            return Err(error);
+        }
         tracing::info!(
             tick_unix_secs = job.tick_unix_secs,
-            seeded = stats.seeded,
+            seeded = result.seeded,
             "oauth refresh watchdog completed"
         );
         Ok(JobOutcome::Done)

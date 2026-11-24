@@ -138,6 +138,7 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
         metadata_hook: None,
         cancel: lazy_cancel.clone(),
         apalis_handle: fixture.scheduler_backend.clone(),
+        meta: fixture.storage.clone(),
     }));
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(

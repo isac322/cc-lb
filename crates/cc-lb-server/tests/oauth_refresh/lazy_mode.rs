@@ -618,4 +618,17 @@ impl LazyRefreshClaimGuard for DoneOnWait {
     async fn task_state(&self, _idempotency_key: &str) -> StorageResult<LazyRefreshTaskState> {
         Ok(LazyRefreshTaskState::Done)
     }
+
+    async fn try_claim_fallback(
+        &self,
+        _upstream_id: Uuid,
+        _holder: &str,
+        _idempotency_key: &str,
+        _generation: u64,
+        _now_unix_secs: u64,
+    ) -> StorageResult<Option<cc_lb_server::refresh::LazyRefreshFallbackLease>> {
+        Ok(Some(
+            cc_lb_server::refresh::LazyRefreshFallbackLease::from_token("done-on-wait".to_owned()),
+        ))
+    }
 }

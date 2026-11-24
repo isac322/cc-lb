@@ -264,6 +264,7 @@ async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
         metadata_hook: None,
         cancel: CancellationToken::new(),
         apalis_handle: fixture.scheduler_backend.clone(),
+        meta: fixture.storage.clone(),
     }));
     let base = AnthropicOAuthSignerFactory::for_upstream_name(
         fixture.storage.clone(),
@@ -328,6 +329,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
         metadata_hook: None,
         cancel,
         apalis_handle: fixture.scheduler_backend.clone(),
+        meta: fixture.storage.clone(),
     }));
     let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
@@ -407,6 +409,7 @@ async fn long_lived_expired_oauth_upstream_never_triggers_lazy_refresh() {
         metadata_hook: None,
         cancel: CancellationToken::new(),
         apalis_handle: fixture.scheduler_backend.clone(),
+        meta: fixture.storage.clone(),
     }));
     let base = AnthropicOAuthSignerFactory::for_upstream_name(
         fixture.storage.clone(),
@@ -1036,6 +1039,7 @@ async fn dispatch_oauth_refresh_job(
     };
     let now = now_secs(clock.as_ref());
     let refresh_clock = clock.clone();
+    let storage_for_next = Arc::clone(&storage);
     OAuthRefreshJobHandler::new(TestOAuthRefreshUpstreams { storage }, Uuid::new_v4())
         .handle(
             job,
@@ -1046,7 +1050,21 @@ async fn dispatch_oauth_refresh_job(
                 move |metadata_job| enqueue_metadata_refresh(backend.clone(), metadata_job)
             },
             move |upstream_id, expires_at_unix_secs| {
-                enqueue_next_oauth_refresh(backend, upstream_id, expires_at_unix_secs)
+                let storage = Arc::clone(&storage_for_next);
+                async move {
+                    let generation =
+                        UpstreamStore::read_oauth_token_generation(storage.as_ref(), upstream_id)
+                            .await
+                            .map_err(storage_scheduler_error)?
+                            .unwrap_or(1);
+                    enqueue_next_oauth_refresh(
+                        backend,
+                        upstream_id,
+                        generation,
+                        expires_at_unix_secs,
+                    )
+                    .await
+                }
             },
         )
         .await
@@ -1159,14 +1177,15 @@ async fn enqueue_metadata_refresh(
 async fn enqueue_next_oauth_refresh(
     backend: SchedulerBackend,
     upstream_id: Uuid,
+    expected_generation: u64,
     expires_at_unix_secs: u64,
 ) -> SchedulerResult<()> {
-    let job = OAuthRefreshJob::new(upstream_id);
+    let job =
+        OAuthRefreshJob::for_credential(upstream_id, expected_generation, expires_at_unix_secs);
+    let idempotency_key = job.generation_idempotency_key(expected_generation, expires_at_unix_secs);
     let task = SchedulerPushTask {
         args: AdaptiveJob::OAuthRefresh(job),
-        idempotency_key: Some(
-            OAuthRefreshJob::new(upstream_id).idempotency_key(expires_at_unix_secs),
-        ),
+        idempotency_key: Some(idempotency_key),
         run_at_unix_secs: Some(OAuthRefreshJob::run_at_for_expires_at(expires_at_unix_secs)),
         max_attempts: None,
     };
