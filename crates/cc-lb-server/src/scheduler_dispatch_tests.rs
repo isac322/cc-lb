@@ -175,6 +175,36 @@ async fn lazy_refresh_waits_across_rescheduled_pending_retry_until_generation_ad
             }
             Ok(state)
         }
+
+        async fn try_claim_fallback(
+            &self,
+            upstream_id: Uuid,
+            holder: &str,
+            idempotency_key: &str,
+            generation: u64,
+            now_unix_secs: u64,
+        ) -> StorageResult<Option<crate::refresh::LazyRefreshFallbackLease>> {
+            self.inner
+                .try_claim_fallback(
+                    upstream_id,
+                    holder,
+                    idempotency_key,
+                    generation,
+                    now_unix_secs,
+                )
+                .await
+        }
+
+        async fn finish_fallback_claim(
+            &self,
+            upstream_id: Uuid,
+            lease: &crate::refresh::LazyRefreshFallbackLease,
+            final_generation: u64,
+        ) -> StorageResult<()> {
+            self.inner
+                .finish_fallback_claim(upstream_id, lease, final_generation)
+                .await
+        }
     }
 
     struct RunningTasks {
@@ -281,7 +311,10 @@ async fn lazy_refresh_waits_across_rescheduled_pending_retry_until_generation_ad
     };
     let (pending_tx, mut pending_rx) = mpsc::unbounded_channel();
     let claims = Arc::new(ObservedClaims {
-        inner: ApalisLazyRefreshClaimGuard::new(fixture.backend.backend.clone()),
+        inner: ApalisLazyRefreshClaimGuard::new(
+            fixture.backend.backend.clone(),
+            fixture.storage.clone(),
+        ),
         pool: pool.clone(),
         pending_observed: pending_tx,
     });

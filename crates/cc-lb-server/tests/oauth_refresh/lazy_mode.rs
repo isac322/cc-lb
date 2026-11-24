@@ -624,8 +624,11 @@ impl LazyRefreshClaimGuard for DoneOnWait {
         _upstream_id: Uuid,
         _holder: &str,
         _idempotency_key: &str,
-        _allow_done: bool,
-    ) -> StorageResult<bool> {
-        Ok(true)
+        _generation: u64,
+        _now_unix_secs: u64,
+    ) -> StorageResult<Option<cc_lb_server::refresh::LazyRefreshFallbackLease>> {
+        Ok(Some(
+            cc_lb_server::refresh::LazyRefreshFallbackLease::from_token("done-on-wait".to_owned()),
+        ))
     }
 }

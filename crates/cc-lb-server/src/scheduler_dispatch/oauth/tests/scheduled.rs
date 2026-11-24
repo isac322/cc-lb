@@ -1260,3 +1260,73 @@ async fn poll_usage_post_refresh_401_via_http_token_exchange_records_status_401(
         token_srv.abort();
     }
 }
+
+#[tokio::test]
+async fn scheduled_oauth_refresh_retries_without_calling_provider_while_lease_is_held() {
+    use cc_lb_storage_api::MetaStore;
+
+    let (endpoint, calls, server) = token_server(
+        StatusCode::OK,
+        r#"{"access_token":"leased-access","refresh_token":"leased-refresh","token_type":"Bearer","expires_in":3600}"#,
+    )
+    .await;
+    let mut fixture = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture, endpoint);
+    let upstream = fixture.oauth_upstream(false).await;
+    let now = cc_lb_clock::unix_secs(fixture.clock.now());
+    let lease = crate::refresh::try_acquire_oauth_refresh_lease(
+        fixture.storage.as_ref(),
+        upstream.id,
+        upstream.oauth_token_generation,
+        now,
+    )
+    .await
+    .expect("lease lookup")
+    .expect("acquire external lease");
+
+    let contended = fixture
+        .dispatch
+        .dispatch_oauth_refresh(OAuthRefreshJob::new(upstream.id))
+        .await
+        .expect("contended dispatch returns Retry");
+    assert!(matches!(contended, JobOutcome::Retry { .. }));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "scheduled dispatch must not contact /oauth/token while fallback lease is live"
+    );
+
+    crate::refresh::release_oauth_refresh_lease(
+        fixture.storage.as_ref(),
+        upstream.id,
+        &lease.token,
+        upstream.oauth_token_generation,
+    )
+    .await
+    .expect("release lease");
+
+    let completed = fixture
+        .dispatch
+        .dispatch_oauth_refresh(OAuthRefreshJob::new(upstream.id))
+        .await
+        .expect("uncontended dispatch completes");
+    assert_eq!(completed, JobOutcome::Done);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let refreshed = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
+        .await
+        .expect("load refreshed")
+        .expect("upstream exists");
+    assert_eq!(
+        refreshed.oauth_token_generation,
+        upstream.oauth_token_generation + 1
+    );
+    let expected_idle = format!("idle:{}", refreshed.oauth_token_generation);
+    let lease_value = fixture
+        .storage
+        .get_meta_value(&format!("oauth_refresh_lease:v1:{}", upstream.id))
+        .await
+        .expect("read released lease");
+    assert_eq!(lease_value.as_deref(), Some(expected_idle.as_str()));
+
+    server.abort();
+}

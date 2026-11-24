@@ -1647,6 +1647,7 @@ async fn post_refresh_unauthorized_expedites_future_scheduled_job_through_apalis
             metadata_hook: None,
             cancel: CancellationToken::new(),
             apalis_handle: fixture.scheduler_backend.clone(),
+            meta: fixture.storage.clone(),
         }));
         let lifecycle = make_lifecycle(&fixture, key_store, lazy).await;
 

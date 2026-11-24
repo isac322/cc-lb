@@ -63,17 +63,65 @@ impl SchedulerDispatch {
         let replica_id = self
             .replica_id
             .ok_or_else(|| SchedulerError::Job("scheduler replica id is unavailable".to_owned()))?;
-        OAuthRefreshJobHandler::new(StorageHandle::new(self.storage.clone()), replica_id)
-            .handle(
-                job,
-                unix_secs(self.clock.now()),
-                |upstream| self.refresh_upstream(upstream),
-                |metadata_job| self.enqueue_metadata_refresh(metadata_job),
-                |upstream_id, expires_at_unix_secs| {
-                    self.push_next_oauth_refresh_task(upstream_id, expires_at_unix_secs)
-                },
-            )
+        let Some(upstream) = UpstreamStore::get_by_id(self.storage.as_ref(), job.upstream_id)
             .await
+            .map_err(storage_scheduler_error)?
+        else {
+            return Ok(JobOutcome::Skip);
+        };
+        let starting_generation = upstream.oauth_token_generation;
+        let Some(lease) = crate::refresh::try_acquire_oauth_refresh_lease(
+            self.storage.as_ref(),
+            job.upstream_id,
+            starting_generation,
+            unix_secs(self.clock.now()),
+        )
+        .await
+        .map_err(storage_scheduler_error)?
+        else {
+            tracing::info!(
+                upstream_id = %job.upstream_id,
+                generation = starting_generation,
+                "oauth refresh credential lease is held by another worker or fallback; retrying later",
+            );
+            return Ok(JobOutcome::Retry {
+                delay: Some(std::time::Duration::from_secs(30)),
+            });
+        };
+        let upstream_id = job.upstream_id;
+        let outcome =
+            OAuthRefreshJobHandler::new(StorageHandle::new(self.storage.clone()), replica_id)
+                .handle(
+                    job,
+                    unix_secs(self.clock.now()),
+                    |upstream| self.refresh_upstream(upstream),
+                    |metadata_job| self.enqueue_metadata_refresh(metadata_job),
+                    |upstream_id, expires_at_unix_secs| {
+                        self.push_next_oauth_refresh_task(upstream_id, expires_at_unix_secs)
+                    },
+                )
+                .await;
+        let final_generation =
+            UpstreamStore::read_oauth_token_generation(self.storage.as_ref(), upstream_id)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(starting_generation);
+        if let Err(error) = crate::refresh::release_oauth_refresh_lease(
+            self.storage.as_ref(),
+            upstream_id,
+            &lease.token,
+            final_generation,
+        )
+        .await
+        {
+            tracing::warn!(
+                error = %error,
+                upstream_id = %upstream_id,
+                "failed to release scheduled oauth refresh lease",
+            );
+        }
+        outcome
     }
 
     async fn refresh_upstream(&self, upstream: UpstreamRecord) -> SchedulerResult<RefreshOutcome> {

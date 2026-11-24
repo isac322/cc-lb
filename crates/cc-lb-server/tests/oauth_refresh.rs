@@ -264,6 +264,7 @@ async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
         metadata_hook: None,
         cancel: CancellationToken::new(),
         apalis_handle: fixture.scheduler_backend.clone(),
+        meta: fixture.storage.clone(),
     }));
     let base = AnthropicOAuthSignerFactory::for_upstream_name(
         fixture.storage.clone(),
@@ -328,6 +329,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
         metadata_hook: None,
         cancel,
         apalis_handle: fixture.scheduler_backend.clone(),
+        meta: fixture.storage.clone(),
     }));
     let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
@@ -407,6 +409,7 @@ async fn long_lived_expired_oauth_upstream_never_triggers_lazy_refresh() {
         metadata_hook: None,
         cancel: CancellationToken::new(),
         apalis_handle: fixture.scheduler_backend.clone(),
+        meta: fixture.storage.clone(),
     }));
     let base = AnthropicOAuthSignerFactory::for_upstream_name(
         fixture.storage.clone(),
