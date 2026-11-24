@@ -1027,6 +1027,161 @@ async fn apalis_lazy_refresh_task_state(
     }
 }
 
+enum FallbackClaimHandoff {
+    Pending,
+    Delivered(LazyRefreshFallbackLease),
+    Taken,
+    WaiterAbandoned,
+}
+
+#[derive(Clone)]
+struct FallbackClaimTarget {
+    claim_guard: Arc<dyn LazyRefreshClaimGuard>,
+    stores: Arc<Stores>,
+    upstream_id: Uuid,
+    idempotency_key: String,
+    generation: u64,
+}
+
+async fn release_abandoned_fallback_lease(
+    target: FallbackClaimTarget,
+    lease: LazyRefreshFallbackLease,
+) {
+    let final_generation = target
+        .stores
+        .upstreams
+        .read_oauth_token_generation(target.upstream_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(target.generation);
+    if let Err(error) = target
+        .claim_guard
+        .finish_fallback_claim(target.upstream_id, &lease, final_generation)
+        .await
+    {
+        tracing::warn!(
+            error = %error,
+            upstream_id = %target.upstream_id,
+            idempotency_key = %target.idempotency_key,
+            "failed to release abandoned oauth refresh fallback lease",
+        );
+    }
+}
+
+/// Ensures any lease committed by `try_claim_fallback` is deterministically
+/// released even if the caller's future is cancelled or dropped after the
+/// database write commits and before the waiter receives the lease token.
+struct FallbackClaimWaiterGuard {
+    handoff: Arc<std::sync::Mutex<FallbackClaimHandoff>>,
+    target: FallbackClaimTarget,
+}
+
+impl FallbackClaimWaiterGuard {
+    fn take_delivered(&self) -> Option<LazyRefreshFallbackLease> {
+        let mut guard = self
+            .handoff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match std::mem::replace(&mut *guard, FallbackClaimHandoff::Taken) {
+            FallbackClaimHandoff::Delivered(lease) => Some(lease),
+            other => {
+                *guard = other;
+                None
+            }
+        }
+    }
+}
+
+impl Drop for FallbackClaimWaiterGuard {
+    fn drop(&mut self) {
+        let abandoned_lease = {
+            let mut guard = self
+                .handoff
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match std::mem::replace(&mut *guard, FallbackClaimHandoff::WaiterAbandoned) {
+                FallbackClaimHandoff::Pending => None,
+                FallbackClaimHandoff::Delivered(lease) => Some(lease),
+                FallbackClaimHandoff::Taken => {
+                    *guard = FallbackClaimHandoff::Taken;
+                    None
+                }
+                FallbackClaimHandoff::WaiterAbandoned => None,
+            }
+        };
+        if let Some(lease) = abandoned_lease {
+            let target = self.target.clone();
+            tokio::spawn(release_abandoned_fallback_lease(target, lease));
+        }
+    }
+}
+
+async fn try_claim_fallback_cancellation_safe(
+    target: FallbackClaimTarget,
+    holder: &str,
+    now_unix_secs: u64,
+) -> Result<Option<LazyRefreshFallbackLease>, LazyRefreshError> {
+    let handoff = Arc::new(std::sync::Mutex::new(FallbackClaimHandoff::Pending));
+    let guard = FallbackClaimWaiterGuard {
+        handoff: Arc::clone(&handoff),
+        target: target.clone(),
+    };
+
+    // Pass only a completion signal through the oneshot so cancelling before
+    // `rx.await` polls never drops the lease inside an unread channel buffer.
+    let (tx, rx) = tokio::sync::oneshot::channel::<StorageResult<Option<()>>>();
+    let task_holder = holder.to_owned();
+    let task_handoff = Arc::clone(&handoff);
+    tokio::spawn(async move {
+        let result = target
+            .claim_guard
+            .try_claim_fallback(
+                target.upstream_id,
+                &task_holder,
+                &target.idempotency_key,
+                target.generation,
+                now_unix_secs,
+            )
+            .await;
+        match result {
+            Ok(Some(lease)) => {
+                let release_immediately = {
+                    let mut state = task_handoff
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match &*state {
+                        FallbackClaimHandoff::WaiterAbandoned => Some(lease),
+                        _ => {
+                            *state = FallbackClaimHandoff::Delivered(lease);
+                            None
+                        }
+                    }
+                };
+                if let Some(abandoned_lease) = release_immediately {
+                    release_abandoned_fallback_lease(target, abandoned_lease).await;
+                    return;
+                }
+                let _ = tx.send(Ok(Some(())));
+            }
+            Ok(None) => {
+                let _ = tx.send(Ok(None));
+            }
+            Err(error) => {
+                let _ = tx.send(Err(error));
+            }
+        }
+    });
+
+    let signal = rx.await.map_err(|_| LazyRefreshError::Failed {
+        reason: "oauth refresh fallback claim task aborted".to_owned(),
+    })?;
+    match signal.map_err(lazy_error)? {
+        Some(()) => Ok(guard.take_delivered()),
+        None => Ok(None),
+    }
+}
+
 impl LazyRefresher {
     pub fn new(params: LazyRefresherParams) -> Self {
         let claim_guard =
@@ -1433,17 +1588,18 @@ impl LazyRefresher {
                     .await
                     .map_err(lazy_refresh_error)?;
 
-                if let Some(lease) = self
-                    .claim_guard
-                    .try_claim_fallback(
+                if let Some(lease) = try_claim_fallback_cancellation_safe(
+                    FallbackClaimTarget {
+                        claim_guard: Arc::clone(&self.claim_guard),
+                        stores: Arc::clone(&self.stores),
                         upstream_id,
-                        holder,
-                        idempotency_key,
-                        starting_generation,
-                        unix_secs(self.clock.now()),
-                    )
-                    .await
-                    .map_err(lazy_error)?
+                        idempotency_key: idempotency_key.to_owned(),
+                        generation: starting_generation,
+                    },
+                    holder,
+                    unix_secs(self.clock.now()),
+                )
+                .await?
                 {
                     return Ok(PollFallback::Claimed(lease));
                 }
@@ -4178,7 +4334,7 @@ mod tests {
                 second_entered: entered_tx,
             }),
             LazyRefreshContentionConfig::for_tests(
-                Duration::from_millis(60),
+                Duration::from_millis(500),
                 Duration::from_millis(5),
             ),
         );
@@ -4248,6 +4404,416 @@ mod tests {
         assert!(matches!(err2, super::LazyRefreshError::Failed { .. }));
         assert_eq!(post_calls.load(Ordering::SeqCst), 1);
         assert_eq!(fixture2.refresh_call_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lazy_refresher_releases_committed_lease_when_contended_claim_cancels_before_delivery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::sync::watch;
+
+        struct DelayedDeliveryAfterCommitGuard {
+            inner: super::ApalisLazyRefreshClaimGuard,
+            calls: AtomicUsize,
+            pause_on_call_index: usize,
+            committed: watch::Sender<bool>,
+            allow_return: watch::Receiver<bool>,
+            released: watch::Sender<bool>,
+        }
+
+        #[async_trait::async_trait]
+        impl super::LazyRefreshClaimGuard for DelayedDeliveryAfterCommitGuard {
+            async fn begin_refresh(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                expires_at_unix_secs: u64,
+                now_unix_secs: u64,
+            ) -> StorageResult<super::LazyRefreshClaim> {
+                self.inner
+                    .begin_refresh(upstream_id, holder, expires_at_unix_secs, now_unix_secs)
+                    .await
+            }
+
+            async fn begin_refresh_for_generation(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                expires_at_unix_secs: u64,
+                expected_generation: u64,
+                now_unix_secs: u64,
+            ) -> StorageResult<super::LazyRefreshClaim> {
+                self.inner
+                    .begin_refresh_for_generation(
+                        upstream_id,
+                        holder,
+                        expires_at_unix_secs,
+                        expected_generation,
+                        now_unix_secs,
+                    )
+                    .await
+            }
+
+            async fn complete_and_bump_generation(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+                _generation: u64,
+            ) -> StorageResult<bool> {
+                Ok(false)
+            }
+
+            async fn release_if_holder(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+            ) -> StorageResult<bool> {
+                Ok(false)
+            }
+
+            async fn task_state(
+                &self,
+                idempotency_key: &str,
+            ) -> StorageResult<super::LazyRefreshTaskState> {
+                self.inner.task_state(idempotency_key).await
+            }
+
+            async fn try_claim_fallback(
+                &self,
+                upstream_id: Uuid,
+                holder: &str,
+                idempotency_key: &str,
+                generation: u64,
+                now_unix_secs: u64,
+            ) -> StorageResult<Option<super::LazyRefreshFallbackLease>> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) < self.pause_on_call_index {
+                    return Ok(None);
+                }
+                let lease = self
+                    .inner
+                    .try_claim_fallback(
+                        upstream_id,
+                        holder,
+                        idempotency_key,
+                        generation,
+                        now_unix_secs,
+                    )
+                    .await?;
+                assert!(
+                    lease.is_some(),
+                    "inner SQLite MetaStore claim must commit before pausing delivery"
+                );
+                self.committed.send_replace(true);
+                let mut allow_return = self.allow_return.clone();
+                let _ = allow_return.wait_for(|&go| go).await;
+                Ok(lease)
+            }
+
+            async fn renew_fallback_claim(
+                &self,
+                upstream_id: Uuid,
+                lease: &super::LazyRefreshFallbackLease,
+                now_unix_secs: u64,
+            ) -> StorageResult<Option<super::LazyRefreshFallbackLease>> {
+                self.inner
+                    .renew_fallback_claim(upstream_id, lease, now_unix_secs)
+                    .await
+            }
+
+            fn fallback_lease_meta_key(&self, upstream_id: Uuid) -> Option<String> {
+                self.inner.fallback_lease_meta_key(upstream_id)
+            }
+
+            async fn finish_fallback_claim(
+                &self,
+                upstream_id: Uuid,
+                lease: &super::LazyRefreshFallbackLease,
+                final_generation: u64,
+            ) -> StorageResult<()> {
+                let res = self
+                    .inner
+                    .finish_fallback_claim(upstream_id, lease, final_generation)
+                    .await;
+                self.released.send_replace(true);
+                res
+            }
+        }
+
+        async fn setup_killed_job_fixture()
+        -> Result<(LazyRefreshFixture, Uuid, u64), Box<dyn std::error::Error>> {
+            let fixture = LazyRefreshFixture::new(Duration::ZERO).await;
+            let upstream_id = fixture.create_oauth_upstream().await;
+            let record = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream_id)
+                .await?
+                .ok_or("missing upstream")?;
+            let bundle = super::oauth_token_bundle(&record, fixture.aead.as_ref())
+                .map_err(|e| format!("{e}"))?;
+            let now = cc_lb_clock::unix_secs(fixture.clock.now());
+            let job = cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob::for_credential(
+                upstream_id,
+                record.oauth_token_generation,
+                bundle.expires_at_unix_secs,
+            );
+            let key = job.generation_idempotency_key(
+                record.oauth_token_generation,
+                bundle.expires_at_unix_secs,
+            );
+            fixture
+                .scheduler_backend
+                .push_adaptive_task(cc_lb_scheduler::worker::SchedulerPushTask {
+                    args: cc_lb_scheduler::worker::AdaptiveJob::OAuthRefresh(job),
+                    idempotency_key: Some(key.clone()),
+                    run_at_unix_secs: Some(now),
+                    max_attempts: None,
+                })
+                .await?;
+            sqlx::query(
+                "UPDATE Jobs SET status = 'Killed', done_at = ?1 WHERE idempotency_key = ?2",
+            )
+            .bind(i64::try_from(now)?)
+            .bind(&key)
+            .execute(&fixture.scheduler_pool)
+            .await?;
+            Ok((fixture, upstream_id, record.oauth_token_generation))
+        }
+
+        // Case 1: wait_deadline expires after SQLite commits `held:...` and before delivery reaches the waiter.
+        let (fixture1, upstream1, gen1) = setup_killed_job_fixture().await?;
+        let lease_key1 = super::oauth_refresh_lease_meta_key(upstream1);
+        let (committed_tx1, mut committed_rx1) = watch::channel(false);
+        let (allow_tx1, allow_rx1) = watch::channel(false);
+        let (released_tx1, mut released_rx1) = watch::channel(false);
+        let refresher1 = fixture1.lazy_refresher(
+            Arc::new(DelayedDeliveryAfterCommitGuard {
+                inner: super::ApalisLazyRefreshClaimGuard::new(
+                    fixture1.scheduler_backend.clone(),
+                    fixture1.storage.clone(),
+                ),
+                calls: AtomicUsize::new(0),
+                pause_on_call_index: 1,
+                committed: committed_tx1,
+                allow_return: allow_rx1,
+                released: released_tx1,
+            }),
+            LazyRefreshContentionConfig::for_tests(
+                Duration::from_millis(500),
+                Duration::from_millis(5),
+            ),
+        );
+        let handle1 = tokio::spawn(async move { refresher1.refresh_one(upstream1).await });
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            committed_rx1.wait_for(|&committed| committed),
+        )
+        .await??;
+        let held1 = fixture1
+            .storage
+            .get_meta_value(&lease_key1)
+            .await?
+            .ok_or("missing committed lease1")?;
+        assert!(held1.starts_with(&format!("held:{gen1}:")));
+        let err1 = tokio::time::timeout(Duration::from_secs(2), handle1)
+            .await??
+            .expect_err("deadline timeout must abort contended fallback claim");
+        assert!(matches!(err1, super::LazyRefreshError::Failed { .. }));
+        allow_tx1.send_replace(true);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            released_rx1.wait_for(|&released| released),
+        )
+        .await??;
+        assert_eq!(
+            fixture1
+                .storage
+                .get_meta_value(&lease_key1)
+                .await?
+                .as_deref(),
+            Some(format!("idle:{gen1}").as_str())
+        );
+        let healthy1 = super::ApalisLazyRefreshClaimGuard::new(
+            fixture1.scheduler_backend.clone(),
+            fixture1.storage.clone(),
+        );
+        let healthy_lease1 = healthy1
+            .try_claim_fallback(
+                upstream1,
+                "healthy-worker-1",
+                "k1",
+                gen1,
+                cc_lb_clock::unix_secs(fixture1.clock.now()),
+            )
+            .await?
+            .ok_or("healthy worker 1 must immediately acquire released fallback lease")?;
+        healthy1
+            .finish_fallback_claim(upstream1, &healthy_lease1, gen1)
+            .await?;
+        assert_eq!(fixture1.refresh_call_count(), 0);
+
+        // Case 2: shutdown cancellation wins after SQLite commits `held:...` and before delivery reaches the waiter.
+        let (fixture2, upstream2, gen2) = setup_killed_job_fixture().await?;
+        let lease_key2 = super::oauth_refresh_lease_meta_key(upstream2);
+        let (committed_tx2, mut committed_rx2) = watch::channel(false);
+        let (allow_tx2, allow_rx2) = watch::channel(false);
+        let (released_tx2, mut released_rx2) = watch::channel(false);
+        let cancel2 = CancellationToken::new();
+        let refresher2 = super::LazyRefresher::new_with_claim_guard_for_tests(
+            LazyRefresherDeps {
+                google_config: Default::default(),
+                stores: fixture2.stores.clone(),
+                aead: fixture2.aead.clone(),
+                oauth_cfg: fixture2.oauth_cfg.clone(),
+                clock: fixture2.clock.clone(),
+            },
+            Uuid::new_v4(),
+            None,
+            cancel2.clone(),
+            Arc::new(DelayedDeliveryAfterCommitGuard {
+                inner: super::ApalisLazyRefreshClaimGuard::new(
+                    fixture2.scheduler_backend.clone(),
+                    fixture2.storage.clone(),
+                ),
+                calls: AtomicUsize::new(0),
+                pause_on_call_index: 1,
+                committed: committed_tx2,
+                allow_return: allow_rx2,
+                released: released_tx2,
+            }),
+            LazyRefreshContentionConfig::for_tests(
+                Duration::from_secs(5),
+                Duration::from_millis(5),
+            ),
+            fixture2.scheduler_backend.clone(),
+        );
+        let handle2 = tokio::spawn(async move { refresher2.refresh_one(upstream2).await });
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            committed_rx2.wait_for(|&committed| committed),
+        )
+        .await??;
+        let held2 = fixture2
+            .storage
+            .get_meta_value(&lease_key2)
+            .await?
+            .ok_or("missing committed lease2")?;
+        assert!(held2.starts_with(&format!("held:{gen2}:")));
+        cancel2.cancel();
+        let err2 = tokio::time::timeout(Duration::from_secs(2), handle2)
+            .await??
+            .expect_err("shutdown cancellation must abort contended fallback claim");
+        assert!(matches!(
+            err2,
+            super::LazyRefreshError::Failed { ref reason } if reason == "oauth refresh cancelled"
+        ));
+        allow_tx2.send_replace(true);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            released_rx2.wait_for(|&released| released),
+        )
+        .await??;
+        assert_eq!(
+            fixture2
+                .storage
+                .get_meta_value(&lease_key2)
+                .await?
+                .as_deref(),
+            Some(format!("idle:{gen2}").as_str())
+        );
+        let healthy2 = super::ApalisLazyRefreshClaimGuard::new(
+            fixture2.scheduler_backend.clone(),
+            fixture2.storage.clone(),
+        );
+        let healthy_lease2 = healthy2
+            .try_claim_fallback(
+                upstream2,
+                "healthy-worker-2",
+                "k2",
+                gen2,
+                cc_lb_clock::unix_secs(fixture2.clock.now()),
+            )
+            .await?
+            .ok_or("healthy worker 2 must immediately acquire released fallback lease")?;
+        healthy2
+            .finish_fallback_claim(upstream2, &healthy_lease2, gen2)
+            .await?;
+        assert_eq!(fixture2.refresh_call_count(), 0);
+
+        // Case 3: waiter future is dropped after `try_claim_fallback` stored `Delivered(lease)` and queued the oneshot.
+        struct NotifyWake(Arc<Notify>);
+        impl std::task::Wake for NotifyWake {
+            fn wake(self: Arc<Self>) {
+                self.0.notify_one();
+            }
+        }
+
+        let (fixture3, upstream3, gen3) = setup_killed_job_fixture().await?;
+        let lease_key3 = super::oauth_refresh_lease_meta_key(upstream3);
+        let (committed_tx3, mut committed_rx3) = watch::channel(false);
+        let (allow_tx3, allow_rx3) = watch::channel(false);
+        let (released_tx3, mut released_rx3) = watch::channel(false);
+        let guard3: Arc<dyn LazyRefreshClaimGuard> = Arc::new(DelayedDeliveryAfterCommitGuard {
+            inner: super::ApalisLazyRefreshClaimGuard::new(
+                fixture3.scheduler_backend.clone(),
+                fixture3.storage.clone(),
+            ),
+            calls: AtomicUsize::new(0),
+            pause_on_call_index: 0,
+            committed: committed_tx3,
+            allow_return: allow_rx3,
+            released: released_tx3,
+        });
+        let notify3 = Arc::new(Notify::new());
+        let waker3 = std::task::Waker::from(Arc::new(NotifyWake(Arc::clone(&notify3))));
+        let mut cx3 = std::task::Context::from_waker(&waker3);
+        let mut claim_fut3 = Box::pin(super::try_claim_fallback_cancellation_safe(
+            super::FallbackClaimTarget {
+                claim_guard: Arc::clone(&guard3),
+                stores: fixture3.stores.clone(),
+                upstream_id: upstream3,
+                idempotency_key: "k3".to_owned(),
+                generation: gen3,
+            },
+            "waiter-3",
+            cc_lb_clock::unix_secs(fixture3.clock.now()),
+        ));
+        assert!(claim_fut3.as_mut().poll(&mut cx3).is_pending());
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            committed_rx3.wait_for(|&committed| committed),
+        )
+        .await??;
+        allow_tx3.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(2), notify3.notified()).await?;
+        drop(claim_fut3);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            released_rx3.wait_for(|&released| released),
+        )
+        .await??;
+        assert_eq!(
+            fixture3
+                .storage
+                .get_meta_value(&lease_key3)
+                .await?
+                .as_deref(),
+            Some(format!("idle:{gen3}").as_str())
+        );
+        let healthy3 = super::ApalisLazyRefreshClaimGuard::new(
+            fixture3.scheduler_backend.clone(),
+            fixture3.storage.clone(),
+        );
+        let healthy_lease3 = healthy3
+            .try_claim_fallback(
+                upstream3,
+                "healthy-worker-3",
+                "k3",
+                gen3,
+                cc_lb_clock::unix_secs(fixture3.clock.now()),
+            )
+            .await?
+            .ok_or("healthy worker 3 must immediately acquire released fallback lease")?;
+        healthy3
+            .finish_fallback_claim(upstream3, &healthy_lease3, gen3)
+            .await?;
         Ok(())
     }
 
