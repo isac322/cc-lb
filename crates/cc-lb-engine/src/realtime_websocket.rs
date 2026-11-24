@@ -145,6 +145,29 @@ fn realtime_terminal_outcome(
     }
 }
 
+fn openai_response_done_complete(value: &Value) -> bool {
+    matches!(
+        value.pointer("/response/status").and_then(Value::as_str),
+        None | Some("completed")
+    )
+}
+
+fn has_provider_metadata_marker(kind: RealtimeWebSocketKind, frame: &[u8]) -> bool {
+    match kind {
+        RealtimeWebSocketKind::Openai => frame
+            .windows(b"session.created".len())
+            .any(|window| window == b"session.created"),
+        RealtimeWebSocketKind::Gemini => {
+            frame
+                .windows(b"setupComplete".len())
+                .any(|window| window == b"setupComplete")
+                || frame
+                    .windows(b"sessionResumptionUpdate".len())
+                    .any(|window| window == b"sessionResumptionUpdate")
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct RealtimeStreamMetrics {
     started: Instant,
@@ -257,7 +280,7 @@ impl RealtimeStreamMetrics {
         let complete = match kind {
             RealtimeWebSocketKind::Openai => match value.get("type").and_then(Value::as_str) {
                 Some("response.created") => Some(false),
-                Some("response.done") => Some(true),
+                Some("response.done") => Some(openai_response_done_complete(&value)),
                 _ => None,
             },
             RealtimeWebSocketKind::Gemini => {
@@ -286,6 +309,9 @@ impl RealtimeStreamMetrics {
     /// Capture bounded provider-native setup/session identifiers without
     /// retaining arbitrary frame payloads.
     pub fn observe_provider_metadata(&mut self, kind: RealtimeWebSocketKind, frame: &[u8]) {
+        if !has_provider_metadata_marker(kind, frame) {
+            return;
+        }
         let Ok(value) = sonic_rs::from_slice::<Value>(frame) else {
             return;
         };
@@ -950,7 +976,7 @@ impl RealtimeUsage {
                     Some("response.done") => {}
                     _ => return,
                 }
-                self.complete = true;
+                self.complete = openai_response_done_complete(&value);
                 let Some(usage) = value
                     .pointer("/response/usage")
                     .filter(|value| value.is_object())
@@ -2000,5 +2026,255 @@ mod tests {
         }
         assert_eq!(started_ttfb, Some(None));
         assert_eq!(terminated_ttfb, Some(Some(116)));
+    }
+
+    #[test]
+    fn openai_response_done_completion_depends_on_response_status_and_preserves_usage() {
+        use cc_lb_clock::{ClockHandle, SystemClock};
+        use cc_lb_control::RequestEventBus;
+        use cc_lb_control::event_bus::InMemoryBus;
+        use cc_lb_lifecycle::LifecycleEvent;
+
+        for (status_field, expected_complete) in [
+            (None, true),
+            (Some("completed"), true),
+            (Some("failed"), false),
+            (Some("cancelled"), false),
+            (Some("incomplete"), false),
+            (Some("in_progress"), false),
+        ] {
+            let mut metrics = RealtimeStreamMetrics::new();
+            // Start from a prior completed turn to verify non-completed status
+            // resets completion rather than leaving it sticky.
+            metrics.observe_turn_boundary(
+                RealtimeWebSocketKind::Openai,
+                br#"{"type":"response.done","response":{"status":"completed"}}"#,
+            );
+            assert_eq!(metrics.turn_complete(), Some(true));
+
+            let frame_without_usage = match status_field {
+                Some(status) => {
+                    format!(r#"{{"type":"response.done","response":{{"status":"{status}"}}}}"#)
+                }
+                None => r#"{"type":"response.done","response":{}}"#.to_owned(),
+            };
+            metrics.observe_turn_boundary(
+                RealtimeWebSocketKind::Openai,
+                frame_without_usage.as_bytes(),
+            );
+            assert_eq!(
+                metrics.turn_complete(),
+                Some(expected_complete),
+                "status={status_field:?}"
+            );
+
+            let downstream_complete = realtime_stream_complete(
+                RealtimeWebSocketTermination::DownstreamClosed,
+                metrics.turn_complete().unwrap_or_default(),
+            );
+            assert_eq!(downstream_complete, expected_complete);
+            assert_eq!(
+                realtime_terminal_outcome(
+                    RealtimeWebSocketTermination::DownstreamClosed,
+                    downstream_complete,
+                ),
+                if expected_complete {
+                    (
+                        StreamTerminationOutcome::Completed,
+                        StreamTerminationCause::None,
+                    )
+                } else {
+                    (
+                        StreamTerminationOutcome::ClientCancelled,
+                        StreamTerminationCause::None,
+                    )
+                }
+            );
+
+            let provider_complete = realtime_stream_complete(
+                RealtimeWebSocketTermination::ProviderClosed,
+                metrics.turn_complete().unwrap_or_default(),
+            );
+            assert_eq!(provider_complete, expected_complete);
+            assert_eq!(
+                realtime_terminal_outcome(
+                    RealtimeWebSocketTermination::ProviderClosed,
+                    provider_complete,
+                ),
+                if expected_complete {
+                    (
+                        StreamTerminationOutcome::Completed,
+                        StreamTerminationCause::None,
+                    )
+                } else {
+                    (
+                        StreamTerminationOutcome::UpstreamError,
+                        StreamTerminationCause::ProviderError,
+                    )
+                }
+            );
+
+            // Usage accounting: first confirm status without usage updates `complete`,
+            // then confirm usage tokens are still recorded when present.
+            let bus = Arc::new(InMemoryBus::new());
+            let mut events = bus.subscribe_lifecycle();
+            let clock: ClockHandle = Arc::new(SystemClock);
+            let observer = crate::terminal_observer::LifecycleContext::new(
+                "response-done-status".to_owned(),
+                bus,
+                &clock,
+            );
+            observer.mark_authn_reached();
+            let mut usage = RealtimeUsage::with_observer(super::RealtimeUsageObserver {
+                observer: Some(observer.clone()),
+            });
+            usage.observe(
+                RealtimeWebSocketKind::Openai,
+                &Bytes::from_static(
+                    br#"{"type":"response.done","response":{"status":"completed"}}"#,
+                ),
+            );
+            assert!(usage.complete);
+            usage.observe(
+                RealtimeWebSocketKind::Openai,
+                &Bytes::from(frame_without_usage.into_bytes()),
+            );
+            assert_eq!(usage.complete, expected_complete, "status={status_field:?}");
+
+            let frame_with_usage = match status_field {
+                Some(status) => format!(
+                    r#"{{"type":"response.done","response":{{"status":"{status}","usage":{{"input_tokens":100,"output_tokens":15,"input_token_details":{{"cached_tokens":40}}}}}}}}"#
+                ),
+                None => {
+                    r#"{"type":"response.done","response":{"usage":{"input_tokens":100,"output_tokens":15,"input_token_details":{"cached_tokens":40}}}}"#.to_owned()
+                }
+            };
+            usage.observe(
+                RealtimeWebSocketKind::Openai,
+                &Bytes::from(frame_with_usage.into_bytes()),
+            );
+            assert_eq!(usage.complete, expected_complete, "status={status_field:?}");
+            let counts = usage
+                .counts
+                .as_ref()
+                .expect("usage tokens must still be recorded");
+            assert_eq!(counts.input_tokens, 60);
+            assert_eq!(counts.output_tokens, 15);
+            assert_eq!(counts.cache_read_input_tokens, 40);
+            let LifecycleEvent::UsageObserved {
+                usage: snapshot, ..
+            } = events.try_recv().expect("UsageObserved emitted")
+            else {
+                panic!("expected UsageObserved lifecycle event");
+            };
+            assert_eq!(snapshot.input_tokens, 60);
+            assert_eq!(snapshot.output_tokens, 15);
+            assert_eq!(snapshot.cache_read_input_tokens, 40);
+        }
+    }
+
+    #[test]
+    fn provider_metadata_prefilters_non_metadata_frames_and_extracts_valid_frames() {
+        for (kind, frame) in [
+            (
+                RealtimeWebSocketKind::Openai,
+                br#"{"type":"response.audio.delta","delta":"AAAA"}"#.as_slice(),
+            ),
+            (
+                RealtimeWebSocketKind::Openai,
+                br#"{"type":"response.done","response":{"id":"r1"}}"#.as_slice(),
+            ),
+            (
+                RealtimeWebSocketKind::Openai,
+                br#"{"setupComplete":{"sessionId":"wrong-provider"}}"#.as_slice(),
+            ),
+            (
+                RealtimeWebSocketKind::Openai,
+                br#"not-json-audio-bytes"#.as_slice(),
+            ),
+            (RealtimeWebSocketKind::Openai, b"".as_slice()),
+            (
+                RealtimeWebSocketKind::Gemini,
+                br#"{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"data":"AAAA"}}]}}}"#
+                    .as_slice(),
+            ),
+            (
+                RealtimeWebSocketKind::Gemini,
+                br#"{"type":"session.created","session":{"id":"wrong-provider"}}"#.as_slice(),
+            ),
+            (
+                RealtimeWebSocketKind::Gemini,
+                br#"{invalid-json-without-marker"#.as_slice(),
+            ),
+            (RealtimeWebSocketKind::Gemini, b"short".as_slice()),
+        ] {
+            assert!(
+                !super::has_provider_metadata_marker(kind, frame),
+                "frame must be skipped by marker check: {frame:?}"
+            );
+            let mut metrics = RealtimeStreamMetrics::new();
+            metrics.observe_provider_metadata(kind, frame);
+            let latency = metrics.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
+            assert_eq!(latency.provider_session_id, None);
+            assert_eq!(latency.provider_connection_id, None);
+        }
+
+        // Malformed JSON that contains a marker must still be handled safely without panic.
+        let mut malformed_with_marker = RealtimeStreamMetrics::new();
+        malformed_with_marker.observe_provider_metadata(
+            RealtimeWebSocketKind::Openai,
+            br#"{"type":"session.created", broken"#,
+        );
+        malformed_with_marker.observe_provider_metadata(
+            RealtimeWebSocketKind::Gemini,
+            br#"{"setupComplete": broken"#,
+        );
+        let latency = malformed_with_marker.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
+        assert_eq!(latency.provider_session_id, None);
+        assert_eq!(latency.provider_connection_id, None);
+
+        // Valid OpenAI session.created extracts both IDs and non-metadata frames do not clear them.
+        assert!(super::has_provider_metadata_marker(
+            RealtimeWebSocketKind::Openai,
+            br#"{"type":"session.created","session":{"id":"oa-s1","connection_id":"oa-c1"}}"#,
+        ));
+        let mut openai = RealtimeStreamMetrics::new();
+        openai.observe_provider_metadata(
+            RealtimeWebSocketKind::Openai,
+            br#"{"type":"session.created","session":{"id":"oa-s1","connection_id":"oa-c1"}}"#,
+        );
+        openai.observe_provider_metadata(
+            RealtimeWebSocketKind::Openai,
+            br#"{"type":"response.audio.delta","delta":"AAAA"}"#,
+        );
+        let latency = openai.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
+        assert_eq!(latency.provider_session_id.as_deref(), Some("oa-s1"));
+        assert_eq!(latency.provider_connection_id.as_deref(), Some("oa-c1"));
+
+        // Valid Gemini setupComplete & sessionResumptionUpdate extract IDs cleanly.
+        assert!(super::has_provider_metadata_marker(
+            RealtimeWebSocketKind::Gemini,
+            br#"{"setupComplete":{"session_id":"gm-s1","connection_id":"gm-c1"}}"#,
+        ));
+        assert!(super::has_provider_metadata_marker(
+            RealtimeWebSocketKind::Gemini,
+            br#"{"sessionResumptionUpdate":{"newSessionId":"gm-s2"}}"#,
+        ));
+        let mut gemini = RealtimeStreamMetrics::new();
+        gemini.observe_provider_metadata(
+            RealtimeWebSocketKind::Gemini,
+            br#"{"setupComplete":{"session_id":"gm-s1","connection_id":"gm-c1"}}"#,
+        );
+        gemini.observe_provider_metadata(
+            RealtimeWebSocketKind::Gemini,
+            br#"{"serverContent":{"turnComplete":true}}"#,
+        );
+        gemini.observe_provider_metadata(
+            RealtimeWebSocketKind::Gemini,
+            br#"{"sessionResumptionUpdate":{"newSessionId":"gm-s2"}}"#,
+        );
+        let latency = gemini.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
+        assert_eq!(latency.provider_session_id.as_deref(), Some("gm-s2"));
+        assert_eq!(latency.provider_connection_id.as_deref(), Some("gm-c1"));
     }
 }

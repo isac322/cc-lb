@@ -46,7 +46,6 @@ impl Lifecycle {
             model,
             codex_backend,
         } = target;
-        let public_query = query.map(str::to_owned);
         let call_id = path
             .strip_prefix("/v1/live/")
             .map(str::trim)
@@ -449,7 +448,7 @@ impl Lifecycle {
                     if record.kind == StorageUpstreamKind::OpenaiOauth {
                         url = self.config.openai_realtime_origin.clone();
                         url.set_path(path);
-                        url.set_query(public_query.as_deref());
+                        url.set_query(ctx.query.as_deref());
                     }
                     let scheme = match url.scheme() {
                         "https" | "wss" => "wss",
@@ -710,5 +709,239 @@ mod tests {
             identity.session_id_source.as_deref(),
             Some("x-opencode-session")
         );
+    }
+
+    #[tokio::test]
+    async fn openai_oauth_realtime_url_scrubs_query_api_key_and_preserves_other_params() {
+        use cc_lb_control::api_keys::{
+            builtin_authn::BuiltinAuthn, key_store::KeyStore, principal_view::PrincipalView, secret,
+        };
+        use cc_lb_storage_api::{
+            ApiKeyMutation, IssueParams, KeyStatus, ManagedKeyStore, StorageResult,
+        };
+        use cc_lb_upstream::SigningCapability;
+
+        const PRINCIPAL: &str = "principal-realtime-oauth";
+
+        struct SingleKeyStore {
+            key_id: String,
+            record: StoredApiKeyRecord,
+        }
+
+        #[async_trait]
+        impl ManagedKeyStore for SingleKeyStore {
+            async fn issue(
+                &self,
+                _principal_id: &str,
+                _key_id: &str,
+                _params: IssueParams,
+            ) -> StorageResult<StoredApiKeyRecord> {
+                Ok(self.record.clone())
+            }
+
+            async fn get(
+                &self,
+                principal_id: &str,
+                key_id: &str,
+            ) -> StorageResult<Option<StoredApiKeyRecord>> {
+                Ok((principal_id == PRINCIPAL && key_id == self.key_id)
+                    .then(|| self.record.clone()))
+            }
+
+            async fn lookup_by_index_hash(
+                &self,
+                index_hash: &[u8; 32],
+            ) -> StorageResult<Option<(String, String, StoredApiKeyRecord)>> {
+                Ok((index_hash == &self.record.index_hash).then(|| {
+                    (
+                        PRINCIPAL.to_owned(),
+                        self.key_id.clone(),
+                        self.record.clone(),
+                    )
+                }))
+            }
+
+            async fn list_by_principal(
+                &self,
+                principal_id: &str,
+            ) -> StorageResult<Vec<StoredApiKeyRecord>> {
+                Ok((principal_id == PRINCIPAL)
+                    .then(|| self.record.clone())
+                    .into_iter()
+                    .collect())
+            }
+
+            async fn list_all(&self) -> StorageResult<Vec<(String, String, StoredApiKeyRecord)>> {
+                Ok(vec![(
+                    PRINCIPAL.to_owned(),
+                    self.key_id.clone(),
+                    self.record.clone(),
+                )])
+            }
+
+            async fn update(
+                &self,
+                _principal_id: &str,
+                _key_id: &str,
+                _mutation: ApiKeyMutation,
+            ) -> StorageResult<()> {
+                Ok(())
+            }
+
+            async fn revoke_zero_secrets(
+                &self,
+                _principal_id: &str,
+                _key_id: &str,
+            ) -> StorageResult<()> {
+                Ok(())
+            }
+        }
+
+        struct NoopSignerFactory;
+        impl ApiKeyAwareSignerFactory for NoopSignerFactory {
+            fn with_router_choice(&self, _name: String) -> Arc<dyn SignerFactory> {
+                Arc::new(Self)
+            }
+        }
+        #[async_trait]
+        impl SignerFactory for NoopSignerFactory {
+            async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
+                Ok(Arc::new(NoopSigner))
+            }
+        }
+
+        struct NoopSigner;
+        #[async_trait]
+        impl Signer for NoopSigner {
+            async fn sign(
+                &self,
+                shaped: ShapedRequest,
+                capability: &mut SigningCapability,
+            ) -> Result<SignedRequest, SignerError> {
+                Ok(SignedRequest::from_shaped(shaped, capability))
+            }
+
+            async fn on_unauthorized(&self, _error: &UpstreamError) -> RetryDecision {
+                RetryDecision::Fail
+            }
+        }
+
+        struct UnusedDispatch;
+        #[async_trait]
+        impl UpstreamDispatch for UnusedDispatch {
+            async fn dispatch(
+                &self,
+                _request: SignedRequest,
+            ) -> Result<Response<Body>, DispatchError> {
+                unreachable!("websocket preparation does not dispatch HTTP")
+            }
+        }
+
+        let generated = secret::generate_new();
+        let plaintext = generated.plaintext.expose().to_owned();
+        let record = StoredApiKeyRecord {
+            label: "realtime-oauth-test-key".to_owned(),
+            verify_hash: generated.verify_hash,
+            secret_salt: generated.secret_salt,
+            status: KeyStatus::Active,
+            last_4: generated.last_4,
+            index_hash: generated.index_hash,
+            ..StoredApiKeyRecord::default()
+        };
+        let key_store: Arc<dyn ManagedKeyStore> = Arc::new(SingleKeyStore {
+            key_id: generated.key_id,
+            record,
+        });
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+        let authn = Arc::new(BuiltinAuthn::new(
+            Arc::new(KeyStore::new(key_store)),
+            clock.clone(),
+        ));
+        let principal_view = Arc::new(PrincipalView::for_tests(
+            PRINCIPAL,
+            true,
+            Vec::new(),
+            Vec::new(),
+            HashMap::new(),
+        ));
+        let upstream = UpstreamRecord {
+            id: Uuid::new_v4(),
+            name: "openai-oauth-rt".to_owned(),
+            kind: StorageUpstreamKind::OpenaiOauth,
+            base_url: Some("https://chatgpt.com/backend-api/codex".parse().unwrap()),
+            enabled: true,
+            revision: 1,
+            ..UpstreamRecord::default()
+        };
+        let view = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(NoopSignerFactory))
+            .principal_view(principal_view)
+            .upstream_records(vec![upstream])
+            .build();
+        let lifecycle = Lifecycle::new_with_dynamic_view(
+            authn,
+            Arc::new(DynamicViewHolder::new(view)),
+            Arc::new(UnusedDispatch),
+            LifecycleConfig {
+                openai_realtime_origin: "https://api.openai.com/".parse().unwrap(),
+                ..Default::default()
+            },
+            clock,
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_str(&plaintext).unwrap());
+        let auth = lifecycle
+            .authenticate(&headers)
+            .await
+            .expect("test key authenticates");
+
+        for (path, query, model, codex_backend, expected_url) in [
+            (
+                "/v1/realtime",
+                Some("key=caller-secret&model=gpt-realtime&KEY=upper-secret&intent=quicksilver"),
+                Some("gpt-realtime"),
+                false,
+                "wss://api.openai.com/v1/realtime?model=gpt-realtime&intent=quicksilver",
+            ),
+            (
+                "/v1/live",
+                Some("key=only-secret"),
+                None,
+                false,
+                "wss://api.openai.com/v1/live",
+            ),
+            (
+                "/v1/realtime",
+                Some("intent=quicksilver&key=caller-secret"),
+                None,
+                true,
+                "wss://api.openai.com/v1/realtime?intent=quicksilver",
+            ),
+        ] {
+            let observation = lifecycle.begin_realtime_websocket(&auth, path);
+            let session = lifecycle
+                .prepare_realtime_websocket(
+                    &auth,
+                    observation,
+                    RealtimeWebSocketKind::Openai,
+                    &headers,
+                    RealtimeWebSocketTarget {
+                        path,
+                        query,
+                        model,
+                        codex_backend,
+                    },
+                    Bytes::new(),
+                )
+                .await
+                .expect("OpenAI OAuth realtime session prepares");
+            assert_eq!(session.url.as_str(), expected_url);
+            assert!(
+                !session.url.as_str().contains("caller-secret")
+                    && !session.url.as_str().contains("upper-secret")
+                    && !session.url.as_str().contains("only-secret")
+            );
+        }
     }
 }

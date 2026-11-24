@@ -561,7 +561,7 @@ impl Lifecycle {
     }
 
     /// Allocate observation state without recording a successful upgrade as a turn.
-    pub(crate) fn websocket_observer(&self, path: &str) -> (Option<LifecycleContext>, String) {
+    pub fn websocket_observer(&self, path: &str) -> (Option<LifecycleContext>, String) {
         let request_id = next_request_id();
         let observer = self.event_bus.as_ref().map(|bus| {
             let observer = LifecycleContext::new(request_id.clone(), Arc::clone(bus), &self.clock);

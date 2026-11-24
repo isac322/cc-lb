@@ -253,14 +253,27 @@ pub(super) async fn codex_backend_root_handler(
         .await;
     }
 
-    if let Err(error) = state.lifecycle.authenticate(&headers).await {
-        return cc_lb_engine::reject_unauthenticated_for_route(
-            &error,
-            &method,
-            uri.path(),
-            Some(cc_lb_domain::Provider::Openai),
-            None,
-        );
+    let (observer, _) = state.lifecycle.websocket_observer(uri.path());
+    if let Some(observer) = observer.as_ref() {
+        observer.mark_authn_reached();
+    }
+    let auth = match state.lifecycle.authenticate(&headers).await {
+        Ok(auth) => auth,
+        Err(error) => {
+            return cc_lb_engine::reject_unauthenticated_for_route(
+                &error,
+                &method,
+                uri.path(),
+                Some(cc_lb_domain::Provider::Openai),
+                observer.as_ref(),
+            );
+        }
+    };
+    if let Some(observer) = observer.as_ref() {
+        state
+            .lifecycle
+            .record_authentication_completed(&auth, observer);
+        observer.terminate_local(TerminalClassification::OPERATION_NOT_SUPPORTED);
     }
 
     provider_scope_error_response(

@@ -2655,3 +2655,93 @@ async fn realtime_and_live_noop_frame_only_shape_preserves_native_frames() {
         proxy_task.abort();
     }
 }
+
+#[tokio::test]
+async fn codex_backend_root_non_ws_unauthenticated_persists_request_event() {
+    use cc_lb_request_log::RequestEventUpdate;
+    use cc_lb_storage_api::RequestEventStreamFilters;
+
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut updates = bus.subscribe();
+    let state = native_websocket_observed_state(
+        "127.0.0.1:1".parse().unwrap(),
+        false,
+        bus.clone(),
+        None,
+    )
+    .await;
+    let storage = state.storage.clone();
+    let assembler = cc_lb_event_pipeline::spawn_request_event_assembler(
+        bus.attach_lifecycle_assembler(128),
+        storage.clone(),
+        Some(bus),
+        Arc::new(cc_lb_observability::NoopMetricsHook),
+    );
+    let (proxy, task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let client = reqwest::Client::new();
+
+    let unauth = client
+        .post(format!("http://{proxy}/openai/backend-api/codex"))
+        .send()
+        .await
+        .expect("unauthenticated non-WS request completes");
+    assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+    let unauth_body: serde_json::Value = unauth.json().await.expect("JSON error body");
+    assert!(unauth_body["error"].is_object(), "{unauth_body}");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RequestEventUpdate::Final(_) = updates.recv().await.unwrap() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("unauthenticated non-WS rejection persists a final request event");
+
+    let valid = client
+        .get(format!("http://{proxy}/openai/backend-api/codex"))
+        .header("x-api-key", TEST_KEY.plaintext.as_str())
+        .send()
+        .await
+        .expect("authenticated non-WS request completes");
+    assert_eq!(valid.status(), StatusCode::NOT_FOUND);
+    let valid_body: serde_json::Value = valid.json().await.expect("JSON 404 body");
+    assert_eq!(valid_body["error"]["type"], "operation_not_supported");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RequestEventUpdate::Final(_) = updates.recv().await.unwrap() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("authenticated non-WS 404 persists a final request event");
+
+    assembler.shutdown().await;
+    let cursor = storage.current_request_event_cursor().await.unwrap();
+    let rows = storage
+        .query_request_events_between_cursors(0, cursor, 10, &RequestEventStreamFilters::default())
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+
+    let unauth_row = &rows[0].1;
+    assert_eq!(unauth_row.status, 401);
+    assert_eq!(
+        unauth_row.error_code.as_deref(),
+        Some("authentication_failed")
+    );
+    assert!(unauth_row.upstream_id.is_none());
+
+    let valid_row = &rows[1].1;
+    assert_eq!(valid_row.status, 404);
+    assert_eq!(
+        valid_row.error_code.as_deref(),
+        Some("operation_not_supported")
+    );
+    assert!(valid_row.upstream_id.is_none());
+
+    task.abort();
+}
