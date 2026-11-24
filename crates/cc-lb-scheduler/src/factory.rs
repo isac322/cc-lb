@@ -607,12 +607,14 @@ async fn install_hstore_for_pooled_connections(
         }
     }
     for schema in candidates {
-        let can_create: bool = sqlx::query_scalar("SELECT has_schema_privilege($1, 'CREATE')")
-            .bind(schema)
-            .fetch_one(&mut *conn)
-            .await
-            .map_err(migration_error)?;
-        if can_create {
+        let can_install_and_use: bool = sqlx::query_scalar(
+            "SELECT has_schema_privilege($1, 'CREATE') AND has_schema_privilege($1, 'USAGE')",
+        )
+        .bind(schema)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(migration_error)?;
+        if can_install_and_use {
             let sql = format!(
                 "CREATE EXTENSION IF NOT EXISTS hstore SCHEMA {}",
                 quote_pg_ident(schema)
@@ -632,7 +634,7 @@ async fn install_hstore_for_pooled_connections(
     }
     Err(SchedulerFactoryError::MigrationFailed {
         message: format!(
-            "no schema in the pooled query role's search_path ({}) is writable to install `hstore`; install `hstore` in one of those schemas or grant CREATE on `public`",
+            "no schema in the pooled query role's search_path ({}) grants both CREATE and USAGE to the setup role to install `hstore`; install `hstore` in one of those schemas or grant CREATE and USAGE on `public`",
             search_path.join(", ")
         ),
     })

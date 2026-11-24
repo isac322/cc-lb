@@ -364,6 +364,215 @@ async fn pgbouncer_fresh_hstore_uses_pooled_role_search_path_when_split_from_lis
 }
 
 #[tokio::test]
+async fn pgbouncer_fresh_hstore_requires_usage_as_well_as_create_for_setup_role() -> Result<()> {
+    let admin_url = std::env::var("DATABASE_URL")
+        .context("DATABASE_URL must be set to a PostgreSQL administrative database")?;
+    ensure!(
+        !admin_url.trim().is_empty(),
+        "DATABASE_URL must not be empty"
+    );
+    let suffix = Uuid::new_v4().simple().to_string();
+    let database_name = format!("cclb_pgbouncer_priv_{suffix}");
+    let role_name = format!("cclb_setup_{suffix}");
+    let role_password = Uuid::new_v4().simple().to_string();
+    let mut database_url = Url::parse(&admin_url).context("parse DATABASE_URL")?;
+    database_url.set_path(&database_name);
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .context("connect to PostgreSQL administrative database")?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"CREATE ROLE "{role_name}" LOGIN PASSWORD '{role_password}'"#
+    )))
+    .execute(&admin_pool)
+    .await
+    .with_context(|| format!("create setup role {role_name}"))?;
+    if let Err(err) = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"CREATE DATABASE "{database_name}""#
+    )))
+    .execute(&admin_pool)
+    .await
+    {
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            r#"DROP ROLE IF EXISTS "{role_name}""#
+        )))
+        .execute(&admin_pool)
+        .await;
+        admin_pool.close().await;
+        return Err(anyhow::Error::new(err)
+            .context(format!("create blank isolated database {database_name}")));
+    }
+
+    let test_result = timeout(
+        Duration::from_secs(45),
+        AssertUnwindSafe(async {
+            let direct_pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(database_url.as_str())
+                .await?;
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                r#"GRANT CREATE ON DATABASE "{database_name}" TO "{role_name}""#
+            )))
+            .execute(&direct_pool)
+            .await?;
+            sqlx::query("CREATE SCHEMA IF NOT EXISTS restricted")
+                .execute(&direct_pool)
+                .await?;
+            sqlx::query("CREATE SCHEMA IF NOT EXISTS app")
+                .execute(&direct_pool)
+                .await?;
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                r#"GRANT CREATE ON SCHEMA restricted TO "{role_name}""#
+            )))
+            .execute(&direct_pool)
+            .await?;
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                r#"GRANT CREATE, USAGE ON SCHEMA app TO "{role_name}""#
+            )))
+            .execute(&direct_pool)
+            .await?;
+            direct_pool.close().await;
+
+            let mut listener_url = database_url.clone();
+            listener_url
+                .set_username(&role_name)
+                .map_err(|()| anyhow::anyhow!("failed to set setup role username"))?;
+            listener_url
+                .set_password(Some(&role_password))
+                .map_err(|()| anyhow::anyhow!("failed to set setup role password"))?;
+            listener_url
+                .query_pairs_mut()
+                .append_pair("options", "-c search_path=app");
+
+            // Negative case: pooled role sees only `restricted`, where setup role holds CREATE
+            // without USAGE. Must fail closed rather than installing `hstore` into `restricted`.
+            let mut restricted_only_url = database_url.clone();
+            restricted_only_url
+                .query_pairs_mut()
+                .append_pair("options", "-c search_path=restricted");
+            let restricted_only_config = cc_lb_config::StorageConfig::Postgres {
+                url: restricted_only_url.to_string(),
+                pool: cc_lb_config::PostgresPoolConfig {
+                    listener_url: Some(listener_url.to_string()),
+                    pgbouncer_transaction_pooling: true,
+                    ..cc_lb_config::PostgresPoolConfig::default()
+                },
+            };
+            let Err(rejected) = cc_lb_scheduler::factory::open_scheduler_storage(
+                &restricted_only_config,
+                &SchedulerConfig::default(),
+                Arc::new(SystemClock),
+            )
+            .await
+            else {
+                bail!("expected MigrationFailed when only schema on search_path lacks USAGE");
+            };
+            ensure!(
+                matches!(
+                    rejected,
+                    cc_lb_scheduler::factory::SchedulerFactoryError::MigrationFailed { ref message }
+                        if message.contains("CREATE and USAGE")
+                ),
+                "unexpected error when setup role lacks USAGE on candidate schema: {rejected:?}"
+            );
+
+            // Fallback case: pooled role sees `restricted,app`; setup must skip `restricted`
+            // (CREATE without USAGE) and install `hstore` into `app` (CREATE and USAGE).
+            let mut pooled_url = database_url.clone();
+            pooled_url
+                .query_pairs_mut()
+                .append_pair("options", "-c search_path=restricted,app");
+            let storage_config = cc_lb_config::StorageConfig::Postgres {
+                url: pooled_url.to_string(),
+                pool: cc_lb_config::PostgresPoolConfig {
+                    listener_url: Some(listener_url.to_string()),
+                    pgbouncer_transaction_pooling: true,
+                    ..cc_lb_config::PostgresPoolConfig::default()
+                },
+            };
+
+            let opened = cc_lb_scheduler::factory::open_scheduler_storage(
+                &storage_config,
+                &SchedulerConfig::default(),
+                Arc::new(SystemClock),
+            )
+            .await
+            .context("open pgbouncer scheduler storage skipping CREATE-only restricted schema")?;
+            #[allow(irrefutable_let_patterns)]
+            let SchedulerBackend::Postgres(ref pg_backend) = opened.backend else {
+                bail!("expected postgres scheduler backend");
+            };
+            let hstore_schema: String = sqlx::query_scalar(
+                "SELECT n.nspname::text \
+                 FROM pg_extension e \
+                 JOIN pg_namespace n ON n.oid = e.extnamespace \
+                 WHERE e.extname = 'hstore'",
+            )
+            .fetch_one(pg_backend.pool())
+            .await?;
+            ensure!(
+                hstore_schema == "app",
+                "setup role without USAGE on `public` must install `hstore` in `app` (got {hstore_schema})"
+            );
+            let upstream_id = Uuid::new_v4();
+            opened
+                .backend
+                .push_adaptive_task(SchedulerPushTask {
+                    args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
+                    idempotency_key: Some(format!("pgbouncer:usage:{upstream_id}")),
+                    run_at_unix_secs: None,
+                    max_attempts: Some(5),
+                })
+                .await
+                .context("adaptive enqueue after CREATE+USAGE schema selection")?;
+            let mut cron_storage =
+                apalis_postgres::PostgresStorage::<CronJob>::new(pg_backend.pool())
+                    .with_config(apalis_postgres::Config::default().queue(CRON_QUEUE));
+            apalis::prelude::TaskSink::push(
+                &mut cron_storage,
+                CronJob::UsageRollup(Default::default()),
+            )
+            .await
+            .context("cron TaskSink enqueue after CREATE+USAGE schema selection")?;
+            pg_backend.pool().close().await;
+            Ok(())
+        })
+        .catch_unwind(),
+    )
+    .await;
+
+    let test_result = match test_result {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(anyhow::anyhow!(
+            "pgbouncer CREATE+USAGE hstore test panicked"
+        )),
+        Err(elapsed) => {
+            Err(anyhow::Error::new(elapsed).context("pgbouncer CREATE+USAGE hstore test timed out"))
+        }
+    };
+    let drop_db_result = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"DROP DATABASE "{database_name}" WITH (FORCE)"#
+    )))
+    .execute(&admin_pool)
+    .await;
+    let drop_role_result = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"DROP ROLE IF EXISTS "{role_name}""#
+    )))
+    .execute(&admin_pool)
+    .await;
+    admin_pool.close().await;
+    match (test_result, drop_db_result, drop_role_result) {
+        (Ok(()), Ok(_), Ok(_)) => Ok(()),
+        (Err(e), Ok(_), Ok(_)) => Err(e),
+        (Ok(()), Err(d), _) | (Ok(()), _, Err(d)) => Err(d.into()),
+        (Err(e), d, r) => Err(anyhow::anyhow!(
+            "test failed: {e:#}; cleanup db={d:?}, role={r:?}"
+        )),
+    }
+}
+
+#[tokio::test]
 async fn unpooled_custom_search_path_keeps_hstore_visible_for_fresh_and_preinstalled_extensions()
 -> Result<()> {
     let admin_url = std::env::var("DATABASE_URL")
