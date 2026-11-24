@@ -41,6 +41,7 @@ const LAZY_REFRESH_POLL_INTERVAL_SECS: u64 = 1;
 const LAZY_REFRESH_TASK_PAGE_SIZE: u32 = 500;
 const OAUTH_REFRESH_LEASE_TTL_SECS: u64 = 90;
 const OAUTH_REFRESH_LEASE_RENEW_INTERVAL_SECS: u64 = 25;
+const OAUTH_REFRESH_LEASE_SAFETY_MARGIN_SECS: u64 = 1;
 const OAUTH_REFRESH_LEASE_CAS_ATTEMPTS: usize = 4;
 
 pub(crate) fn oauth_refresh_lease_meta_key(upstream_id: Uuid) -> String {
@@ -277,6 +278,17 @@ impl Drop for ActiveOAuthRefreshLease {
     }
 }
 
+async fn mark_lease_lost(
+    state: &tokio::sync::Mutex<LeaseHeartbeatState>,
+    lease_cancel: &CancellationToken,
+) {
+    let mut guard = state.lock().await;
+    if !matches!(&*guard, LeaseHeartbeatState::Released) {
+        *guard = LeaseHeartbeatState::Lost;
+        lease_cancel.cancel();
+    }
+}
+
 impl ActiveOAuthRefreshLease {
     pub(crate) fn start(
         meta: Arc<dyn MetaStore>,
@@ -285,7 +297,10 @@ impl ActiveOAuthRefreshLease {
         lease: OAuthRefreshLease,
         expected_generation: u64,
     ) -> Self {
-        Self::start_with_controller(
+        let safety_margin = Duration::from_secs(OAUTH_REFRESH_LEASE_SAFETY_MARGIN_SECS);
+        let effective_ttl =
+            Duration::from_secs(OAUTH_REFRESH_LEASE_TTL_SECS).saturating_sub(safety_margin);
+        Self::start_with_controller_and_timings(
             Arc::new(MetaStoreLeaseController(meta)),
             clock,
             parent_cancel,
@@ -293,6 +308,8 @@ impl ActiveOAuthRefreshLease {
             lease.token,
             expected_generation,
             Duration::from_secs(OAUTH_REFRESH_LEASE_RENEW_INTERVAL_SECS),
+            effective_ttl,
+            safety_margin,
         )
     }
 
@@ -304,7 +321,10 @@ impl ActiveOAuthRefreshLease {
         lease: LazyRefreshFallbackLease,
         expected_generation: u64,
     ) -> Self {
-        Self::start_with_controller(
+        let safety_margin = Duration::from_secs(OAUTH_REFRESH_LEASE_SAFETY_MARGIN_SECS);
+        let effective_ttl =
+            Duration::from_secs(OAUTH_REFRESH_LEASE_TTL_SECS).saturating_sub(safety_margin);
+        Self::start_with_controller_and_timings(
             Arc::new(ClaimGuardLeaseController(claim_guard)),
             clock,
             parent_cancel,
@@ -312,6 +332,8 @@ impl ActiveOAuthRefreshLease {
             lease.0,
             expected_generation,
             Duration::from_secs(OAUTH_REFRESH_LEASE_RENEW_INTERVAL_SECS),
+            effective_ttl,
+            safety_margin,
         )
     }
 
@@ -324,7 +346,10 @@ impl ActiveOAuthRefreshLease {
         expected_generation: u64,
         renew_interval: Duration,
     ) -> Self {
-        Self::start_with_controller(
+        let safety_margin = Duration::from_secs(OAUTH_REFRESH_LEASE_SAFETY_MARGIN_SECS);
+        let effective_ttl =
+            Duration::from_secs(OAUTH_REFRESH_LEASE_TTL_SECS).saturating_sub(safety_margin);
+        Self::start_with_controller_and_timings(
             Arc::new(MetaStoreLeaseController(meta)),
             clock,
             parent_cancel,
@@ -332,10 +357,14 @@ impl ActiveOAuthRefreshLease {
             lease.token,
             expected_generation,
             renew_interval,
+            effective_ttl,
+            safety_margin,
         )
     }
 
-    fn start_with_controller(
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn start_with_controller_for_tests(
         controller: Arc<dyn OAuthLeaseController>,
         clock: ClockHandle,
         parent_cancel: CancellationToken,
@@ -343,7 +372,52 @@ impl ActiveOAuthRefreshLease {
         initial_token: String,
         expected_generation: u64,
         renew_interval: Duration,
+        effective_ttl: Duration,
+        safety_margin: Duration,
     ) -> Self {
+        Self::start_with_controller_and_timings(
+            controller,
+            clock,
+            parent_cancel,
+            upstream_id,
+            initial_token,
+            expected_generation,
+            renew_interval,
+            effective_ttl,
+            safety_margin,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_with_controller_and_timings(
+        controller: Arc<dyn OAuthLeaseController>,
+        clock: ClockHandle,
+        parent_cancel: CancellationToken,
+        upstream_id: Uuid,
+        initial_token: String,
+        expected_generation: u64,
+        renew_interval: Duration,
+        effective_ttl: Duration,
+        safety_margin: Duration,
+    ) -> Self {
+        let start_instant = tokio::time::Instant::now();
+        let start_unix = unix_secs(clock.now());
+        let (mut confirmed_expires_at, initial_deadline) =
+            match parse_oauth_refresh_lease(&initial_token) {
+                Some(ParsedOAuthRefreshLease::Held {
+                    expires_at_unix_secs,
+                    ..
+                }) => {
+                    let remaining =
+                        Duration::from_secs(expires_at_unix_secs.saturating_sub(start_unix))
+                            .saturating_sub(safety_margin);
+                    (
+                        expires_at_unix_secs,
+                        start_instant + remaining.min(effective_ttl),
+                    )
+                }
+                _ => (u64::MAX, start_instant + effective_ttl),
+            };
         let state = Arc::new(tokio::sync::Mutex::new(LeaseHeartbeatState::Active(
             initial_token,
         )));
@@ -356,11 +430,18 @@ impl ActiveOAuthRefreshLease {
         let stop_bg = stop_heartbeat.clone();
         let parent_bg = parent_cancel;
         let heartbeat = tokio::spawn(async move {
+            let expiry_sleep = tokio::time::sleep_until(initial_deadline);
+            tokio::pin!(expiry_sleep);
             loop {
                 tokio::select! {
+                    biased;
                     _ = stop_bg.cancelled() => break,
                     _ = parent_bg.cancelled() => break,
-                    _ = tokio::time::sleep(renew_interval) => {}
+                    () = &mut expiry_sleep => {
+                        mark_lease_lost(&state_bg, &lease_cancel_bg).await;
+                        break;
+                    }
+                    () = tokio::time::sleep(renew_interval) => {}
                 }
                 let current_token = {
                     let guard = state_bg.lock().await;
@@ -369,21 +450,62 @@ impl ActiveOAuthRefreshLease {
                         LeaseHeartbeatState::Lost | LeaseHeartbeatState::Released => break,
                     }
                 };
-                let now = unix_secs(clock.now());
-                match controller_bg.renew(upstream_id, &current_token, now).await {
+                let renew_started = tokio::time::Instant::now();
+                let renew_unix = unix_secs(clock.now());
+                if renew_unix >= confirmed_expires_at {
+                    mark_lease_lost(&state_bg, &lease_cancel_bg).await;
+                    break;
+                }
+                let renew_result = tokio::select! {
+                    biased;
+                    _ = parent_bg.cancelled() => break,
+                    () = &mut expiry_sleep => {
+                        mark_lease_lost(&state_bg, &lease_cancel_bg).await;
+                        break;
+                    }
+                    result = controller_bg.renew(upstream_id, &current_token, renew_unix) => result,
+                };
+                match renew_result {
                     Ok(Some(next_token)) => {
-                        let mut guard = state_bg.lock().await;
-                        if matches!(&*guard, LeaseHeartbeatState::Active(tok) if tok == &current_token)
                         {
-                            *guard = LeaseHeartbeatState::Active(next_token);
+                            let mut guard = state_bg.lock().await;
+                            if matches!(&*guard, LeaseHeartbeatState::Active(tok) if tok == &current_token)
+                            {
+                                *guard = LeaseHeartbeatState::Active(next_token.clone());
+                            }
                         }
+                        let post_now_unix = unix_secs(clock.now());
+                        let post_now_instant = tokio::time::Instant::now();
+                        let next_expires_at = match parse_oauth_refresh_lease(&next_token) {
+                            Some(ParsedOAuthRefreshLease::Held {
+                                expires_at_unix_secs,
+                                ..
+                            }) => expires_at_unix_secs,
+                            _ => u64::MAX,
+                        };
+                        if post_now_unix >= next_expires_at {
+                            mark_lease_lost(&state_bg, &lease_cancel_bg).await;
+                            break;
+                        }
+                        let monotonic_deadline = renew_started + effective_ttl;
+                        let new_deadline = if next_expires_at == u64::MAX {
+                            monotonic_deadline
+                        } else {
+                            let wall_remaining =
+                                Duration::from_secs(next_expires_at.saturating_sub(post_now_unix))
+                                    .saturating_sub(safety_margin);
+                            let wall_deadline = post_now_instant + wall_remaining;
+                            monotonic_deadline.min(wall_deadline)
+                        };
+                        if new_deadline <= post_now_instant {
+                            mark_lease_lost(&state_bg, &lease_cancel_bg).await;
+                            break;
+                        }
+                        confirmed_expires_at = next_expires_at;
+                        expiry_sleep.as_mut().reset(new_deadline);
                     }
                     Ok(None) => {
-                        let mut guard = state_bg.lock().await;
-                        if !matches!(&*guard, LeaseHeartbeatState::Released) {
-                            *guard = LeaseHeartbeatState::Lost;
-                            lease_cancel_bg.cancel();
-                        }
+                        mark_lease_lost(&state_bg, &lease_cancel_bg).await;
                         break;
                     }
                     Err(error) => {
@@ -392,17 +514,8 @@ impl ActiveOAuthRefreshLease {
                             upstream_id = %upstream_id,
                             "transient storage error renewing oauth refresh lease",
                         );
-                        if let Some(ParsedOAuthRefreshLease::Held {
-                            expires_at_unix_secs,
-                            ..
-                        }) = parse_oauth_refresh_lease(&current_token)
-                            && now >= expires_at_unix_secs
-                        {
-                            let mut guard = state_bg.lock().await;
-                            if !matches!(&*guard, LeaseHeartbeatState::Released) {
-                                *guard = LeaseHeartbeatState::Lost;
-                                lease_cancel_bg.cancel();
-                            }
+                        if unix_secs(clock.now()) >= confirmed_expires_at {
+                            mark_lease_lost(&state_bg, &lease_cancel_bg).await;
                             break;
                         }
                     }
@@ -706,10 +819,11 @@ impl ApalisLazyRefreshClaimGuard {
     async fn begin_refresh_task(
         &self,
         job: OAuthRefreshJob,
+        idempotency_key: String,
         expires_at_unix_secs: u64,
         now_unix_secs: u64,
     ) -> StorageResult<LazyRefreshClaim> {
-        let idempotency_key = job.idempotency_key(expires_at_unix_secs);
+        let _ = expires_at_unix_secs;
         let task = SchedulerPushTask {
             args: AdaptiveJob::OAuthRefresh(job),
             idempotency_key: Some(idempotency_key.clone()),
@@ -738,12 +852,10 @@ impl LazyRefreshClaimGuard for ApalisLazyRefreshClaimGuard {
         expires_at_unix_secs: u64,
         now_unix_secs: u64,
     ) -> StorageResult<LazyRefreshClaim> {
-        self.begin_refresh_task(
-            OAuthRefreshJob::new(upstream_id),
-            expires_at_unix_secs,
-            now_unix_secs,
-        )
-        .await
+        let job = OAuthRefreshJob::new(upstream_id);
+        let idempotency_key = job.idempotency_key(expires_at_unix_secs);
+        self.begin_refresh_task(job, idempotency_key, expires_at_unix_secs, now_unix_secs)
+            .await
     }
 
     async fn begin_refresh_for_generation(
@@ -754,12 +866,12 @@ impl LazyRefreshClaimGuard for ApalisLazyRefreshClaimGuard {
         expected_generation: u64,
         now_unix_secs: u64,
     ) -> StorageResult<LazyRefreshClaim> {
-        self.begin_refresh_task(
-            OAuthRefreshJob::for_credential(upstream_id, expected_generation, expires_at_unix_secs),
-            expires_at_unix_secs,
-            now_unix_secs,
-        )
-        .await
+        let job =
+            OAuthRefreshJob::for_credential(upstream_id, expected_generation, expires_at_unix_secs);
+        let idempotency_key =
+            job.generation_idempotency_key(expected_generation, expires_at_unix_secs);
+        self.begin_refresh_task(job, idempotency_key, expires_at_unix_secs, now_unix_secs)
+            .await
     }
 
     async fn complete_and_bump_generation(
@@ -1093,7 +1205,6 @@ impl LazyRefresher {
         self,
         upstream_id: Uuid,
         starting_generation: u64,
-        starting_expires_at_unix_secs: Option<u64>,
         active_lease: &mut ActiveOAuthRefreshLease,
     ) -> Result<u64, RefreshError> {
         let upstream = self
@@ -1130,10 +1241,8 @@ impl LazyRefresher {
                 refreshed.generation,
                 expires_at_unix_secs,
             );
-            let mut idempotency_key = job.idempotency_key(expires_at_unix_secs);
-            if starting_expires_at_unix_secs == Some(expires_at_unix_secs) {
-                idempotency_key = format!("{idempotency_key}:generation:{}", refreshed.generation);
-            }
+            let idempotency_key =
+                job.generation_idempotency_key(refreshed.generation, expires_at_unix_secs);
             let task = SchedulerPushTask {
                 args: AdaptiveJob::OAuthRefresh(job),
                 idempotency_key: Some(idempotency_key),
@@ -1225,7 +1334,6 @@ impl LazyRefresher {
                             &holder,
                             &idempotency_key,
                             starting_generation,
-                            Some(expires_at_unix_secs),
                             &reason,
                         )
                         .await
@@ -1236,7 +1344,6 @@ impl LazyRefresher {
                             &holder,
                             &idempotency_key,
                             starting_generation,
-                            Some(expires_at_unix_secs),
                             "oauth refresh job completed without advancing generation",
                         )
                         .await
@@ -1247,7 +1354,6 @@ impl LazyRefresher {
                             &holder,
                             &idempotency_key,
                             starting_generation,
-                            Some(expires_at_unix_secs),
                             &reason,
                         )
                         .await
@@ -1264,7 +1370,6 @@ impl LazyRefresher {
         holder: &str,
         idempotency_key: &str,
         starting_generation: u64,
-        starting_expires_at_unix_secs: Option<u64>,
         contended_reason: &str,
     ) -> Result<(), LazyRefreshError> {
         let upstream = self
@@ -1358,12 +1463,7 @@ impl LazyRefresher {
         ::metrics::counter!("cclb_lazy_refresh_inproc_fallback_total").increment(1);
         let outcome = self
             .clone()
-            .run_in_process_refresh(
-                upstream_id,
-                starting_generation,
-                starting_expires_at_unix_secs,
-                &mut active_lease,
-            )
+            .run_in_process_refresh(upstream_id, starting_generation, &mut active_lease)
             .await;
         let final_generation = match &outcome {
             Ok(generation) => *generation,
@@ -2432,7 +2532,7 @@ mod tests {
             lease_after.as_deref(),
             Some(format!("idle:{new_generation}").as_str())
         );
-        let next_proactive_key = job.idempotency_key(now + 3600);
+        let next_proactive_key = job.generation_idempotency_key(new_generation, now + 3600);
         let pending_tasks = fixture
             .scheduler_backend
             .list_adaptive_tasks(&cc_lb_scheduler::worker::Filter {
@@ -2468,8 +2568,12 @@ mod tests {
             .await?
             .ok_or("missing starting generation")?;
         let now = cc_lb_clock::unix_secs(fixture.clock.now());
-        let job = cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob::new(upstream_id);
-        let expiry_key = job.idempotency_key(1);
+        let job = cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob::for_credential(
+            upstream_id,
+            starting_generation,
+            1,
+        );
+        let expiry_key = job.generation_idempotency_key(starting_generation, 1);
         fixture
             .scheduler_backend
             .push_or_expedite_adaptive_task(cc_lb_scheduler::worker::SchedulerPushTask {
@@ -2519,7 +2623,7 @@ mod tests {
             fixture.storage.get_meta_value(&lease_key).await?.as_deref(),
             Some(format!("idle:{new_generation}").as_str())
         );
-        let next_proactive_key = job.idempotency_key(now + 3600);
+        let next_proactive_key = job.generation_idempotency_key(new_generation, now + 3600);
         let pending_tasks = fixture
             .scheduler_backend
             .list_adaptive_tasks(&cc_lb_scheduler::worker::Filter {
@@ -2760,6 +2864,321 @@ mod tests {
             Some(competing_holder.as_str())
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth_refresh_lease_cancels_at_expiry_deadline_despite_transient_renewal_errors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct ErrorRenewController {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl super::OAuthLeaseController for ErrorRenewController {
+            async fn renew(
+                &self,
+                _upstream_id: Uuid,
+                _current_token: &str,
+                _now_unix_secs: u64,
+            ) -> StorageResult<Option<String>> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(cc_lb_storage_api::StorageError::Unavailable {
+                    message: "transient storage timeout".to_owned(),
+                })
+            }
+
+            async fn release(
+                &self,
+                _upstream_id: Uuid,
+                _lease_token: &str,
+                _final_generation: u64,
+            ) -> StorageResult<()> {
+                Ok(())
+            }
+
+            fn meta_key(&self, upstream_id: Uuid) -> Option<String> {
+                Some(super::oauth_refresh_lease_meta_key(upstream_id))
+            }
+        }
+
+        struct HungRenewController;
+
+        #[async_trait::async_trait]
+        impl super::OAuthLeaseController for HungRenewController {
+            async fn renew(
+                &self,
+                _upstream_id: Uuid,
+                _current_token: &str,
+                _now_unix_secs: u64,
+            ) -> StorageResult<Option<String>> {
+                std::future::pending::<()>().await;
+                Ok(None)
+            }
+
+            async fn release(
+                &self,
+                _upstream_id: Uuid,
+                _lease_token: &str,
+                _final_generation: u64,
+            ) -> StorageResult<()> {
+                Ok(())
+            }
+
+            fn meta_key(&self, upstream_id: Uuid) -> Option<String> {
+                Some(super::oauth_refresh_lease_meta_key(upstream_id))
+            }
+        }
+
+        let upstream_id = Uuid::new_v4();
+        let clock = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let now = cc_lb_clock::unix_secs(clock.now());
+        let token = format!("held:1:{}:{}", Uuid::new_v4(), now + 90);
+        let parent_cancel = CancellationToken::new();
+
+        // Case 1: Repeated transient storage errors never extend the expiry deadline,
+        // so the exchange cancels strictly at `effective_ttl`.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut active_err = super::ActiveOAuthRefreshLease::start_with_controller_for_tests(
+            Arc::new(ErrorRenewController {
+                calls: Arc::clone(&calls),
+            }),
+            clock.clone(),
+            parent_cancel.clone(),
+            upstream_id,
+            token.clone(),
+            1,
+            Duration::from_millis(10),
+            Duration::from_millis(55),
+            Duration::ZERO,
+        );
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            active_err.cancel_token().cancelled(),
+        )
+        .await
+        .map_err(|_| "expiry deadline did not cancel on repeated transient errors")?;
+        assert!(active_err.is_lost().await);
+        assert!(active_err.stop_and_fence().await.is_err());
+        assert!(calls.load(Ordering::SeqCst) >= 1);
+
+        // Case 2: A slow/hung storage renew call is itself bounded by the expiry deadline.
+        let mut active_hung = super::ActiveOAuthRefreshLease::start_with_controller_for_tests(
+            Arc::new(HungRenewController),
+            clock,
+            parent_cancel,
+            upstream_id,
+            token,
+            1,
+            Duration::from_millis(5),
+            Duration::from_millis(45),
+            Duration::ZERO,
+        );
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            active_hung.cancel_token().cancelled(),
+        )
+        .await
+        .map_err(|_| "expiry deadline did not cancel while renew was hung")?;
+        assert!(active_hung.is_lost().await);
+        assert!(active_hung.stop_and_fence().await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lazy_refresher_expedites_generation_keyed_reconnect_job_without_legacy_collision()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = LazyRefreshFixture::new(Duration::ZERO).await;
+        let upstream_id = fixture.create_oauth_upstream().await;
+        let now = cc_lb_clock::unix_secs(fixture.clock.now());
+        let future_expiry = now + 3_600;
+
+        // Reconnect updates token to generation 2 at `future_expiry`.
+        let record = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream_id)
+            .await?
+            .ok_or("missing upstream")?;
+        let rotated_tokens = EncryptedOAuthTokens::encrypt(
+            fixture.aead.as_ref(),
+            &OAuthTokenBundle {
+                oauth_profile: Default::default(),
+                access_token: "sk-ant-oat01-reconnected".to_owned(),
+                refresh_token: "sk-ant-ort01-reconnected".to_owned(),
+                expires_at_unix_secs: future_expiry,
+                refresh_token_expires_at_unix_secs: None,
+                account_id: None,
+                project_id: None,
+                scopes: vec!["messages".to_owned()],
+                never_refresh: false,
+            },
+            upstream_id.as_bytes(),
+        )?;
+        let reconnected = fixture
+            .storage
+            .store_oauth_tokens(upstream_id, record.revision, rotated_tokens, false)
+            .await?;
+        let gen2 = reconnected.oauth_token_generation;
+
+        // An obsolete generation-1 Done job occupies the legacy unsuffixed expiry key,
+        // while reconnect queued the generation-2 job at the canonical generation-keyed slot
+        // with future `run_at`.
+        let legacy_job = cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob::new(upstream_id);
+        let legacy_key = legacy_job.idempotency_key(future_expiry);
+        fixture
+            .scheduler_backend
+            .push_or_expedite_adaptive_task(cc_lb_scheduler::worker::SchedulerPushTask {
+                args: cc_lb_scheduler::worker::AdaptiveJob::OAuthRefresh(legacy_job),
+                idempotency_key: Some(legacy_key.clone()),
+                run_at_unix_secs: Some(now),
+                max_attempts: None,
+            })
+            .await?;
+        sqlx::query("UPDATE Jobs SET status = 'Done', done_at = ?1 WHERE idempotency_key = ?2")
+            .bind(i64::try_from(now)?)
+            .bind(&legacy_key)
+            .execute(&fixture.scheduler_pool)
+            .await?;
+
+        let current_job = cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob::for_credential(
+            upstream_id,
+            gen2,
+            future_expiry,
+        );
+        let current_key = current_job.generation_idempotency_key(gen2, future_expiry);
+        fixture
+            .scheduler_backend
+            .push_or_expedite_adaptive_task(cc_lb_scheduler::worker::SchedulerPushTask {
+                args: cc_lb_scheduler::worker::AdaptiveJob::OAuthRefresh(current_job),
+                idempotency_key: Some(current_key.clone()),
+                run_at_unix_secs: Some(future_expiry),
+                max_attempts: None,
+            })
+            .await?;
+
+        let guard = Arc::new(super::ApalisLazyRefreshClaimGuard::new(
+            fixture.scheduler_backend.clone(),
+            fixture.storage.clone(),
+        ));
+        let refresher = fixture.lazy_refresher(
+            guard,
+            LazyRefreshContentionConfig::for_tests(
+                Duration::from_millis(15),
+                Duration::from_millis(5),
+            ),
+        );
+
+        refresher.enqueue_only(upstream_id).await?;
+        let run_at: i64 = sqlx::query_scalar("SELECT run_at FROM Jobs WHERE idempotency_key = ?1")
+            .bind(&current_key)
+            .fetch_one(&fixture.scheduler_pool)
+            .await?;
+        assert!(
+            u64::try_from(run_at)? <= now,
+            "enqueue_only must expedite the canonical generation-2 job rather than colliding on legacy Done key"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_complete_refresh_fenced_fails_closed() {
+        struct UnimplementedFencedStore;
+
+        #[async_trait::async_trait]
+        impl UpstreamStore for UnimplementedFencedStore {
+            async fn create(
+                &self,
+                _create: UpstreamCreate,
+            ) -> StorageResult<cc_lb_storage_api::UpstreamRecord> {
+                unimplemented!()
+            }
+            async fn get_by_name(
+                &self,
+                _name: &str,
+            ) -> StorageResult<Option<cc_lb_storage_api::UpstreamRecord>> {
+                unimplemented!()
+            }
+            async fn get_by_id(
+                &self,
+                _id: Uuid,
+            ) -> StorageResult<Option<cc_lb_storage_api::UpstreamRecord>> {
+                unimplemented!()
+            }
+            async fn list(
+                &self,
+                _after: Option<Uuid>,
+                _limit: usize,
+            ) -> StorageResult<Vec<cc_lb_storage_api::UpstreamRecord>> {
+                unimplemented!()
+            }
+            async fn update(
+                &self,
+                _id: Uuid,
+                _expected_revision: u64,
+                _update: cc_lb_storage_api::UpstreamUpdate,
+            ) -> StorageResult<cc_lb_storage_api::UpstreamRecord> {
+                unimplemented!()
+            }
+            async fn set_status(
+                &self,
+                _id: Uuid,
+                _status: cc_lb_storage_api::UpstreamStatusUpdate,
+            ) -> StorageResult<()> {
+                unimplemented!()
+            }
+            async fn store_oauth_tokens(
+                &self,
+                _id: Uuid,
+                _expected_revision: u64,
+                _tokens: EncryptedOAuthTokens,
+                _never_refresh: bool,
+            ) -> StorageResult<cc_lb_storage_api::UpstreamRecord> {
+                unimplemented!()
+            }
+            async fn complete_refresh(
+                &self,
+                _id: Uuid,
+                _holder: Uuid,
+                _tokens: EncryptedOAuthTokens,
+            ) -> StorageResult<cc_lb_storage_api::UpstreamRecord> {
+                panic!(
+                    "default complete_refresh_fenced must never delegate to unfenced complete_refresh"
+                );
+            }
+            async fn set_last_apply_error(
+                &self,
+                _id: Uuid,
+                _error: Option<String>,
+            ) -> StorageResult<()> {
+                unimplemented!()
+            }
+            async fn soft_delete(&self, _id: Uuid, _expected_revision: u64) -> StorageResult<()> {
+                unimplemented!()
+            }
+            async fn hard_delete(&self, _id: Uuid) -> StorageResult<()> {
+                unimplemented!()
+            }
+            async fn clear_warmup_dialect_plugin(
+                &self,
+                _id: Uuid,
+                _expected_revision: u64,
+            ) -> StorageResult<Option<cc_lb_storage_api::UpstreamRecord>> {
+                unimplemented!()
+            }
+        }
+
+        let upstream_id = Uuid::new_v4();
+        let err = UnimplementedFencedStore
+            .complete_refresh_fenced(
+                upstream_id,
+                Uuid::new_v4(),
+                EncryptedOAuthTokens::from_ciphertext(vec![1, 2, 3]),
+                &cc_lb_storage_api::OAuthRefreshFence {
+                    expected_generation: 1,
+                    lease_meta_key: "oauth_refresh_lease:v1:test".to_owned(),
+                    expected_lease_token: "held:1:test:999".to_owned(),
+                },
+            )
+            .await
+            .expect_err("default complete_refresh_fenced must fail closed");
+        assert!(matches!(err, cc_lb_storage_api::StorageError::Fatal { .. }));
     }
 
     /// `LazyRefresher::refresh_one` is the single chokepoint every lazy and

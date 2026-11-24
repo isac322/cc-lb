@@ -145,6 +145,25 @@ async fn lazy_refresh_waits_across_rescheduled_pending_retry_until_generation_ad
                 .await
         }
 
+        async fn begin_refresh_for_generation(
+            &self,
+            upstream_id: Uuid,
+            holder: &str,
+            expires_at_unix_secs: u64,
+            expected_generation: u64,
+            now_unix_secs: u64,
+        ) -> StorageResult<LazyRefreshClaim> {
+            self.inner
+                .begin_refresh_for_generation(
+                    upstream_id,
+                    holder,
+                    expires_at_unix_secs,
+                    expected_generation,
+                    now_unix_secs,
+                )
+                .await
+        }
+
         async fn complete_and_bump_generation(
             &self,
             upstream_id: Uuid,
@@ -369,7 +388,7 @@ async fn lazy_refresh_waits_across_rescheduled_pending_retry_until_generation_ad
     };
     let upstream_id = upstream.id;
     let waiter = tokio::spawn(async move { refresher.refresh_one(upstream_id).await });
-    let key = OAuthRefreshJob::new(upstream_id).idempotency_key(1);
+    let key = OAuthRefreshJob::new(upstream_id).generation_idempotency_key(starting_generation, 1);
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let row: Option<(String, i64)> =

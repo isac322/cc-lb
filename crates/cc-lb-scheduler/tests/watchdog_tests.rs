@@ -320,3 +320,55 @@ fn entity_job(kind: WatchdogEntityKind, upstream_id: Uuid) -> AdaptiveJob {
         ),
     }
 }
+
+#[tokio::test]
+async fn oauth_refresh_watchdog_ignores_obsolete_generation_job_and_seeds_current_successor()
+-> TestResult<()> {
+    use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
+    use cc_lb_scheduler::jobs::watchdog::{OAuthRefreshWatchdogTarget, run_oauth_refresh_watchdog};
+
+    let fixture = Fixture::new().await?;
+    let upstream_id = Uuid::new_v4();
+    let old_job = OAuthRefreshJob::for_credential(upstream_id, 1, 100);
+    let old_key = old_job.generation_idempotency_key(1, 100);
+    fixture
+        .backend
+        .push_adaptive_task(SchedulerPushTask {
+            args: AdaptiveJob::OAuthRefresh(old_job),
+            idempotency_key: Some(old_key),
+            run_at_unix_secs: Some(RUN_AT_UNIX_SECS),
+            max_attempts: None,
+        })
+        .await?;
+
+    let target_expires = TICK_UNIX_SECS + 3600;
+    let targets = [OAuthRefreshWatchdogTarget {
+        upstream_id,
+        expected_generation: 2,
+        expected_expires_at_unix_secs: target_expires,
+        is_anthropic_oauth: true,
+    }];
+
+    // Generation-1 job must NOT mask missing generation-2 successor.
+    let first = run_oauth_refresh_watchdog(&fixture.backend, &targets).await?;
+    assert_eq!(first.seeded, 1);
+    assert_eq!(first.seeded_targets, targets);
+
+    let expected_key =
+        OAuthRefreshJob::new(upstream_id).generation_idempotency_key(2, target_expires);
+    assert_eq!(fixture.count_key(&expected_key).await?, 1);
+    let run_at: i64 = sqlx::query_scalar("SELECT run_at FROM Jobs WHERE idempotency_key = ?1")
+        .bind(&expected_key)
+        .fetch_one(&fixture.pool)
+        .await?;
+    assert_eq!(
+        u64::try_from(run_at)?,
+        OAuthRefreshJob::run_at_for_expires_at(target_expires)
+    );
+
+    // Subsequent watchdog run sees the active generation-2 successor and does not re-seed.
+    let second = run_oauth_refresh_watchdog(&fixture.backend, &targets).await?;
+    assert_eq!(second.seeded, 0);
+    assert!(second.seeded_targets.is_empty());
+    Ok(())
+}

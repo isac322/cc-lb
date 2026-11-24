@@ -213,25 +213,14 @@ pub trait UpstreamStore: Send + Sync {
     ) -> StorageResult<UpstreamRecord>;
     async fn complete_refresh_fenced(
         &self,
-        id: Uuid,
-        holder: Uuid,
-        tokens: EncryptedOAuthTokens,
-        fence: &OAuthRefreshFence,
+        _id: Uuid,
+        _holder: Uuid,
+        _tokens: EncryptedOAuthTokens,
+        _fence: &OAuthRefreshFence,
     ) -> StorageResult<UpstreamRecord> {
-        let Some(current) = self.read_oauth_token_generation(id).await? else {
-            return Err(crate::StorageError::Conflict {
-                message: format!("upstream {id} not found"),
-            });
-        };
-        if current != fence.expected_generation {
-            return Err(crate::StorageError::Conflict {
-                message: format!(
-                    "stale oauth refresh generation: expected {}, found {current}",
-                    fence.expected_generation
-                ),
-            });
-        }
-        self.complete_refresh(id, holder, tokens).await
+        Err(crate::StorageError::Fatal {
+            message: "complete_refresh_fenced requires an atomic storage implementation".to_owned(),
+        })
     }
     async fn read_oauth_token_generation(&self, id: Uuid) -> StorageResult<Option<u64>> {
         Ok(self

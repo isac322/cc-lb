@@ -2047,10 +2047,7 @@ fn oauth_reconnect_refresh_task(
     generation: u64,
 ) -> SchedulerPushTask<AdaptiveJob> {
     let job = OAuthRefreshJob::for_credential(upstream_id, generation, expires_at_unix_secs);
-    let idempotency_key = format!(
-        "{}:generation:{generation}",
-        job.idempotency_key(expires_at_unix_secs)
-    );
+    let idempotency_key = job.generation_idempotency_key(generation, expires_at_unix_secs);
     SchedulerPushTask {
         args: AdaptiveJob::OAuthRefresh(job),
         idempotency_key: Some(idempotency_key),

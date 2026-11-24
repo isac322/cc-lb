@@ -68,6 +68,13 @@ impl OAuthRefreshJob {
         )
     }
 
+    pub fn generation_idempotency_key(&self, generation: u64, expires_at_unix_secs: u64) -> String {
+        format!(
+            "{}:generation:{generation}",
+            self.idempotency_key(expires_at_unix_secs)
+        )
+    }
+
     pub const fn run_at_for_expires_at(expires_at_unix_secs: u64) -> u64 {
         expires_at_unix_secs.saturating_sub(REFRESH_BEFORE_EXPIRY_SECS)
     }

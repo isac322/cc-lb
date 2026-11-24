@@ -1492,3 +1492,192 @@ async fn scheduled_oauth_refresh_rejects_stale_lease_after_generation_advances()
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn legacy_untagged_oauth_refresh_job_retires_and_reconciles_after_fallback_rotates_token() {
+    let (endpoint, calls, server) = token_server(
+        StatusCode::OK,
+        r#"{"access_token":"legacy-late","refresh_token":"legacy-refresh","token_type":"Bearer","expires_in":3600}"#,
+    )
+    .await;
+    let mut fixture = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture, endpoint);
+    let upstream = fixture.oauth_upstream(false).await;
+    let now = cc_lb_clock::unix_secs(fixture.clock.now());
+    let new_expiry = now + 7_200;
+
+    // Simulate lazy fallback having rotated N -> N+1 to a fresh token (due at new_expiry - 300),
+    // WITHOUT having enqueued the N+1 successor yet (or while a persisted pre-upgrade untagged job
+    // without `expected_generation` / `expected_expires_at_unix_secs` remained Pending).
+    let replacement = EncryptedOAuthTokens::encrypt(
+        fixture.dispatch.aead.as_ref(),
+        &OAuthTokenBundle {
+            oauth_profile: Default::default(),
+            access_token: "fallback-fresh-access".to_owned(),
+            refresh_token: "fallback-fresh-refresh".to_owned(),
+            expires_at_unix_secs: new_expiry,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: None,
+            scopes: vec!["messages".to_owned()],
+            never_refresh: false,
+        },
+        upstream.id.as_bytes(),
+    )
+    .expect("encrypt fresh fallback token");
+    let rotated = UpstreamStore::complete_refresh(
+        fixture.storage.as_ref(),
+        upstream.id,
+        Uuid::new_v4(),
+        replacement,
+    )
+    .await
+    .expect("fallback rotates token");
+    let new_gen = rotated.oauth_token_generation;
+
+    // Deserialize a persisted pre-upgrade payload with no expected fields.
+    let raw_legacy = serde_json::json!({
+        "upstream_id": upstream.id,
+        "traceparent": null
+    });
+    let legacy_job: OAuthRefreshJob =
+        serde_json::from_value(raw_legacy).expect("deserialize legacy untagged job");
+    assert_eq!(legacy_job.expected_generation, None);
+    assert_eq!(legacy_job.expected_expires_at_unix_secs, None);
+
+    let outcome = fixture
+        .dispatch
+        .dispatch_oauth_refresh(legacy_job.clone())
+        .await
+        .expect("legacy job retires cleanly");
+    assert_eq!(outcome, JobOutcome::Skip);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    // Canonical successor for N+1 was reconciled!
+    let expected_key = legacy_job.generation_idempotency_key(new_gen, new_expiry);
+    let pending = fixture
+        .dispatch
+        .backend
+        .list_adaptive_tasks(&Filter {
+            status: Some(TaskStatus::Pending),
+            page: 1,
+            page_size: Some(50),
+        })
+        .await
+        .expect("list pending");
+    assert!(
+        pending.iter().any(|task| {
+            task.idempotency_key.as_deref() == Some(expected_key.as_str())
+                && matches!(
+                    &task.args,
+                    AdaptiveJob::OAuthRefresh(j)
+                        if j.expected_generation == Some(new_gen)
+                            && j.expected_expires_at_unix_secs == Some(new_expiry)
+                )
+        }),
+        "legacy retirement must reconcile canonical generation-tagged successor"
+    );
+
+    // Even when a credential later becomes due, an active canonical generation-tagged job
+    // still causes a legacy untagged job to retire without calling `/oauth/token`.
+    fixture.clock.advance_secs(7_100);
+    let second_outcome = fixture
+        .dispatch
+        .dispatch_oauth_refresh(legacy_job)
+        .await
+        .expect("legacy job covered by tagged successor retries/retires");
+    assert_eq!(second_outcome, JobOutcome::Skip);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    server.abort();
+}
+
+#[tokio::test]
+async fn superseded_oauth_refresh_job_repairs_missing_metadata_and_successor_without_provider_call()
+{
+    let (endpoint, calls, server) = token_server(
+        StatusCode::OK,
+        r#"{"access_token":"never-called","refresh_token":"never-called","token_type":"Bearer","expires_in":3600}"#,
+    )
+    .await;
+    let mut fixture = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture, endpoint);
+    let upstream = fixture.oauth_upstream(false).await;
+    let old_gen = upstream.oauth_token_generation;
+    let now = cc_lb_clock::unix_secs(fixture.clock.now());
+    let new_expiry = now + 5_000;
+
+    // Commit generation N+1 as if token persistence succeeded right before metadata/successor
+    // enqueue failed. Neither MetadataRefreshJob(N+1) nor OAuthRefreshJob(N+1) exists yet.
+    let replacement = EncryptedOAuthTokens::encrypt(
+        fixture.dispatch.aead.as_ref(),
+        &OAuthTokenBundle {
+            oauth_profile: Default::default(),
+            access_token: "committed-access".to_owned(),
+            refresh_token: "committed-refresh".to_owned(),
+            expires_at_unix_secs: new_expiry,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: None,
+            scopes: vec!["messages".to_owned()],
+            never_refresh: false,
+        },
+        upstream.id.as_bytes(),
+    )
+    .expect("encrypt committed tokens");
+    let committed = UpstreamStore::complete_refresh(
+        fixture.storage.as_ref(),
+        upstream.id,
+        Uuid::new_v4(),
+        replacement,
+    )
+    .await
+    .expect("commit generation N+1");
+    let new_gen = committed.oauth_token_generation;
+
+    let superseded_job = OAuthRefreshJob::for_credential(upstream.id, old_gen, 1);
+    let outcome = fixture
+        .dispatch
+        .dispatch_oauth_refresh(superseded_job)
+        .await
+        .expect("superseded job repairs post-commit work");
+    assert_eq!(outcome, JobOutcome::Skip);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "repairing missing post-commit work must not exchange the token again",
+    );
+
+    let pending = fixture
+        .dispatch
+        .backend
+        .list_adaptive_tasks(&Filter {
+            status: Some(TaskStatus::Pending),
+            page: 1,
+            page_size: Some(50),
+        })
+        .await
+        .expect("list pending after repair");
+    let expected_oauth_key =
+        OAuthRefreshJob::new(upstream.id).generation_idempotency_key(new_gen, new_expiry);
+    assert!(
+        pending.iter().any(|task| {
+            task.idempotency_key.as_deref() == Some(expected_oauth_key.as_str())
+                && matches!(
+                    &task.args,
+                    AdaptiveJob::OAuthRefresh(j)
+                        if j.expected_generation == Some(new_gen)
+                            && j.expected_expires_at_unix_secs == Some(new_expiry)
+                )
+        }),
+        "missing successor OAuthRefreshJob must be repaired"
+    );
+    assert!(
+        pending.iter().any(|task| matches!(
+            &task.args,
+            AdaptiveJob::MetadataRefresh(m)
+                if m.upstream_id == upstream.id && m.credential_generation == new_gen
+        )),
+        "missing MetadataRefreshJob for Anthropic OAuth generation N+1 must be repaired"
+    );
+    server.abort();
+}

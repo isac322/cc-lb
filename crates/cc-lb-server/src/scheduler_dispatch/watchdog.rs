@@ -64,6 +64,7 @@ impl SchedulerDispatch {
                     upstream_id: upstream.id,
                     expected_generation: upstream.oauth_token_generation,
                     expected_expires_at_unix_secs: bundle.expires_at_unix_secs,
+                    is_anthropic_oauth: upstream.kind == UpstreamKind::AnthropicOauth,
                 });
             }
             after = page.last().map(|upstream| upstream.id);

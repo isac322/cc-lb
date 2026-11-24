@@ -6,8 +6,8 @@ use crate::middleware::TraceparentCarrier;
 
 mod runner;
 pub use runner::{
-    OAuthRefreshWatchdogTarget, WatchdogEntityKind, WatchdogSeedStats, run_entity_watchdog,
-    run_oauth_refresh_watchdog,
+    OAuthRefreshWatchdogResult, OAuthRefreshWatchdogTarget, WatchdogEntityKind, WatchdogSeedStats,
+    run_entity_watchdog, run_oauth_refresh_watchdog,
 };
 
 /// Monitors upstream warmup cycle health and enqueues missing cycles.

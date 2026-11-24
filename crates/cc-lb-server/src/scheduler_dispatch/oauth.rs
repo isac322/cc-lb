@@ -18,7 +18,7 @@ use cc_lb_scheduler::jobs::oauth_refresh::{
 };
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollObservation;
 use cc_lb_scheduler::retry::JobOutcome;
-use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
+use cc_lb_scheduler::worker::{AdaptiveJob, Filter, SchedulerPushTask, TaskStatus};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
@@ -142,15 +142,121 @@ impl OAuthRefreshUpstreams for FencedOAuthRefreshUpstreams {
             .store(updated.oauth_token_generation, Ordering::SeqCst);
         Ok(updated)
     }
-
-    async fn read_oauth_token_generation(&self, id: Uuid) -> SchedulerResult<Option<u64>> {
-        UpstreamStore::read_oauth_token_generation(self.storage.as_ref(), id)
-            .await
-            .map_err(storage_scheduler_error)
-    }
 }
 
 impl SchedulerDispatch {
+    async fn has_active_tagged_oauth_refresh_job(
+        &self,
+        upstream_id: Uuid,
+        expected_generation: u64,
+    ) -> SchedulerResult<bool> {
+        const PAGE_SIZE: u32 = 500;
+        for status in [
+            TaskStatus::Pending,
+            TaskStatus::Queued,
+            TaskStatus::Running,
+            TaskStatus::Failed,
+        ] {
+            let is_failed = status == TaskStatus::Failed;
+            let mut page = 1;
+            loop {
+                let filter = Filter {
+                    status: Some(status.clone()),
+                    page,
+                    page_size: Some(PAGE_SIZE),
+                };
+                let tasks = self.backend.list_adaptive_tasks(&filter).await?;
+                for task in &tasks {
+                    if is_failed && task.attempts >= task.max_attempts {
+                        continue;
+                    }
+                    if let AdaptiveJob::OAuthRefresh(candidate) = &task.args
+                        && candidate.upstream_id == upstream_id
+                        && candidate.expected_generation == Some(expected_generation)
+                    {
+                        return Ok(true);
+                    }
+                }
+                if tasks.len() < PAGE_SIZE as usize {
+                    break;
+                }
+                page += 1;
+            }
+        }
+        Ok(false)
+    }
+
+    async fn reconcile_post_commit_work(
+        &self,
+        upstream: &UpstreamRecord,
+        traceparent: Option<&str>,
+    ) -> SchedulerResult<()> {
+        if upstream.deleted_at_unix_secs.is_some()
+            || upstream.oauth_credentials.is_none()
+            || upstream.oauth_never_refresh
+            || refresh_requires_reconnect(upstream.last_apply_error.as_deref())
+            || !matches!(
+                upstream.kind,
+                UpstreamKind::AnthropicOauth
+                    | UpstreamKind::OpenaiOauth
+                    | UpstreamKind::GeminiOauth
+            )
+        {
+            return Ok(());
+        }
+        let bundle = decrypt_bundle(upstream, self.aead.as_ref())?;
+        if bundle.never_refresh {
+            return Ok(());
+        }
+        if upstream.kind == UpstreamKind::AnthropicOauth {
+            let mut metadata_job =
+                MetadataRefreshJob::new(upstream.id, upstream.oauth_token_generation);
+            metadata_job.traceparent = traceparent.map(str::to_owned);
+            self.enqueue_metadata_refresh(metadata_job).await?;
+        }
+        self.push_next_oauth_refresh_task(
+            upstream.id,
+            upstream.oauth_token_generation,
+            bundle.expires_at_unix_secs,
+        )
+        .await
+    }
+
+    async fn reconcile_and_skip(
+        &self,
+        upstream: &UpstreamRecord,
+        traceparent: Option<&str>,
+    ) -> SchedulerResult<JobOutcome> {
+        match self.reconcile_post_commit_work(upstream, traceparent).await {
+            Ok(()) => Ok(JobOutcome::Skip),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    upstream_id = %upstream.id,
+                    generation = upstream.oauth_token_generation,
+                    "failed to reconcile post-commit oauth refresh work; retrying without token exchange",
+                );
+                Ok(JobOutcome::Retry {
+                    delay: Some(std::time::Duration::from_secs(30)),
+                })
+            }
+        }
+    }
+
+    async fn reconcile_reloaded_and_skip(
+        &self,
+        upstream_id: Uuid,
+        traceparent: Option<&str>,
+    ) -> SchedulerResult<JobOutcome> {
+        let Some(current) = UpstreamStore::get_by_id(self.storage.as_ref(), upstream_id)
+            .await
+            .map_err(storage_scheduler_error)?
+        else {
+            return Ok(JobOutcome::Skip);
+        };
+        self.reconcile_and_skip(&current, traceparent).await
+    }
+
     pub(super) async fn dispatch_oauth_refresh(
         &self,
         job: OAuthRefreshJob,
@@ -164,13 +270,37 @@ impl SchedulerDispatch {
         else {
             return Ok(JobOutcome::Skip);
         };
+        let traceparent = job.traceparent.clone();
         if oauth_refresh_job_is_superseded(&job, &upstream, self.aead.as_ref()) {
-            return Ok(JobOutcome::Skip);
+            return self
+                .reconcile_and_skip(&upstream, traceparent.as_deref())
+                .await;
+        }
+        // Legacy untagged rows serialized before generation/expiry tagging
+        // must retire cleanly once the current generation is already covered or
+        // holds a fresh non-due replacement credential.
+        if job.expected_generation.is_none() && job.expected_expires_at_unix_secs.is_none() {
+            let now = unix_secs(self.clock.now());
+            let covered = self
+                .has_active_tagged_oauth_refresh_job(upstream.id, upstream.oauth_token_generation)
+                .await?;
+            let fresh_replacement = !upstream.oauth_never_refresh
+                && decrypt_bundle(&upstream, self.aead.as_ref())
+                    .ok()
+                    .is_some_and(|bundle| {
+                        !bundle.never_refresh
+                            && now
+                                < OAuthRefreshJob::run_at_for_expires_at(
+                                    bundle.expires_at_unix_secs,
+                                )
+                    });
+            if covered || fresh_replacement {
+                return self
+                    .reconcile_and_skip(&upstream, traceparent.as_deref())
+                    .await;
+            }
         }
         let starting_generation = upstream.oauth_token_generation;
-        let starting_expires_at = decrypt_bundle(&upstream, self.aead.as_ref())
-            .ok()
-            .map(|bundle| bundle.expires_at_unix_secs);
         let Some(lease) = crate::refresh::try_acquire_oauth_refresh_lease(
             self.storage.as_ref(),
             job.upstream_id,
@@ -186,7 +316,9 @@ impl SchedulerDispatch {
             {
                 None => return Ok(JobOutcome::Skip),
                 Some(current_generation) if current_generation > starting_generation => {
-                    return Ok(JobOutcome::Skip);
+                    return self
+                        .reconcile_reloaded_and_skip(job.upstream_id, traceparent.as_deref())
+                        .await;
                 }
                 Some(_) => {}
             }
@@ -211,6 +343,7 @@ impl SchedulerDispatch {
         let lease_slot = Arc::new(tokio::sync::Mutex::new(Some(active_lease)));
         let lease_fenced_conflict = Arc::new(AtomicBool::new(false));
         let committed_generation = Arc::new(AtomicU64::new(starting_generation));
+        let snapshot_superseded = Arc::new(AtomicBool::new(false));
         let fenced_upstreams = FencedOAuthRefreshUpstreams {
             storage: self.storage.clone(),
             lease: Arc::clone(&lease_slot),
@@ -221,6 +354,7 @@ impl SchedulerDispatch {
         let aead_for_check = Arc::clone(&self.aead);
         let lease_cancel_for_refresh = lease_cancel.clone();
         let committed_for_schedule = Arc::clone(&committed_generation);
+        let superseded_for_check = Arc::clone(&snapshot_superseded);
         let outcome = OAuthRefreshJobHandler::new(fenced_upstreams, replica_id)
             .handle(
                 job,
@@ -233,6 +367,7 @@ impl SchedulerDispatch {
                             aead_for_check.as_ref(),
                         )
                     {
+                        superseded_for_check.store(true, Ordering::SeqCst);
                         return Ok(RefreshOutcome::NotRefreshable);
                     }
                     self.refresh_upstream_with_cancel(upstream, &lease_cancel_for_refresh)
@@ -245,7 +380,6 @@ impl SchedulerDispatch {
                         upstream_id,
                         expected_generation,
                         expires_at_unix_secs,
-                        starting_expires_at,
                     )
                 },
             )
@@ -269,16 +403,22 @@ impl SchedulerDispatch {
         } else {
             false
         };
-        if matches!(outcome, Ok(JobOutcome::Retry { .. }) | Err(_))
-            && (was_lost || lease_fenced_conflict.load(Ordering::SeqCst))
+        let generation_advanced =
+            observed_generation.is_some_and(|current| current > starting_generation);
+        if snapshot_superseded.load(Ordering::SeqCst)
+            || (matches!(outcome, Ok(JobOutcome::Retry { .. }) | Err(_))
+                && (generation_advanced
+                    || was_lost
+                    || lease_fenced_conflict.load(Ordering::SeqCst)))
         {
-            return if observed_generation.is_none_or(|current| current > starting_generation) {
-                Ok(JobOutcome::Skip)
-            } else {
-                Ok(JobOutcome::Retry {
-                    delay: Some(std::time::Duration::from_secs(30)),
-                })
-            };
+            if observed_generation.is_none() || generation_advanced {
+                return self
+                    .reconcile_reloaded_and_skip(upstream_id, traceparent.as_deref())
+                    .await;
+            }
+            return Ok(JobOutcome::Retry {
+                delay: Some(std::time::Duration::from_secs(30)),
+            });
         }
         outcome
     }
@@ -395,10 +535,21 @@ impl SchedulerDispatch {
         }
     }
 
-    async fn enqueue_metadata_refresh(&self, job: MetadataRefreshJob) -> SchedulerResult<()> {
-        self.backend
-            .push_job(AdaptiveJob::MetadataRefresh(job))
-            .await
+    pub(super) async fn enqueue_metadata_refresh(
+        &self,
+        job: MetadataRefreshJob,
+    ) -> SchedulerResult<()> {
+        let idempotency_key = job.idempotency_key();
+        let task = SchedulerPushTask {
+            args: AdaptiveJob::MetadataRefresh(job),
+            idempotency_key: Some(idempotency_key),
+            run_at_unix_secs: None,
+            max_attempts: None,
+        };
+        match self.backend.push_adaptive_task(task).await {
+            Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     /// Enqueues a metadata refresh for a long-lived credential, which never
@@ -440,14 +591,11 @@ impl SchedulerDispatch {
         upstream_id: uuid::Uuid,
         expected_generation: u64,
         expires_at_unix_secs: u64,
-        previous_expires_at_unix_secs: Option<u64>,
     ) -> SchedulerResult<()> {
         let job =
             OAuthRefreshJob::for_credential(upstream_id, expected_generation, expires_at_unix_secs);
-        let mut idempotency_key = job.idempotency_key(expires_at_unix_secs);
-        if previous_expires_at_unix_secs == Some(expires_at_unix_secs) {
-            idempotency_key = format!("{idempotency_key}:generation:{expected_generation}");
-        }
+        let idempotency_key =
+            job.generation_idempotency_key(expected_generation, expires_at_unix_secs);
         let task = SchedulerPushTask {
             args: AdaptiveJob::OAuthRefresh(job),
             idempotency_key: Some(idempotency_key),

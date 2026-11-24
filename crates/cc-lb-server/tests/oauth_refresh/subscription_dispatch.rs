@@ -1629,10 +1629,20 @@ async fn post_refresh_unauthorized_expedites_future_scheduled_job_through_apalis
         .await;
 
         // Seed the future proactive refresh task (run_at = expires_at - 300) using the
-        // exact idempotency key that ApalisLazyRefreshClaimGuard::begin_refresh builds.
-        enqueue_next_oauth_refresh(fixture.scheduler_backend.clone(), upstream_id, expires_at)
-            .await
-            .expect("seed future proactive refresh task");
+        // exact generation-aware key that ApalisLazyRefreshClaimGuard builds.
+        let seeded_generation =
+            UpstreamStore::read_oauth_token_generation(fixture.storage.as_ref(), upstream_id)
+                .await
+                .expect("read seeded generation")
+                .expect("upstream exists");
+        enqueue_next_oauth_refresh(
+            fixture.scheduler_backend.clone(),
+            upstream_id,
+            seeded_generation,
+            expires_at,
+        )
+        .await
+        .expect("seed future proactive refresh task");
 
         let (key_store, key) = make_key(&fixture, upstream_id).await;
         let lazy = Arc::new(LazyRefresher::new(LazyRefresherParams {

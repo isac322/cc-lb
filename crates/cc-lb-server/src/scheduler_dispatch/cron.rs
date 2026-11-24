@@ -5,6 +5,7 @@ use cc_lb_scheduler::jobs::apalis_housekeeping::{
     ApalisHousekeepingConfig, ApalisHousekeepingJobHandler,
 };
 use cc_lb_scheduler::jobs::compat::handle_anthropic_compat_refresh_job_with_core_fetcher;
+use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_usage_poll::{
     NETWORK_FAILURE_STATUS, OAuthUsagePollCronJob, OAuthUsagePollObservation,
 };
@@ -176,16 +177,19 @@ impl SchedulerDispatch {
         job: OAuthRefreshWatchdogJob,
     ) -> SchedulerResult<JobOutcome> {
         let targets = self.list_oauth_refresh_watchdog_targets().await?;
-        let stats = run_oauth_refresh_watchdog(
-            &self.backend,
-            &targets,
-            job.tick_unix_secs,
-            unix_secs(self.clock.now()),
-        )
-        .await?;
+        let result = run_oauth_refresh_watchdog(&self.backend, &targets).await?;
+        for target in &result.seeded_targets {
+            if target.is_anthropic_oauth {
+                self.enqueue_metadata_refresh(MetadataRefreshJob::new(
+                    target.upstream_id,
+                    target.expected_generation,
+                ))
+                .await?;
+            }
+        }
         tracing::info!(
             tick_unix_secs = job.tick_unix_secs,
-            seeded = stats.seeded,
+            seeded = result.seeded,
             "oauth refresh watchdog completed"
         );
         Ok(JobOutcome::Done)
