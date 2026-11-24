@@ -732,7 +732,12 @@ async fn build_latest_response(
             now_unix_millis,
             max_staleness_secs,
         );
-        if snapshots.is_empty() && !provider_quota_windows(upstream.kind).is_empty() {
+        let cache_has_no_observations = snapshots.is_empty()
+            || (db_only_split
+                && snapshots
+                    .iter()
+                    .all(|snapshot| snapshot.state == SubscriptionQuotaDataState::Unobserved));
+        if cache_has_no_observations && !provider_quota_windows(upstream.kind).is_empty() {
             let durable_samples = durable_latest_by_upstream
                 .get(&upstream.id)
                 .map(Vec::as_slice)
