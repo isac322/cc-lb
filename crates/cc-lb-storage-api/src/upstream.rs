@@ -173,6 +173,14 @@ pub struct UpstreamStatusUpdate {
     pub expected_spec_revision: Option<u64>,
 }
 
+/// Ownership and generation predicate guarding [`UpstreamStore::complete_refresh_fenced`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthRefreshFence {
+    pub expected_generation: u64,
+    pub lease_meta_key: String,
+    pub expected_lease_token: String,
+}
+
 #[async_trait]
 pub trait UpstreamStore: Send + Sync {
     async fn create(&self, create: UpstreamCreate) -> StorageResult<UpstreamRecord>;
@@ -203,6 +211,28 @@ pub trait UpstreamStore: Send + Sync {
         holder: Uuid,
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord>;
+    async fn complete_refresh_fenced(
+        &self,
+        id: Uuid,
+        holder: Uuid,
+        tokens: EncryptedOAuthTokens,
+        fence: &OAuthRefreshFence,
+    ) -> StorageResult<UpstreamRecord> {
+        let Some(current) = self.read_oauth_token_generation(id).await? else {
+            return Err(crate::StorageError::Conflict {
+                message: format!("upstream {id} not found"),
+            });
+        };
+        if current != fence.expected_generation {
+            return Err(crate::StorageError::Conflict {
+                message: format!(
+                    "stale oauth refresh generation: expected {}, found {current}",
+                    fence.expected_generation
+                ),
+            });
+        }
+        self.complete_refresh(id, holder, tokens).await
+    }
     async fn read_oauth_token_generation(&self, id: Uuid) -> StorageResult<Option<u64>> {
         Ok(self
             .get_by_id(id)

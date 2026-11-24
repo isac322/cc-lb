@@ -101,6 +101,7 @@ async fn run_postgres_race_inner(databases: &TestDatabases) -> TestResult<()> {
         metadata_hook: None,
         cancel: CancellationToken::new(),
         apalis_handle: backend.clone(),
+        meta: storage.clone(),
     });
 
     let result = run_race_scenario(

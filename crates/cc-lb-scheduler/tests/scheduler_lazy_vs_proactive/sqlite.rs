@@ -79,6 +79,7 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
         metadata_hook: None,
         cancel: CancellationToken::new(),
         apalis_handle: backend.clone(),
+        meta: storage.clone(),
     });
 
     let result = run_race_scenario(

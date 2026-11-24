@@ -23,6 +23,10 @@ const REFRESH_BEFORE_EXPIRY_SECS: u64 = 300;
 pub struct OAuthRefreshJob {
     pub upstream_id: Uuid,
     pub traceparent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_expires_at_unix_secs: Option<u64>,
 }
 
 impl OAuthRefreshJob {
@@ -30,6 +34,30 @@ impl OAuthRefreshJob {
         Self {
             upstream_id,
             traceparent: None,
+            expected_generation: None,
+            expected_expires_at_unix_secs: None,
+        }
+    }
+
+    pub const fn for_credential(
+        upstream_id: Uuid,
+        expected_generation: u64,
+        expected_expires_at_unix_secs: u64,
+    ) -> Self {
+        Self {
+            upstream_id,
+            traceparent: None,
+            expected_generation: Some(expected_generation),
+            expected_expires_at_unix_secs: Some(expected_expires_at_unix_secs),
+        }
+    }
+
+    pub const fn with_expected_generation(upstream_id: Uuid, expected_generation: u64) -> Self {
+        Self {
+            upstream_id,
+            traceparent: None,
+            expected_generation: Some(expected_generation),
+            expected_expires_at_unix_secs: None,
         }
     }
 
@@ -135,6 +163,12 @@ where
             return Ok(JobOutcome::Skip);
         };
         if !is_refreshable(&upstream) {
+            return Ok(JobOutcome::Skip);
+        }
+        if job
+            .expected_generation
+            .is_some_and(|expected| upstream.oauth_token_generation != expected)
+        {
             return Ok(JobOutcome::Skip);
         }
 

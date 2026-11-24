@@ -78,6 +78,47 @@ pub struct WatchdogSeedStats {
     pub seeded: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OAuthRefreshWatchdogTarget {
+    pub upstream_id: Uuid,
+    pub expected_generation: u64,
+    pub expected_expires_at_unix_secs: u64,
+}
+
+pub async fn run_oauth_refresh_watchdog(
+    backend: &SchedulerBackend,
+    targets: &[OAuthRefreshWatchdogTarget],
+    tick_unix_secs: u64,
+    run_at_unix_secs: u64,
+) -> Result<WatchdogSeedStats> {
+    let active = active_entity_ids(backend, WatchdogEntityKind::OAuthRefresh).await?;
+    let mut seeded = 0;
+    for target in targets {
+        if active.contains(&target.upstream_id) {
+            continue;
+        }
+        let job = OAuthRefreshJob::for_credential(
+            target.upstream_id,
+            target.expected_generation,
+            target.expected_expires_at_unix_secs,
+        );
+        let task = SchedulerPushTask {
+            args: AdaptiveJob::OAuthRefresh(job),
+            idempotency_key: Some(
+                WatchdogEntityKind::OAuthRefresh.bootstrap_key(target.upstream_id, tick_unix_secs),
+            ),
+            run_at_unix_secs: Some(run_at_unix_secs),
+            max_attempts: None,
+        };
+        match backend.push_adaptive_task(task).await {
+            Ok(()) => seeded += 1,
+            Err(SchedulerError::Conflict(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(WatchdogSeedStats { seeded })
+}
+
 pub async fn run_entity_watchdog(
     backend: &SchedulerBackend,
     kind: WatchdogEntityKind,

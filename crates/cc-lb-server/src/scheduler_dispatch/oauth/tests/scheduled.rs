@@ -1330,3 +1330,165 @@ async fn scheduled_oauth_refresh_retries_without_calling_provider_while_lease_is
 
     server.abort();
 }
+
+#[tokio::test]
+async fn obsolete_oauth_refresh_job_skips_after_fallback_rotates_token_and_preserves_successor() {
+    let (endpoint, calls, server) = token_server(
+        StatusCode::OK,
+        r#"{"access_token":"late-access","refresh_token":"late-refresh","token_type":"Bearer","expires_in":3600}"#,
+    )
+    .await;
+    let mut fixture = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture, endpoint);
+    let upstream = fixture.oauth_upstream(false).await;
+    let original_generation = upstream.oauth_token_generation;
+    let obsolete_job = OAuthRefreshJob::for_credential(upstream.id, original_generation, 1);
+
+    // Simulate lazy fallback advancing N -> N+1 with a newer expiry before the
+    // previously pending worker job resumes and executes.
+    let replacement = EncryptedOAuthTokens::encrypt(
+        fixture.dispatch.aead.as_ref(),
+        &OAuthTokenBundle {
+            oauth_profile: Default::default(),
+            access_token: "fallback-access".to_owned(),
+            refresh_token: "fallback-refresh".to_owned(),
+            expires_at_unix_secs: 9_999_999_999,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: None,
+            scopes: vec!["messages".to_owned()],
+            never_refresh: false,
+        },
+        upstream.id.as_bytes(),
+    )
+    .expect("encrypt replacement");
+    let rotated = UpstreamStore::complete_refresh(
+        fixture.storage.as_ref(),
+        upstream.id,
+        Uuid::new_v4(),
+        replacement,
+    )
+    .await
+    .expect("fallback rotates credential");
+    assert_eq!(rotated.oauth_token_generation, original_generation + 1);
+
+    let outcome = fixture
+        .dispatch
+        .dispatch_oauth_refresh(obsolete_job)
+        .await
+        .expect("obsolete job dispatch");
+    assert_eq!(outcome, JobOutcome::Skip);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "obsolete job must never exchange the replacement credential",
+    );
+
+    let current = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
+        .await
+        .expect("reload upstream")
+        .expect("upstream present");
+    assert_eq!(
+        current.oauth_token_generation,
+        original_generation + 1,
+        "obsolete job must leave the replacement generation untouched",
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn scheduled_oauth_refresh_rejects_stale_lease_after_generation_advances() {
+    use cc_lb_storage_api::MetaStore;
+
+    let (endpoint, calls, server) = token_server(
+        StatusCode::OK,
+        r#"{"access_token":"stale-access","refresh_token":"stale-refresh","token_type":"Bearer","expires_in":3600}"#,
+    )
+    .await;
+    let mut fixture = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture, endpoint);
+    let upstream = fixture.oauth_upstream(false).await;
+    let old_gen = upstream.oauth_token_generation;
+    let now = cc_lb_clock::unix_secs(fixture.clock.now());
+    let lease_key = crate::refresh::oauth_refresh_lease_meta_key(upstream.id);
+
+    // Another runner committed N+1 and published `idle:{N+1}`.
+    let advanced_idle = format!("idle:{}", old_gen + 1);
+    fixture
+        .storage
+        .put_meta_value(&lease_key, &advanced_idle)
+        .await
+        .expect("seed idle:N+1");
+
+    // A stale lease claim for `old_gen` must be rejected and leave `idle:{N+1}` intact.
+    let stale_attempt = crate::refresh::try_acquire_oauth_refresh_lease(
+        fixture.storage.as_ref(),
+        upstream.id,
+        old_gen,
+        now,
+    )
+    .await
+    .expect("stale lease attempt");
+    assert!(
+        stale_attempt.is_none(),
+        "stale lease generation N must not overwrite idle:(N+1)",
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .get_meta_value(&lease_key)
+            .await
+            .expect("read meta")
+            .as_deref(),
+        Some(advanced_idle.as_str())
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    // Dispatching a legacy/generation-unbound job after `idle:{N+1}` also fails
+    // to steal ownership for generation `old_gen` and skips once generation > old_gen,
+    // OR completes only if uncontended at N+1. Specifically verify an N-bound job
+    // skips cleanly with 0 token calls even if metadata says `idle:N+1`.
+    let replacement = EncryptedOAuthTokens::encrypt(
+        fixture.dispatch.aead.as_ref(),
+        &OAuthTokenBundle {
+            oauth_profile: Default::default(),
+            access_token: "fresh-access".to_owned(),
+            refresh_token: "fresh-refresh".to_owned(),
+            expires_at_unix_secs: 9_999_999_999,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: None,
+            scopes: vec!["messages".to_owned()],
+            never_refresh: false,
+        },
+        upstream.id.as_bytes(),
+    )
+    .expect("encrypt fresh");
+    UpstreamStore::complete_refresh(
+        fixture.storage.as_ref(),
+        upstream.id,
+        Uuid::new_v4(),
+        replacement,
+    )
+    .await
+    .expect("commit generation N+1");
+
+    let stale_job = OAuthRefreshJob::with_expected_generation(upstream.id, old_gen);
+    let outcome = fixture
+        .dispatch
+        .dispatch_oauth_refresh(stale_job)
+        .await
+        .expect("stale job dispatch");
+    assert_eq!(outcome, JobOutcome::Skip);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture
+            .storage
+            .get_meta_value(&lease_key)
+            .await
+            .expect("read meta after skip")
+            .as_deref(),
+        Some(advanced_idle.as_str())
+    );
+    server.abort();
+}

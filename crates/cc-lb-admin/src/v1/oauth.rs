@@ -2053,7 +2053,7 @@ fn oauth_reconnect_refresh_task(
     expires_at_unix_secs: u64,
     generation: u64,
 ) -> SchedulerPushTask<AdaptiveJob> {
-    let job = OAuthRefreshJob::new(upstream_id);
+    let job = OAuthRefreshJob::for_credential(upstream_id, generation, expires_at_unix_secs);
     let idempotency_key = format!(
         "{}:generation:{generation}",
         job.idempotency_key(expires_at_unix_secs)
@@ -2103,7 +2103,7 @@ pub(super) async fn seed_oauth_bootstrap_tasks(
     // OAuth refresh bootstrap is skipped — a long-lived upstream is otherwise
     // fully managed and still receives its warmup bootstrap below.
     if !upstream.oauth_never_refresh {
-        for task in oauth_bootstrap_tasks(upstream.id, seed_secs) {
+        for task in oauth_bootstrap_tasks(upstream.id, upstream.oauth_token_generation, seed_secs) {
             match scheduler.push_adaptive_task(task).await {
                 Ok(()) | Err(SchedulerError::Conflict(_)) => {}
                 Err(error) => return Err(error),
@@ -2120,9 +2120,16 @@ pub(super) async fn seed_oauth_bootstrap_tasks(
     Ok(())
 }
 
-fn oauth_bootstrap_tasks(upstream_id: Uuid, seed_secs: u64) -> [SchedulerPushTask<AdaptiveJob>; 1] {
+fn oauth_bootstrap_tasks(
+    upstream_id: Uuid,
+    expected_generation: u64,
+    seed_secs: u64,
+) -> [SchedulerPushTask<AdaptiveJob>; 1] {
     [SchedulerPushTask {
-        args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
+        args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::with_expected_generation(
+            upstream_id,
+            expected_generation,
+        )),
         idempotency_key: Some(format!(
             "adaptive:oauth_refresh:{upstream_id}:bootstrap:{seed_secs}"
         )),
@@ -3565,7 +3572,7 @@ mod tests {
             Uuid::parse_str("12345678-1234-5678-1234-567812345678").expect("uuid parses");
         let seed_secs = 123_456;
 
-        let [refresh] = oauth_bootstrap_tasks(upstream_id, seed_secs);
+        let [refresh] = oauth_bootstrap_tasks(upstream_id, 3, seed_secs);
 
         assert_eq!(
             refresh.idempotency_key.as_deref(),
@@ -3576,6 +3583,7 @@ mod tests {
             panic!("expected oauth refresh job");
         };
         assert_eq!(refresh_job.upstream_id, upstream_id);
+        assert_eq!(refresh_job.expected_generation, Some(3));
     }
 
     fn org_meta(

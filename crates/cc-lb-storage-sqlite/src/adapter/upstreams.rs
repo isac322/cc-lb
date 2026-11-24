@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_clock::{Clock, unix_secs};
 use cc_lb_storage_api::upstream::{
-    UpstreamKind, UpstreamStatusUpdate, UpstreamWarmupDialectPlugin,
+    OAuthRefreshFence, UpstreamKind, UpstreamStatusUpdate, UpstreamWarmupDialectPlugin,
     credential_failure_is_terminal, has_sticky_credential_failure,
 };
 use cc_lb_storage_api::{
@@ -88,6 +88,16 @@ impl UpstreamStore for SqliteStorage {
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord> {
         complete_split_refresh(self, id, holder, tokens).await
+    }
+
+    async fn complete_refresh_fenced(
+        &self,
+        id: Uuid,
+        holder: Uuid,
+        tokens: EncryptedOAuthTokens,
+        fence: &OAuthRefreshFence,
+    ) -> StorageResult<UpstreamRecord> {
+        complete_split_refresh_fenced(self, id, holder, tokens, fence).await
     }
 
     async fn read_oauth_token_generation(&self, id: Uuid) -> StorageResult<Option<u64>> {
@@ -617,6 +627,58 @@ async fn complete_split_refresh(
 ) -> StorageResult<UpstreamRecord> {
     let mut tx = storage.begin_immediate().await?;
     ensure_split_spec_active_in_tx(&mut tx, id).await?;
+    let record = commit_split_refresh_in_tx(&mut tx, id, &tokens).await?;
+    tx.commit().await.map_err(map_sqlx_error)?;
+    Ok(record)
+}
+
+async fn complete_split_refresh_fenced(
+    storage: &SqliteStorage,
+    id: Uuid,
+    _holder: Uuid,
+    tokens: EncryptedOAuthTokens,
+    fence: &OAuthRefreshFence,
+) -> StorageResult<UpstreamRecord> {
+    let mut tx = storage.begin_immediate().await?;
+    ensure_split_spec_active_in_tx(&mut tx, id).await?;
+    let current_gen: Option<i64> = sqlx::query_scalar(
+        "SELECT oauth_token_generation FROM upstream_oauth_token_v1 WHERE upstream_id = ?",
+    )
+    .bind(id.to_string())
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    let current_gen = i64_to_u64(current_gen.unwrap_or_default(), "oauth token generation")?;
+    if current_gen != fence.expected_generation {
+        return Err(conflict(format!(
+            "stale oauth refresh generation: expected {}, found {current_gen}",
+            fence.expected_generation
+        )));
+    }
+    let next_gen = current_gen
+        .checked_add(1)
+        .ok_or_else(|| conflict("oauth token generation overflow"))?;
+    let idle_value = format!("idle:{next_gen}");
+    let lease_update = sqlx::query("UPDATE meta_v1 SET value = ? WHERE key = ? AND value = ?")
+        .bind(&idle_value)
+        .bind(&fence.lease_meta_key)
+        .bind(&fence.expected_lease_token)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    if lease_update.rows_affected() != 1 {
+        return Err(conflict("oauth refresh lease ownership lost"));
+    }
+    let record = commit_split_refresh_in_tx(&mut tx, id, &tokens).await?;
+    tx.commit().await.map_err(map_sqlx_error)?;
+    Ok(record)
+}
+
+async fn commit_split_refresh_in_tx(
+    tx: &mut Transaction<'static, Sqlite>,
+    id: Uuid,
+    tokens: &EncryptedOAuthTokens,
+) -> StorageResult<UpstreamRecord> {
     sqlx::query(
         "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, oauth_token_generation, created_at, updated_at)
          VALUES (?, ?, 1, unixepoch(), unixepoch())
@@ -627,14 +689,12 @@ async fn complete_split_refresh(
     )
     .bind(id.to_string())
     .bind(tokens.ciphertext())
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
-    bump_split_owner_epoch_in_tx(&mut tx, id).await?;
-    clear_split_apply_error_in_tx(&mut tx, id).await?;
-    let record = require_split_in_tx(&mut tx, id).await?;
-    tx.commit().await.map_err(map_sqlx_error)?;
-    Ok(record)
+    bump_split_owner_epoch_in_tx(tx, id).await?;
+    clear_split_apply_error_in_tx(tx, id).await?;
+    require_split_in_tx(tx, id).await
 }
 
 async fn read_split_oauth_token_generation(
