@@ -254,6 +254,11 @@ async fn transient_refresh_responses_keep_existing_retry_policy() {
         let mut fixture = DispatchFixture::new().await;
         set_token_endpoint(&mut fixture, endpoint);
         let upstream = fixture.oauth_upstream(false).await;
+        let expected_retry_delay = if status.is_server_error() {
+            std::time::Duration::from_secs(crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1)
+        } else {
+            std::time::Duration::from_secs(30)
+        };
         assert_eq!(
             fixture
                 .dispatch
@@ -261,19 +266,19 @@ async fn transient_refresh_responses_keep_existing_retry_policy() {
                 .await
                 .expect("retryable response"),
             JobOutcome::Retry {
-                delay: Some(std::time::Duration::from_secs(30)),
+                delay: Some(expected_retry_delay),
             }
         );
         if status.is_server_error() {
-            // Ambiguous 5xx responses keep the held lease until TTL expiry before re-sending.
+            // Ambiguous 5xx responses keep the held lease until TTL expiry and defer retries past it.
             assert_eq!(
                 fixture
                     .dispatch
                     .dispatch_oauth_refresh(OAuthRefreshJob::new(upstream.id))
                     .await
-                    .expect("held 5xx lease retries without calling provider"),
+                    .expect("held 5xx lease retries after expiry without calling provider"),
                 JobOutcome::Retry {
-                    delay: Some(std::time::Duration::from_secs(30)),
+                    delay: Some(expected_retry_delay),
                 }
             );
             assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -288,7 +293,7 @@ async fn transient_refresh_responses_keep_existing_retry_policy() {
                 .await
                 .expect("retryable response after rejection or lease expiry"),
             JobOutcome::Retry {
-                delay: Some(std::time::Duration::from_secs(30)),
+                delay: Some(expected_retry_delay),
             }
         );
         let stored = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
@@ -485,7 +490,9 @@ async fn network_refresh_failure_keeps_existing_retry_policy() {
             .await
             .expect("network failure is retryable"),
         JobOutcome::Retry {
-            delay: Some(std::time::Duration::from_secs(30)),
+            delay: Some(std::time::Duration::from_secs(
+                crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1,
+            )),
         }
     );
     let stored = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
@@ -2085,7 +2092,14 @@ async fn scheduled_oauth_refresh_retains_lease_when_shutdown_cancels_after_provi
             .expect("cancelled scheduled refresh completes within 2s")
             .expect("spawned task joins")
             .expect("cancelled refresh returns Retry instead of hard failing");
-    assert!(matches!(cancelled_outcome1, JobOutcome::Retry { .. }));
+    assert_eq!(
+        cancelled_outcome1,
+        JobOutcome::Retry {
+            delay: Some(std::time::Duration::from_secs(
+                crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1,
+            )),
+        }
+    );
     assert_eq!(
         fixture1
             .storage
@@ -2150,7 +2164,9 @@ async fn scheduled_oauth_refresh_retains_lease_when_shutdown_cancels_after_provi
     assert_eq!(
         outcome2,
         JobOutcome::Retry {
-            delay: Some(std::time::Duration::from_secs(30)),
+            delay: Some(std::time::Duration::from_secs(
+                crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1,
+            )),
         }
     );
     tokio::time::timeout(

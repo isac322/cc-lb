@@ -313,6 +313,7 @@ impl SchedulerDispatch {
         .await
         .map_err(storage_scheduler_error)?
         else {
+            let now = unix_secs(self.clock.now());
             match UpstreamStore::read_oauth_token_generation(self.storage.as_ref(), job.upstream_id)
                 .await
                 .map_err(storage_scheduler_error)?
@@ -325,18 +326,56 @@ impl SchedulerDispatch {
                 }
                 Some(_) => {}
             }
+            let observed_expires_at = crate::refresh::read_oauth_refresh_lease_expires_at(
+                self.storage.as_ref(),
+                job.upstream_id,
+            )
+            .await
+            .ok()
+            .flatten();
+            let retry_delay =
+                crate::refresh::oauth_refresh_lease_retry_delay(now, observed_expires_at);
             tracing::info!(
                 upstream_id = %job.upstream_id,
                 generation = starting_generation,
-                "oauth refresh credential lease is held by another worker or fallback; retrying later",
+                retry_delay_secs = retry_delay.as_secs(),
+                "oauth refresh credential lease is held by another worker or fallback; retrying after lease expiry",
             );
             return Ok(JobOutcome::Retry {
-                delay: Some(std::time::Duration::from_secs(30)),
+                delay: Some(retry_delay),
             });
         };
         self.spawn_leased_oauth_refresh(job, lease, replica_id, starting_generation, traceparent)
             .await
             .map_err(|error| SchedulerError::Job(format!("oauth refresh task aborted: {error}")))?
+    }
+
+    async fn retry_delay_for_retained_lease(
+        &self,
+        upstream_id: Uuid,
+        retained_expires_at: Option<u64>,
+        probe_storage: bool,
+        base_delay: std::time::Duration,
+    ) -> std::time::Duration {
+        let now = unix_secs(self.clock.now());
+        let mut observed_expires_at = retained_expires_at;
+        if probe_storage || observed_expires_at.is_none_or(|expires_at| expires_at <= now) {
+            let stored = crate::refresh::read_oauth_refresh_lease_expires_at(
+                self.storage.as_ref(),
+                upstream_id,
+            )
+            .await
+            .ok()
+            .flatten();
+            observed_expires_at = match (observed_expires_at, stored) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (Some(a), None) | (None, Some(a)) => Some(a),
+                (None, None) => None,
+            };
+        }
+        observed_expires_at.map_or(base_delay, |expires_at| {
+            crate::refresh::oauth_refresh_lease_retry_delay(now, Some(expires_at)).max(base_delay)
+        })
     }
 
     fn spawn_leased_oauth_refresh(
@@ -426,24 +465,28 @@ impl SchedulerDispatch {
             let final_generation = observed_generation.unwrap_or(starting_generation);
             let generation_advanced =
                 observed_generation.is_some_and(|current| current > starting_generation);
-            let was_lost = if let Some(active) = lease_slot.lock().await.take() {
-                let lost = active.is_lost().await;
-                if active.provider_exchange_started()
-                    && !generation_advanced
-                    && !definite_no_rotation.load(Ordering::SeqCst)
-                {
-                    active.retire_without_release().await;
-                } else if let Err(error) = active.release(final_generation).await {
-                    tracing::warn!(
-                        error = %error,
-                        upstream_id = %upstream_id,
-                        "failed to release scheduled oauth refresh lease",
-                    );
-                }
-                lost
-            } else {
-                false
-            };
+            let (was_lost, retained_expires_at) =
+                if let Some(active) = lease_slot.lock().await.take() {
+                    let lost = active.is_lost().await;
+                    let retained_expires_at = if active.provider_exchange_started()
+                        && !generation_advanced
+                        && !definite_no_rotation.load(Ordering::SeqCst)
+                    {
+                        active.retire_without_release().await
+                    } else {
+                        if let Err(error) = active.release(final_generation).await {
+                            tracing::warn!(
+                                error = %error,
+                                upstream_id = %upstream_id,
+                                "failed to release scheduled oauth refresh lease",
+                            );
+                        }
+                        None
+                    };
+                    (lost, retained_expires_at)
+                } else {
+                    (false, None)
+                };
             if snapshot_superseded.load(Ordering::SeqCst)
                 || (matches!(outcome, Ok(JobOutcome::Retry { .. }) | Err(_))
                     && (generation_advanced
@@ -455,8 +498,36 @@ impl SchedulerDispatch {
                         .reconcile_reloaded_and_skip(upstream_id, traceparent.as_deref())
                         .await;
                 }
+                let base_delay = match outcome {
+                    Ok(JobOutcome::Retry { delay: Some(delay) }) => delay,
+                    _ => std::time::Duration::from_secs(30),
+                };
+                let retry_delay = dispatch
+                    .retry_delay_for_retained_lease(
+                        upstream_id,
+                        retained_expires_at,
+                        true,
+                        base_delay,
+                    )
+                    .await;
                 return Ok(JobOutcome::Retry {
-                    delay: Some(std::time::Duration::from_secs(30)),
+                    delay: Some(retry_delay),
+                });
+            }
+            if let Ok(JobOutcome::Retry { delay }) = outcome
+                && retained_expires_at.is_some()
+            {
+                let base_delay = delay.unwrap_or_else(|| std::time::Duration::from_secs(30));
+                let retry_delay = dispatch
+                    .retry_delay_for_retained_lease(
+                        upstream_id,
+                        retained_expires_at,
+                        false,
+                        base_delay,
+                    )
+                    .await;
+                return Ok(JobOutcome::Retry {
+                    delay: Some(retry_delay),
                 });
             }
             outcome

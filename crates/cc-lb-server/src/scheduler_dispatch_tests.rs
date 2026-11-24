@@ -255,8 +255,8 @@ async fn lazy_refresh_waits_across_rescheduled_pending_retry_until_generation_ad
             async move {
                 if ordinal == 1 {
                     return (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        axum::Json(serde_json::json!({"error": "temporarily_unavailable"})),
+                        StatusCode::TOO_MANY_REQUESTS,
+                        axum::Json(serde_json::json!({"error": "rate_limited"})),
                     );
                 }
                 assert_eq!(ordinal, 2, "no in-process fallback or duplicate refresh");
@@ -456,6 +456,343 @@ async fn lazy_refresh_waits_across_rescheduled_pending_retry_until_generation_ad
             .expect("upstream exists")
             > starting_generation,
     );
+    tasks.cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(30), &mut tasks.worker)
+        .await
+        .expect("worker shuts down")
+        .expect("worker task");
+}
+
+#[cfg(all(test, feature = "storage-sqlite"))]
+#[tokio::test]
+async fn scheduled_oauth_refresh_retries_after_retained_503_lease_expiry_without_exhausting_attempts()
+ {
+    use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
+    use cc_lb_clock::{Clock, TestClock, unix_secs};
+    use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
+    use cc_lb_scheduler::worker::{
+        AdaptiveJob, SchedulerBackend, SchedulerCtx, SchedulerPushTask, build_adaptive_worker,
+    };
+    use cc_lb_storage_api::{MetaStore, UpstreamStore};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct AbortOnDrop {
+        cancel: CancellationToken,
+        worker: tokio::task::JoinHandle<()>,
+        endpoint: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.cancel.cancel();
+            self.worker.abort();
+            self.endpoint.abort();
+        }
+    }
+
+    let fixture = Fixture::new().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let endpoint_calls = Arc::clone(&calls);
+    let router = axum::Router::new().route(
+        "/oauth/token",
+        axum::routing::post(move || {
+            let ordinal = endpoint_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            async move {
+                if ordinal <= 2 {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({"error": "temporarily_unavailable"})),
+                    );
+                }
+                (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "access_token": "sk-ant-oat01-refreshed-503",
+                        "refresh_token": "sk-ant-ort01-refreshed-503",
+                        "expires_in": 3600,
+                        "token_type": "Bearer"
+                    })),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind oauth token endpoint");
+    let endpoint_url = format!(
+        "http://{}/oauth/token",
+        listener.local_addr().expect("endpoint address")
+    );
+    let endpoint = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .await
+            .expect("serve oauth endpoint");
+    });
+
+    const START_UNIX: u64 = 1_800_000_000;
+    let test_clock = Arc::new(TestClock::new_at_secs(START_UNIX));
+    let mut dispatch = fixture.dispatch(Arc::new(FailingPusher));
+    dispatch.clock = test_clock.clone();
+    let mut oauth_cfg = dispatch.oauth_cfg.as_ref().clone();
+    oauth_cfg.token_url = endpoint_url.parse().expect("parse token url");
+    dispatch.oauth_cfg = Arc::new(oauth_cfg);
+    dispatch.replica_id = Some(Uuid::new_v4());
+
+    let upstream = UpstreamStore::get_by_id(fixture.storage.as_ref(), fixture.upstream_id)
+        .await
+        .expect("load fixture upstream")
+        .expect("upstream exists");
+    let tokens = EncryptedOAuthTokens::encrypt(
+        dispatch.aead.as_ref(),
+        &OAuthTokenBundle {
+            oauth_profile: Default::default(),
+            access_token: "sk-ant-oat01-expired".to_owned(),
+            refresh_token: "sk-ant-ort01-existing".to_owned(),
+            expires_at_unix_secs: 1,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: None,
+            scopes: vec!["messages".to_owned()],
+            never_refresh: false,
+        },
+        upstream.id.as_bytes(),
+    )
+    .expect("encrypt expired token bundle");
+    fixture
+        .storage
+        .store_oauth_tokens(upstream.id, upstream.revision, tokens, false)
+        .await
+        .expect("store expired OAuth credential");
+    let starting_generation = fixture
+        .storage
+        .read_oauth_token_generation(upstream.id)
+        .await
+        .expect("read starting generation")
+        .expect("upstream exists");
+
+    #[allow(clippy::infallible_destructuring_match)]
+    let pool = match &fixture.backend.backend {
+        SchedulerBackend::Sqlite(sqlite) => sqlite.pool().clone(),
+        #[cfg(feature = "storage-postgres")]
+        SchedulerBackend::Postgres(_) => panic!("expected SQLite scheduler"),
+    };
+
+    let direct_dispatch = dispatch.clone();
+    let cron_dispatch = dispatch.clone().cron_dispatch();
+    let adaptive_dispatch: cc_lb_scheduler::worker::AdaptiveDispatchFn = Arc::new(move |job| {
+        let dispatch = dispatch.clone();
+        Box::pin(async move {
+            match job {
+                cc_lb_scheduler::worker::AdaptiveJob::OAuthRefresh(_) => {
+                    dispatch.dispatch_entity(job).await
+                }
+                _ => Ok(JobOutcome::Noop),
+            }
+        })
+    });
+    let worker = build_adaptive_worker(
+        &fixture.backend.backend,
+        SchedulerCtx::new(
+            Default::default(),
+            adaptive_dispatch,
+            cron_dispatch,
+            Arc::new(SystemClock),
+        ),
+    )
+    .expect("build adaptive worker");
+    let cancel = CancellationToken::new();
+    let worker_cancel = cancel.clone();
+    let worker = tokio::spawn(async move {
+        worker
+            .run_until_cancelled(worker_cancel)
+            .await
+            .expect("run adaptive worker");
+    });
+    let mut tasks = AbortOnDrop {
+        cancel,
+        worker,
+        endpoint,
+    };
+
+    let upstream_id = upstream.id;
+    let job = OAuthRefreshJob::for_credential(upstream_id, starting_generation, 1);
+    let key = job.generation_idempotency_key(starting_generation, 1);
+    let lease_key = crate::refresh::oauth_refresh_lease_meta_key(upstream_id);
+    let real_before_attempt_1 = unix_secs(SystemClock.now());
+    fixture
+        .backend
+        .backend
+        .push_adaptive_task(SchedulerPushTask {
+            args: AdaptiveJob::OAuthRefresh(job),
+            idempotency_key: Some(key.clone()),
+            run_at_unix_secs: Some(0),
+            max_attempts: None,
+        })
+        .await
+        .expect("enqueue scheduled oauth refresh");
+
+    // Attempt 1 (503): persists attempts=1, retains lease until START_UNIX+90, and schedules
+    // next retry at or after the lease expiry instead of wasting attempts at +30s/+60s.
+    let run_at_1 = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let row: Option<(String, i64, i64)> = sqlx::query_as(
+                "SELECT status, attempts, run_at FROM Jobs WHERE idempotency_key = ?",
+            )
+            .bind(&key)
+            .fetch_optional(&pool)
+            .await
+            .expect("read attempt 1 row");
+            if let Some((status, attempts, run_at)) = row
+                && attempts >= 1
+                && !matches!(status.as_str(), "Queued" | "Running")
+            {
+                assert_eq!(status, "Pending");
+                assert_eq!(attempts, 1);
+                break run_at;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("attempt 1 completes");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let expected_expires_1 = START_UNIX + crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS;
+    let held_1 = fixture
+        .storage
+        .get_meta_value(&lease_key)
+        .await
+        .expect("read retained lease 1")
+        .expect("lease 1 row present");
+    assert!(held_1.starts_with(&format!("held:{starting_generation}:")));
+    assert!(held_1.ends_with(&format!(":{expected_expires_1}")));
+    assert!(
+        run_at_1
+            >= i64::try_from(real_before_attempt_1 + crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS)
+                .unwrap()
+    );
+    assert_eq!(
+        direct_dispatch
+            .dispatch_oauth_refresh(OAuthRefreshJob::for_credential(
+                upstream_id,
+                starting_generation,
+                1,
+            ))
+            .await
+            .expect("contended retry defers past retained lease 1"),
+        JobOutcome::Retry {
+            delay: Some(Duration::from_secs(
+                crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1,
+            )),
+        }
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // Attempt 2 (503) runs immediately once clock passes retained lease 1 expiry.
+    test_clock.advance_secs(crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1);
+    let real_before_attempt_2 = unix_secs(SystemClock.now());
+    sqlx::query("UPDATE Jobs SET run_at = 0 WHERE idempotency_key = ?")
+        .bind(&key)
+        .execute(&pool)
+        .await
+        .expect("fast-forward attempt 2");
+    let run_at_2 = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let row: Option<(String, i64, i64)> = sqlx::query_as(
+                "SELECT status, attempts, run_at FROM Jobs WHERE idempotency_key = ?",
+            )
+            .bind(&key)
+            .fetch_optional(&pool)
+            .await
+            .expect("read attempt 2 row");
+            if let Some((status, attempts, run_at)) = row
+                && attempts >= 2
+                && !matches!(status.as_str(), "Queued" | "Running")
+            {
+                assert_eq!(status, "Pending");
+                assert_eq!(attempts, 2);
+                break run_at;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("attempt 2 completes");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let expected_expires_2 = START_UNIX + 2 * crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1;
+    let held_2 = fixture
+        .storage
+        .get_meta_value(&lease_key)
+        .await
+        .expect("read retained lease 2")
+        .expect("lease 2 row present");
+    assert!(held_2.ends_with(&format!(":{expected_expires_2}")));
+    assert!(
+        run_at_2
+            >= i64::try_from(real_before_attempt_2 + crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS)
+                .unwrap()
+    );
+    assert_eq!(
+        direct_dispatch
+            .dispatch_oauth_refresh(OAuthRefreshJob::for_credential(
+                upstream_id,
+                starting_generation,
+                1,
+            ))
+            .await
+            .expect("contended retry defers past retained lease 2"),
+        JobOutcome::Retry {
+            delay: Some(Duration::from_secs(
+                crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1,
+            )),
+        }
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    // Attempt 3 (200 OK) succeeds within the 5-attempt budget and releases `idle:{gen+1}`.
+    test_clock.advance_secs(crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1);
+    sqlx::query("UPDATE Jobs SET run_at = 0 WHERE idempotency_key = ?")
+        .bind(&key)
+        .execute(&pool)
+        .await
+        .expect("fast-forward attempt 3");
+    let final_attempts = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let row: Option<(String, i64)> =
+                sqlx::query_as("SELECT status, attempts FROM Jobs WHERE idempotency_key = ?")
+                    .bind(&key)
+                    .fetch_optional(&pool)
+                    .await
+                    .expect("read attempt 3 row");
+            if let Some((status, attempts)) = row
+                && status == "Done"
+            {
+                break attempts;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("attempt 3 completes");
+    assert_eq!(final_attempts, 3);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        fixture
+            .storage
+            .read_oauth_token_generation(upstream_id)
+            .await
+            .expect("read rotated generation"),
+        Some(starting_generation + 1)
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .get_meta_value(&lease_key)
+            .await
+            .expect("read idle lease")
+            .as_deref(),
+        Some(format!("idle:{}", starting_generation + 1).as_str())
+    );
+
     tasks.cancel.cancel();
     tokio::time::timeout(Duration::from_secs(30), &mut tasks.worker)
         .await

@@ -47,6 +47,40 @@ pub(crate) fn oauth_refresh_lease_meta_key(upstream_id: Uuid) -> String {
     format!("oauth_refresh_lease:v1:{upstream_id}")
 }
 
+pub(crate) async fn read_oauth_refresh_lease_expires_at(
+    meta: &dyn MetaStore,
+    upstream_id: Uuid,
+) -> StorageResult<Option<u64>> {
+    let key = oauth_refresh_lease_meta_key(upstream_id);
+    let raw = meta.get_meta_value(&key).await?;
+    Ok(raw
+        .as_deref()
+        .and_then(parse_oauth_refresh_lease)
+        .and_then(|parsed| match parsed {
+            ParsedOAuthRefreshLease::Held {
+                expires_at_unix_secs,
+                ..
+            } => Some(expires_at_unix_secs),
+            ParsedOAuthRefreshLease::Idle { .. } => None,
+        }))
+}
+
+pub(crate) fn oauth_refresh_lease_retry_delay(
+    now_unix_secs: u64,
+    expires_at_unix_secs: Option<u64>,
+) -> Duration {
+    const DEFAULT_LEASE_RETRY_DELAY_SECS: u64 = 30;
+    const MAX_LEASE_RETRY_DELAY_SECS: u64 = 600;
+    let secs = match expires_at_unix_secs {
+        Some(expires_at) => expires_at
+            .saturating_sub(now_unix_secs)
+            .saturating_add(1)
+            .min(MAX_LEASE_RETRY_DELAY_SECS),
+        None => DEFAULT_LEASE_RETRY_DELAY_SECS,
+    };
+    Duration::from_secs(secs)
+}
+
 enum ParsedOAuthRefreshLease {
     Idle {
         generation: u64,
@@ -788,24 +822,40 @@ impl ActiveOAuthRefreshLease {
         }
     }
 
-    async fn retire_heartbeat(&mut self) {
+    async fn retire_heartbeat(&mut self) -> Option<u64> {
         self.released = true;
         self.stop_heartbeat.cancel();
         if let Some(handle) = self.heartbeat.take() {
             let _ = handle.await;
         }
-        *self.state.lock().await = LeaseHeartbeatState::Released;
+        let mut guard = self.state.lock().await;
+        let expires_at = match &*guard {
+            LeaseHeartbeatState::Active(token)
+            | LeaseHeartbeatState::Lost {
+                cleanup_token: token,
+            } => match parse_oauth_refresh_lease(token) {
+                Some(ParsedOAuthRefreshLease::Held {
+                    expires_at_unix_secs,
+                    ..
+                }) => Some(expires_at_unix_secs),
+                _ => None,
+            },
+            LeaseHeartbeatState::Released => None,
+        };
+        *guard = LeaseHeartbeatState::Released;
+        expires_at
     }
 
     pub(crate) async fn mark_committed_and_released(&mut self) {
-        self.retire_heartbeat().await;
+        let _ = self.retire_heartbeat().await;
     }
 
     /// Stops heartbeat renewals and disarms Drop cleanup without clearing the
     /// persisted `held:...` lease row so exclusive ownership holds until the
     /// existing TTL expires when a post-send failure leaves rotation uncertain.
-    pub(crate) async fn retire_without_release(mut self) {
-        self.retire_heartbeat().await;
+    /// Returns the lease expiry unix timestamp when a `held:...` token was held.
+    pub(crate) async fn retire_without_release(mut self) -> Option<u64> {
+        self.retire_heartbeat().await
     }
 
     fn spawn_release(
