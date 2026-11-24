@@ -68,6 +68,30 @@ impl TokenHttpClient {
     }
 }
 
+type InFlightRefreshOutcome = Result<(), String>;
+type InFlightRefreshMap = Arc<
+    std::sync::Mutex<
+        std::collections::HashMap<
+            Uuid,
+            tokio::sync::watch::Receiver<Option<InFlightRefreshOutcome>>,
+        >,
+    >,
+>;
+
+struct InFlightRefreshGuard {
+    in_flight: InFlightRefreshMap,
+    upstream_id: Uuid,
+}
+
+impl Drop for InFlightRefreshGuard {
+    fn drop(&mut self) {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.upstream_id);
+    }
+}
+
 #[derive(Clone)]
 pub struct LazyRefresher {
     stores: Arc<Stores>,
@@ -82,6 +106,7 @@ pub struct LazyRefresher {
     contention: LazyRefreshContentionConfig,
     apalis_handle: SchedulerBackend,
     clock: ClockHandle,
+    in_flight: InFlightRefreshMap,
 }
 
 #[derive(Clone, Copy)]
@@ -347,6 +372,7 @@ impl LazyRefresher {
             contention,
             apalis_handle,
             clock: deps.clock,
+            in_flight: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -456,7 +482,11 @@ pub struct LazyRefresherParams {
 }
 
 impl LazyRefresher {
-    async fn run_in_process_refresh(self, upstream_id: Uuid) -> Result<(), LazyRefreshError> {
+    async fn run_in_process_refresh(
+        self,
+        upstream_id: Uuid,
+        starting_generation: u64,
+    ) -> Result<(), LazyRefreshError> {
         let upstream = self
             .stores
             .upstreams
@@ -466,6 +496,9 @@ impl LazyRefresher {
             .ok_or_else(|| LazyRefreshError::Failed {
                 reason: "oauth upstream not found".to_owned(),
             })?;
+        if upstream.oauth_token_generation > starting_generation {
+            return Ok(());
+        }
         let is_anthropic_oauth = upstream.kind == UpstreamKind::AnthropicOauth;
         let result = refresh_flow(
             &self.stores,
@@ -500,12 +533,65 @@ impl LazyRefresher {
         }
     }
 
-    async fn in_process_refresh(&self, upstream_id: Uuid) -> Result<(), LazyRefreshError> {
-        let this = self.clone();
-        let handle = tokio::spawn(async move { this.run_in_process_refresh(upstream_id).await });
-        handle.await.map_err(|error| LazyRefreshError::Failed {
-            reason: format!("oauth refresh task failed: {error}"),
-        })?
+    async fn execute_refresh_one(self, upstream_id: Uuid) -> Result<(), LazyRefreshError> {
+        let upstream = self
+            .stores
+            .upstreams
+            .get_by_id(upstream_id)
+            .await
+            .map_err(lazy_error)?
+            .ok_or_else(|| LazyRefreshError::Failed {
+                reason: "oauth upstream not found".to_owned(),
+            })?;
+        let bundle = oauth_token_bundle(&upstream, &self.aead)?;
+        if bundle.never_refresh {
+            // Access-only imports and Anthropic long-lived grants must stop
+            // before acquiring a refresh claim or contacting a token endpoint.
+            return Err(LazyRefreshError::Failed {
+                reason: RefreshError::NotRefreshable.to_string(),
+            });
+        }
+        check_refresh_allowed(&self.stores, &upstream, &bundle, &*self.clock)
+            .await
+            .map_err(lazy_refresh_error)?;
+        let holder = lazy_refresh_holder(self.replica_id);
+        let expires_at_unix_secs = bundle.expires_at_unix_secs;
+        let starting_generation = upstream.oauth_token_generation;
+        let claim = self
+            .claim_guard
+            .begin_refresh(
+                upstream_id,
+                &holder,
+                expires_at_unix_secs,
+                unix_secs(self.clock.now()),
+            )
+            .await
+            .map_err(lazy_error)?;
+        match claim {
+            LazyRefreshClaim::Enqueued { idempotency_key } => {
+                match self
+                    .wait_for_token_generation(
+                        upstream_id,
+                        starting_generation,
+                        Some(&idempotency_key),
+                    )
+                    .await
+                {
+                    Ok(()) => Ok(()),
+                    Err(wait_error) => {
+                        tracing::warn!(
+                            upstream_id = %upstream_id,
+                            error = %wait_error,
+                            "scheduler-backed refresh wait failed; falling back to in-process refresh",
+                        );
+                        ::metrics::counter!("cclb_lazy_refresh_inproc_fallback_total").increment(1);
+                        self.run_in_process_refresh(upstream_id, starting_generation)
+                            .await
+                    }
+                }
+            }
+            LazyRefreshClaim::Acquired => self.run_acquired_refresh(upstream, holder).await,
+        }
     }
 
     async fn run_acquired_refresh(
@@ -578,83 +664,54 @@ impl LazyRefresher {
     }
 }
 
-enum LazyRefreshStart {
-    Completed,
-    Enqueued { idempotency_key: String },
-}
-
 #[async_trait]
 impl LazyRefreshHandle for LazyRefresher {
     async fn refresh_one(&self, upstream_id: Uuid) -> Result<(), LazyRefreshError> {
-        let upstream = self
-            .stores
-            .upstreams
-            .get_by_id(upstream_id)
+        // Share one detached per-upstream refresh task across concurrent or
+        // subsequent callers so cancelling a caller (for example a timed-out
+        // WebSocket handshake) releases nothing prematurely and never races a
+        // second credential exchange before the first task persists its result.
+        let mut rx = {
+            let mut in_flight = self
+                .in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(existing) = in_flight.get(&upstream_id) {
+                existing.clone()
+            } else {
+                let (tx, rx) = tokio::sync::watch::channel(None);
+                in_flight.insert(upstream_id, rx.clone());
+                let this = self.clone();
+                let in_flight_map = Arc::clone(&self.in_flight);
+                tokio::spawn(async move {
+                    let guard = InFlightRefreshGuard {
+                        in_flight: in_flight_map,
+                        upstream_id,
+                    };
+                    let outcome = this
+                        .execute_refresh_one(upstream_id)
+                        .await
+                        .map_err(|error| match error {
+                            LazyRefreshError::Failed { reason } => reason,
+                        });
+                    drop(guard);
+                    let _ = tx.send(Some(outcome));
+                });
+                rx
+            }
+        };
+        let outcome = rx
+            .wait_for(Option::is_some)
             .await
-            .map_err(lazy_error)?
-            .ok_or_else(|| LazyRefreshError::Failed {
-                reason: "oauth upstream not found".to_owned(),
+            .map_err(|_| LazyRefreshError::Failed {
+                reason: "oauth refresh task failed".to_owned(),
             })?;
-        let bundle = oauth_token_bundle(&upstream, &self.aead)?;
-        if bundle.never_refresh {
-            // Access-only imports and Anthropic long-lived grants must stop
-            // before acquiring a refresh claim or contacting a token endpoint.
-            return Err(LazyRefreshError::Failed {
-                reason: RefreshError::NotRefreshable.to_string(),
-            });
+        match outcome.as_ref().expect("watch waited for Some(outcome)") {
+            Ok(()) => Ok(()),
+            Err(reason) => Err(LazyRefreshError::Failed {
+                reason: reason.clone(),
+            }),
         }
-        check_refresh_allowed(&self.stores, &upstream, &bundle, &*self.clock)
-            .await
-            .map_err(lazy_refresh_error)?;
-        let holder = lazy_refresh_holder(self.replica_id);
-        let expires_at_unix_secs = bundle.expires_at_unix_secs;
-        let starting_generation = upstream.oauth_token_generation;
-        // Run claim acquisition + acquired refresh inside a detached task so
-        // cancelling a caller (for example a timed-out WebSocket handshake)
-        // never aborts an in-flight token rotation or strands the claim holder.
-        let this = self.clone();
-        let handle = tokio::spawn(async move {
-            let claim = this
-                .claim_guard
-                .begin_refresh(
-                    upstream_id,
-                    &holder,
-                    expires_at_unix_secs,
-                    unix_secs(this.clock.now()),
-                )
-                .await
-                .map_err(lazy_error)?;
-            match claim {
-                LazyRefreshClaim::Enqueued { idempotency_key } => {
-                    Ok(LazyRefreshStart::Enqueued { idempotency_key })
-                }
-                LazyRefreshClaim::Acquired => {
-                    this.run_acquired_refresh(upstream, holder).await?;
-                    Ok(LazyRefreshStart::Completed)
-                }
-            }
-        });
-        let start = handle.await.map_err(|error| LazyRefreshError::Failed {
-            reason: format!("oauth refresh task failed: {error}"),
-        })??;
-        if let LazyRefreshStart::Enqueued { idempotency_key } = start {
-            match self
-                .wait_for_token_generation(upstream_id, starting_generation, Some(&idempotency_key))
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(wait_error) => {
-                    tracing::warn!(
-                        upstream_id = %upstream_id,
-                        error = %wait_error,
-                        "scheduler-backed refresh wait failed; falling back to in-process refresh",
-                    );
-                    ::metrics::counter!("cclb_lazy_refresh_inproc_fallback_total").increment(1);
-                    return self.in_process_refresh(upstream_id).await;
-                }
-            }
-        }
-        Ok(())
     }
 
     async fn enqueue_only(&self, upstream_id: Uuid) -> Result<(), LazyRefreshError> {
@@ -1264,6 +1321,105 @@ mod tests {
             .ok_or("missing rotated credentials")?
             .decrypt(&fixture.aead, upstream_id.as_bytes())?;
         assert_eq!(decrypted.refresh_token, "sk-ant-ort01-new");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lazy_refresher_second_caller_joins_detached_in_process_fallback_after_first_times_out()
+    -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(Debug)]
+        struct DoneWithoutBumpClaims;
+
+        #[async_trait::async_trait]
+        impl LazyRefreshClaimGuard for DoneWithoutBumpClaims {
+            async fn begin_refresh(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+                _expires_at_unix_secs: u64,
+                _now_unix_secs: u64,
+            ) -> StorageResult<LazyRefreshClaim> {
+                Ok(LazyRefreshClaim::Enqueued {
+                    idempotency_key: "done:no-bump".to_owned(),
+                })
+            }
+
+            async fn complete_and_bump_generation(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+                _generation: u64,
+            ) -> StorageResult<bool> {
+                Ok(true)
+            }
+
+            async fn release_if_holder(
+                &self,
+                _upstream_id: Uuid,
+                _holder: &str,
+            ) -> StorageResult<bool> {
+                Ok(true)
+            }
+
+            async fn task_state(
+                &self,
+                _idempotency_key: &str,
+            ) -> StorageResult<LazyRefreshTaskState> {
+                Ok(LazyRefreshTaskState::Done)
+            }
+        }
+
+        let fixture = LazyRefreshFixture::new(Duration::ZERO).await;
+        fixture.hold_refresh_response();
+        let upstream_id = fixture.create_oauth_upstream().await;
+        let starting_generation = fixture
+            .storage
+            .read_oauth_token_generation(upstream_id)
+            .await?
+            .ok_or("missing starting generation")?;
+        let claims = Arc::new(DoneWithoutBumpClaims);
+        let config = LazyRefreshContentionConfig::for_tests(
+            Duration::from_secs(5),
+            Duration::from_millis(5),
+        );
+        let refresher1 = fixture.lazy_refresher(claims.clone(), config);
+        let refresher2 = refresher1.clone();
+
+        let caller1 = tokio::spawn(async move { refresher1.refresh_one(upstream_id).await });
+        fixture.wait_for_refresh_start().await;
+        // Abort Caller 1 (simulating WebSocket connect timeout) while its detached in-process
+        // exchange is still holding at `/oauth/token`.
+        caller1.abort();
+        let _ = caller1.await;
+        assert_eq!(fixture.refresh_call_count(), 1);
+
+        // Caller 2 arrives for the same upstream: synchronously polling `caller2` once via
+        // `select! { biased; ... }` proves it joins Caller 1's shared in-flight watch channel
+        // rather than launching a second `/oauth/token` exchange.
+        let mut caller2 = Box::pin(refresher2.refresh_one(upstream_id));
+        tokio::select! {
+            biased;
+            res = &mut caller2 => panic!("caller2 unexpectedly completed before token endpoint released: {res:?}"),
+            _ = std::future::ready(()) => {}
+        }
+        assert_eq!(fixture.refresh_call_count(), 1);
+
+        fixture.release_refresh_response();
+        caller2.await?;
+
+        assert_eq!(
+            fixture.refresh_call_count(),
+            1,
+            "second caller must share detached in-process refresh instead of exchanging rotating token twice"
+        );
+        assert_eq!(
+            fixture
+                .storage
+                .read_oauth_token_generation(upstream_id)
+                .await?
+                .ok_or("missing rotated generation")?,
+            starting_generation + 1
+        );
         Ok(())
     }
 

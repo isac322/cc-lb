@@ -9078,3 +9078,160 @@ fn thread_sticky_subagent_latch_evicts_oldest_entry_per_shard() {
     assert!(!latch.observe(keys[0].clone(), false));
     assert!(latch.observe(keys[1].clone(), false));
 }
+
+#[tokio::test]
+async fn responses_websocket_subscription_preference_keeps_multiple_api_keys_reachable_behind_16_oauth()
+ {
+    struct StaticQuotaCache {
+        snapshots: Mutex<HashMap<Uuid, Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot>>>,
+    }
+
+    impl cc_lb_control::SubscriptionQuotaCacheLike for StaticQuotaCache {
+        fn upsert_observation(&self, _record: &cc_lb_storage_api::SubscriptionQuotaSample) {}
+
+        fn snapshot_for_upstream(
+            &self,
+            upstream_id: Uuid,
+            _now_unix_millis: u64,
+            _max_staleness_secs: u64,
+        ) -> Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot> {
+            self.snapshots
+                .lock()
+                .expect("quota cache lock")
+                .get(&upstream_id)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    const NOW_SECS: u64 = 1_800_000_000;
+    let quota_snapshot = |window: &str, utilization: f64, status: &str, reset: u64| {
+        cc_lb_domain::SubscriptionQuotaCandidateSnapshot {
+            window: window.to_owned(),
+            state: cc_lb_domain::SubscriptionQuotaDataState::Fresh,
+            source: Some("ws-fallback-test".to_owned()),
+            utilization: Some(utilization),
+            status: Some(status.to_owned()),
+            resets_at_unix_secs: Some(reset),
+            surpassed_threshold: None,
+            representative_claim: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            credits: None,
+            observed_at_unix_millis: Some(NOW_SECS * 1_000),
+            max_staleness_secs: 60,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+        }
+    };
+
+    let mut upstreams = Vec::new();
+    for idx in 1..=16_u128 {
+        let id = Uuid::from_u128(0xD000 + idx);
+        upstreams.push(UpstreamRecord {
+            id,
+            name: format!("oauth-{idx}"),
+            kind: StorageRecordKind::OpenaiOauth,
+            enabled: true,
+            ..Default::default()
+        });
+    }
+    let api_key_1 = Uuid::from_u128(0xE001);
+    let api_key_2 = Uuid::from_u128(0xE002);
+    upstreams.push(UpstreamRecord {
+        id: api_key_1,
+        name: "openai-api-key-1".to_owned(),
+        kind: StorageRecordKind::OpenaiApiKey,
+        enabled: true,
+        ..Default::default()
+    });
+    upstreams.push(UpstreamRecord {
+        id: api_key_2,
+        name: "openai-api-key-2".to_owned(),
+        kind: StorageRecordKind::OpenaiApiKey,
+        enabled: true,
+        ..Default::default()
+    });
+
+    let filter: Arc<dyn FilterPlugin> = Arc::new(
+        crate::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::new(),
+    );
+    let pipeline = Arc::new(RouterPipelineCache {
+        user_filters: vec![filter],
+        terminal: TerminalStrategy::FirstPick,
+        instantiation_error: None,
+        provider_filters: None,
+    });
+    let principal_view = failure_principal_view(
+        "principal-test",
+        (
+            Some(pipeline),
+            cc_lb_control::api_keys::principal_view::DialectCache::Inherit,
+        ),
+    );
+    let quota_cache = Arc::new(StaticQuotaCache {
+        snapshots: Mutex::new(HashMap::from([(
+            Uuid::from_u128(0xD001),
+            vec![
+                quota_snapshot("5h", 0.05, "allowed", NOW_SECS + 1_800),
+                quota_snapshot("7d", 0.05, "allowed", NOW_SECS + 86_400),
+            ],
+        )])),
+    });
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(TestSignerFactory))
+        .principal_view(principal_view)
+        .subscription_quota_cache(quota_cache)
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(upstreams)
+        .build();
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        failure_authn(),
+        Arc::new(DynamicViewHolder::new(view)),
+        Arc::new(QueueDispatch::new(Vec::new())),
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::TestClock::new_at_secs(NOW_SECS)),
+    );
+    let frame = Bytes::from_static(br#"{"model":"gpt-6.2-sol","store":false}"#);
+    let body = Arc::new(serde_json::from_slice::<Value>(&frame).expect("frame parses"));
+    let request = failure_request(Bytes::new());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("authenticates");
+    let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
+    let public_turn = lifecycle
+        .prepare_websocket_turn_with_surface(
+            &auth,
+            WebSocketIngress {
+                headers: request.headers(),
+                frame: &frame,
+                query: None,
+            },
+            body,
+            None,
+            observer,
+            &request_id,
+            false,
+        )
+        .await
+        .expect("public turn prepares");
+    assert!(
+        public_turn
+            .candidates
+            .iter()
+            .any(|c| c.upstream_id == api_key_1 && c.is_api_key),
+        "first API-key fallback must be included"
+    );
+    assert!(
+        public_turn
+            .candidates
+            .iter()
+            .any(|c| c.upstream_id == api_key_2 && c.is_api_key),
+        "second API-key fallback must remain reachable when 15 OAuth + 1 API key already fill ordinary fallbacks"
+    );
+}

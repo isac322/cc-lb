@@ -1324,18 +1324,18 @@ impl Lifecycle {
                 fallback_candidates.push(next_candidate);
             }
             // Keep eligible public API-key fallbacks reachable even when more than
-            // `MAX_WS_FALLBACK_CANDIDATES` OAuth candidates precede them; native
-            // Codex routes remain OAuth-only.
-            if !codex_backend
-                && !result
+            // `MAX_WS_FALLBACK_CANDIDATES` OAuth candidates precede them, or when
+            // one API key sits at the end of the ordinary fallback list with its
+            // breaker open; native Codex routes remain OAuth-only.
+            if !codex_backend {
+                const MIN_WS_API_KEY_CANDIDATES: usize = 4;
+                let mut api_key_candidates = result
                     .candidates
                     .iter()
                     .chain(fallback_candidates.iter())
-                    .any(|candidate| candidate.kind.credential_kind() == CredentialKind::ApiKey)
-            {
-                const MAX_WS_EXTRA_API_KEY_FALLBACKS: usize = 4;
-                let mut added_api_keys = 0;
-                while added_api_keys < MAX_WS_EXTRA_API_KEY_FALLBACKS {
+                    .filter(|candidate| candidate.kind.credential_kind() == CredentialKind::ApiKey)
+                    .count();
+                while api_key_candidates < MIN_WS_API_KEY_CANDIDATES {
                     let remaining_api_keys: Vec<UpstreamCandidate> = pool
                         .iter()
                         .filter(|candidate| {
@@ -1365,7 +1365,7 @@ impl Lifecycle {
                     };
                     excluded.push(next_id);
                     fallback_candidates.push(next_candidate);
-                    added_api_keys += 1;
+                    api_key_candidates += 1;
                 }
             }
         }

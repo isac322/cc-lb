@@ -1221,3 +1221,588 @@ fn realtime_websocket_preserves_30s_connect_timeout() {
         Duration::from_secs(15)
     );
 }
+
+#[tokio::test]
+async fn websocket_handshake_public_skips_open_breaker_on_first_api_key_and_reaches_second_behind_16_oauth()
+ {
+    let mut failing_tasks = Vec::new();
+    let mut records = Vec::new();
+    let quota_cache = Arc::new(crate::subscription_quota_cache::SubscriptionQuotaCache::new());
+
+    for idx in 1..=16_u128 {
+        let (url, _reqs, task) = spawn_http_error_provider(
+            429,
+            r#"{"error":{"code":"rate_limit_exceeded","message":"rate limited"}}"#.to_owned(),
+        )
+        .await;
+        let mut up = websocket_upstream(idx, &format!("oauth-{idx}"), url);
+        up.kind = UpstreamKind::OpenaiOauth;
+        seed_subscription_quota(&quota_cache, up.id, 0.01 * idx as f64, 0.01, false);
+        failing_tasks.push(task);
+        records.push(up);
+    }
+    let (api1_url, api1_reqs, api1_task) = spawn_http_error_provider(
+        500,
+        r#"{"error":{"code":"server_error","message":"api1 down"}}"#.to_owned(),
+    )
+    .await;
+    let api1 = websocket_upstream(101, "openai-api-key-1", api1_url);
+    records.push(api1.clone());
+    let (api2_url, api2_reqs, api2_task) = spawn_responses_success_provider().await;
+    let api2 = websocket_upstream(102, "openai-api-key-2", api2_url);
+    records.push(api2);
+
+    let state = subscription_websocket_state(records, quota_cache).await;
+    // Open breakers on the first 14 OAuth upstreams (so 15 & 16 fail 429) AND on the first API key.
+    for id in (1..=14_u128).chain(std::iter::once(101_u128)) {
+        let breaker = state.breaker_registry.breaker(
+            responses_websocket::websocket_breaker_key(Uuid::from_u128(id)),
+            state.breaker_config,
+            state.clock.clone(),
+        );
+        for _ in 0..state.breaker_config.failures_to_open {
+            if let Ok(permit) = breaker.permit() {
+                permit.record_failure();
+            }
+        }
+    }
+
+    let router = proxy_router(state, 30);
+    let (proxy_address, proxy_task) = spawn_proxy_router(router).await;
+    let mut req = websocket_request(proxy_address);
+    *req.uri_mut() = format!("ws://{proxy_address}/openai/v1/responses")
+        .parse()
+        .expect("public WS URI parses");
+    let (mut client, _) = connect_async(req).await.expect("public WS connects");
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-6.2-sol","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .expect("create sends");
+    let message = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .expect("second API key fallback responds")
+        .expect("stream stays open")
+        .expect("response decodes");
+    let created: Value =
+        serde_json::from_str(message.to_text().expect("text frame")).expect("json");
+    assert_eq!(created["response"]["id"], "healthy");
+    assert_eq!(api1_reqs.load(Ordering::SeqCst), 0);
+    assert_eq!(api2_reqs.load(Ordering::SeqCst), 1);
+
+    let _ = client.close(None).await;
+    proxy_task.abort();
+    api1_task.abort();
+    api2_task.abort();
+    for task in failing_tasks {
+        task.abort();
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::result_large_err)]
+async fn websocket_handshake_post_upgrade_quota_exhaustion_skips_pin_and_continues_and_respects_deadline()
+ {
+    // Part A: Exhausting an OAuth candidate DURING its WebSocket upgrade drops the uncommitted
+    // socket, avoids pinning `session_upstream`/`session_oauth`, and fails over cleanly.
+    {
+        let quota_cache = Arc::new(crate::subscription_quota_cache::SubscriptionQuotaCache::new());
+        let up1_id = Uuid::from_u128(1);
+        let upgrade_count_1 = Arc::new(AtomicUsize::new(0));
+        let text_msgs_1 = Arc::new(AtomicUsize::new(0));
+
+        let listener1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr1 = listener1.local_addr().unwrap();
+        let quota_for_up1 = quota_cache.clone();
+        let upgrade_1_task = upgrade_count_1.clone();
+        let text_1_task = text_msgs_1.clone();
+        let task1 = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener1.accept().await {
+                upgrade_1_task.fetch_add(1, Ordering::SeqCst);
+                let quota = quota_for_up1.clone();
+                let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(
+                    socket,
+                    |_req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                     resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                        seed_subscription_quota(&quota, up1_id, 0.0, 1.0, true);
+                        Ok(resp)
+                    },
+                )
+                .await
+                else {
+                    continue;
+                };
+                while let Some(Ok(msg)) = ws.next().await {
+                    if msg.is_text() {
+                        text_1_task.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        });
+
+        let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        let reqs2 = Arc::new(AtomicUsize::new(0));
+        let reqs2_task = reqs2.clone();
+        let task2 = tokio::spawn(async move {
+            let (socket, _) = listener2.accept().await.unwrap();
+            let mut ws = accept_async(socket).await.unwrap();
+            while let Some(Ok(msg)) = ws.next().await {
+                if msg.is_text() {
+                    let count = reqs2_task.fetch_add(1, Ordering::SeqCst) + 1;
+                    ws.send(UpstreamMessage::Text(
+                        format!(
+                            r#"{{"type":"response.created","response":{{"id":"healthy-{count}","store":false}}}}"#
+                        )
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                    ws.send(UpstreamMessage::Text(
+                        format!(
+                            r#"{{"type":"response.completed","response":{{"id":"healthy-{count}","status":"completed","usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+                        )
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                }
+            }
+        });
+
+        let mut up1 =
+            websocket_upstream(1, "oauth-1", Url::parse(&format!("http://{addr1}/")).unwrap());
+        up1.kind = UpstreamKind::OpenaiOauth;
+        let mut up2 =
+            websocket_upstream(2, "oauth-2", Url::parse(&format!("http://{addr2}/")).unwrap());
+        up2.kind = UpstreamKind::OpenaiOauth;
+        seed_subscription_quota(&quota_cache, up1.id, 0.05, 0.05, false);
+        seed_subscription_quota(&quota_cache, up2.id, 0.20, 0.20, false);
+
+        let state = subscription_websocket_state(vec![up1, up2], quota_cache).await;
+        let headers = {
+            let mut h = HeaderMap::new();
+            h.insert("x-api-key", HeaderValue::from_str(TEST_KEY.plaintext.as_str()).unwrap());
+            h
+        };
+        let auth = state.lifecycle.authenticate(&headers).await.unwrap();
+        let mut gateway = cc_lb_engine::responses_websocket::ResponsesWebSocketGateway::new(
+            state.lifecycle.clone(),
+            &auth,
+            headers,
+            state.body_caps.messages,
+            8,
+        )
+        .with_codex_backend(true);
+
+        let d1 = gateway
+            .client_message(
+                auth.clone(),
+                Bytes::from_static(
+                    br#"{"type":"response.create","model":"gpt-6.2-sol","store":false,"input":[]}"#,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let (events, mut event_rx) = tokio::sync::mpsc::channel(16);
+        let mut connections = HashMap::new();
+        let mut next_conn_id = 1;
+        let (_ready1, errs1) = responses_websocket::dispatch_responses_websocket_with_limits(
+            &mut gateway,
+            d1,
+            &state,
+            &mut connections,
+            &events,
+            &mut next_conn_id,
+            8,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            3,
+        )
+        .await;
+        assert!(errs1.is_empty());
+        assert_eq!(upgrade_count_1.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            text_msgs_1.load(Ordering::SeqCst),
+            0,
+            "post-upgrade exhausted oauth-1 must be dropped before any response.create write"
+        );
+        assert_eq!(
+            connections.len(),
+            1,
+            "only committed oauth-2 socket must remain registered"
+        );
+        while let Some(ev) = event_rx.recv().await {
+            if let responses_websocket::WsProviderEvent::Frame {
+                connection_id,
+                bytes,
+                ..
+            } = ev
+            {
+                let _ = gateway.provider_message(connection_id, &bytes).await.unwrap();
+                if bytes.windows(18).any(|w| w == b"response.completed") {
+                    break;
+                }
+            }
+        }
+        assert_eq!(reqs2.load(Ordering::SeqCst), 1);
+
+        // Turn 2 must route directly via healthy oauth-2 (never pinned to rejected oauth-1).
+        let d2 = gateway
+            .client_message(
+                auth,
+                Bytes::from_static(
+                    br#"{"type":"response.create","model":"gpt-6.2-sol","store":false,"input":[]}"#,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(d2.candidates.len(), 1);
+        assert_eq!(d2.candidates[0].upstream_name, "oauth-2");
+        let (_ready2, errs2) = responses_websocket::dispatch_responses_websocket_with_limits(
+            &mut gateway,
+            d2,
+            &state,
+            &mut connections,
+            &events,
+            &mut next_conn_id,
+            8,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            3,
+        )
+        .await;
+        assert!(errs2.is_empty());
+        while let Some(ev) = event_rx.recv().await {
+            if let responses_websocket::WsProviderEvent::Frame {
+                connection_id,
+                bytes,
+                ..
+            } = ev
+            {
+                let _ = gateway.provider_message(connection_id, &bytes).await.unwrap();
+                if bytes.windows(18).any(|w| w == b"response.completed") {
+                    break;
+                }
+            }
+        }
+        assert_eq!(upgrade_count_1.load(Ordering::SeqCst), 1);
+        assert_eq!(reqs2.load(Ordering::SeqCst), 2);
+
+        task1.abort();
+        task2.abort();
+    }
+
+    // Part B: Post-upgrade `validate_candidate_for_send` stalling past deadline cleans up the
+    // uncommitted socket and returns 504 without writing to the upstream.
+    {
+        use std::sync::atomic::AtomicBool;
+        struct ArmableStallKeyStore {
+            armed: Arc<AtomicBool>,
+            release: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait]
+        impl ManagedKeyStore for ArmableStallKeyStore {
+            async fn issue(
+                &self,
+                principal_id: &str,
+                key_id: &str,
+                params: IssueParams,
+            ) -> StorageResult<StoredApiKeyRecord> {
+                FixtureKeyStore.issue(principal_id, key_id, params).await
+            }
+
+            async fn get(
+                &self,
+                principal_id: &str,
+                key_id: &str,
+            ) -> StorageResult<Option<StoredApiKeyRecord>> {
+                FixtureKeyStore.get(principal_id, key_id).await
+            }
+
+            async fn lookup_by_index_hash(
+                &self,
+                index_hash: &[u8; 32],
+            ) -> StorageResult<Option<(String, String, StoredApiKeyRecord)>> {
+                if self.armed.load(Ordering::SeqCst) {
+                    self.release.notified().await;
+                }
+                FixtureKeyStore.lookup_by_index_hash(index_hash).await
+            }
+
+            async fn list_by_principal(
+                &self,
+                principal_id: &str,
+            ) -> StorageResult<Vec<StoredApiKeyRecord>> {
+                FixtureKeyStore.list_by_principal(principal_id).await
+            }
+
+            async fn list_all(&self) -> StorageResult<Vec<(String, String, StoredApiKeyRecord)>> {
+                FixtureKeyStore.list_all().await
+            }
+
+            async fn update(
+                &self,
+                principal_id: &str,
+                key_id: &str,
+                mutation: ApiKeyMutation,
+            ) -> StorageResult<()> {
+                FixtureKeyStore.update(principal_id, key_id, mutation).await
+            }
+
+            async fn revoke_zero_secrets(&self, principal_id: &str, key_id: &str) -> StorageResult<()> {
+                FixtureKeyStore.revoke_zero_secrets(principal_id, key_id).await
+            }
+        }
+
+        let armed = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let text_msgs = Arc::new(AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let armed_task = armed.clone();
+        let text_task = text_msgs.clone();
+        let server_task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(
+                socket,
+                |_req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    // Stall the very next `authenticate()` inside post-upgrade validation.
+                    armed_task.store(true, Ordering::SeqCst);
+                    Ok(resp)
+                },
+            )
+            .await
+            else {
+                return;
+            };
+            while let Some(Ok(msg)) = ws.next().await {
+                if msg.is_text() {
+                    text_task.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+
+        let up = websocket_upstream(1, "slow-validate", Url::parse(&format!("http://{addr}/")).unwrap());
+        let state = websocket_test_state(
+            vec![up],
+            TerminalStrategy::FirstPick,
+            DrainController::new(),
+            Arc::new(WebSocketTestSignerFactory),
+            Arc::new(ArmableStallKeyStore {
+                armed,
+                release: release.clone(),
+            }),
+            vec!["*".to_owned()],
+        )
+        .await;
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_str(TEST_KEY.plaintext.as_str()).unwrap());
+        let auth = state.lifecycle.authenticate(&headers).await.unwrap();
+        let mut gateway = cc_lb_engine::responses_websocket::ResponsesWebSocketGateway::new(
+            state.lifecycle.clone(),
+            &auth,
+            headers,
+            state.body_caps.messages,
+            8,
+        );
+        let dispatch = gateway
+            .client_message(auth, Bytes::from_static(RESPONSE_CREATE.as_bytes()))
+            .await
+            .unwrap()
+            .unwrap();
+        let (events, _event_rx) = tokio::sync::mpsc::channel(8);
+        let mut connections = HashMap::new();
+        let mut next_conn_id = 1;
+        let (_ready, errors) = responses_websocket::dispatch_responses_websocket_with_limits(
+            &mut gateway,
+            dispatch,
+            &state,
+            &mut connections,
+            &events,
+            &mut next_conn_id,
+            8,
+            Duration::from_millis(80),
+            Duration::from_millis(120),
+            1,
+        )
+        .await;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].status, 504);
+        assert_eq!(errors[0].code, "upstream_unavailable");
+        assert!(connections.is_empty(), "timed-out uncommitted socket must be dropped");
+        assert_eq!(text_msgs.load(Ordering::SeqCst), 0);
+
+        release.notify_waiters();
+        server_task.abort();
+    }
+}
+
+#[tokio::test]
+async fn websocket_relay_delivers_buffered_response_failed_before_pending_expiry() {
+    use futures_util::StreamExt as _;
+
+    // Obtain a real axum WebSocket `SplitSink` by upgrading a loopback socket.
+    let (sink_tx, sink_rx) = tokio::sync::oneshot::channel();
+    let sink_tx = Arc::new(std::sync::Mutex::new(Some(sink_tx)));
+    let app = axum::Router::new().route(
+        "/ws",
+        axum::routing::get(move |ws: axum::extract::ws::WebSocketUpgrade| {
+            let sink_tx = sink_tx.clone();
+            async move {
+                ws.on_upgrade(move |socket| async move {
+                    let (sink, _stream) = socket.split();
+                    if let Some(tx) = sink_tx.lock().unwrap().take() {
+                        let _ = tx.send(sink);
+                    }
+                    std::future::pending::<()>().await;
+                })
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let (mut client_ws, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
+    let mut downstream_sink = sink_rx.await.unwrap();
+
+    // Stand up a real proxy gateway turn using `websocket_test_state` + open provider socket
+    // that keeps its WebSocket open after `response.created` so no premature `Closed` event
+    // arrives ahead of our synthetic `response.failed`.
+    let up_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up_addr = up_listener.local_addr().unwrap();
+    let up_url = Url::parse(&format!("http://{up_addr}/")).unwrap();
+    let up_task = tokio::spawn(async move {
+        let Ok((socket, _)) = up_listener.accept().await else {
+            return;
+        };
+        let Ok(mut provider) = accept_async(socket).await else {
+            return;
+        };
+        while let Some(Ok(message)) = provider.next().await {
+            if message.is_text() {
+                let _ = provider
+                    .send(UpstreamMessage::Text(
+                        r#"{"type":"response.created","response":{"id":"healthy","store":false}}"#
+                            .into(),
+                    ))
+                    .await;
+                break;
+            }
+        }
+        while let Some(Ok(_)) = provider.next().await {}
+    });
+    let up = websocket_upstream(1, "provider-a", up_url);
+    let relay_state = websocket_test_state(
+        vec![up.clone()],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let mut r_headers = HeaderMap::new();
+    r_headers.insert("x-api-key", HeaderValue::from_str(TEST_KEY.plaintext.as_str()).unwrap());
+    let r_auth = relay_state.lifecycle.authenticate(&r_headers).await.unwrap();
+    let mut r_gateway = cc_lb_engine::responses_websocket::ResponsesWebSocketGateway::new(
+        relay_state.lifecycle.clone(),
+        &r_auth,
+        r_headers,
+        relay_state.body_caps.messages,
+        8,
+    );
+    let d1 = r_gateway
+        .client_message(
+            r_auth,
+            Bytes::from_static(
+                br#"{"type":"response.create","model":"gpt-test","store":false,"input":[]}"#,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let (events, mut event_rx) = tokio::sync::mpsc::channel(16);
+    let mut connections = HashMap::new();
+    let mut next_conn_id = 1;
+    let (_ready, errs) = responses_websocket::dispatch_responses_websocket_with_limits(
+        &mut r_gateway,
+        d1,
+        &relay_state,
+        &mut connections,
+        &events,
+        &mut next_conn_id,
+        8,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+        1,
+    )
+    .await;
+    assert!(errs.is_empty());
+    // Consume the mock provider's initial `response.created` (`healthy`), park on a statusless
+    // `error` (`healthy`), buffer a timely `response.failed` behind a slow dispatch past the
+    // deadline, and prove `drain_buffered_ws_events_before_expiry` forwards `response.failed`
+    // rather than synthesizing an expiry terminal.
+    let conn_id = *connections.keys().next().unwrap();
+    let first_created = loop {
+        match event_rx.recv().await.unwrap() {
+            responses_websocket::WsProviderEvent::Frame { bytes, .. } => break bytes,
+            _ => continue,
+        }
+    };
+    assert!(r_gateway.provider_message(conn_id, &first_created).await.unwrap().forward);
+    let statusless_err = Bytes::from_static(
+        br#"{"type":"error","response_id":"healthy","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Overloaded"}}"#,
+    );
+    assert!(r_gateway.provider_message(conn_id, &statusless_err).await.unwrap().forward);
+    let past_deadline = r_gateway
+        .next_pending_error_deadline()
+        .expect("pending terminal scheduled")
+        + Duration::from_secs(1);
+
+    events
+        .send(responses_websocket::WsProviderEvent::Frame {
+            connection_id: conn_id,
+            bytes: Bytes::from_static(
+                br#"{"type":"response.failed","response":{"id":"healthy","status":"failed","error":{"code":"server_is_overloaded","message":"Overloaded"}}}"#,
+            ),
+            text: true,
+        })
+        .await
+        .unwrap();
+
+    let mut dispatches = VecDeque::new();
+    assert!(
+        responses_websocket::drain_buffered_ws_events_before_expiry(
+            &mut event_rx,
+            &mut r_gateway,
+            &mut connections,
+            &mut dispatches,
+            &mut downstream_sink,
+            past_deadline,
+        )
+        .await
+    );
+    assert!(
+        r_gateway.next_pending_error_deadline().is_none(),
+        "buffered response.failed must drain and retire the pending terminal"
+    );
+    let forwarded = tokio::time::timeout(Duration::from_secs(5), client_ws.next())
+        .await
+        .expect("forwarded frame arrives")
+        .unwrap()
+        .unwrap();
+    let forwarded_json: Value = serde_json::from_str(forwarded.to_text().unwrap()).unwrap();
+    assert_eq!(forwarded_json["type"], "response.failed");
+
+    let _ = client_ws.close(None).await;
+    server_task.abort();
+    up_task.abort();
+}
