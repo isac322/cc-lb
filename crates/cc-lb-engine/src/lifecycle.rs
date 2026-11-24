@@ -32,7 +32,8 @@ use self::cache::{
     request_cache_metadata_from_value_with_analysis_for_capability,
 };
 use self::identity::{
-    ThreadStickySubagentLatch, apply_thread_sticky_subagent_latch, request_identity_metadata,
+    OpenaiSessionHintCache, ThreadStickySubagentLatch, apply_thread_sticky_subagent_latch,
+    is_openai_prewarm_request, request_identity_metadata,
 };
 use self::limits::{
     ActiveLimit, LimitRequest, admission_fanout_multiplier, attach_limit_headers_from_engine,
@@ -245,6 +246,14 @@ use cc_lb_control::{
 use cc_lb_domain::ReplicaIdentity;
 use cc_lb_observability::truncate_reason;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WebSocketTurnOwner {
+    None,
+    SessionHint(Uuid),
+    PrewarmResponse(Uuid),
+    Response(Uuid),
+}
+
 pub struct Lifecycle {
     authn: Arc<BuiltinAuthn>,
     dynamic_view: Arc<DynamicViewHolder>,
@@ -260,6 +269,7 @@ pub struct Lifecycle {
     subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     cache_keepalive: crate::cache_keepalive::LifecycleKeepalive,
     thread_sticky_subagent_latch: ThreadStickySubagentLatch,
+    openai_session_hint: OpenaiSessionHintCache,
     prompt_cache_analysis_executor: PromptCacheAnalysisExecutor,
     completion_observer: Arc<CompletionObserver>,
     clock: ClockHandle,
@@ -292,6 +302,7 @@ impl Lifecycle {
                 Arc::clone(&dynamic_view),
             ),
             thread_sticky_subagent_latch: ThreadStickySubagentLatch::default(),
+            openai_session_hint: OpenaiSessionHintCache::default(),
             prompt_cache_analysis_executor: PromptCacheAnalysisExecutor::default(),
             completion_observer: Arc::new(CompletionObserver::new()),
             clock,
@@ -636,7 +647,7 @@ impl Lifecycle {
         auth: &crate::Authenticated,
         ingress: WebSocketIngress<'_>,
         body: Arc<Value>,
-        owner: Option<Uuid>,
+        owner: WebSocketTurnOwner,
         observer: Option<LifecycleContext>,
         request_id: &str,
         codex_backend: bool,
@@ -998,6 +1009,56 @@ impl Lifecycle {
         result
     }
 
+    pub(crate) fn record_openai_session_hint(
+        &self,
+        principal_id: &str,
+        headers: &HeaderMap,
+        body: &Value,
+        upstream_id: Uuid,
+    ) {
+        if is_openai_prewarm_request(body) {
+            return;
+        }
+        let now_unix_secs = unix_secs(self.clock.now());
+        if let Some(cache_key) = body
+            .get("prompt_cache_key")
+            .and_then(Value::as_str)
+            .filter(|key| !key.is_empty())
+        {
+            self.openai_session_hint
+                .record(principal_id, cache_key, upstream_id, now_unix_secs);
+        }
+        let identity = request_identity_metadata(
+            headers,
+            Some(body),
+            Some(ProviderCapability::OpenaiResponses),
+        );
+        if let Some(session_id) = identity
+            .observed_session_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+        {
+            self.openai_session_hint
+                .record(principal_id, session_id, upstream_id, now_unix_secs);
+        }
+    }
+
+    fn record_openai_session_hint_keys(
+        &self,
+        principal_id: &str,
+        keys: &[String],
+        upstream_id: Uuid,
+    ) {
+        if keys.is_empty() {
+            return;
+        }
+        let now_unix_secs = unix_secs(self.clock.now());
+        for key in keys {
+            self.openai_session_hint
+                .record(principal_id, key, upstream_id, now_unix_secs);
+        }
+    }
+
     pub(crate) fn is_openai_oauth_upstream(&self, upstream_id: Uuid) -> Option<bool> {
         let view = self.dynamic_view.load();
         view.upstreams_snapshot()
@@ -1043,7 +1104,7 @@ impl Lifecycle {
             auth,
             ingress,
             body,
-            Some(upstream_id),
+            WebSocketTurnOwner::Response(upstream_id),
             next_request_id(),
             codex_backend,
             reject_exhausted_subscription,
@@ -1059,7 +1120,7 @@ impl Lifecycle {
         auth: &crate::Authenticated,
         ingress: WebSocketIngress<'_>,
         body: &Value,
-        owner: Option<Uuid>,
+        owner: WebSocketTurnOwner,
         request_id: String,
         codex_backend: bool,
         reject_exhausted_subscription: bool,
@@ -1109,11 +1170,15 @@ impl Lifecycle {
                 "model is not allowed for this principal",
             ));
         }
+        let has_connection_owner = matches!(
+            owner,
+            WebSocketTurnOwner::Response(_) | WebSocketTurnOwner::PrewarmResponse(_)
+        );
         let keys = extract_request_affinity_keys_with_scope(
             ProviderCapability::OpenaiResponses,
             body,
             auth.principal_id(),
-            if owner.is_some() {
+            if has_connection_owner {
                 OpenaiResponseReferenceScope::ConnectionLocal
             } else {
                 OpenaiResponseReferenceScope::Durable
@@ -1170,7 +1235,7 @@ impl Lifecycle {
                 }
                 let oauth_only = has_openai_oauth && (codex_backend || !has_openai_api_key);
                 let not_established = failure.message == UPSTREAM_AFFINITY_NOT_ESTABLISHED_MESSAGE;
-                if owner.is_none() && has_previous && oauth_only && not_established {
+                if !has_connection_owner && has_previous && oauth_only && not_established {
                     return Err(WebSocketError::new(
                         400,
                         "previous_response_not_found",
@@ -1199,14 +1264,32 @@ impl Lifecycle {
                 .as_ref()
                 .map(|affinity| affinity.target_upstream_id),
         ) {
-            (Some(owner), Some(affinity)) if owner != affinity => {
+            (WebSocketTurnOwner::Response(owner_id), Some(affinity_id))
+                if owner_id != affinity_id =>
+            {
                 return Err(WebSocketError::new(
                     400,
                     error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
                     "provider state belongs to a different upstream",
                 ));
             }
-            (owner, affinity) => owner.or(affinity),
+            (WebSocketTurnOwner::PrewarmResponse(owner_id), Some(affinity_id))
+                if owner_id != affinity_id =>
+            {
+                return Err(WebSocketError::new(
+                    400,
+                    "previous_response_not_found",
+                    "The previous response is not available on this connection",
+                ));
+            }
+            (
+                WebSocketTurnOwner::Response(owner_id)
+                | WebSocketTurnOwner::PrewarmResponse(owner_id),
+                _,
+            ) => Some(owner_id),
+            (WebSocketTurnOwner::SessionHint(_), Some(affinity_id)) => Some(affinity_id),
+            (WebSocketTurnOwner::SessionHint(hint_id), None) => Some(hint_id),
+            (WebSocketTurnOwner::None, affinity_id) => affinity_id,
         };
         let cached = view
             .principal_view
@@ -1235,6 +1318,7 @@ impl Lifecycle {
             Some(body),
             Some(ProviderCapability::OpenaiResponses),
         );
+        let observed_session_id = identity.observed_session_id;
         let mut ctx = RequestContext::builder()
             .request_id(request_id)
             .thread_id(identity.thread_id)
@@ -1289,6 +1373,41 @@ impl Lifecycle {
         if let Some(target) = target {
             candidates.retain(|candidate| candidate.upstream_id == target);
         }
+        let prewarm_hint_id = if target.is_none() && is_openai_prewarm_request(body) {
+            let now_unix_secs = unix_secs(self.clock.now());
+            let ttl_secs = self.config.upstream_affinity_ttl.as_secs();
+            let cache_key = body
+                .get("prompt_cache_key")
+                .and_then(Value::as_str)
+                .filter(|key| !key.is_empty());
+            let candidate_hint = cache_key
+                .and_then(|key| {
+                    self.openai_session_hint.lookup(
+                        auth.principal_id(),
+                        key,
+                        now_unix_secs,
+                        ttl_secs,
+                    )
+                })
+                .or_else(|| {
+                    observed_session_id.as_deref().and_then(|session_id| {
+                        self.openai_session_hint.lookup(
+                            auth.principal_id(),
+                            session_id,
+                            now_unix_secs,
+                            ttl_secs,
+                        )
+                    })
+                });
+            candidate_hint.filter(|hint_id| {
+                candidates.iter().any(|candidate| {
+                    candidate.upstream_id == *hint_id
+                        && !subscription_hard_blocked(ctx.canonical_model_id.as_str(), candidate)
+                })
+            })
+        } else {
+            None
+        };
         let filters = pipeline.filters_for(cc_lb_domain::Provider::Openai);
         let pre_filter_candidates = (target.is_none()
             && candidates.len() > 1
@@ -1296,7 +1415,26 @@ impl Lifecycle {
                 .iter()
                 .any(|filter| filter.plugin_id() == BUILTIN_SUBSCRIPTION_PREFERENCE_ID))
         .then(|| candidates.clone());
-        let mut result = execute_filter_pipeline(filters, &ctx, &principal, candidates);
+        let mut result = if let Some(hint_id) = prewarm_hint_id {
+            let hinted: Vec<UpstreamCandidate> = candidates
+                .iter()
+                .filter(|candidate| candidate.upstream_id == hint_id)
+                .cloned()
+                .collect();
+            let hinted_result = execute_filter_pipeline(filters, &ctx, &principal, hinted);
+            if !hinted_result.candidates.is_empty()
+                && !subscription_hard_blocked(
+                    ctx.canonical_model_id.as_str(),
+                    &hinted_result.candidates[0],
+                )
+            {
+                hinted_result
+            } else {
+                execute_filter_pipeline(filters, &ctx, &principal, candidates)
+            }
+        } else {
+            execute_filter_pipeline(filters, &ctx, &principal, candidates)
+        };
         if let Some(target) = target {
             result
                 .candidates
@@ -1760,6 +1898,7 @@ impl Lifecycle {
             observe_response_keys: true,
             owner_epoch: Some(0),
             ttl_secs: self.config.upstream_affinity_ttl.as_secs(),
+            session_hint_keys: Vec::new(),
         };
         bind_upstream_affinity_keys(&context, &keys, unix_secs(self.clock.now()), None)
             .await
@@ -3692,6 +3831,30 @@ impl Lifecycle {
                     context
                 }
             });
+        let session_hint_keys = if request_capability == ProviderCapability::OpenaiResponses
+            && !body_view.value().is_some_and(is_openai_prewarm_request)
+        {
+            let mut keys = Vec::new();
+            if let Some(key) = body_view
+                .value()
+                .and_then(|value| value.get("prompt_cache_key"))
+                .and_then(Value::as_str)
+                .filter(|key| !key.is_empty())
+            {
+                keys.push(key.to_owned());
+            }
+            if let Some(session_id) = cache_metadata
+                .observed_session_id
+                .as_deref()
+                .filter(|session_id| !session_id.is_empty())
+                && !keys.iter().any(|existing| existing == session_id)
+            {
+                keys.push(session_id.to_owned());
+            }
+            keys
+        } else {
+            Vec::new()
+        };
         let response_affinity_context = ResponseAffinityContext {
             capability: request_capability,
             usage_shape: (request_capability == ProviderCapability::OpenaiChatCompletions
@@ -3707,6 +3870,7 @@ impl Lifecycle {
                 .is_some_and(|value| request_observes_response_affinity(request_capability, value)),
             owner_epoch: routed_owner_epoch,
             ttl_secs: self.config.upstream_affinity_ttl.as_secs(),
+            session_hint_keys,
         };
         response = self
             .finish_success_response(
@@ -4794,6 +4958,23 @@ impl Lifecycle {
                     .saturating_add(usage.cache_creation_input_tokens),
             );
         }
+        if !body_collect_failed
+            && status.is_success()
+            && !non_error_status_response_failed
+            && !native_response_failed
+            && !declared_provider_error
+            && !vertex_translation_failed
+            && abnormal_stop.is_none()
+            && !affinity_bind_failed
+            && buffered_transform_error.is_none()
+            && !response_affinity_context.session_hint_keys.is_empty()
+        {
+            self.record_openai_session_hint_keys(
+                &response_affinity_context.principal_id,
+                &response_affinity_context.session_hint_keys,
+                response_affinity_context.upstream_id,
+            );
+        }
         if status.is_success()
             && let Some(context) = prompt_cache_observation_context.as_ref()
         {
@@ -5808,6 +5989,7 @@ impl Lifecycle {
         let relay_start = Instant::now();
         let keepalive = self.cache_keepalive.clone();
         let affinity_clock = self.clock.clone();
+        let session_hint_cache = self.openai_session_hint.clone();
         let upstream_error_status = status.is_client_error() || status.is_server_error();
         if upstream_error_status && let Some(o) = observer.as_ref() {
             let code = if status.is_client_error() {
@@ -8117,7 +8299,7 @@ impl Lifecycle {
             }
             // EOF is evidence only after codec trailers and complete event
             // framing have been validated. Error flags alone never prove it.
-            if upstream_body_eof
+            let sse_clean_terminal = upstream_body_eof
                 && keepalive_decode_complete
                 && !upstream_error_body_decode_failed
                 && transform_decode_supported
@@ -8129,8 +8311,8 @@ impl Lifecycle {
                     upstream_is_sse,
                     status,
                     semantic_completion_observed,
-                )
-            {
+                );
+            if sse_clean_terminal {
                 downstream_drop_guard.mark_upstream_terminal();
             }
             if stream_affinity_error.is_none()
@@ -8170,6 +8352,24 @@ impl Lifecycle {
                     );
                     batch_index = batch_index.saturating_add(1);
                     yield Ok::<Bytes, Infallible>(frame);
+                }
+            }
+            if sse_clean_terminal
+                && stream_affinity_error.is_none()
+                && stream_upstream_error.is_none()
+                && stream_transform_error.is_none()
+                && !stream_provider_error_seen
+                && status.is_success()
+                && !response_affinity_context.session_hint_keys.is_empty()
+            {
+                let hint_now = unix_secs(affinity_clock.now());
+                for key in &response_affinity_context.session_hint_keys {
+                    session_hint_cache.record(
+                        &response_affinity_context.principal_id,
+                        key,
+                        response_affinity_context.upstream_id,
+                        hint_now,
+                    );
                 }
             }
             downstream_drop_guard.detach_lifecycle_observer();

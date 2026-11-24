@@ -21,7 +21,11 @@ use uuid::Uuid;
 use crate::authn_rail::Authenticated;
 use crate::completion_observer::{StreamCompletionLog, StreamLatency};
 use crate::downstream_stream_drop_guard::record_stream_termination_metric;
-use crate::lifecycle::{Lifecycle, PromptCacheObservationContext};
+use crate::lifecycle::{Lifecycle, PromptCacheObservationContext, WebSocketTurnOwner};
+
+fn is_prewarm_body(body: &serde_json::Value) -> bool {
+    body.get("generate") == Some(&serde_json::Value::Bool(false))
+}
 use crate::response_transform::ResponseTransformContext;
 use crate::terminal_observer::{
     InternalFailure, LifecycleContext, StreamTerminationCause, StreamTerminationOutcome,
@@ -961,11 +965,17 @@ impl ResponsesWebSocketGateway {
             self.finish_turn(successor, Some(&error));
         }
         let body = Arc::new(body);
-        let routing_owner = owner.as_ref().map(|owner| owner.upstream_id).or_else(|| {
-            self.session_oauth
+        let routing_owner = match owner.as_ref() {
+            Some(owner) if is_prewarm_body(&owner.body) => {
+                WebSocketTurnOwner::PrewarmResponse(owner.upstream_id)
+            }
+            Some(owner) => WebSocketTurnOwner::Response(owner.upstream_id),
+            None => self
+                .session_oauth
                 .then_some(self.session_upstream)
                 .flatten()
-        });
+                .map_or(WebSocketTurnOwner::None, WebSocketTurnOwner::SessionHint),
+        };
         let mut prepared = self
             .lifecycle
             .prepare_websocket_turn_with_surface(
@@ -1220,7 +1230,7 @@ impl ResponsesWebSocketGateway {
                     query: self.query.as_deref(),
                 },
                 body.clone(),
-                Some(owner.upstream_id),
+                WebSocketTurnOwner::Response(owner.upstream_id),
                 observer,
                 request_id,
                 self.codex_backend,
@@ -1684,11 +1694,19 @@ impl ResponsesWebSocketGateway {
                     .get(&turn_id)
                     .is_some_and(|turn| turn.prepared.oauth_transport)
             });
+        let is_prewarm = self
+            .turns
+            .get(&turn_id)
+            .is_some_and(|turn| is_prewarm_body(&turn.body));
         self.connection_oauth
             .entry(connection_id)
             .or_insert(is_oauth);
         if is_oauth {
-            self.session_upstream.get_or_insert(upstream_id);
+            if is_prewarm {
+                self.session_upstream.get_or_insert(upstream_id);
+            } else {
+                self.session_upstream = Some(upstream_id);
+            }
             self.session_oauth = true;
         }
         self.connections.entry(connection_id).or_insert(upstream_id);
@@ -2907,6 +2925,12 @@ impl ResponsesWebSocketGateway {
                     turn.response_created = true;
                 }
                 turn.prepared.span.record("gen_ai.response.id", id);
+                self.lifecycle.record_openai_session_hint(
+                    turn.auth.principal_id(),
+                    &self.headers,
+                    &turn.body,
+                    upstream_id,
+                );
                 if let Some(parent) = turn.steer_parent.as_ref() {
                     self.successors.remove(parent);
                     let lane = self.lanes.entry(lane.clone()).or_default();
@@ -7589,5 +7613,668 @@ pub(crate) mod tests {
             br#"{"type":"response.failed","stream_id":"other-lane","response":{"id":"resp_pub_a","status":"failed","error":{"code":"server_is_overloaded","message":"Overloaded"}}}"#,
         );
         assert!(gateway.provider_message(1, &dup_wrong_lane).await.is_err());
+    }
+
+    struct PrewarmMultiUpstreamFixture {
+        auth: Authenticated,
+        lifecycle: Arc<Lifecycle>,
+        upstream_a: Uuid,
+        upstream_b: Uuid,
+        quota_cache: Arc<PrewarmQuotaCache>,
+        affinity_store: Arc<PrewarmAffinityStore>,
+    }
+
+    #[derive(Default)]
+    struct PrewarmQuotaCache {
+        snapshots: Mutex<HashMap<Uuid, Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot>>>,
+    }
+
+    impl cc_lb_control::SubscriptionQuotaCacheLike for PrewarmQuotaCache {
+        fn upsert_observation(&self, _record: &cc_lb_storage_api::SubscriptionQuotaSample) {}
+
+        fn snapshot_for_upstream(
+            &self,
+            upstream_id: Uuid,
+            _now_unix_millis: u64,
+            _max_staleness_secs: u64,
+        ) -> Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot> {
+            self.snapshots
+                .lock()
+                .expect("prewarm quota cache lock")
+                .get(&upstream_id)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    #[derive(Default)]
+    struct PrewarmAffinityStore {
+        bindings: Mutex<
+            HashMap<
+                UpstreamAffinityKey,
+                cc_lb_storage_api::upstream_affinity::UpstreamAffinityBinding,
+            >,
+        >,
+    }
+
+    #[async_trait::async_trait]
+    impl cc_lb_storage_api::UpstreamAffinityStore for PrewarmAffinityStore {
+        async fn read_upstream_owner_epoch(
+            &self,
+            _upstream_id: cc_lb_storage_api::UpstreamRecordId,
+            _expected_spec_revision: u64,
+        ) -> cc_lb_storage_api::StorageResult<Option<u64>> {
+            Ok(Some(0))
+        }
+
+        async fn resolve_upstream_affinities(
+            &self,
+            keys: &[UpstreamAffinityKey],
+            _now_unix_secs: u64,
+            _ttl_secs: u64,
+        ) -> cc_lb_storage_api::StorageResult<
+            Vec<cc_lb_storage_api::upstream_affinity::UpstreamAffinityBinding>,
+        > {
+            let bindings = self.bindings.lock().expect("prewarm affinity lock");
+            Ok(keys
+                .iter()
+                .filter_map(|key| bindings.get(key).cloned())
+                .collect())
+        }
+
+        async fn bind_upstream_affinities(
+            &self,
+            bindings: &[cc_lb_storage_api::upstream_affinity::UpstreamAffinityBinding],
+            _now_unix_secs: u64,
+            _ttl_secs: u64,
+        ) -> cc_lb_storage_api::StorageResult<()> {
+            let mut guard = self.bindings.lock().expect("prewarm affinity lock");
+            for binding in bindings {
+                guard.insert(binding.key.clone(), binding.clone());
+            }
+            Ok(())
+        }
+
+        async fn purge_expired_upstream_affinities(
+            &self,
+            _now_unix_secs: u64,
+            _ttl_secs: u64,
+            _batch_size: usize,
+        ) -> cc_lb_storage_api::StorageResult<u64> {
+            Ok(0)
+        }
+    }
+
+    fn prewarm_quota_snapshot(
+        window: &str,
+        utilization: f64,
+        status: &str,
+        reset: u64,
+    ) -> cc_lb_domain::SubscriptionQuotaCandidateSnapshot {
+        cc_lb_domain::SubscriptionQuotaCandidateSnapshot {
+            window: window.to_owned(),
+            state: cc_lb_domain::SubscriptionQuotaDataState::Fresh,
+            source: Some("prewarm-test".to_owned()),
+            utilization: Some(utilization),
+            status: Some(status.to_owned()),
+            resets_at_unix_secs: Some(reset),
+            surpassed_threshold: None,
+            representative_claim: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            credits: None,
+            observed_at_unix_millis: Some(1_700_000_000 * 1_000),
+            max_staleness_secs: 60,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+        }
+    }
+
+    impl PrewarmMultiUpstreamFixture {
+        async fn new() -> Self {
+            use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+            use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+            use cc_lb_control::api_keys::principal_view::{
+                DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache,
+            };
+            use cc_lb_control::dynamic_view::{DynamicViewBuilder, DynamicViewHolder};
+            use cc_lb_domain::TerminalStrategy;
+            use cc_lb_routing::FilterPlugin;
+            use cc_lb_storage_api::upstream::{UpstreamKind as StorageRecordKind, UpstreamRecord};
+            use cc_lb_upstream::{
+                ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer,
+                SignerError, SignerFactory, SigningCapability, UpstreamError,
+            };
+
+            struct DummySignerFactory;
+            impl ApiKeyAwareSignerFactory for DummySignerFactory {
+                fn with_router_choice(&self, _name: String) -> Arc<dyn SignerFactory> {
+                    Arc::new(Self)
+                }
+            }
+            #[async_trait::async_trait]
+            impl SignerFactory for DummySignerFactory {
+                async fn build(
+                    &self,
+                    _upstream: &cc_lb_domain::Upstream,
+                ) -> Result<Arc<dyn Signer>, SignerError> {
+                    Ok(Arc::new(DummySigner))
+                }
+            }
+            struct DummySigner;
+            #[async_trait::async_trait]
+            impl Signer for DummySigner {
+                async fn sign(
+                    &self,
+                    shaped: ShapedRequest,
+                    capability: &mut SigningCapability,
+                ) -> Result<SignedRequest, SignerError> {
+                    Ok(SignedRequest::from_shaped(shaped, capability))
+                }
+
+                async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+                    RetryDecision::Fail
+                }
+            }
+            struct UnusedDispatcher;
+            #[async_trait::async_trait]
+            impl crate::UpstreamDispatch for UnusedDispatcher {
+                async fn dispatch(
+                    &self,
+                    _request: SignedRequest,
+                ) -> Result<http::Response<crate::Body>, crate::DispatchError> {
+                    unreachable!("unused dispatcher in websocket prewarm unit test")
+                }
+            }
+
+            const NOW_SECS: u64 = 1_700_000_000;
+            let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(NOW_SECS));
+            let storage = Arc::new(
+                cc_lb_storage_sqlite::open_sqlite("sqlite::memory:", clock.clone())
+                    .await
+                    .expect("open in-memory prewarm test database"),
+            );
+            storage
+                .initialize()
+                .await
+                .expect("migrate prewarm test database");
+            let keys = Arc::new(KeyStore::new(storage));
+            let (_record, secret) = keys
+                .create(
+                    DIRECT_PRINCIPAL,
+                    CreateParams {
+                        label: "prewarm-test".to_owned(),
+                        description: None,
+                        expires_at_unix_secs: None,
+                        limit_overrides: Vec::new(),
+                    },
+                )
+                .await
+                .expect("issue prewarm fixture key");
+            let filter: Arc<dyn FilterPlugin> = Arc::new(
+                crate::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::new(
+                ),
+            );
+            let pipeline = Arc::new(RouterPipelineCache {
+                user_filters: vec![filter],
+                terminal: TerminalStrategy::FirstPick,
+                instantiation_error: None,
+                provider_filters: None,
+            });
+            let mut chains: HashMap<String, PrincipalRoutingArtifacts> = HashMap::new();
+            chains.insert(
+                DIRECT_PRINCIPAL.to_owned(),
+                (Some(pipeline), DialectCache::Inherit),
+            );
+            let view = Arc::new(PrincipalView::for_tests(
+                DIRECT_PRINCIPAL,
+                true,
+                vec!["*".to_owned()],
+                Vec::new(),
+                chains,
+            ));
+            let authn = Arc::new(BuiltinAuthn::new(keys, clock.clone()));
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-api-key",
+                secret.expose().parse().expect("fixture key header"),
+            );
+            let auth = crate::authenticate_first(&authn, &headers, &view)
+                .await
+                .expect("authenticate prewarm fixture caller");
+
+            let upstream_a = Uuid::from_u128(0xAAA1);
+            let upstream_b = Uuid::from_u128(0xBBB2);
+            let upstreams = vec![
+                UpstreamRecord {
+                    id: upstream_a,
+                    name: "oauth-a".to_owned(),
+                    kind: StorageRecordKind::OpenaiOauth,
+                    enabled: true,
+                    ..Default::default()
+                },
+                UpstreamRecord {
+                    id: upstream_b,
+                    name: "oauth-b".to_owned(),
+                    kind: StorageRecordKind::OpenaiOauth,
+                    enabled: true,
+                    ..Default::default()
+                },
+            ];
+            let quota_cache = Arc::new(PrewarmQuotaCache::default());
+            {
+                let mut guard = quota_cache.snapshots.lock().expect("quota cache lock");
+                guard.insert(
+                    upstream_a,
+                    vec![
+                        prewarm_quota_snapshot("5h", 0.80, "allowed", NOW_SECS + 10_000),
+                        prewarm_quota_snapshot("7d", 0.80, "allowed", NOW_SECS + 100_000),
+                    ],
+                );
+                guard.insert(
+                    upstream_b,
+                    vec![
+                        prewarm_quota_snapshot("5h", 0.10, "allowed", NOW_SECS + 10_000),
+                        prewarm_quota_snapshot("7d", 0.10, "allowed", NOW_SECS + 100_000),
+                    ],
+                );
+            }
+            let dynamic = DynamicViewBuilder::new(0)
+                .signer_factory(Arc::new(DummySignerFactory))
+                .principal_view(view)
+                .subscription_quota_cache(quota_cache.clone())
+                .subscription_quota_routing_max_staleness_secs(60)
+                .upstream_records(upstreams)
+                .build();
+            let affinity_store = Arc::new(PrewarmAffinityStore::default());
+            let config = crate::LifecycleConfig {
+                unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy::Hybrid,
+                ..Default::default()
+            };
+            let lifecycle = Arc::new(
+                Lifecycle::new_with_dynamic_view(
+                    authn,
+                    Arc::new(DynamicViewHolder::new(dynamic)),
+                    Arc::new(UnusedDispatcher),
+                    config,
+                    clock,
+                )
+                .with_upstream_affinity_store(affinity_store.clone()),
+            );
+            Self {
+                auth,
+                lifecycle,
+                upstream_a,
+                upstream_b,
+                quota_cache,
+                affinity_store,
+            }
+        }
+
+        fn gateway(&self, headers: HeaderMap) -> ResponsesWebSocketGateway {
+            ResponsesWebSocketGateway::new(
+                self.lifecycle.clone(),
+                &self.auth,
+                headers,
+                1_024 * 1_024,
+                16,
+            )
+            .with_codex_backend(true)
+        }
+
+        fn seed_encrypted_content_owner(&self, encrypted_content: &str, owner: Uuid) {
+            let body = serde_json::json!({
+                "model": "gpt-5",
+                "store": false,
+                "input": [{
+                    "type": "reasoning",
+                    "id": "rs_seeded",
+                    "summary": [],
+                    "content": [],
+                    "encrypted_content": encrypted_content
+                }]
+            });
+            let keys = crate::upstream_affinity::extract_request_affinity_keys_with_scope(
+                crate::provider_capability::ProviderCapability::OpenaiResponses,
+                &body,
+                DIRECT_PRINCIPAL,
+                crate::upstream_affinity::OpenaiResponseReferenceScope::Durable,
+            )
+            .expect("affinity keys extract");
+            assert!(!keys.is_empty());
+            let mut guard = self
+                .affinity_store
+                .bindings
+                .lock()
+                .expect("prewarm affinity lock");
+            for key in keys {
+                guard.insert(
+                    key.clone(),
+                    cc_lb_storage_api::upstream_affinity::UpstreamAffinityBinding {
+                        key,
+                        upstream_id: owner,
+                        owner_epoch: 0,
+                        observed_at_unix_secs: 1_700_000_000,
+                        expires_at_unix_secs: None,
+                    },
+                );
+            }
+        }
+    }
+
+    async fn complete_gateway_turn(
+        gateway: &mut ResponsesWebSocketGateway,
+        dispatch: &WebSocketDispatch,
+        conn_id: u64,
+        upstream_id: Uuid,
+        upstream_name: &str,
+        response_id: &str,
+    ) {
+        gateway.assign_connection(dispatch.turn_id, conn_id, upstream_id, upstream_name);
+        gateway.commit_send_attempt(dispatch.turn_id);
+        let _ = gateway.sent_with_timings(
+            dispatch.turn_id,
+            ResponsesDispatchTimings::reused(),
+            std::time::Instant::now(),
+        );
+        let created = serde_json::to_vec(&serde_json::json!({
+            "type": "response.created",
+            "response": {"id": response_id, "status": "in_progress", "store": false}
+        }))
+        .unwrap();
+        gateway
+            .provider_message(conn_id, &Bytes::from(created))
+            .await
+            .unwrap();
+        let completed = serde_json::to_vec(&serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id": response_id,
+                "status": "completed",
+                "store": false,
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }
+        }))
+        .unwrap();
+        gateway
+            .provider_message(conn_id, &Bytes::from(completed))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn prewarm_uses_session_hint_to_route_to_existing_thread_owner() {
+        let fixture = PrewarmMultiUpstreamFixture::new().await;
+
+        // Upstream B has lower utilization than A, so unhinted turns choose B.
+        // Establish a non-prewarm turn on upstream A with prompt_cache_key "S".
+        let mut gateway_owner = fixture.gateway(HeaderMap::new());
+        let seed_frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "prompt_cache_key": "session-S",
+                "store": false,
+                "input": [{"role": "user", "content": "hi"}]
+            }))
+            .unwrap(),
+        );
+        let seed_dispatch = gateway_owner
+            .client_message(fixture.auth.clone(), seed_frame)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(seed_dispatch.candidates[0].upstream_id, fixture.upstream_b);
+        // Simulate failover / assignment to upstream A on the seed turn.
+        complete_gateway_turn(
+            &mut gateway_owner,
+            &seed_dispatch,
+            1,
+            fixture.upstream_a,
+            "oauth-a",
+            "resp_seed_a",
+        )
+        .await;
+
+        // A fresh WebSocket gateway (e.g., subagent / reconnect) sends a prewarm with the same
+        // prompt_cache_key; the session hint must steer it proactively to upstream A.
+        let mut gateway_prewarm = fixture.gateway(HeaderMap::new());
+        let prewarm_frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "generate": false,
+                "prompt_cache_key": "session-S",
+                "store": false,
+                "input": []
+            }))
+            .unwrap(),
+        );
+        let prewarm_dispatch = gateway_prewarm
+            .client_message(fixture.auth.clone(), prewarm_frame)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            prewarm_dispatch.candidates[0].upstream_id,
+            fixture.upstream_a
+        );
+    }
+
+    #[tokio::test]
+    async fn prewarm_on_other_upstream_recovers_via_previous_response_not_found_and_session_hint_yields_to_affinity()
+     {
+        let fixture = PrewarmMultiUpstreamFixture::new().await;
+        let owned_cipher = "gAAAAAB_owned_by_a";
+        fixture.seed_encrypted_content_owner(owned_cipher, fixture.upstream_a);
+
+        // Fresh gateway without a session hint sends a prewarm -> routes to B (lower utilization).
+        let mut gateway = fixture.gateway(HeaderMap::new());
+        let turn1_prewarm = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "generate": false,
+                "prompt_cache_key": "thread-prewarm-mismatch",
+                "store": false,
+                "input": []
+            }))
+            .unwrap(),
+        );
+        let d1 = gateway
+            .client_message(fixture.auth.clone(), turn1_prewarm)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(d1.candidates[0].upstream_id, fixture.upstream_b);
+        complete_gateway_turn(
+            &mut gateway,
+            &d1,
+            10,
+            fixture.upstream_b,
+            "oauth-b",
+            "resp_prewarm_b",
+        )
+        .await;
+        assert_eq!(gateway.session_upstream, Some(fixture.upstream_b));
+
+        // Turn 2 sends previous_response_id = resp_prewarm_b alongside encrypted_content owned by A.
+        // Because the previous owner was a prewarm, it must return previous_response_not_found (400)
+        // so Codex retries cleanly without previous_response_id.
+        let turn2_conflict = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "previous_response_id": "resp_prewarm_b",
+                "prompt_cache_key": "thread-prewarm-mismatch",
+                "store": false,
+                "input": [{
+                    "type": "reasoning",
+                    "id": "rs_seeded",
+                    "summary": [],
+                    "content": [],
+                    "encrypted_content": owned_cipher
+                }]
+            }))
+            .unwrap(),
+        );
+        let err = gateway
+            .client_message(fixture.auth.clone(), turn2_conflict)
+            .await
+            .expect_err("prewarm owner vs durable affinity conflict must return previous_response_not_found");
+        assert_eq!(err.status, 400);
+        assert_eq!(err.code, "previous_response_not_found");
+
+        // Turn 3 drops previous_response_id on the SAME gateway (where session_upstream == Some(B));
+        // SessionHint(B) must yield to durable affinity A, and assigning A must update session_upstream.
+        let turn3_retry = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "prompt_cache_key": "thread-prewarm-mismatch",
+                "store": false,
+                "input": [{
+                    "type": "reasoning",
+                    "id": "rs_seeded",
+                    "summary": [],
+                    "content": [],
+                    "encrypted_content": owned_cipher
+                }]
+            }))
+            .unwrap(),
+        );
+        let d3 = gateway
+            .client_message(fixture.auth.clone(), turn3_retry)
+            .await
+            .unwrap()
+            .unwrap();
+        let candidate_ids: Vec<Uuid> = d3.candidates.iter().map(|c| c.upstream_id).collect();
+        assert_eq!(candidate_ids, vec![fixture.upstream_a]);
+
+        gateway.assign_connection(d3.turn_id, 11, fixture.upstream_a, "oauth-a");
+        assert_eq!(gateway.session_upstream, Some(fixture.upstream_a));
+    }
+
+    #[tokio::test]
+    async fn non_prewarm_owner_conflict_still_returns_upstream_affinity_unavailable() {
+        let fixture = PrewarmMultiUpstreamFixture::new().await;
+        let owned_cipher = "gAAAAAB_owned_by_a_real";
+        fixture.seed_encrypted_content_owner(owned_cipher, fixture.upstream_a);
+
+        let mut gateway = fixture.gateway(HeaderMap::new());
+        let turn1_real = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "store": false,
+                "input": [{"role": "user", "content": "real turn on B"}]
+            }))
+            .unwrap(),
+        );
+        let d1 = gateway
+            .client_message(fixture.auth.clone(), turn1_real)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(d1.candidates[0].upstream_id, fixture.upstream_b);
+        complete_gateway_turn(
+            &mut gateway,
+            &d1,
+            20,
+            fixture.upstream_b,
+            "oauth-b",
+            "resp_real_b",
+        )
+        .await;
+
+        let turn2_conflict = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "previous_response_id": "resp_real_b",
+                "store": false,
+                "input": [{
+                    "type": "reasoning",
+                    "id": "rs_seeded",
+                    "summary": [],
+                    "content": [],
+                    "encrypted_content": owned_cipher
+                }]
+            }))
+            .unwrap(),
+        );
+        let err = gateway
+            .client_message(fixture.auth.clone(), turn2_conflict)
+            .await
+            .expect_err("non-prewarm owner vs affinity conflict must still return upstream_affinity_unavailable");
+        assert_eq!(err.status, 400);
+        assert_eq!(err.code, "upstream_affinity_unavailable");
+    }
+
+    #[tokio::test]
+    async fn prewarm_ignores_session_hint_when_hinted_upstream_is_hard_blocked() {
+        let fixture = PrewarmMultiUpstreamFixture::new().await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("session_id", "blocked-session-S".parse().unwrap());
+        fixture.lifecycle.record_openai_session_hint(
+            fixture.auth.principal_id(),
+            &headers,
+            &serde_json::json!({
+                "model": "gpt-5",
+                "prompt_cache_key": "blocked-hint-key"
+            }),
+            fixture.upstream_a,
+        );
+
+        // Mark upstream A hard-blocked (5h=100% + 7d=100% rejected, credits depleted).
+        {
+            let mut overage = prewarm_quota_snapshot("overage", 1.0, "rejected", 1_700_600_000);
+            overage.utilization = None;
+            overage.status = None;
+            overage.fallback_available = Some(false);
+            overage.credits = Some(cc_lb_domain::SubscriptionQuotaCredits {
+                has_credits: Some(false),
+                unlimited: Some(false),
+                limit_reached: Some(true),
+                ..Default::default()
+            });
+            let mut guard = fixture
+                .quota_cache
+                .snapshots
+                .lock()
+                .expect("quota cache lock");
+            guard.insert(
+                fixture.upstream_a,
+                vec![
+                    prewarm_quota_snapshot("5h", 1.0, "rejected", 1_700_018_000),
+                    prewarm_quota_snapshot("7d", 1.0, "rejected", 1_700_600_000),
+                    overage,
+                ],
+            );
+        }
+
+        let mut gateway = fixture.gateway(headers);
+        let prewarm_frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "generate": false,
+                "prompt_cache_key": "blocked-hint-key",
+                "store": false,
+                "input": []
+            }))
+            .unwrap(),
+        );
+        let dispatch = gateway
+            .client_message(fixture.auth.clone(), prewarm_frame)
+            .await
+            .expect("prewarm must fall back cleanly instead of failing on blocked hint")
+            .unwrap();
+        assert_eq!(dispatch.candidates[0].upstream_id, fixture.upstream_b);
     }
 }

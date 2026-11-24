@@ -1478,6 +1478,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             if matched_response_id.is_none() {
                 partial.funding_ambiguous = true;
             } else if let Ok(value) = sonic_rs::from_slice::<serde_json::Value>(&frame)
+                && cc_lb_engine::codex_quota_observation::is_main_codex_frame(&value)
                 && let Some(headers) =
                     cc_lb_engine::codex_quota_observation::websocket_headers(&value)
             {

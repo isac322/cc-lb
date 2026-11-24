@@ -1,3 +1,5 @@
+use sha2::{Digest, Sha256};
+
 use super::*;
 
 pub(super) const THREAD_STICKY_SUBAGENT_SHARD_COUNT: usize = 16;
@@ -337,4 +339,113 @@ pub(super) fn hermes_body_session_identity(value: &Value) -> Option<(String, &'s
                     .map(|session_id| (session_id, "tags.conversation"))
             })
         })
+}
+
+pub(super) fn is_openai_prewarm_request(body: &Value) -> bool {
+    body.get("generate") == Some(&Value::Bool(false))
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct OpenaiSessionHintKey {
+    principal_id: String,
+    key_sha256: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OpenaiSessionHintEntry {
+    upstream_id: Uuid,
+    observed_at_unix_secs: u64,
+    sequence: u64,
+}
+
+#[derive(Clone)]
+pub(super) struct OpenaiSessionHintCache {
+    next_sequence: Arc<AtomicU64>,
+    shards: Arc<
+        [Mutex<HashMap<OpenaiSessionHintKey, OpenaiSessionHintEntry>>;
+            THREAD_STICKY_SUBAGENT_SHARD_COUNT],
+    >,
+}
+
+impl OpenaiSessionHintCache {
+    pub(super) fn new() -> Self {
+        Self {
+            next_sequence: Arc::new(AtomicU64::new(0)),
+            shards: Arc::new(std::array::from_fn(|_| Mutex::new(HashMap::new()))),
+        }
+    }
+
+    fn key(principal_id: &str, raw_key: &str) -> Option<OpenaiSessionHintKey> {
+        if raw_key.is_empty() || raw_key.len() > MAX_IDENTITY_VALUE_BYTES {
+            return None;
+        }
+        let key_sha256: [u8; 32] = Sha256::digest(raw_key.as_bytes()).into();
+        Some(OpenaiSessionHintKey {
+            principal_id: principal_id.to_owned(),
+            key_sha256,
+        })
+    }
+
+    fn shard_index(key: &OpenaiSessionHintKey) -> usize {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        (hasher.finish() as usize) % THREAD_STICKY_SUBAGENT_SHARD_COUNT
+    }
+
+    pub(super) fn record(
+        &self,
+        principal_id: &str,
+        raw_key: &str,
+        upstream_id: Uuid,
+        now_unix_secs: u64,
+    ) {
+        let Some(key) = Self::key(principal_id, raw_key) else {
+            return;
+        };
+        let shard = &self.shards[Self::shard_index(&key)];
+        let mut shard = shard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        if !shard.contains_key(&key)
+            && shard.len() >= MAX_THREAD_STICKY_SUBAGENTS_PER_SHARD
+            && let Some(oldest_key) = shard
+                .iter()
+                .min_by_key(|(_, entry)| entry.sequence)
+                .map(|(k, _)| k.clone())
+        {
+            shard.remove(&oldest_key);
+        }
+        shard.insert(
+            key,
+            OpenaiSessionHintEntry {
+                upstream_id,
+                observed_at_unix_secs: now_unix_secs,
+                sequence,
+            },
+        );
+    }
+
+    pub(super) fn lookup(
+        &self,
+        principal_id: &str,
+        raw_key: &str,
+        now_unix_secs: u64,
+        ttl_secs: u64,
+    ) -> Option<Uuid> {
+        let key = Self::key(principal_id, raw_key)?;
+        let shard = &self.shards[Self::shard_index(&key)];
+        let shard = shard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = shard.get(&key)?;
+        (now_unix_secs.saturating_sub(entry.observed_at_unix_secs) <= ttl_secs)
+            .then_some(entry.upstream_id)
+    }
+}
+
+impl Default for OpenaiSessionHintCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }

@@ -102,6 +102,27 @@ fn drops_codex_windows_with_unknown_duration() {
 }
 
 #[test]
+fn parses_credits_limit_reached_header() {
+    let observations = parse_openai_codex_quota_headers(&headers(&[
+        ("x-codex-credits-has-credits", "false"),
+        ("x-codex-credits-unlimited", "false"),
+        ("x-codex-credits-limit-reached", "true"),
+    ]));
+    let credits = observations
+        .iter()
+        .find(|observation| observation.window == SubscriptionQuotaWindow::Unified)
+        .expect("credit observation");
+    assert_eq!(credits.fallback_available, Some(false));
+    assert_eq!(
+        credits
+            .credits
+            .as_ref()
+            .and_then(|value| value.limit_reached),
+        Some(true)
+    );
+}
+
+#[test]
 fn ignores_unrelated_codex_headers() {
     assert!(
         parse_openai_codex_quota_headers(&headers(&[("x-codex-plan-type", "plus",)])).is_empty()

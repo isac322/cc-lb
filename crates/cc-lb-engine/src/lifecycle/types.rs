@@ -700,6 +700,7 @@ pub(super) struct ResponseAffinityContext {
     pub(super) observe_response_keys: bool,
     pub(super) owner_epoch: Option<u64>,
     pub(super) ttl_secs: u64,
+    pub(super) session_hint_keys: Vec<String>,
 }
 
 pub(super) async fn bind_upstream_affinity_keys(

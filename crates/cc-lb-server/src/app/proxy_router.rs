@@ -137,12 +137,17 @@ fn codex_backend_http_routes(
 pub(super) fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
     let _ = cc_lb_providers::builtin_provider_registry();
     let request_id_state = RequestIdState::uuid_v7("req_server_");
+    let responses_ws_route = || {
+        get(responses_websocket_handler).layer(cc_lb_observability::trace_layer().make_span_with(
+            cc_lb_observability::ProxyMakeSpan::with_route_template(proxy_route_template),
+        ))
+    };
     let websocket_routes = Router::new()
-        .route("/v1/responses", get(responses_websocket_handler))
+        .route("/v1/responses", responses_ws_route())
         .nest(
             "/openai",
             Router::new()
-                .route("/v1/responses", get(responses_websocket_handler))
+                .route("/v1/responses", responses_ws_route())
                 .route(
                     "/v1/realtime",
                     get(openai_realtime_websocket_handler).layer(
@@ -186,7 +191,7 @@ pub(super) fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
                                 ),
                             ),
                         )
-                        .route("/responses", get(responses_websocket_handler))
+                        .route("/responses", responses_ws_route())
                         .route(
                             "/realtime",
                             get(openai_realtime_websocket_handler).layer(

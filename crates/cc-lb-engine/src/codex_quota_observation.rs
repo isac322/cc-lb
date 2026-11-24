@@ -42,26 +42,45 @@ pub fn funding_from_headers(headers: &HeaderMap) -> Option<RequestFunding> {
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.eq_ignore_ascii_case("true") || v == "1")
     };
-    (flag("x-codex-credits-has-credits") || flag("x-codex-credits-unlimited"))
-        .then_some(RequestFunding::CreditsEstimated)
+    (!flag("x-codex-credits-limit-reached")
+        && (flag("x-codex-credits-has-credits") || flag("x-codex-credits-unlimited")))
+    .then_some(RequestFunding::CreditsEstimated)
+}
+
+/// Returns whether a `codex.rate_limits` frame belongs to the main `codex`
+/// meter family rather than an auxiliary limit family (`codex_bengalfox`, `premium`, etc.).
+pub fn is_main_codex_frame(value: &Value) -> bool {
+    ["metered_limit_name", "limit_name", "limit_id"]
+        .into_iter()
+        .all(|key| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .is_none_or(|family| family.eq_ignore_ascii_case("codex"))
+        })
 }
 
 /// Adapt the actual Codex event to the existing header parser. The caller has
 /// already parsed this frame once, on the quota worker. Extra limit families
-/// remain separate and never overwrite the main Codex quota or credit stream.
+/// remain separate and never overwrite the main Codex quota window meters;
+/// workspace-level credit depletion frames are still translated into credit
+/// exhaustion headers.
 pub fn websocket_headers(value: &Value) -> Option<HeaderMap> {
     if value.get("type").and_then(Value::as_str) != Some("codex.rate_limits") {
         return None;
     }
-    for key in ["metered_limit_name", "limit_name"] {
-        if let Some(family) = value.get(key).and_then(Value::as_str)
-            && !family.eq_ignore_ascii_case("codex")
-        {
-            return None;
-        }
+    let is_main_codex = is_main_codex_frame(value);
+    let credits_depleted = value.get("rate_limit_reached_type").and_then(Value::as_str)
+        == Some("workspace_member_credits_depleted");
+    if !is_main_codex && !credits_depleted {
+        return None;
     }
     let mut headers = HeaderMap::new();
-    if let Some(limits) = value.get("rate_limits") {
+    if is_main_codex {
+        let limits = value
+            .get("rate_limits")
+            .filter(|limits| limits.is_object())
+            .unwrap_or(value);
         for window in ["primary", "secondary"] {
             let Some(meter) = limits.get(window).and_then(Value::as_object) else {
                 continue;
@@ -98,6 +117,7 @@ pub fn websocket_headers(value: &Value) -> Option<HeaderMap> {
         for (field, header) in [
             ("has_credits", "x-codex-credits-has-credits"),
             ("unlimited", "x-codex-credits-unlimited"),
+            ("overage_limit_reached", "x-codex-credits-limit-reached"),
         ] {
             if let Some(flag) = credits.get(field).and_then(Value::as_bool) {
                 headers.insert(
@@ -114,6 +134,12 @@ pub fn websocket_headers(value: &Value) -> Option<HeaderMap> {
                 HeaderValue::from_str(balance).ok()?,
             );
         }
+    }
+    if credits_depleted {
+        headers.insert(
+            "x-codex-credits-limit-reached",
+            HeaderValue::from_static("true"),
+        );
     }
     Some(headers)
 }
@@ -197,5 +223,71 @@ mod tests {
         }
         let headers = websocket_headers(&meter()).unwrap();
         assert_eq!(headers["x-codex-credits-balance"], "12.9900000000");
+    }
+
+    #[test]
+    fn non_codex_limit_id_is_rejected_and_workspace_credits_depletion_is_propagated() {
+        let mut supplemental = meter();
+        supplemental["limit_id"] = json!("codex_bengalfox");
+        assert!(websocket_headers(&supplemental).is_none());
+
+        let mut codex_main = meter();
+        codex_main["limit_id"] = json!("codex");
+        assert!(websocket_headers(&codex_main).is_some());
+
+        let depleted = json!({
+            "type": "codex.rate_limits",
+            "limit_id": "premium",
+            "limit_name": null,
+            "primary": null,
+            "secondary": null,
+            "credits": {"has_credits": false, "unlimited": false, "balance": null},
+            "plan_type": "team",
+            "rate_limit_reached_type": "workspace_member_credits_depleted"
+        });
+        let headers = websocket_headers(&depleted).expect("depletion frame produces headers");
+        assert_eq!(headers["x-codex-credits-limit-reached"], "true");
+        assert_eq!(headers["x-codex-credits-has-credits"], "false");
+        assert_eq!(headers["x-codex-credits-unlimited"], "false");
+        assert!(!headers.contains_key("x-codex-primary-used-percent"));
+        assert!(!headers.contains_key("x-codex-secondary-used-percent"));
+
+        let parsed = cc_lb_quota::parse_openai_codex_quota_headers(&headers);
+        let unified = parsed
+            .iter()
+            .find(|obs| obs.window == cc_lb_storage_api::SubscriptionQuotaWindow::Unified)
+            .expect("unified credit observation");
+        assert_eq!(unified.fallback_available, Some(false));
+        assert_eq!(
+            unified.credits.as_ref().and_then(|c| c.limit_reached),
+            Some(true)
+        );
+
+        let top_level_main = json!({
+            "type": "codex.rate_limits",
+            "limit_id": "codex",
+            "primary": {"used_percent": 15.0, "window_minutes": 300, "reset_at": 1_900_000_000u64},
+            "secondary": {"used_percent": 40.0, "window_minutes": 10080, "reset_at": 1_900_500_000u64},
+            "credits": {"has_credits": false, "unlimited": false}
+        });
+        let top_headers = websocket_headers(&top_level_main).expect("top-level codex headers");
+        assert_eq!(top_headers["x-codex-primary-used-percent"], "15");
+        assert_eq!(
+            funding_from_headers(&top_headers),
+            Some(RequestFunding::IncludedEstimated)
+        );
+
+        let overage_blocked = json!({
+            "type": "codex.rate_limits",
+            "limit_id": "codex",
+            "rate_limits": {
+                "primary": {"used_percent": 100, "window_minutes": 300, "reset_at": 1_900_000_000u64},
+                "secondary": {"used_percent": 50, "window_minutes": 10080, "reset_at": 1_900_500_000u64}
+            },
+            "credits": {"has_credits": true, "unlimited": false, "overage_limit_reached": true}
+        });
+        let overage_headers = websocket_headers(&overage_blocked).expect("overage headers");
+        assert_eq!(overage_headers["x-codex-credits-limit-reached"], "true");
+        assert_eq!(funding_from_headers(&overage_headers), None);
     }
 }
