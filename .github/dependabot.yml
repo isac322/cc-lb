@@ -36,11 +36,6 @@ updates:
       cargo-workspace:
         patterns:
           - "*"
-    ignore:
-      # bincode 3.0.0 is an xkcd-2347 joke release containing `compile_error!`;
-      # 2.0.1 is the real latest stable. See deny.toml RUSTSEC-2025-0141.
-      - dependency-name: "bincode"
-        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "cargo"
     directory: "/fuzz"
@@ -54,11 +49,6 @@ updates:
       cargo-fuzz:
         patterns:
           - "*"
-    ignore:
-      # bincode 3.0.0 is an xkcd-2347 joke release containing `compile_error!`;
-      # 2.0.1 is the real latest stable. See deny.toml RUSTSEC-2025-0141.
-      - dependency-name: "bincode"
-        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "bun"
     directory: "/web"

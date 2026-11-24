@@ -31,11 +31,9 @@ cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 http.workspace = true
 metrics.workspace = true
 parking_lot = "0.13"
-serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-sha2 = "0.11"
+sha2.workspace = true
 sonic-rs.workspace = true
-sqlx.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util.workspace = true
@@ -54,6 +52,7 @@ cc-lb-workspace-hack.workspace = true
 metrics-exporter-prometheus.workspace = true
 metrics-util.workspace = true
 proptest.workspace = true
+sqlx.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 url.workspace = true

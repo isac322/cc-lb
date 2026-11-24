@@ -1091,7 +1091,7 @@ pub(crate) fn chat_completions_from_sse_bodies(
     Ok(output)
 }
 
-fn sse_payloads(body: &[u8]) -> Vec<Vec<u8>> {
+pub(crate) fn sse_payloads(body: &[u8]) -> Vec<Vec<u8>> {
     let mut payloads = Vec::new();
     let mut start = 0;
     while start < body.len() {
@@ -1112,7 +1112,7 @@ fn sse_payloads(body: &[u8]) -> Vec<Vec<u8>> {
     payloads
 }
 
-fn sse_event_end(buffer: &[u8]) -> Option<usize> {
+pub(crate) fn sse_event_end(buffer: &[u8]) -> Option<usize> {
     let lf = buffer
         .windows(2)
         .position(|window| window == b"\n\n")
@@ -1135,7 +1135,7 @@ fn sse_event_end(buffer: &[u8]) -> Option<usize> {
     Some(index + width)
 }
 
-fn sse_data(frame: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn sse_data(frame: &[u8]) -> Option<Vec<u8>> {
     let text = std::str::from_utf8(frame).ok()?;
     let mut data = Vec::new();
     for line in text.lines() {

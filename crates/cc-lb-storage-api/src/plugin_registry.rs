@@ -6,12 +6,6 @@ use crate::StorageResult;
 pub use crate::PluginSlotKind;
 pub use crate::plugin_registry_models::*;
 
-const fn default_pure() -> bool {
-    true
-}
-
-const _: () = assert!(default_pure());
-
 #[async_trait]
 pub trait PluginRegistryStore: Send + Sync {
     async fn persist_wasm_upload(

@@ -38,7 +38,7 @@ impl UpstreamDispatch for TimedDispatch {
             .expect("attempt timing lock")
             .pop_front()
             .expect("attempt timing remains");
-        cc_lb_engine::request_timing::record_bulkhead_wait(delay);
+        cc_lb_proxy_telemetry::request_timing::record_bulkhead_wait(delay);
         let deadline = Instant::now() + delay;
         while Instant::now() < deadline {
             std::hint::spin_loop();

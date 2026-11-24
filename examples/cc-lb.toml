@@ -1,12 +1,12 @@
 # Top-level keys must precede the first [table].
 
-# Listener addresses for the proxy, admin stub, and Prometheus metrics listener.
+# Listener addresses for the proxy, admin API, and Prometheus metrics listener.
 [listener]
 proxy_addr = "127.0.0.1:8080"
 admin_addr = "127.0.0.1:9090"
 metrics_addr = "127.0.0.1:9091"
 
-# TLS is disabled in the smoke config; T29 wires certificate reload support.
+# TLS is disabled in the smoke config.
 # [listener.tls]
 # cert_path = "./certs/server.crt"
 # key_path = "./certs/server.key"

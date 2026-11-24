@@ -204,7 +204,7 @@ export function capabilitiesOf(
   return PROVIDER_CAPABILITIES[kind];
 }
 
-export const PROVIDER_DEFAULT_ENDPOINTS: Record<ProviderFamily, string> = {
+const PROVIDER_DEFAULT_ENDPOINTS: Record<ProviderFamily, string> = {
   anthropic: 'https://api.anthropic.com',
   openai: 'https://api.openai.com',
   gemini: 'https://generativelanguage.googleapis.com',

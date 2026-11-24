@@ -13,7 +13,7 @@ sqlite = ["sqlx/sqlite", "apalis-sqlite", "cc-lb-server/storage-sqlite"]
 postgres = ["sqlx/postgres", "apalis-postgres", "cc-lb-server/storage-postgres"]
 
 [dependencies]
-apalis = { version = "1.0.0", features = ["catch-panic", "limit", "prometheus", "timeout"], default-features = false }
+apalis = { version = "1.0.0", features = ["catch-panic", "limit", "prometheus"], default-features = false }
 apalis-codec = { version = "1.0.0", default-features = false, features = ["json"] }
 apalis-core = { version = "1.0.0", features = ["sleep"] }
 apalis-postgres = { version = "1.0.0", optional = true }

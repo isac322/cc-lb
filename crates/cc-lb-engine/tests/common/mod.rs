@@ -792,20 +792,21 @@ pub fn test_parse_cache_breakpoints(body: &[u8]) -> Vec<cc_lb_domain::CacheBreak
         cc_lb_domain::Provider::Anthropic,
         model,
     );
-    let analysis = cc_lb_engine::prompt_cache_simulator::analyze_v3_prompt_cache(&value, canonical);
+    let analysis =
+        cc_lb_routing_eval::prompt_cache_simulator::analyze_v3_prompt_cache(&value, canonical);
     analysis
         .breakpoints
         .into_iter()
         .map(|bp| cc_lb_domain::CacheBreakpoint {
             block_index: u32::try_from(bp.block_index).unwrap_or(u32::MAX),
             source: match bp.source {
-                cc_lb_engine::prompt_cache_simulator::V3PromptCacheBlockSource::Tools => {
+                cc_lb_routing_eval::prompt_cache_simulator::V3PromptCacheBlockSource::Tools => {
                     cc_lb_domain::CacheBreakpointSource::Tools
                 }
-                cc_lb_engine::prompt_cache_simulator::V3PromptCacheBlockSource::System => {
+                cc_lb_routing_eval::prompt_cache_simulator::V3PromptCacheBlockSource::System => {
                     cc_lb_domain::CacheBreakpointSource::System
                 }
-                cc_lb_engine::prompt_cache_simulator::V3PromptCacheBlockSource::Message => {
+                cc_lb_routing_eval::prompt_cache_simulator::V3PromptCacheBlockSource::Message => {
                     cc_lb_domain::CacheBreakpointSource::Message
                 }
             },
@@ -830,7 +831,7 @@ pub fn test_parse_cache_breakpoints(body: &[u8]) -> Vec<cc_lb_domain::CacheBreak
                 })
                 .collect(),
             token_estimate_source: Some(
-                cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
+                cc_lb_routing_eval::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
             ),
         })
         .collect()

@@ -593,7 +593,8 @@ async fn invalid_key_is_rejected_at_the_authentication_boundary() {
     let Err(error) = lifecycle.authenticate(request.headers()).await else {
         panic!("invalid key fails authentication");
     };
-    let response = cc_lb_engine::reject_unauthenticated_for_provider(&error, None, None);
+    let response =
+        cc_lb_engine::authn_rail::reject_unauthenticated_for_provider(&error, None, None);
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let body = response

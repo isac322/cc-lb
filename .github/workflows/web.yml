@@ -164,11 +164,7 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           git worktree add --detach "$base_root" "$BASE_SHA"
           git config --global --add safe.directory "$base_root"
-          if [ -d "$base_root/web" ]; then
-            base_web_dir="$base_root/web"
-          else
-            base_web_dir="$base_root/crates/cc-lb-admin/web"
-          fi
+          base_web_dir="$base_root/web"
           if cmp -s bun.lock "$base_web_dir/bun.lock" && \
              cmp -s package.json "$base_web_dir/package.json"; then
             ln -s "$PWD/node_modules" "$base_web_dir/node_modules"
@@ -372,11 +368,7 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           git worktree add --detach "$base_root" "$BASE_SHA"
           git config --global --add safe.directory "$base_root"
-          if [ -d "$base_root/web" ]; then
-            base_web_dir="$base_root/web"
-          else
-            base_web_dir="$base_root/crates/cc-lb-admin/web"
-          fi
+          base_web_dir="$base_root/web"
           if cmp -s bun.lock "$base_web_dir/bun.lock" && \
              cmp -s package.json "$base_web_dir/package.json"; then
             ln -s "$PWD/node_modules" "$base_web_dir/node_modules"

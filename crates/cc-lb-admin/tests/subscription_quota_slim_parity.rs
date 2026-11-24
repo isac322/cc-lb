@@ -302,7 +302,7 @@ async fn subscription_quota_aggregate_is_identical_after_independent_storage_and
         clock.clone(),
     )
     .await;
-    let restarted = cc_lb_admin::subscription_quotas::build_cc_lb_aggregate_response(
+    let restarted = cc_lb_control::subscription_quotas::build_cc_lb_aggregate_response(
         restarted_storage.as_ref(),
         &admin_test_common::dynamic_view_holder(&Config::default()),
         Some(vec![upstream_id]),

@@ -41,7 +41,7 @@ pub use lifecycle_subscription_quota_subscriber::{
     SubscriptionQuotaSubscriberHandle, spawn_lifecycle_subscription_quota_subscriber,
 };
 pub use metrics_labels::{
-    NotifyDropReason, NotifySentOutcome, PartialTrigger, PgListenerReconnectReason, ResetReason,
+    NotifyDropReason, NotifySentOutcome, PartialTrigger, PgListenerReconnectReason,
 };
 pub use pg_notify_fanout::{
     DEFAULT_PG_NOTIFY_CHANNEL, PARTIAL_NOTIFY_MPSC_CAPACITY, PgListener, PgNotifier, PgNotifyFanout,

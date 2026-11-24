@@ -1,3 +1,4 @@
+use super::types::CollectedResponse;
 use super::*;
 
 pub(super) fn new_activity_heartbeat_interval() -> tokio::time::Interval {
@@ -562,7 +563,6 @@ pub(super) fn is_semantic_content_frame(
 pub(crate) fn sse_event_completes_response(
     capability: ProviderCapability,
     event: &usage_parser::ParsedSseEvent<'_>,
-    _anthropic_message_stop: bool,
 ) -> bool {
     match capability.usage_shape() {
         crate::provider_capability::UsageShape::AnthropicMessages => {
@@ -640,7 +640,7 @@ pub(crate) fn keepalive_event_reaches_upstream_terminal(
     match capability.usage_shape() {
         crate::provider_capability::UsageShape::OpenaiChatCompletions
         | crate::provider_capability::UsageShape::OpenaiCompletions => event.is_done(),
-        _ => sse_event_completes_response(capability, event, false),
+        _ => sse_event_completes_response(capability, event),
     }
 }
 

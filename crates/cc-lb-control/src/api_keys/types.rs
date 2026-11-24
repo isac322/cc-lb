@@ -3,29 +3,6 @@ pub use cc_lb_storage_api::{KeyStatus, Limit, LimitKind};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::{Serialize, de::DeserializeOwned};
-
-    fn bincode_roundtrip<T>(value: &T) -> T
-    where
-        T: Serialize + DeserializeOwned,
-    {
-        let encoded = bincode::serde::encode_to_vec(value, bincode::config::standard())
-            .expect("encode value");
-        let (decoded, consumed) =
-            bincode::serde::decode_from_slice::<T, _>(&encoded, bincode::config::standard())
-                .expect("decode value");
-        assert_eq!(consumed, encoded.len());
-        decoded
-    }
-
-    #[test]
-    fn key_status_bincode_roundtrip() {
-        let value = KeyStatus::Revoked;
-
-        let decoded: KeyStatus = bincode_roundtrip(&value);
-
-        assert_eq!(decoded, value);
-    }
 
     #[test]
     fn is_subset_of_accepts_same_kind_window_and_lower_cap() {

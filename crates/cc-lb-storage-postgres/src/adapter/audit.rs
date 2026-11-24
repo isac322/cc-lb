@@ -7,7 +7,7 @@ use sqlx::{Postgres, QueryBuilder, Row, postgres::PgRow};
 use crate::{
     adapter::{
         PostgresStorage, datetime_to_unix_secs, i32_to_u16, i64_to_u64, u64_to_i64,
-        unix_secs_to_datetime, unix_secs_to_datetime_lower, unix_secs_to_datetime_upper,
+        unix_secs_to_datetime, unix_secs_to_datetime_opt,
     },
     error_map::map_sqlx_error,
 };
@@ -139,10 +139,10 @@ impl AuditStore for PostgresStorage {
         if limit == 0 || until < since {
             return Ok(Vec::new());
         }
-        let Some(since) = unix_secs_to_datetime_lower(since, "audit since")? else {
+        let Some(since) = unix_secs_to_datetime_opt(since) else {
             return Ok(Vec::new());
         };
-        let until = unix_secs_to_datetime_upper(until, "audit until")?;
+        let until = unix_secs_to_datetime_opt(until);
 
         let rows = sqlx::query(
             "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND actor_authority = $3 AND actor_subject = $4 ORDER BY seq ASC LIMIT $5",
@@ -170,10 +170,10 @@ impl AuditStore for PostgresStorage {
         if limit == 0 || until < since {
             return Ok(Vec::new());
         }
-        let Some(since) = unix_secs_to_datetime_lower(since, "audit since")? else {
+        let Some(since) = unix_secs_to_datetime_opt(since) else {
             return Ok(Vec::new());
         };
-        let until = unix_secs_to_datetime_upper(until, "audit until")?;
+        let until = unix_secs_to_datetime_opt(until);
         let limit = u64_to_i64(limit as u64, "audit limit")?;
 
         let mut query = QueryBuilder::<Postgres>::new(RECENT_AUDIT_SELECT);

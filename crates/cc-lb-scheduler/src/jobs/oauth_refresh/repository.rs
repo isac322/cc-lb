@@ -18,11 +18,6 @@ pub trait OAuthRefreshUpstreams {
         holder: Uuid,
         tokens: EncryptedOAuthTokens,
     ) -> impl Future<Output = Result<UpstreamRecord>> + Send + '_;
-
-    fn read_oauth_token_generation(
-        &self,
-        id: Uuid,
-    ) -> impl Future<Output = Result<Option<u64>>> + Send + '_;
 }
 
 impl<T> OAuthRefreshUpstreams for T
@@ -42,12 +37,6 @@ where
         tokens: EncryptedOAuthTokens,
     ) -> Result<UpstreamRecord> {
         UpstreamStore::complete_refresh(self, id, holder, tokens)
-            .await
-            .map_err(storage_error)
-    }
-
-    async fn read_oauth_token_generation(&self, id: Uuid) -> Result<Option<u64>> {
-        UpstreamStore::read_oauth_token_generation(self, id)
             .await
             .map_err(storage_error)
     }

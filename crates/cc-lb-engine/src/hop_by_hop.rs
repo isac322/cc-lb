@@ -2,9 +2,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 
-use http::header::{
-    CONNECTION, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
-};
+use http::header::CONNECTION;
 use http::{HeaderMap, HeaderName, Request, Response};
 use tower::{Layer, Service};
 
@@ -113,12 +111,5 @@ fn connection_listed_headers(headers: &HeaderMap) -> HashSet<HeaderName> {
 }
 
 fn is_hop_by_hop(name: &HeaderName, connection_names: &HashSet<HeaderName>) -> bool {
-    HOP_BY_HOP_HEADERS.contains(name)
-        || connection_names.contains(name)
-        || *name == TE
-        || *name == TRAILER
-        || *name == UPGRADE
-        || *name == PROXY_AUTHENTICATE
-        || *name == PROXY_AUTHORIZATION
-        || *name == TRANSFER_ENCODING
+    HOP_BY_HOP_HEADERS.contains(name) || connection_names.contains(name)
 }

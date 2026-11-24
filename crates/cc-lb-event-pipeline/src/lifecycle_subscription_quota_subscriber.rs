@@ -104,8 +104,6 @@ struct Partial {
     created_at: Option<Instant>,
     last_activity_at: Option<Instant>,
     upstream_id: Option<Uuid>,
-    websocket: bool,
-    attempt_num: u32,
 }
 
 impl Partial {
@@ -114,8 +112,6 @@ impl Partial {
             created_at: Some(now),
             last_activity_at: Some(now),
             upstream_id: None,
-            websocket: false,
-            attempt_num: 0,
         }
     }
 
@@ -179,14 +175,11 @@ fn handle_event(
             }
             return;
         }
-        LifecycleEvent::ParseCompleted {
-            result: Ok(info), ..
-        } => {
+        LifecycleEvent::ParseCompleted { result: Ok(_), .. } => {
             let partial = partials
                 .entry(event_id)
                 .or_insert_with(|| Partial::new(now));
             partial.touch(now);
-            partial.websocket = info.method == "GET";
         }
         LifecycleEvent::UpstreamQuotaFrameObserved {
             upstream_id,
@@ -203,17 +196,12 @@ fn handle_event(
             };
             apply_observations(cache, sink, upstream_id, &headers, observed_at_unix_millis);
         }
-        LifecycleEvent::UpstreamAttempt {
-            upstream_id,
-            attempt_num,
-            ..
-        } => {
+        LifecycleEvent::UpstreamAttempt { upstream_id, .. } => {
             let partial = partials
                 .entry(event_id)
                 .or_insert_with(|| Partial::new(now));
             partial.upstream_id = Some(upstream_id);
             partial.touch(now);
-            partial.attempt_num = attempt_num;
         }
         LifecycleEvent::UpstreamResponseStarted {
             status,

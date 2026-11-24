@@ -444,7 +444,7 @@ where
     let mut builder = Request::builder().method(method).uri(uri);
     copy_headers(headers, builder.headers_mut());
     if let Some(headers) = builder.headers_mut() {
-        cc_lb_proxy_telemetry::inject_current_trace_context(headers);
+        cc_lb_observability::inject_current_trace_context(headers);
     }
     let request = builder.body(Full::new(body)).map_err(|source| {
         record_dispatch_failure(&span, "request_build");
@@ -653,10 +653,27 @@ mod tests {
 
     use super::*;
 
+    async fn with_timings<F, T>(
+        fut: F,
+    ) -> (
+        T,
+        cc_lb_proxy_telemetry::request_timing::RequestStageTimings,
+    )
+    where
+        F: Future<Output = T>,
+    {
+        let ctx = Arc::new(std::sync::Mutex::new(
+            cc_lb_proxy_telemetry::request_timing::RequestStageTimings::default(),
+        ));
+        let value = cc_lb_proxy_telemetry::request_timing::REQUEST_STAGE_TIMINGS
+            .scope(ctx.clone(), fut)
+            .await;
+        let snapshot = ctx.lock().unwrap().clone();
+        (value, snapshot)
+    }
+
     #[tokio::test]
     async fn no_contention_wait_ms_is_under_threshold() {
-        use crate::request_timing::with_timings;
-
         let bulkhead = bulkhead_for_test(8);
         let (_, timings) = with_timings(async {
             bulkhead
@@ -675,8 +692,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn high_contention_forces_wait_ms() {
-        use crate::request_timing::with_timings;
-
         let bulkhead = bulkhead_for_test(1);
         let permit_holder = bulkhead.acquire().await.expect("acquire");
         let release_handle = tokio::spawn(async {

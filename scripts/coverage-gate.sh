@@ -2,7 +2,7 @@
 # coverage-gate.sh — per-package line-coverage gate for cc-lb.
 #
 # Reads a cargo-llvm-cov lcov tracefile and enforces a minimum line-coverage
-# percentage per workspace package. This replaces 11 sequential
+# percentage per workspace package. This replaces 10 sequential
 # `cargo llvm-cov report --package <p> --fail-under-lines <n>` calls with one
 # pass over the lcov file the coverage job already generates. The threshold map
 # is unchanged; migration validation must compare both paths against the same

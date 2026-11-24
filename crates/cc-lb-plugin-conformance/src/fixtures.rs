@@ -64,7 +64,6 @@ pub fn sample_openai_chat_completions_shape_request() -> v2::ShapeRequest {
     sample_shape_request_with(
         ProviderFamily::Openai,
         "/v1/chat/completions",
-        "gpt-4.1",
         br#"{"model":"gpt-4.1","messages":[{"role":"user","content":"probe"}]}"#,
     )
 }
@@ -79,7 +78,6 @@ pub fn sample_gemini_stream_generate_content_shape_request() -> v2::ShapeRequest
     sample_shape_request_with(
         ProviderFamily::Gemini,
         "/v1beta/models/gemini-2.5-flash:streamGenerateContent",
-        "gemini-2.5-flash",
         br#"{"contents":[{"role":"user","parts":[{"text":"probe"}]}]}"#,
     )
 }
@@ -87,7 +85,6 @@ pub fn sample_gemini_stream_generate_content_shape_request() -> v2::ShapeRequest
 fn sample_shape_request_with(
     provider: ProviderFamily,
     path: &str,
-    _model: &str,
     body: &[u8],
 ) -> v2::ShapeRequest {
     v2::ShapeRequest {
@@ -167,10 +164,7 @@ pub fn sample_gemini_stream_generate_content_transform_sse_event_request()
     request
 }
 
-fn response_values(
-    provider: ProviderFamily,
-    _stream: bool,
-) -> (&'static str, &'static str, &'static [u8]) {
+fn response_values(provider: ProviderFamily) -> (&'static str, &'static str, &'static [u8]) {
     match provider {
         ProviderFamily::Anthropic => (
             "/v1/messages",
@@ -192,7 +186,6 @@ fn response_values(
 
 fn sse_values(
     provider: ProviderFamily,
-    _stream: bool,
 ) -> (&'static str, &'static str, &'static str, &'static [u8]) {
     match provider {
         ProviderFamily::Anthropic => (
@@ -382,7 +375,7 @@ pub fn sample_transform_realtime_frame_request_v2(
 pub fn sample_transform_response_request_v2(
     provider: ProviderFamily,
 ) -> v2::TransformResponseRequest {
-    let (path, model, body) = response_values(provider, false);
+    let (path, model, body) = response_values(provider);
     v2::TransformResponseRequest {
         request_id: Box::from("conformance-req-1"),
         principal: v2_principal(),
@@ -403,7 +396,7 @@ pub fn sample_transform_response_request_v2(
 pub fn sample_transform_sse_event_request_v2(
     provider: ProviderFamily,
 ) -> v2::TransformSseEventRequest {
-    let (path, model, event, data) = sse_values(provider, false);
+    let (path, model, event, data) = sse_values(provider);
     v2::TransformSseEventRequest {
         request_id: Box::from("conformance-req-1"),
         principal: v2_principal(),

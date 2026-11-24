@@ -40,8 +40,8 @@ pub mod wasm_host;
 #[cfg(feature = "admin")]
 pub use app::{App, build_app, build_app_with_path, run_serve};
 pub use app::{
-    BuildError, ProxyApp, ProxyRole, ProxyServeOptions, ServeError, build_proxy_app,
-    build_proxy_app_with_path, build_proxy_app_with_storage, run_proxy_serve,
+    BuildError, ProxyApp, ProxyRole, ProxyServeOptions, ServeError, build_proxy_app_with_storage,
+    run_proxy_serve,
 };
 pub(crate) use plugin_manifest::PluginManifest;
 #[cfg(any(feature = "storage-sqlite", feature = "storage-postgres"))]

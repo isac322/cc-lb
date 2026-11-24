@@ -1,3 +1,4 @@
+use super::routing::upstream_kind_for_candidate;
 use super::*;
 
 #[derive(Clone, Debug)]
@@ -3161,14 +3162,14 @@ mod prompt_cache_policy_tests {
             }));
             let request = json!({"model":"claude-sonnet-4-5","system":system});
             let canonical_model = canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5");
-            crate::tokenizer::reset_tokenizer_call_count();
+            cc_lb_routing_eval::tokenizer::reset_tokenizer_call_count();
             let analysis = analyze_v3_prompt_cache(&request, canonical_model);
             let eligible = cacheable_breakpoint_prefix_keys(
                 &analysis,
                 canonical_model,
                 cache_threshold_tokens(canonical_model),
             );
-            assert_eq!(crate::tokenizer::tokenizer_call_count(), 1);
+            assert_eq!(cc_lb_routing_eval::tokenizer::tokenizer_call_count(), 1);
             let output = PromptCacheAnalysisOutput {
                 analysis,
                 cacheable_breakpoint_prefix_keys: eligible,
@@ -3185,7 +3186,7 @@ mod prompt_cache_policy_tests {
             assert_eq!(metadata.bundles.official.cache_breakpoints.len(), 1);
             assert_eq!(metadata.bundles.literal.cache_breakpoints.len(), 1);
             assert_eq!(
-                crate::tokenizer::tokenizer_call_count(),
+                cc_lb_routing_eval::tokenizer::tokenizer_call_count(),
                 1,
                 "shared raw boundary was tokenized again, billing_header={include_billing_header}"
             );

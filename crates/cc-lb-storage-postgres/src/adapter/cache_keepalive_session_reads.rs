@@ -341,10 +341,6 @@ fn query_u64_to_i64(value: u64, field: &str, reason: &str) -> StorageResult<i64>
     })
 }
 
-fn filter_includes_sessions(_filter: CacheKeepaliveSessionFilter) -> bool {
-    true
-}
-
 fn filter_includes_decisions(filter: CacheKeepaliveSessionFilter) -> bool {
     matches!(
         filter,
@@ -556,26 +552,20 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
         let cursor_entry_id = query.cursor.as_ref().map(|cursor| cursor.entry_id.as_str());
         let fetch_limit = i64::from(query.limit.saturating_add(1));
 
-        let include_sessions = filter_includes_sessions(query.filter);
         let include_decisions = filter_includes_decisions(query.filter);
         let mut builder = QueryBuilder::<Postgres>::new("WITH ");
-        if include_sessions {
-            builder.push("session_entries AS (");
-            push_session_list_branch(
-                &mut builder,
-                query,
-                horizon_start_ms,
-                cursor_last_message_at_ms,
-                cursor_entry_id,
-                fetch_limit,
-            );
-            builder.push(")");
-        }
+        builder.push("session_entries AS (");
+        push_session_list_branch(
+            &mut builder,
+            query,
+            horizon_start_ms,
+            cursor_last_message_at_ms,
+            cursor_entry_id,
+            fetch_limit,
+        );
+        builder.push(")");
         if include_decisions {
-            if include_sessions {
-                builder.push(", ");
-            }
-            builder.push("decision_entries AS (");
+            builder.push(", decision_entries AS (");
             push_decision_list_branch(
                 &mut builder,
                 query,
@@ -586,15 +576,9 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
             );
             builder.push(")");
         }
-        builder.push(" SELECT * FROM (");
-        if include_sessions {
-            builder.push("SELECT * FROM session_entries");
-        }
-        if include_sessions && include_decisions {
-            builder.push(" UNION ALL ");
-        }
+        builder.push(" SELECT * FROM (SELECT * FROM session_entries");
         if include_decisions {
-            builder.push("SELECT * FROM decision_entries");
+            builder.push(" UNION ALL SELECT * FROM decision_entries");
         }
         builder.push(") entries ORDER BY last_message_at_ms DESC, entry_id ASC LIMIT ");
         builder.push_bind(fetch_limit);

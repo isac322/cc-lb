@@ -13,7 +13,6 @@ use thiserror::Error;
 
 /// Public installed-app client used by the OpenAI Codex device and browser flows.
 pub const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-pub const OPENAI_OAUTH_ISSUER_URL: &str = "https://auth.openai.com";
 pub const OPENAI_OAUTH_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 pub const OPENAI_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 pub const OPENAI_OAUTH_BROWSER_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";

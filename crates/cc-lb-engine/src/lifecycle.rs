@@ -8,6 +8,8 @@ mod realtime_websocket_lifecycle;
 pub use realtime_websocket_lifecycle::live_eligible;
 mod cache;
 mod identity;
+#[cfg(test)]
+pub(crate) use self::identity::MAX_IDENTITY_VALUE_BYTES;
 mod limits;
 mod routing;
 mod streaming;
@@ -15,8 +17,6 @@ mod streaming;
 mod tests;
 mod types;
 
-#[allow(unused_imports)]
-use self::cache::*;
 pub(crate) use self::cache::{
     PromptCacheBundle, PromptCacheBundles, PromptCacheUsage, RequestCacheMetadata,
     SelectedCacheMatch, build_candidates_with_matches_for_bundles,
@@ -25,22 +25,63 @@ pub(crate) use self::cache::{
     publish_prompt_cache_observations, publish_prompt_cache_observations_with_usage,
 };
 pub use self::cache::{PromptCacheObservationContext, build_candidates};
-#[allow(unused_imports)]
-use self::identity::*;
-#[allow(unused_imports)]
-use self::limits::*;
+use self::cache::{
+    cache_pricing_summary_for_model, compat_service_tier_for_upstream,
+    fetch_prompt_cache_warm_entries_for_bundles, fetch_provider_native_cache_scores,
+    prompt_cache_token_scope, publish_provider_cache_observation,
+    request_cache_metadata_from_value_with_analysis_for_capability,
+};
+use self::identity::{
+    ThreadStickySubagentLatch, apply_thread_sticky_subagent_latch, request_identity_metadata,
+};
+use self::limits::{
+    ActiveLimit, LimitRequest, admission_fanout_multiplier, attach_limit_headers_from_engine,
+    attach_limit_headers_from_record, limit_rejection_response, limit_retry_after_secs,
+    limit_violation_name, use_image_rates_for_admission,
+};
 pub(crate) use self::limits::{INPUT_ESTIMATE_MAX_BYTES, INPUT_ESTIMATE_MAX_NODES};
-#[allow(unused_imports)]
-use self::routing::*;
+use self::routing::{
+    FailoverReason, FailoverRouter, FilterPipelineResult, RoutedUpstream, announce_attempt,
+    emit_route_completed, execute_filter_pipeline, filter_codex_models_catalog, route_for_record,
+    route_info_for_routed, terminal_candidates, upstream_for_record,
+};
 pub use self::routing::{native_route_dialect, observe_rate_limits};
-#[allow(unused_imports)]
-use self::streaming::*;
+use self::streaming::{
+    ANTHROPIC_PROVIDER_STATE_MARKER_PROBE_BYTES, ErrorBodyClass, SINGLE_OWNER_AMBIGUOUS_MESSAGE,
+    SseDownstreamBoundaryTracker, UPSTREAM_AFFINITY_KEY_LIMIT_MESSAGE,
+    UPSTREAM_AFFINITY_NOT_ESTABLISHED_MESSAGE, UPSTREAM_AFFINITY_TARGET_INELIGIBLE_MESSAGE,
+    UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE, UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE,
+    UPSTREAM_RESPONSE_BODY_ERROR_TYPE, UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+    UPSTREAM_RESPONSE_DECODE_ERROR_TYPE, UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE,
+    UPSTREAM_RESPONSE_INCOMPLETE_ERROR_TYPE, UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+    UpstreamBodyDiagnostics, affinity_stream_error, append_bounded_upstream_error_body,
+    classify_error_body, collect_error_response, decompression_output_budget_bytes,
+    drive_with_activity_heartbeat, has_json_content_type, held_error_body_is_json,
+    incomplete_sse_event_budget_bytes, is_semantic_content_frame, is_sse_response,
+    is_upstream_response_decode_error, keepalive_http_end_is_terminal, make_stream_error_frame,
+    maybe_emit_chunk_heartbeat, new_activity_heartbeat_interval, observe_sse_lifecycle_markers,
+    observe_sse_terminal_event, response_from_collected, scrubbed_upstream_error_body,
+    semantic_body_bytes, semantic_terminal_event_type, split_sse_event, sse_buffer_is_blank,
+    sse_bytes_may_carry_anthropic_provider_state, timed_body_frame_with_heartbeat,
+    unsolicited_anthropic_sse_affinity_keys, upstream_end_after_message_stop_is_acceptable,
+};
 pub(crate) use self::streaming::{
     abnormal_stop_error_message, keepalive_event_reaches_upstream_terminal,
     sse_event_completes_response,
 };
-#[allow(unused_imports)]
-use self::types::*;
+use self::types::{
+    AttemptFailure, AttemptResponse, CompatBodyTimingGuard, ConcurrentAttemptFuture,
+    ConcurrentAttemptInputs, LimitRejectionErr, LimitRejectionInfo, RawPassthroughDialect,
+    RawPassthroughError, RequestAffinityFailure, RequestAffinityResolution, RequestBodyView,
+    ResponseAffinityContext, ResponseBodyFuture, apply_prompt_cache_timings,
+    bind_upstream_affinity_keys, body_cap_for_path, canonical_model_for_capability,
+    db_principal_kind_as_str, duration_to_ms, gemini_model_from_path, header_snapshot_from,
+    header_to_string, lifecycle_request_model, multipart_request_model, next_request_id,
+    principal_kind_lite, push_buffered_data, raw_passthrough_request, record_shape_internal_error,
+    reduce_fanout, response_start_unix_secs, responses_usage_value_to_counts,
+    rewrite_json_request_body_headers, signer_error_kind, store_setup_timings,
+    system_time_to_unix_millis, to_usage_snapshot, unix_now_ms, unsupported_operation_response,
+};
 pub(crate) use self::types::{AttemptTimings, DEFAULT_MAX_INPUT_ESTIMATE, RequestEventContext};
 pub use self::types::{
     AuthLimitSubject, Body, DispatchError, HASH_SCHEMA_VERSION, LifecycleConfig,
@@ -153,6 +194,13 @@ use crate::request_classification::{
 };
 use crate::request_context::{CodexBackendSurface, ProviderScope, RequestContext};
 use crate::request_timing::{REQUEST_STAGE_TIMINGS, RequestStageTimings};
+use crate::response_transform::{
+    ComposedSseResponseTransformHook, GEMINI_OAUTH_RESPONSE_TRANSFORM, ResponseTransformContext,
+    SseTransformOutcome, apply_buffered_transform_result, make_response_transform_error_frame,
+    sanitize_downstream_response_headers, sanitize_downstream_stream_headers,
+    sanitized_response_headers_for_plugin, transform_sse_event_bytes, translate_vertex_response,
+    unwrap_gemini_code_assist_body,
+};
 use crate::responses_websocket::{
     PreparedWebSocketTurn, WebSocketCandidate, WebSocketError, WebSocketIngress,
     WebSocketPluginRequest, WsUnknownReasoningPlan,
@@ -210,7 +258,6 @@ pub struct Lifecycle {
     subscription_quota_sink: Option<SubscriptionQuotaSink>,
     subscription_metadata_hook: Option<MetadataHookHandle>,
     subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
-    cache_keepalive_enqueuer: Option<Arc<dyn crate::cache_keepalive::CacheKeepaliveEnqueuer>>,
     cache_keepalive: crate::cache_keepalive::LifecycleKeepalive,
     thread_sticky_subagent_latch: ThreadStickySubagentLatch,
     prompt_cache_analysis_executor: PromptCacheAnalysisExecutor,
@@ -245,7 +292,6 @@ impl Lifecycle {
                 Arc::clone(&dynamic_view),
             ),
             thread_sticky_subagent_latch: ThreadStickySubagentLatch::default(),
-            cache_keepalive_enqueuer: None,
             prompt_cache_analysis_executor: PromptCacheAnalysisExecutor::default(),
             completion_observer: Arc::new(CompletionObserver::new()),
             clock,
@@ -257,8 +303,7 @@ impl Lifecycle {
         mut self,
         enqueuer: Arc<dyn crate::cache_keepalive::CacheKeepaliveEnqueuer>,
     ) -> Self {
-        self.cache_keepalive = self.cache_keepalive.with_enqueuer(Arc::clone(&enqueuer));
-        self.cache_keepalive_enqueuer = Some(enqueuer);
+        self.cache_keepalive = self.cache_keepalive.with_enqueuer(enqueuer);
         self
     }
 
@@ -2117,7 +2162,7 @@ impl Lifecycle {
             }
         };
         let keepalive_response_enabled =
-            self.cache_keepalive_enqueuer.is_some() && cached.cache_keepalive().is_some();
+            self.cache_keepalive.has_enqueuer() && cached.cache_keepalive().is_some();
         let track_keepalive_response = keepalive_response_enabled
             && (cache_metadata.cache_keepalive_surface.is_some()
                 || !cache_metadata.bundles.official.cache_breakpoints.is_empty()
@@ -2765,7 +2810,7 @@ impl Lifecycle {
             let mut response = if let Some(count) =
                 chat_fanout_n.filter(|_| routed.record.kind == StorageUpstreamKind::OpenaiOauth)
             {
-                let (results, first_timings, shaped_body, _dispatched_at) = self
+                let (results, first_timings, shaped_body) = self
                     .run_upstream_attempts_concurrently(
                         count,
                         ConcurrentAttemptInputs {
@@ -2909,7 +2954,7 @@ impl Lifecycle {
                 response = if let Some(count) =
                     chat_fanout_n.filter(|_| routed.record.kind == StorageUpstreamKind::OpenaiOauth)
                 {
-                    let (results, first_timings, shaped_body, _dispatched_at) = self
+                    let (results, first_timings, shaped_body) = self
                         .run_upstream_attempts_concurrently(
                             count,
                             ConcurrentAttemptInputs {
@@ -3771,7 +3816,7 @@ impl Lifecycle {
         dispatch_started: Instant,
         dispatch_unix_secs: u64,
     ) -> Response<Body> {
-        let mut compat_compact_pending = None;
+        let mut compat_compact_pending = false;
         let mut compat_body_timing: Option<CompatBodyTimingGuard> = None;
         if let Some(plan) = compat_response_plan.as_ref() {
             match &plan.kind {
@@ -3796,7 +3841,7 @@ impl Lifecycle {
                         ),
                     };
                 }
-                CompatResponseKind::Compact { original_request } => {
+                CompatResponseKind::Compact => {
                     let mut guard = observer.clone().map(CompatBodyTimingGuard::start);
                     let aggregated = compat_response::aggregate_response(
                         response,
@@ -3808,7 +3853,7 @@ impl Lifecycle {
                     compat_body_timing = guard;
                     response = match aggregated {
                         Ok(response) => {
-                            compat_compact_pending = Some(original_request.clone());
+                            compat_compact_pending = true;
                             response
                         }
                         Err(error) => provider_error_response(
@@ -4290,12 +4335,9 @@ impl Lifecycle {
             );
         }
         if !body_collect_failed {
-            if let Some(original_request) = compat_compact_pending.take() {
+            if compat_compact_pending {
                 if parts.status.is_success() {
-                    match compat_response::compact_response_body(
-                        &original_request,
-                        &downstream_body,
-                    ) {
+                    match compat_response::compact_response_body(&downstream_body) {
                         Ok(compacted) => {
                             downstream_body = Bytes::from(compacted);
                             parts.headers = sanitize_downstream_response_headers(
@@ -4886,7 +4928,6 @@ impl Lifecycle {
         Vec<Result<AttemptResponse, AttemptFailure>>,
         AttemptTimings,
         Option<Bytes>,
-        Option<(Instant, Option<crate::cache_keepalive::RequestStartOrder>)>,
     ) {
         let ConcurrentAttemptInputs {
             authenticated,
@@ -4929,14 +4970,7 @@ impl Lifecycle {
             .into_iter()
             .next()
             .expect("concurrent fan-out has at least one attempt");
-        (
-            results,
-            timings,
-            shaped_body,
-            shared_request_started
-                .get()
-                .map(|(instant, order)| (*instant, order.clone())),
-        )
+        (results, timings, shaped_body)
     }
 
     /// Dispatch one attempt to `routed` (already announced with
@@ -5260,7 +5294,6 @@ impl Lifecycle {
                     ctx.openai_oauth_compat
                         .as_ref()
                         .unwrap_or(&self.config.openai_oauth_compat),
-                    None,
                     self.config.files_body_cap_bytes,
                 )
                 .await
@@ -5511,7 +5544,7 @@ impl Lifecycle {
                     plan.kind,
                     CompatResponseKind::ResponsesAggregate { .. }
                         | CompatResponseKind::ResponsesStream { .. }
-                        | CompatResponseKind::Compact { .. }
+                        | CompatResponseKind::Compact
                         | CompatResponseKind::Chat { .. }
                 )
             })
@@ -6340,7 +6373,6 @@ impl Lifecycle {
                                     let bind_pending_request = sse_event_completes_response(
                                         response_affinity_context.capability,
                                         &parsed_event,
-                                        usage_update.message_stop,
                                     );
                                     Some((response_keys, bind_pending_request))
                                 } else if unsolicited_sse_affinity_inspection {
@@ -6506,7 +6538,6 @@ impl Lifecycle {
                                 let event_completes_response = sse_event_completes_response(
                                     response_affinity_context.capability,
                                     &parsed_event,
-                                    usage_update.message_stop,
                                 );
                                 raw_chunk_completes_response |= event_completes_response;
                                 raw_chunk_done |= parsed_event.is_done();
@@ -7240,7 +7271,6 @@ impl Lifecycle {
                                 let bind_pending_request = sse_event_completes_response(
                                     response_affinity_context.capability,
                                     &parsed_event,
-                                    usage_update.message_stop,
                                 );
                                 Some((response_keys, bind_pending_request))
                             } else if unsolicited_sse_affinity_inspection {
@@ -7378,7 +7408,6 @@ impl Lifecycle {
                             let event_completes_response = sse_event_completes_response(
                                 response_affinity_context.capability,
                                 &parsed_event,
-                                usage_update.message_stop,
                             );
                             if !semantic_completion_observed && event_completes_response {
                                 semantic_completion_observed = true;

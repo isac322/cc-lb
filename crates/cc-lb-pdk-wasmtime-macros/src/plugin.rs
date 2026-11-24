@@ -13,7 +13,7 @@ pub(crate) fn expand(args: PluginArgs, mut module: ItemMod) -> TokenStream2 {
     if handlers.is_empty() {
         return Error::new_spanned(
             &module.ident,
-            "#[plugin] module must contain at least one #[handler(<kind>, wire = N, description = \"...\", usage = \"...\")] function",
+            "#[plugin] module must contain at least one #[handler(<kind>, provider = \"...\", wire = 2|3, description = \"...\", usage = \"...\")] function",
         )
         .to_compile_error();
     }

@@ -271,7 +271,7 @@ async fn check_plugin_chain_entry(
             format!(
                 "plugin chain entry {}: missing wasm blob {}",
                 entry.id,
-                hex_sha256(registry_entry.sha256)
+                crate::revision_hash::hex_sha256(&registry_entry.sha256)
             ),
         );
         return Ok(());
@@ -281,19 +281,19 @@ async fn check_plugin_chain_entry(
     match tokio::fs::try_exists(&cache_path).await {
         Ok(true) => tracing::info!(
             plugin_chain_entry_id = %entry.id,
-            wasm_sha256 = hex_sha256(registry_entry.sha256).as_str(),
+            wasm_sha256 = crate::revision_hash::hex_sha256(&registry_entry.sha256).as_str(),
             cache_path = %cache_path.display(),
             "preflight plugin wasm cache present"
         ),
         Ok(false) => tracing::info!(
             plugin_chain_entry_id = %entry.id,
-            wasm_sha256 = hex_sha256(registry_entry.sha256).as_str(),
+            wasm_sha256 = crate::revision_hash::hex_sha256(&registry_entry.sha256).as_str(),
             cache_path = %cache_path.display(),
             "preflight plugin wasm cache will be materialized at first use"
         ),
         Err(error) => tracing::info!(
             plugin_chain_entry_id = %entry.id,
-            wasm_sha256 = hex_sha256(registry_entry.sha256).as_str(),
+            wasm_sha256 = crate::revision_hash::hex_sha256(&registry_entry.sha256).as_str(),
             cache_path = %cache_path.display(),
             error = %error,
             "preflight plugin wasm cache existence check failed"
@@ -328,16 +328,10 @@ fn wasm_cache_path(data_dir: &Path, sha256: [u8; 32]) -> PathBuf {
         .join("plugins")
         .join("wasm")
         .join("cache")
-        .join(format!("{}.wasm", hex_sha256(sha256)))
-}
-
-fn hex_sha256(sha256: [u8; 32]) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in sha256 {
-        use std::fmt::Write as _;
-        let _ = write!(&mut output, "{byte:02x}");
-    }
-    output
+        .join(format!(
+            "{}.wasm",
+            crate::revision_hash::hex_sha256(&sha256)
+        ))
 }
 
 fn storage_error(error: ApiStorageError) -> PreflightError {
@@ -351,24 +345,8 @@ fn decode_master_key(env_name: &str, value: &str) -> Result<[u8; 32], PreflightE
             actual: value.len() / 2,
         });
     }
-    let mut key = [0_u8; 32];
-    for (index, &[high_byte, low_byte]) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
-        let high = hex_nibble(high_byte)
-            .ok_or_else(|| PreflightError::MasterKeyBadHex(env_name.to_owned()))?;
-        let low = hex_nibble(low_byte)
-            .ok_or_else(|| PreflightError::MasterKeyBadHex(env_name.to_owned()))?;
-        key[index] = (high << 4) | low;
-    }
-    Ok(key)
-}
-
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
+    cc_lb_runtime_sync::aead_key::decode_hex_key(value)
+        .map_err(|_| PreflightError::MasterKeyBadHex(env_name.to_owned()))
 }
 
 fn validate_sqlite_path(path: &Path) -> Result<(), PreflightError> {

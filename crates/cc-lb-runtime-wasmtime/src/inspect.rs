@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::error::WasmtimeRuntimeError;
 use cc_lb_plugin_wire::metadata::PluginMetadata;
-use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily, WireSchema, WireVersion, host_supports};
+use cc_lb_plugin_wire::schema::{HookKind, WireSchema, WireVersion, host_supports};
 use wasmtime::wasmparser::{ExternalKind, Parser, Payload};
 
 const PLUGIN_META_SECTION: &str = "cc_lb.plugin.v2";
@@ -181,21 +181,6 @@ fn inspect_wasm_with_scope(
                 reason: format!("unknown hook `{hook_name}` in metadata"),
             }
         })?;
-        if hook == HookKind::ShapeEnvelopeGemini
-            && hook_name != HookKind::ShapeEnvelopeGemini.as_str()
-        {
-            return Err(WasmtimeRuntimeError::ModuleRejected {
-                reason: format!(
-                    "hook `{hook_name}` must use the canonical Gemini envelope metadata key `{}`",
-                    HookKind::ShapeEnvelopeGemini.as_str()
-                ),
-            });
-        }
-        if hook == HookKind::ShapeEnvelopeGemini && provider != ProviderFamily::Gemini {
-            return Err(WasmtimeRuntimeError::ModuleRejected {
-                reason: "shape_envelope_gemini is Gemini-only".into(),
-            });
-        }
         let wire_version = WireVersion::from_u8(hook_metadata.wire_version).ok_or_else(|| {
             WasmtimeRuntimeError::ModuleRejected {
                 reason: format!(

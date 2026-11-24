@@ -2,7 +2,9 @@ use serde_json::{Value, json};
 
 use cc_lb_domain::Provider;
 use cc_lb_engine::model_resolution::canonical_model_id;
-use cc_lb_engine::prompt_cache_simulator::{V3PromptCacheBlockSource, analyze_v3_prompt_cache};
+use cc_lb_routing_eval::prompt_cache_simulator::{
+    V3PromptCacheBlockSource, analyze_v3_prompt_cache,
+};
 
 const CANONICAL_MODEL: &str = "claude-sonnet-4-5-20250929";
 

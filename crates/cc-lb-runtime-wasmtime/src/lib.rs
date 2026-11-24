@@ -105,7 +105,7 @@ impl WasmtimeRuntime {
     }
 
     /// Register (or replace) a shape-hook slot. The plugin module
-    /// must export `cc_lb_shape`.
+    /// must export provider-qualified `cc_lb_shape_<provider>` entrypoint(s).
     pub fn register_shape(
         &self,
         slot_key: RuntimeSlotKey,

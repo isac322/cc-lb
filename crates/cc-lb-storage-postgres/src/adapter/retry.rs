@@ -37,33 +37,11 @@ where
     }
 }
 
-pub async fn with_retry_storage<T, F, Fut>(
-    policy: &RetryPolicy,
-    mut op: F,
-) -> Result<T, StorageError>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, StorageError>>,
-{
-    let mut attempt = 0usize;
-    loop {
-        match op().await {
-            Ok(value) => return Ok(value),
-            Err(err) if err.is_retryable() && attempt < policy.attempts.len() => {
-                tokio::time::sleep(policy.attempts[attempt]).await;
-                attempt += 1;
-            }
-            Err(err) => return Err(err),
-        }
-    }
-}
-
 /// Retries only on Postgres serialization (40001) and deadlock (40P01)
 /// failures. These abort and fully roll back the transaction, so a fresh
-/// attempt is safe even for a non-idempotent operation. Unlike
-/// `with_retry_storage` this deliberately does NOT retry IO/connection errors:
-/// a failure while committing is ambiguous and retrying could mask a write
-/// that actually landed.
+/// attempt is safe even for a non-idempotent operation. It deliberately does
+/// NOT retry IO/connection errors: a failure while committing is ambiguous and
+/// retrying could mask a write that actually landed.
 pub async fn with_retry_serialization<T, F, Fut>(
     policy: &RetryPolicy,
     mut op: F,
@@ -173,51 +151,6 @@ mod tests {
 
         assert!(matches!(result, Err(SqlxError::PoolClosed)));
         assert_eq!(call_count.load(Ordering::SeqCst), 4);
-    }
-
-    #[tokio::test]
-    async fn retryable_storage_error_retries_then_succeeds() {
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let policy = RetryPolicy::default();
-
-        let result = with_retry_storage(&policy, || {
-            let count = Arc::clone(&call_count);
-            async move {
-                let n = count.fetch_add(1, Ordering::SeqCst);
-                if n < 2 {
-                    Err(StorageError::Transient {
-                        retryable: true,
-                        source: Box::<dyn std::error::Error + Send + Sync>::from("serialize"),
-                    })
-                } else {
-                    Ok(7u32)
-                }
-            }
-        })
-        .await;
-
-        assert_eq!(result.unwrap(), 7u32);
-        assert_eq!(call_count.load(Ordering::SeqCst), 3);
-    }
-
-    #[tokio::test]
-    async fn non_retryable_storage_error_not_retried() {
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let policy = RetryPolicy::default();
-
-        let result: Result<u32, StorageError> = with_retry_storage(&policy, || {
-            let count = Arc::clone(&call_count);
-            async move {
-                count.fetch_add(1, Ordering::SeqCst);
-                Err(StorageError::Conflict {
-                    message: "dup".to_owned(),
-                })
-            }
-        })
-        .await;
-
-        assert!(matches!(result, Err(StorageError::Conflict { .. })));
-        assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

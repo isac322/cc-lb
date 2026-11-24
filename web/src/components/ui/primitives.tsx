@@ -346,7 +346,7 @@ export function EmptyState({
   );
 }
 
-// ─── Modal (Radix Dialog) ────────────────────────────────────────────────────
+// ─── Modal (Base UI Dialog) ────────────────────────────────────────────────────
 export function Modal({
   open,
   onOpenChange,

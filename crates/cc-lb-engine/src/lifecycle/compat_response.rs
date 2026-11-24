@@ -8,6 +8,7 @@ use std::convert::Infallible;
 
 use crate::lifecycle::compat_request::{CompatResponseKind, CompatResponsePlan};
 use crate::openai_compat;
+use crate::openai_compat::chat::{sse_data, sse_event_end, sse_payloads};
 
 pub(crate) const CHAT_STREAM_PREFIX_CAP_BYTES: usize = 1024 * 1024;
 
@@ -624,20 +625,17 @@ fn response_with_headers(
         .body(Body::from(body))
         .expect("response body construction")
 }
-pub(crate) fn compact_response_body(
-    original_request: &Value,
-    aggregated: &[u8],
-) -> Result<Vec<u8>, CollectError> {
+pub(crate) fn compact_response_body(aggregated: &[u8]) -> Result<Vec<u8>, CollectError> {
     let aggregated =
         sonic_rs::from_slice::<Value>(aggregated).map_err(|_| CollectError::BodyRead)?;
-    let compact = openai_compat::compact::compaction_resource(original_request, &aggregated);
+    let compact = openai_compat::compact::compaction_resource(&aggregated);
     serde_json::to_vec(&compact).map_err(|_| CollectError::BodyRead)
 }
 
 pub(crate) fn requires_buffered_response(plan: &CompatResponsePlan) -> bool {
     match &plan.kind {
         CompatResponseKind::ResponsesAggregate { .. }
-        | CompatResponseKind::Compact { .. }
+        | CompatResponseKind::Compact
         | CompatResponseKind::ModelsList
         | CompatResponseKind::ModelsGet { .. }
         | CompatResponseKind::ImagesStream { .. }
@@ -701,66 +699,6 @@ fn is_sse_content_type(headers: &HeaderMap) -> bool {
                 .next()
                 .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/event-stream"))
         })
-}
-
-fn sse_event_end(buffer: &[u8]) -> Option<usize> {
-    let lf = buffer
-        .windows(2)
-        .position(|window| window == b"\n\n")
-        .map(|index| (index, 2));
-    let crlf = buffer
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|index| (index, 4));
-    let (index, width) = match (lf, crlf) {
-        (Some(left), Some(right)) => {
-            if left.0 <= right.0 {
-                left
-            } else {
-                right
-            }
-        }
-        (Some(value), None) | (None, Some(value)) => value,
-        (None, None) => return None,
-    };
-    Some(index + width)
-}
-
-fn sse_payloads(body: &[u8]) -> Vec<Vec<u8>> {
-    let mut payloads = Vec::new();
-    let mut start = 0;
-    while start < body.len() {
-        let Some(end) = sse_event_end(&body[start..]) else {
-            break;
-        };
-        let frame_end = start + end;
-        if let Some(payload) = sse_data(&body[start..frame_end]) {
-            payloads.push(payload);
-        }
-        start = frame_end;
-    }
-    if start < body.len()
-        && let Some(payload) = sse_data(&body[start..])
-    {
-        payloads.push(payload);
-    }
-    payloads
-}
-
-fn sse_data(frame: &[u8]) -> Option<Vec<u8>> {
-    let text = std::str::from_utf8(frame).ok()?;
-    let mut data = Vec::new();
-    for line in text.lines() {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        let Some(value) = line.strip_prefix("data:") else {
-            continue;
-        };
-        if !data.is_empty() {
-            data.push(b'\n');
-        }
-        data.extend_from_slice(value.strip_prefix(' ').unwrap_or(value).as_bytes());
-    }
-    (!data.is_empty()).then_some(data)
 }
 
 #[cfg(test)]

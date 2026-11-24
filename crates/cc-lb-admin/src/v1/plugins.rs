@@ -355,7 +355,7 @@ async fn delete_registry(
                         };
                     remove_wasm_cache_file(&state, deleted.entry.sha256).await;
                     let payload = AuditPayload::PluginRegistryDelete {
-                        sha256: hex_sha256(deleted.entry.sha256),
+                        sha256: hex::encode(deleted.entry.sha256),
                     };
                     let action = payload.to_string();
                     let route = format!("/admin/v1/plugins/registry/{id}");
@@ -406,7 +406,7 @@ async fn delete_registry(
             finish_after_commit(async move {
                 remove_wasm_cache_file(&state, deleted.sha256).await;
                 let payload = AuditPayload::PluginRegistryDelete {
-                    sha256: hex_sha256(deleted.sha256),
+                    sha256: hex::encode(deleted.sha256),
                 };
                 let action = payload.to_string();
                 let route = format!("/admin/v1/plugins/registry/{id}");
@@ -910,7 +910,7 @@ fn registry_response(entry: WasmRegistryEntry, size_bytes: u64) -> RegistryEntry
     let provider_hook_credential_kinds = provider_hook_credential_kinds(&provider_hooks);
     RegistryEntryResponse {
         id: entry.id,
-        sha256_hex: hex_sha256(entry.sha256),
+        sha256_hex: hex::encode(entry.sha256),
         name: entry.name,
         original_filename: entry.original_filename,
         version: entry.version,
@@ -1009,7 +1009,7 @@ async fn first_plugin_chain_audit_metadata(
 fn plugin_chain_audit_metadata(entry: &WasmRegistryEntry) -> PluginChainAuditMetadata {
     PluginChainAuditMetadata {
         wasm_registry_id: entry.id.to_string(),
-        sha256_hex: hex_sha256(entry.sha256),
+        sha256_hex: hex::encode(entry.sha256),
         supported_slots: supported_slot_strings(&entry.supported_slots),
     }
 }
@@ -1109,7 +1109,7 @@ fn storage_mutation_error(error: StorageError) -> axum::response::Response {
 }
 
 async fn remove_wasm_cache_file(state: &AdminState, sha256: [u8; 32]) {
-    let sha256_hex = hex_sha256(sha256);
+    let sha256_hex = hex::encode(sha256);
     let cache_path = wasm_cache_path(state, &sha256_hex);
     match tokio::fs::remove_file(&cache_path).await {
         Ok(()) => {}
@@ -1289,10 +1289,6 @@ async fn post_commit_storage_error(
         );
     }
     response
-}
-
-fn hex_sha256(sha256: [u8; 32]) -> String {
-    sha256.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]

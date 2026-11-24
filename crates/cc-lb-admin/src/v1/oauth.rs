@@ -230,12 +230,6 @@ struct DeviceState {
     user_code: String,
     poll_interval_secs: u64,
     expires_at_unix_secs: u64,
-    #[serde(default)]
-    authorization_code: Option<String>,
-    #[serde(default)]
-    code_verifier: Option<String>,
-    #[serde(default)]
-    pending_attempts: u32,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -267,7 +261,6 @@ struct DraftCompletion {
     encrypted_tokens: EncryptedOAuthTokens,
     subscription_metadata_record: UpstreamSubscriptionMetadataRecord,
     organization_metadata_record: Option<OrganizationMetadataRecord>,
-    fetched_at_unix_secs: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -557,7 +550,7 @@ async fn start_oauth_draft(
                         .into_response();
                 }
             };
-        let auth_url = match AuthUrl::new(config.auth_url.to_string()) {
+        let auth_url = match AuthUrl::new(config.authorize_url.to_string()) {
             Ok(value) => value,
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
@@ -832,15 +825,11 @@ async fn complete_oauth_draft(
                     };
                     let (authorization_code, code_verifier) = match poll {
                         OpenAiDevicePoll::Pending => {
-                            let mut pending = in_flight;
-                            if let Some(device) = pending.device.as_mut() {
-                                device.pending_attempts = device.pending_attempts.saturating_add(1);
-                            }
                             if let Err(response) = persist_pkce_flow(
                                 &state,
                                 storage.as_ref(),
                                 &payload.state_token,
-                                &pending,
+                                &in_flight,
                             )
                             .await
                             {
@@ -1125,7 +1114,6 @@ async fn complete_oauth_draft(
             encrypted_tokens,
             subscription_metadata_record: records.subscription_metadata_record.clone(),
             organization_metadata_record: records.organization_metadata_record.clone(),
-            fetched_at_unix_secs: cc_lb_clock::unix_secs(state.clock.now()),
         };
 
         let mut in_flight = in_flight;
@@ -1346,7 +1334,6 @@ async fn create_upstream_from_oauth_draft(
             )
             .await;
         }
-        let _fetched_at_unix_secs = completion.fetched_at_unix_secs;
         let mut subscription_record = completion.subscription_metadata_record;
         subscription_record.upstream_id = created.id;
         if let Err(error) = storage
@@ -2411,9 +2398,6 @@ async fn request_openai_device_code(
         user_code,
         poll_interval_secs,
         expires_at_unix_secs,
-        authorization_code: None,
-        code_verifier: None,
-        pending_attempts: 0,
     })
 }
 
@@ -3024,12 +3008,9 @@ async fn complete_provider_oauth(
                 };
                 let (authorization_code, code_verifier) = match poll {
                     OpenAiDevicePoll::Pending => {
-                        let mut pending = in_flight;
-                        if let Some(device) = pending.device.as_mut() {
-                            device.pending_attempts = device.pending_attempts.saturating_add(1);
-                        }
                         if let Err(response) =
-                            persist_pkce_flow(state, storage, &payload.state_token, &pending).await
+                            persist_pkce_flow(state, storage, &payload.state_token, &in_flight)
+                                .await
                         {
                             return response;
                         }
@@ -3402,7 +3383,7 @@ async fn start_provider_oauth(
                 }
             };
             let (Ok(auth), Ok(token)) = (
-                AuthUrl::new(config.auth_url.to_string()),
+                AuthUrl::new(config.authorize_url.to_string()),
                 TokenUrl::new(config.token_url.to_string()),
             ) else {
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();

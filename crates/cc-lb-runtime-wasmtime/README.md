@@ -9,10 +9,10 @@ crates, it depends only on the wire contract; guest plugins use
 
 ## Contents
 
-- `admit_wasm(engine, wasm_bytes)` — full admission gate: `inspect_wasm` (static
-  metadata + fingerprint check) followed by canonical sample payload probe per
-  declared hook and wire version. Filter probes carry
-  `service_tier = Some("priority")` on the V1 request.
+- `admit_wasm(engine, linker, kind, wasm_bytes, config)` — full admission gate:
+  `inspect_wasm(kind, wasm_bytes)` (static metadata + fingerprint check)
+  followed by canonical sample payload probe per declared hook and wire
+  version. Filter probes carry `service_tier = Some("priority")` on the V3 request.
 - `inspect_wasm(kind, wasm_bytes)` — structural-only load-time verification.
 - Wire-level dispatch primitives consumed by host adapters. The
   `WasmtimeFilterPlugin` and `WasmtimeUpstreamDialect` adapters live in

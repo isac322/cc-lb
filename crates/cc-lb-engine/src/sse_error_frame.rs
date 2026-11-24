@@ -40,7 +40,7 @@ impl ResponsesSseErrorContext {
             output.done |= parsed.is_done();
             if !output.completes_response {
                 output.completes_response =
-                    crate::lifecycle::sse_event_completes_response(capability, &parsed, false);
+                    crate::lifecycle::sse_event_completes_response(capability, &parsed);
             }
             if let Some(value) = parsed.value().ok().flatten() {
                 let is_responses = matches!(
