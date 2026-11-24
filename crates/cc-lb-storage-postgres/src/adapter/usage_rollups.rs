@@ -24,7 +24,7 @@ const GEMINI_RECONCILIATION_ID: &str = "canonicalize_gemini_model_identity";
 pub(super) const ROLLUP_BATCH_LIMIT: i64 = 10_000;
 const MINUTE_SECS: u64 = 60;
 const HOUR_SECS: u64 = 60 * 60;
-const USAGE_ROLLUP_LOCK_NAMESPACE: &str = "cc_lb:usage_rollup:";
+const USAGE_ROLLUP_LOCK_KEY: i64 = 0x_CC1B_0001_0010_0001_u64 as i64;
 
 async fn cleanup_gemini_reconciliation_markers(
     tx: &mut Transaction<'_, Postgres>,
@@ -42,12 +42,12 @@ struct RollupKey {
     bucket_start: u64,
     principal: String,
     upstream_id: Uuid,
-    upstream_name: String,
     model: String,
 }
 
 #[derive(Debug, Default, Clone)]
 struct RollupDelta {
+    upstream_name: String,
     request_count: u64,
     input_tokens: u64,
     output_tokens: u64,
@@ -580,10 +580,8 @@ async fn reconcile_gemini_model_identity(
     };
 
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
-    let locked = sqlx::query_scalar::<_, bool>(
-        "SELECT pg_try_advisory_xact_lock(hashtextextended($1 || COALESCE(current_schema(), ''), 0))",
-    )
-    .bind(USAGE_ROLLUP_LOCK_NAMESPACE)
+    let locked = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(USAGE_ROLLUP_LOCK_KEY)
         .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -942,10 +940,8 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
     }
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
 
-    let locked = sqlx::query_scalar::<_, bool>(
-        "SELECT pg_try_advisory_xact_lock(hashtextextended($1 || COALESCE(current_schema(), ''), 0))",
-    )
-    .bind(USAGE_ROLLUP_LOCK_NAMESPACE)
+    let locked = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(USAGE_ROLLUP_LOCK_KEY)
         .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -1175,16 +1171,18 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                 bucket_start: bucket_start(resolution, event_ts_secs(&event)),
                 principal: normalize_usage_rollup_dimension(event.principal_id.as_deref()),
                 upstream_id: upstream.id,
-                upstream_name: normalize_usage_rollup_dimension(Some(&upstream.name)),
                 model: normalize_usage_rollup_dimension(event.model.as_deref()),
             };
+            let upstream_name = normalize_usage_rollup_dimension(Some(&upstream.name));
             if is_overview_excluded_status(event.status) {
                 let count = overview_excluded_error_deltas
                     .entry((resolution, key.bucket_start, key.upstream_id))
                     .or_default();
                 *count = count.saturating_add(1);
             }
-            deltas.entry(key).or_default().add_event(&event);
+            let entry = deltas.entry(key).or_default();
+            entry.upstream_name = upstream_name;
+            entry.add_event(&event);
         }
     }
 
@@ -1260,7 +1258,6 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                 bucket_start: bucket_start(resolution, event_ts_secs(&event)),
                 principal: normalize_usage_rollup_dimension(event.principal_id.as_deref()),
                 upstream_id: upstream.id,
-                upstream_name: normalize_usage_rollup_dimension(Some(&upstream.name)),
                 model: normalize_usage_rollup_dimension(event.model.as_deref()),
             };
             backfill_deltas
@@ -1427,7 +1424,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
             bucket_starts.push(u64_to_i64(key.bucket_start, "usage rollup bucket_start")?);
             principals.push(key.principal);
             upstream_ids.push(key.upstream_id);
-            upstream_names.push(key.upstream_name);
+            upstream_names.push(delta.upstream_name);
             models.push(key.model);
             request_counts.push(u64_to_i64(delta.request_count, "rollup request_count")?);
             input_tokens.push(u64_to_i64(delta.input_tokens, "rollup input_tokens")?);

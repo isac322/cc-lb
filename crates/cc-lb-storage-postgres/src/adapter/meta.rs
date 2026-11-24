@@ -59,15 +59,9 @@ fn get_fast_init_full_sql() -> &'static str {
         .as_str()
 }
 
-fn sqlx_migration_lock_id(database_name: &str, schema_name: &str) -> i64 {
+fn sqlx_migration_lock_id(database_name: &str) -> i64 {
     let mut crc: u32 = 0xffff_ffff;
-    for byte in database_name
-        .as_bytes()
-        .iter()
-        .copied()
-        .chain(std::iter::once(0))
-        .chain(schema_name.as_bytes().iter().copied())
-    {
+    for &byte in database_name.as_bytes() {
         crc ^= u32::from(byte);
         for _ in 0..8 {
             let mask = (crc & 1).wrapping_neg();
@@ -91,7 +85,7 @@ pub(super) async fn lock_meta_value(conn: &mut sqlx::PgConnection, key: &str) ->
 #[async_trait]
 impl MetaStore for PostgresStorage {
     async fn initialize(&self) -> StorageResult<()> {
-        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let mut tx = self.listener_pool.begin().await.map_err(map_sqlx_error)?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
             .execute(&mut *tx)
             .await
@@ -105,7 +99,7 @@ impl MetaStore for PostgresStorage {
 
         if schema_name != "public" {
             sqlx::query("SELECT pg_advisory_xact_lock($1)")
-                .bind(sqlx_migration_lock_id(&database_name, &schema_name))
+                .bind(sqlx_migration_lock_id(&database_name))
                 .execute(&mut *tx)
                 .await
                 .map_err(map_sqlx_error)?;
@@ -407,14 +401,14 @@ mod tests {
     use super::sqlx_migration_lock_id;
 
     #[test]
-    fn sqlx_migration_lock_id_differs_across_schemas() {
-        assert_ne!(
-            sqlx_migration_lock_id("cclb", "schema_a"),
-            sqlx_migration_lock_id("cclb", "schema_b")
+    fn sqlx_migration_lock_id_is_database_scoped() {
+        assert_eq!(
+            sqlx_migration_lock_id("cclb"),
+            sqlx_migration_lock_id("cclb")
         );
         assert_ne!(
-            sqlx_migration_lock_id("db_a", "public"),
-            sqlx_migration_lock_id("db_b", "public")
+            sqlx_migration_lock_id("db_a"),
+            sqlx_migration_lock_id("db_b")
         );
     }
 }

@@ -60,10 +60,11 @@ impl OrganizationMetadataStore for PostgresStorage {
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
-        let notify_payload = if record.organization_uuid.len() <= 100 {
-            record.organization_uuid.as_str()
+        let candidate_payload = format!("organization_metadata:{}", record.organization_uuid);
+        let notify_payload = if candidate_payload.len() <= 100 {
+            candidate_payload.as_str()
         } else {
-            "organization-metadata"
+            "organization_metadata"
         };
         sqlx::query("SELECT pg_notify('cclb_upstream_changed', $1)")
             .bind(notify_payload)

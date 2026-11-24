@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use cc_lb_clock::unix_secs;
 use cc_lb_storage_api::{
@@ -55,28 +57,63 @@ impl ApiKeyUsageBucketStore for PostgresStorage {
             return Ok(ApiKeyUsageFlushResult::AlreadyApplied);
         }
         if !flush.deltas.is_empty() {
-            let mut key_ids = Vec::with_capacity(flush.deltas.len());
-            let mut bucket_widths = Vec::with_capacity(flush.deltas.len());
-            let mut bucket_starts = Vec::with_capacity(flush.deltas.len());
-            let mut requests = Vec::with_capacity(flush.deltas.len());
-            let mut input_tokens = Vec::with_capacity(flush.deltas.len());
-            let mut output_tokens = Vec::with_capacity(flush.deltas.len());
-            let mut cost_usd_micros = Vec::with_capacity(flush.deltas.len());
+            let delta_overflow = || StorageError::InvalidInput {
+                field: "api_key_usage_bucket".to_owned(),
+                reason: "API-key usage delta overflow".to_owned(),
+            };
+            let mut coalesced: BTreeMap<(String, i64, i64), ApiKeyUsage> = BTreeMap::new();
             for delta in &flush.deltas {
                 validate_delta(delta)?;
-                key_ids.push(delta.key.key_id.clone());
-                bucket_widths.push(u64_to_i64(
-                    delta.key.bucket_width_secs,
-                    "API-key usage bucket width",
-                )?);
-                bucket_starts.push(u64_to_i64(
+                let bucket_width_secs =
+                    u64_to_i64(delta.key.bucket_width_secs, "API-key usage bucket width")?;
+                let bucket_start_unix_secs = u64_to_i64(
                     delta.key.bucket_start_unix_secs,
                     "API-key usage bucket start",
-                )?);
-                requests.push(delta.usage.requests);
-                input_tokens.push(delta.usage.input_tokens);
-                output_tokens.push(delta.usage.output_tokens);
-                cost_usd_micros.push(delta.usage.cost_usd_micros);
+                )?;
+                let entry = coalesced
+                    .entry((
+                        delta.key.key_id.clone(),
+                        bucket_width_secs,
+                        bucket_start_unix_secs,
+                    ))
+                    .or_insert(ApiKeyUsage {
+                        requests: 0,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cost_usd_micros: 0,
+                    });
+                entry.requests = entry
+                    .requests
+                    .checked_add(delta.usage.requests)
+                    .ok_or_else(delta_overflow)?;
+                entry.input_tokens = entry
+                    .input_tokens
+                    .checked_add(delta.usage.input_tokens)
+                    .ok_or_else(delta_overflow)?;
+                entry.output_tokens = entry
+                    .output_tokens
+                    .checked_add(delta.usage.output_tokens)
+                    .ok_or_else(delta_overflow)?;
+                entry.cost_usd_micros = entry
+                    .cost_usd_micros
+                    .checked_add(delta.usage.cost_usd_micros)
+                    .ok_or_else(delta_overflow)?;
+            }
+            let mut key_ids = Vec::with_capacity(coalesced.len());
+            let mut bucket_widths = Vec::with_capacity(coalesced.len());
+            let mut bucket_starts = Vec::with_capacity(coalesced.len());
+            let mut requests = Vec::with_capacity(coalesced.len());
+            let mut input_tokens = Vec::with_capacity(coalesced.len());
+            let mut output_tokens = Vec::with_capacity(coalesced.len());
+            let mut cost_usd_micros = Vec::with_capacity(coalesced.len());
+            for ((key_id, bucket_width_secs, bucket_start_unix_secs), usage) in coalesced {
+                key_ids.push(key_id);
+                bucket_widths.push(bucket_width_secs);
+                bucket_starts.push(bucket_start_unix_secs);
+                requests.push(usage.requests);
+                input_tokens.push(usage.input_tokens);
+                output_tokens.push(usage.output_tokens);
+                cost_usd_micros.push(usage.cost_usd_micros);
             }
             sqlx::query(
                 "INSERT INTO api_key_usage_buckets_v1 \

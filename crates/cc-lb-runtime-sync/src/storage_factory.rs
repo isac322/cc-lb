@@ -51,6 +51,74 @@ mod pool_metrics_tests {
         metrics::with_local_recorder(&recorder, || record_postgres_pool_metrics(&pool));
         assert_pool_samples(&handle.render(), 0, 0);
     }
+
+    #[tokio::test]
+    async fn postgres_mismatched_listener_target_fails_before_migrations() {
+        let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+            eprintln!("skipped: CI_POSTGRES_URL unset");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let schema_a = format!("cclb_target_a_{suffix}");
+        let schema_b = format!("cclb_target_b_{suffix}");
+
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect admin pool");
+        for schema in [&schema_a, &schema_b] {
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+                .execute(&admin_pool)
+                .await
+                .expect("create isolated test schema");
+        }
+
+        let with_schema = |schema: &str| {
+            let mut parsed = url::Url::parse(&url).expect("parse CI_POSTGRES_URL");
+            parsed
+                .query_pairs_mut()
+                .append_pair("options", &format!("-c search_path={schema},public"));
+            parsed.to_string()
+        };
+
+        let result = super::open_storage(
+            &cc_lb_config::StorageConfig::Postgres {
+                url: with_schema(&schema_a),
+                pool: cc_lb_config::PostgresPoolConfig {
+                    listener_url: Some(with_schema(&schema_b)),
+                    pgbouncer_transaction_pooling: true,
+                    ..Default::default()
+                },
+            },
+            std::sync::Arc::new(cc_lb_clock::SystemClock),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(super::StorageFactoryError::ConnectionFailed { ref message }) if message.contains("different PostgreSQL database or schema targets")),
+            "expected ConnectionFailed on mismatched listener target"
+        );
+
+        let table_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ANY($1)",
+        )
+        .bind([schema_a.as_str(), schema_b.as_str()])
+        .fetch_one(&admin_pool)
+        .await
+        .expect("query created tables");
+        assert_eq!(table_count, 0, "mismatched target must abort before DDL");
+
+        for schema in [&schema_a, &schema_b] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE"
+            )))
+            .execute(&admin_pool)
+            .await
+            .expect("drop isolated test schema");
+        }
+        admin_pool.close().await;
+    }
 }
 
 use std::path::Path;
@@ -200,11 +268,32 @@ async fn open_postgres(
     listener_pool_config.min_connections = 0;
     listener_pool_config.pgbouncer_transaction_pooling = false;
     listener_pool_config.statement_cache_capacity = None;
-    let listener_pool = open_postgres_pool(
-        pool_config.effective_listener_url(url),
-        &listener_pool_config,
-    )
-    .await?;
+    let listener_url = pool_config.effective_listener_url(url);
+    let listener_pool = open_postgres_pool(listener_url, &listener_pool_config).await?;
+    if pool_config.listener_url.is_some() {
+        let primary_target: (String, Option<String>) =
+            sqlx::query_as("SELECT current_database(), current_schema()")
+                .fetch_one(&pool)
+                .await
+                .map_err(|error| StorageFactoryError::ConnectionFailed {
+                    message: host_only(url) + ": " + &error.to_string(),
+                })?;
+        let listener_target: (String, Option<String>) =
+            sqlx::query_as("SELECT current_database(), current_schema()")
+                .fetch_one(&listener_pool)
+                .await
+                .map_err(|error| StorageFactoryError::ConnectionFailed {
+                    message: host_only(listener_url) + ": " + &error.to_string(),
+                })?;
+        if primary_target != listener_target {
+            return Err(StorageFactoryError::ConnectionFailed {
+                message: format!(
+                    "storage.url ({:?}.{:?}) and storage.pool.listener_url ({:?}.{:?}) resolve to different PostgreSQL database or schema targets",
+                    primary_target.0, primary_target.1, listener_target.0, listener_target.1,
+                ),
+            });
+        }
+    }
 
     let storage = Arc::new(
         cc_lb_storage_postgres::PostgresStorage::new_with_listener_pool(

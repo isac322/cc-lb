@@ -32,7 +32,7 @@ filter = 'binary_id(cc-lb-scheduler::integration) and test(worker_restart_lifeti
 priority = 95
 
 [[profile.default.overrides]]
-filter = 'binary_id(cc-lb-storage-conformance::integration) and test(/storage_roundtrips_postgres::(usage_rollup|upstream_subscription_quota_aggregate_store_postgres)/)'
+filter = 'binary_id(cc-lb-storage-conformance::integration) and test(/storage_roundtrips_postgres::(storage_roundtrips_postgres|usage_rollup|upstream_subscription_quota_aggregate_store_postgres|upstream_subscription_quota_store_postgres)/)'
 test-group = 'pg-usage-rollup'
 priority = 95
 
@@ -46,11 +46,12 @@ filter = 'test(/crash_recovery::|storage_roundtrips_postgres::|upstream_store_po
 priority = 90
 
 [[profile.default.overrides]]
-filter = 'binary_id(cc-lb-storage-postgres::integration) and test(/overview_error_attribution_migration::|usage_rollup_pricing_completeness_migration::/)'
+filter = 'binary_id(cc-lb-storage-postgres::integration) and test(/overview_error_attribution_migration::|usage_rollup_pricing_completeness_migration::|crash_recovery::/)'
+test-group = 'pg-usage-rollup'
 priority = 95
 
 [[profile.default.overrides]]
-filter = 'binary_id(cc-lb-storage-postgres::integration) and test(/crash_recovery::|request_event_filter_index_plans::/)'
+filter = 'binary_id(cc-lb-storage-postgres::integration) and test(request_event_filter_index_plans::)'
 test-group = 'pg-heavy-xmin'
 threads-required = 2
 priority = 100

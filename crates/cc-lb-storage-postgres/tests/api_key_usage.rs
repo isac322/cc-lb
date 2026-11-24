@@ -168,6 +168,63 @@ async fn run_contracts(pool: &PgPool) -> Result<()> {
         })
         .await?;
     assert_eq!(bulk_buckets.len(), 2);
+
+    // Duplicate keys in a single flush coalesce cleanly with additive semantics.
+    let duplicate_flush = ApiKeyUsageFlush {
+        writer_epoch: bulk_writer,
+        flush_id: Uuid::now_v7(),
+        lease_until_unix_secs: NOW + 300,
+        deltas: vec![
+            ApiKeyUsageBucketDelta {
+                key: ApiKeyUsageBucketKey {
+                    key_id: "key-dup".to_owned(),
+                    bucket_width_secs: 60,
+                    bucket_start_unix_secs: NOW,
+                },
+                usage: ApiKeyUsage {
+                    requests: 2,
+                    input_tokens: 25,
+                    output_tokens: 50,
+                    cost_usd_micros: 75,
+                },
+            },
+            ApiKeyUsageBucketDelta {
+                key: ApiKeyUsageBucketKey {
+                    key_id: "key-dup".to_owned(),
+                    bucket_width_secs: 60,
+                    bucket_start_unix_secs: NOW,
+                },
+                usage: ApiKeyUsage {
+                    requests: 3,
+                    input_tokens: 35,
+                    output_tokens: 70,
+                    cost_usd_micros: 105,
+                },
+            },
+        ],
+    };
+    assert_eq!(
+        storage.flush_api_key_usage(&duplicate_flush).await?,
+        ApiKeyUsageFlushResult::Applied
+    );
+    let dup_buckets = storage
+        .query_api_key_usage_buckets(&ApiKeyUsageBucketQuery {
+            key_ids: vec!["key-dup".to_owned()],
+            since_unix_secs: NOW - 60,
+            until_unix_secs: NOW + 60,
+            exclude_writer_epoch: Uuid::now_v7(),
+        })
+        .await?;
+    assert_eq!(dup_buckets.len(), 1);
+    assert_eq!(
+        dup_buckets[0].usage,
+        ApiKeyUsage {
+            requests: 5,
+            input_tokens: 60,
+            output_tokens: 120,
+            cost_usd_micros: 180,
+        }
+    );
     Ok(())
 }
 

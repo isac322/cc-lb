@@ -97,9 +97,19 @@ Use SQLite for local or bounded single-node operation. Use Postgres when multipl
 
 After changing scheduler or affinity retention settings, restart the server so all workers use the same startup policy.
 
+## PostgreSQL connection pooling and PgBouncer
+
+The main storage pool and the scheduler query pool connect to `storage.url` (`scheduler.separate_pool.max_connections` on worker/standalone roles, capped at `min(max_connections, 2)` with `min_connections = 0` on proxy-only and standalone admin `EnqueueOnly` roles). Session-pinned operations — runtime change and live-tail `LISTEN/NOTIFY` listeners, the shared scheduler `PostgresInsertFanout` listener, startup migrations, and advisory locks — use `storage.pool.listener_url` (defaulting to `storage.url` when omitted). Both URLs must resolve to the same PostgreSQL database and application schema.
+
+When `storage.url` points at PgBouncer in transaction pooling mode, enable `storage.pool.pgbouncer_transaction_pooling = true` and set `storage.pool.listener_url` to a direct PostgreSQL DSN:
+
+- PgBouncer 1.21 or newer is required with `max_prepared_statements > 0` (at least `storage.pool.statement_cache_capacity`, `>= 200` recommended). `storage.pool.statement_cache_capacity` defaults to `100` under transaction pooling, and `0` is rejected because SQLx 0.9 still sends named `Parse`+`Sync` before `Bind`.
+- Session-level `SET` statements (`statement_timeout`, `idle_in_transaction_session_timeout`, and `search_path`) are skipped in `after_connect`. Configure timeouts on PgBouncer or PostgreSQL, and keep `hstore` visible on the pooled role's default `search_path` (fresh scheduler setups install `hstore` on the default `search_path` before switching to `cc_lb_scheduler`).
+- Budget direct sessions on PostgreSQL alongside pooled capacity: each replica opens up to `2` pooled storage `listener_pool` connections (`min = 0`), `2` scheduler `listener_pool` connections (`min = 0`), runtime change/live-tail `PgListener` session(s) (`1`), and `1` shared `PostgresInsertFanout` `PgListener` session on worker replicas.
+
 ## PostgreSQL TLS
 
-Storage and scheduler connections use `storage.url`, but resolve TLS mode independently. Storage connections, including startup preflight, use `storage.pool.sslmode`. The scheduler uses `scheduler.separate_pool.sslmode`; it does not inherit `storage.pool.sslmode`.
+Storage connections (the primary `storage.url` pool and the direct `storage.pool.listener_url` pool) and scheduler connections (the `storage.url` query pool and the direct `storage.pool.listener_url` setup/listener pool) resolve TLS mode independently. Storage connections, including startup preflight, use `storage.pool.sslmode`. Scheduler connections use `scheduler.separate_pool.sslmode`; they do not inherit `storage.pool.sslmode`.
 
 For each pool, TLS mode follows this precedence:
 

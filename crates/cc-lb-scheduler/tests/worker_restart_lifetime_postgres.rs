@@ -37,6 +37,144 @@ async fn replacement_worker_dispatches_distinct_job_from_same_postgres_backend()
     with_isolated_database(|pool| async move { run_two_generation_contract(&pool).await }).await
 }
 
+#[tokio::test]
+async fn pgbouncer_transaction_pooling_keeps_hstore_visible_for_adaptive_and_cron_enqueues()
+-> Result<()> {
+    let admin_url = std::env::var("DATABASE_URL")
+        .context("DATABASE_URL must be set to a PostgreSQL administrative database")?;
+    ensure!(
+        !admin_url.trim().is_empty(),
+        "DATABASE_URL must not be empty"
+    );
+    let database_name = format!("cclb_pgbouncer_{}", Uuid::new_v4().simple());
+    let mut database_url = Url::parse(&admin_url).context("parse DATABASE_URL")?;
+    database_url.set_path(&database_name);
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .context("connect to PostgreSQL administrative database")?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"CREATE DATABASE "{database_name}""#
+    )))
+    .execute(&admin_pool)
+    .await
+    .with_context(|| format!("create blank isolated database {database_name}"))?;
+
+    let test_result = timeout(
+        Duration::from_secs(45),
+        AssertUnwindSafe(async {
+            let db_url = database_url.to_string();
+            let storage_config = cc_lb_config::StorageConfig::Postgres {
+                url: db_url.clone(),
+                pool: cc_lb_config::PostgresPoolConfig {
+                    listener_url: Some(db_url.clone()),
+                    pgbouncer_transaction_pooling: true,
+                    ..cc_lb_config::PostgresPoolConfig::default()
+                },
+            };
+            let opened = cc_lb_scheduler::factory::open_scheduler_storage(
+                &storage_config,
+                &SchedulerConfig::default(),
+                Arc::new(SystemClock),
+            )
+            .await
+            .context("open scheduler storage in pgbouncer transaction pooling mode")?;
+            let SchedulerBackend::Postgres(ref pg_backend) = opened.backend else {
+                bail!("expected postgres scheduler backend");
+            };
+
+            let hstore_schema: String = sqlx::query_scalar(
+                "SELECT n.nspname::text \
+                 FROM pg_extension e \
+                 JOIN pg_namespace n ON n.oid = e.extnamespace \
+                 WHERE e.extname = 'hstore'",
+            )
+            .fetch_one(pg_backend.pool())
+            .await?;
+            ensure!(
+                hstore_schema != "cc_lb_scheduler",
+                "fresh pgbouncer setup must not hide hstore inside cc_lb_scheduler (got {hstore_schema})"
+            );
+
+            // Adaptive enqueue uses `''::hstore` without session `SET search_path`.
+            let upstream_id = Uuid::new_v4();
+            opened
+                .backend
+                .push_adaptive_task(SchedulerPushTask {
+                    args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
+                    idempotency_key: Some(format!("pgbouncer:adaptive:{upstream_id}")),
+                    run_at_unix_secs: None,
+                    max_attempts: Some(5),
+                })
+                .await
+                .context("adaptive enqueue under pgbouncer_transaction_pooling")?;
+
+            // Cron TaskSink enqueue uses Apalis's `unnest($7::hstore[])` without session `SET search_path`.
+            let mut cron_storage = apalis_postgres::PostgresStorage::<CronJob>::new(pg_backend.pool())
+                .with_config(apalis_postgres::Config::default().queue(CRON_QUEUE));
+            apalis::prelude::TaskSink::push(
+                &mut cron_storage,
+                CronJob::UsageRollup(Default::default()),
+            )
+            .await
+            .context("cron TaskSink enqueue under pgbouncer_transaction_pooling")?;
+
+            // Simulated upgrade path: if an older setup installed hstore inside cc_lb_scheduler,
+            // reopening with pgbouncer_transaction_pooling relocates it into the pooled schema.
+            sqlx::query("ALTER EXTENSION hstore SET SCHEMA cc_lb_scheduler")
+                .execute(pg_backend.pool())
+                .await
+                .context("relocate hstore to cc_lb_scheduler to simulate legacy upgrade")?;
+            pg_backend.pool().close().await;
+
+            let reopened = cc_lb_scheduler::factory::open_scheduler_storage(
+                &storage_config,
+                &SchedulerConfig::default(),
+                Arc::new(SystemClock),
+            )
+            .await
+            .context("reopen scheduler storage after legacy hstore placement")?;
+            let SchedulerBackend::Postgres(ref reopened_pg) = reopened.backend else {
+                bail!("expected postgres scheduler backend");
+            };
+            let upstream_id_2 = Uuid::new_v4();
+            reopened
+                .backend
+                .push_adaptive_task(SchedulerPushTask {
+                    args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id_2)),
+                    idempotency_key: Some(format!("pgbouncer:adaptive:{upstream_id_2}")),
+                    run_at_unix_secs: None,
+                    max_attempts: Some(5),
+                })
+                .await
+                .context("adaptive enqueue after hstore relocation")?;
+            reopened_pg.pool().close().await;
+            Ok(())
+        })
+        .catch_unwind(),
+    )
+    .await;
+
+    let test_result = match test_result {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(anyhow::anyhow!("pgbouncer hstore test panicked")),
+        Err(elapsed) => Err(anyhow::Error::new(elapsed).context("pgbouncer hstore test timed out")),
+    };
+    let drop_result = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"DROP DATABASE "{database_name}" WITH (FORCE)"#
+    )))
+    .execute(&admin_pool)
+    .await;
+    admin_pool.close().await;
+    match (test_result, drop_result) {
+        (Ok(()), Ok(_)) => Ok(()),
+        (Err(e), Ok(_)) => Err(e),
+        (Ok(()), Err(d)) => Err(d.into()),
+        (Err(e), Err(d)) => Err(anyhow::anyhow!("test failed: {e:#}; drop failed: {d}")),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_idle_worker_claims_future_keepalive_job_within_poll_interval() -> Result<()> {
     with_isolated_database(|pool| async move {

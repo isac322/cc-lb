@@ -1051,7 +1051,8 @@ async fn apply_upstreams(
             } else {
                 is_oauth && refresh_requires_reconnect(last_apply_error.as_deref())
             };
-            if !reconnect_required {
+            if !reconnect_required && upstream.last_apply_error.as_deref() != Some(message.as_str())
+            {
                 if is_oauth {
                     match stores
                         .upstreams
@@ -1075,7 +1076,7 @@ async fn apply_upstreams(
                         Ok(()) | Err(StorageError::Conflict { .. }) => {}
                         Err(error) => return Err(error),
                     }
-                } else if upstream.last_apply_error.as_deref() != Some(message.as_str()) {
+                } else {
                     stores
                         .upstreams
                         .set_last_apply_error(upstream.id, Some(message.clone()))

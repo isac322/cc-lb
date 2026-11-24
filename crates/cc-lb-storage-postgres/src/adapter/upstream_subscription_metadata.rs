@@ -40,7 +40,7 @@ impl UpstreamSubscriptionMetadataStore for PostgresStorage {
         .await
         .map_err(map_sqlx_error)?;
         sqlx::query("SELECT pg_notify('cclb_upstream_changed', $1)")
-            .bind(record.upstream_id.to_string())
+            .bind(format!("subscription_metadata:{}", record.upstream_id))
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
@@ -132,7 +132,7 @@ impl UpstreamSubscriptionMetadataStore for PostgresStorage {
         let wrote = written.rows_affected() != 0;
         if wrote {
             sqlx::query("SELECT pg_notify('cclb_upstream_changed', $1)")
-                .bind(record.upstream_id.to_string())
+                .bind(format!("subscription_metadata:{}", record.upstream_id))
                 .execute(&mut *tx)
                 .await
                 .map_err(map_sqlx_error)?;

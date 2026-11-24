@@ -73,7 +73,7 @@ pub(super) async fn append(
     .map_err(map_sqlx_error)?;
 
     sqlx::query("SELECT pg_notify('cclb_upstream_changed', $1)")
-        .bind(record.upstream_id.to_string())
+        .bind(format!("plan_tier:{}", record.upstream_id))
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;

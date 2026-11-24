@@ -291,7 +291,10 @@ impl Default for AeadConfig {
     }
 }
 
+pub const DEFAULT_PGBOUNCER_STATEMENT_CACHE_CAPACITY: usize = 100;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct PostgresPoolConfig {
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
@@ -313,10 +316,10 @@ pub struct PostgresPoolConfig {
     /// Optional direct PostgreSQL URL for dedicated session-pinned listeners (`LISTEN/NOTIFY`), migrations, and advisory locks when `url` goes through a transaction pooler such as PgBouncer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listener_url: Option<String>,
-    /// Optional SQLx prepared-statement cache capacity override (`0` disables prepared statement caching).
+    /// Optional SQLx prepared-statement cache capacity override (must be greater than `0` when `pgbouncer_transaction_pooling` is enabled).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statement_cache_capacity: Option<usize>,
-    /// Configure connections for PgBouncer transaction pooling (disables prepared-statement caching unless `statement_cache_capacity` is explicitly set and skips session-level `SET` statements in `after_connect`).
+    /// Configure connections for PgBouncer transaction pooling (requires PgBouncer >= 1.21 with `max_prepared_statements > 0`, defaults `statement_cache_capacity` to `100` while rejecting `0`, and skips session-level `SET` statements in `after_connect`).
     #[serde(default, skip_serializing_if = "is_false_bool")]
     pub pgbouncer_transaction_pooling: bool,
 }
@@ -331,8 +334,10 @@ impl PostgresPoolConfig {
     }
 
     pub fn effective_statement_cache_capacity(&self) -> Option<usize> {
-        self.statement_cache_capacity
-            .or_else(|| self.pgbouncer_transaction_pooling.then_some(0))
+        self.statement_cache_capacity.or_else(|| {
+            self.pgbouncer_transaction_pooling
+                .then_some(DEFAULT_PGBOUNCER_STATEMENT_CACHE_CAPACITY)
+        })
     }
 }
 

@@ -853,6 +853,7 @@ async fn set_split_status(
         "last_warmup_at",
     )?;
 
+    let previous_last_apply_error = last_apply_error.clone();
     if let Some(value) = patch.last_apply_error
         && (!kind
             .is_some_and(|kind| has_sticky_credential_failure(kind, last_apply_error.as_deref()))
@@ -868,6 +869,7 @@ async fn set_split_status(
     if let Some(value) = patch.last_warmup_at_unix_secs {
         last_warmup_at = value;
     }
+    let apply_error_changed = last_apply_error != previous_last_apply_error;
 
     sqlx::query(
         "INSERT INTO upstream_status_v1 (upstream_id, last_apply_error, last_apply_at, last_warmup_at, updated_at)
@@ -889,7 +891,9 @@ async fn set_split_status(
     .execute(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
-    notify(&mut tx, id).await?;
+    if apply_error_changed {
+        notify(&mut tx, id).await?;
+    }
     tx.commit().await.map_err(map_sqlx_error)?;
     Ok(())
 }

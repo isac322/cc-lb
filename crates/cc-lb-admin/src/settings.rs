@@ -142,6 +142,8 @@ pub struct ValidateConfigDraftRequest {
     pub expected_revision: u64,
     #[serde(default)]
     pub storage_url_replacement: Option<String>,
+    #[serde(default)]
+    pub storage_listener_url_replacement: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +153,8 @@ pub struct SaveConfigFileRequest {
     #[serde(default)]
     pub storage_url_replacement: Option<String>,
     #[serde(default)]
+    pub storage_listener_url_replacement: Option<String>,
+    #[serde(default)]
     pub confirm_self_lockout: bool,
 }
 
@@ -159,6 +163,8 @@ pub struct DownloadConfigDraftRequest {
     pub expected_revision: u64,
     #[serde(default)]
     pub storage_url_replacement: Option<String>,
+    #[serde(default)]
+    pub storage_listener_url_replacement: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,6 +276,7 @@ pub async fn validate_draft(
         draft,
         request.expected_revision,
         request.storage_url_replacement.as_deref(),
+        request.storage_listener_url_replacement.as_deref(),
     )?;
     let report = materialized.report;
     let valid = report_is_valid(&report);
@@ -376,6 +383,7 @@ pub async fn write_config_file(
         draft,
         request.expected_revision,
         request.storage_url_replacement.as_deref(),
+        request.storage_listener_url_replacement.as_deref(),
     )?;
     if !report_is_valid(&materialized.report) {
         return Err(SettingsError::Validation(Box::new(materialized.report)));
@@ -422,6 +430,7 @@ pub async fn download_config_draft(
         draft,
         request.expected_revision,
         request.storage_url_replacement.as_deref(),
+        request.storage_listener_url_replacement.as_deref(),
     )?;
     if !materialized.report.file.valid {
         return Err(SettingsError::Validation(Box::new(materialized.report)));
@@ -505,11 +514,17 @@ fn materialize_and_validate(
     mut draft: Value,
     revision: u64,
     storage_url_replacement: Option<&str>,
+    storage_listener_url_replacement: Option<&str>,
 ) -> Result<MaterializedDraft, SettingsError> {
     normalize_unset(&mut draft);
     let snapshot = file_snapshot_for_state(state)?;
     let current_file = partial_file_json(snapshot_text(&snapshot)?)?;
-    if let Err(issue) = restore_storage_url(&mut draft, &current_file, storage_url_replacement) {
+    if let Err(issue) = restore_storage_url(
+        &mut draft,
+        &current_file,
+        storage_url_replacement,
+        storage_listener_url_replacement,
+    ) {
         let report = ConfigValidationReport {
             revision,
             file: ConfigValidationResult {
@@ -838,9 +853,33 @@ fn storage_url(value: &Value) -> Option<&str> {
         .as_str()
 }
 
+fn storage_listener_url_mut(value: &mut Value) -> Option<&mut Value> {
+    value
+        .as_object_mut()?
+        .get_mut("storage")?
+        .as_object_mut()?
+        .get_mut("pool")?
+        .as_object_mut()?
+        .get_mut("listener_url")
+}
+
+fn storage_listener_url(value: &Value) -> Option<&str> {
+    value
+        .as_object()?
+        .get("storage")?
+        .as_object()?
+        .get("pool")?
+        .as_object()?
+        .get("listener_url")?
+        .as_str()
+}
+
 fn redact_storage_url(value: &mut Value) {
     if let Some(url) = storage_url_mut(value) {
         *url = Value::String(STORAGE_URL_REDACTION_SENTINEL.to_owned());
+    }
+    if let Some(listener_url) = storage_listener_url_mut(value) {
+        *listener_url = Value::String(STORAGE_URL_REDACTION_SENTINEL.to_owned());
     }
 }
 
@@ -848,6 +887,7 @@ fn restore_storage_url(
     draft: &mut Value,
     current_file: &Value,
     replacement: Option<&str>,
+    listener_replacement: Option<&str>,
 ) -> Result<(), ConfigValidationIssue> {
     if let Some(replacement) = replacement
         && let Some(storage) = draft
@@ -856,23 +896,48 @@ fn restore_storage_url(
             .and_then(Value::as_object_mut)
     {
         storage.insert("url".to_owned(), Value::String(replacement.to_owned()));
-        return Ok(());
-    }
-    let Some(url) = storage_url_mut(draft) else {
-        return Ok(());
-    };
-    if url.as_str() != Some(STORAGE_URL_REDACTION_SENTINEL) {
-        return Ok(());
-    }
-    if let Some(original) = storage_url(current_file) {
+    } else if let Some(url) = storage_url_mut(draft)
+        && url.as_str() == Some(STORAGE_URL_REDACTION_SENTINEL)
+    {
+        let Some(original) = storage_url(current_file) else {
+            return Err(error_issue(
+                "storage.url",
+                "secret_source_missing",
+                "storage.url is marked unchanged, but the current file has no value to restore",
+            ));
+        };
         *url = Value::String(original.to_owned());
-        return Ok(());
     }
-    Err(error_issue(
-        "storage.url",
-        "secret_source_missing",
-        "storage.url is marked unchanged, but the current file has no value to restore",
-    ))
+
+    if let Some(replacement) = listener_replacement
+        && let Some(storage) = draft
+            .as_object_mut()
+            .and_then(|draft| draft.get_mut("storage"))
+            .and_then(Value::as_object_mut)
+    {
+        let pool = storage
+            .entry("pool".to_owned())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Some(pool) = pool.as_object_mut() {
+            pool.insert(
+                "listener_url".to_owned(),
+                Value::String(replacement.to_owned()),
+            );
+        }
+    } else if let Some(listener_url) = storage_listener_url_mut(draft)
+        && listener_url.as_str() == Some(STORAGE_URL_REDACTION_SENTINEL)
+    {
+        let Some(original) = storage_listener_url(current_file) else {
+            return Err(error_issue(
+                "storage.pool.listener_url",
+                "secret_source_missing",
+                "storage.pool.listener_url is marked unchanged, but the current file has no value to restore",
+            ));
+        };
+        *listener_url = Value::String(original.to_owned());
+    }
+
+    Ok(())
 }
 
 fn effective_config_from_state(state: &AdminState) -> Config {

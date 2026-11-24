@@ -237,7 +237,20 @@ async fn open_postgres(
         .connect_with(connect_options)
         .await
         .map_err(|error| connection_error_with_host(url, error))?;
-    run_postgres_scheduler_setup(&direct_connect_options).await?;
+    let expected_database = if storage_pool.listener_url.is_some() {
+        Some(
+            sqlx::query_scalar::<_, String>("SELECT current_database()")
+                .fetch_one(&pool)
+                .await
+                .map_err(|error| connection_error_with_host(url, error))?,
+        )
+    } else {
+        None
+    };
+    run_postgres_scheduler_setup(&direct_connect_options, expected_database.as_deref()).await?;
+    if pgbouncer_tx_pooling {
+        ensure_pooled_hstore_visible(&pool, &direct_connect_options).await?;
+    }
     let listener_pool = PgPoolOptions::new()
         .max_connections(2)
         .min_connections(0)
@@ -307,30 +320,179 @@ fn parse_ssl_mode(value: &str) -> Result<sqlx::postgres::PgSslMode, SchedulerFac
 }
 
 #[cfg(feature = "postgres")]
+fn quote_pg_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+#[cfg(feature = "postgres")]
+async fn resolve_or_create_hstore_schema(
+    conn: &mut sqlx::PgConnection,
+) -> Result<String, SchedulerFactoryError> {
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT n.nspname::text \
+         FROM pg_extension e \
+         JOIN pg_namespace n ON n.oid = e.extnamespace \
+         WHERE e.extname = 'hstore'",
+    )
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(migration_error)?;
+    if let Some(schema) = existing {
+        return Ok(schema);
+    }
+    // Install BEFORE switching search_path so PostgreSQL places hstore in the
+    // role/database default schema (typically public), keeping it resolvable on
+    // transaction-pooled connections that do not run SET search_path.
+    sqlx::query("CREATE EXTENSION IF NOT EXISTS hstore")
+        .execute(&mut *conn)
+        .await
+        .map_err(migration_error)?;
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT n.nspname::text \
+         FROM pg_extension e \
+         JOIN pg_namespace n ON n.oid = e.extnamespace \
+         WHERE e.extname = 'hstore'",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(migration_error)?
+    .ok_or_else(|| SchedulerFactoryError::MigrationFailed {
+        message: "hstore extension was not found after CREATE EXTENSION IF NOT EXISTS hstore"
+            .to_owned(),
+    })
+}
+
+#[cfg(feature = "postgres")]
+async fn ensure_pooled_hstore_visible(
+    pool: &sqlx::PgPool,
+    direct_connect_options: &sqlx::postgres::PgConnectOptions,
+) -> Result<(), SchedulerFactoryError> {
+    let hstore_visible: bool = sqlx::query_scalar("SELECT to_regtype('hstore') IS NOT NULL")
+        .fetch_one(pool)
+        .await
+        .map_err(migration_error)?;
+    if hstore_visible {
+        return Ok(());
+    }
+
+    let pooled_schema: Option<String> = sqlx::query_scalar("SELECT current_schema()")
+        .fetch_one(pool)
+        .await
+        .map_err(migration_error)?;
+    if let Some(target_schema) = pooled_schema
+        .as_deref()
+        .filter(|schema| *schema != "cc_lb_scheduler")
+    {
+        let target_schema = target_schema.to_owned();
+        let direct_options = direct_connect_options.clone();
+        tokio::spawn(async move {
+            use sqlx::Connection as _;
+
+            let mut conn = sqlx::PgConnection::connect_with(&direct_options)
+                .await
+                .map_err(migration_error)?;
+            sqlx::query("SELECT pg_advisory_lock($1)")
+                .bind(SCHEDULER_SETUP_LOCK_KEY)
+                .execute(&mut conn)
+                .await
+                .map_err(migration_error)?;
+            let outcome: Result<(), SchedulerFactoryError> = async {
+                let ext_schema: Option<String> = sqlx::query_scalar(
+                    "SELECT n.nspname::text \
+                     FROM pg_extension e \
+                     JOIN pg_namespace n ON n.oid = e.extnamespace \
+                     WHERE e.extname = 'hstore'",
+                )
+                .fetch_optional(&mut conn)
+                .await
+                .map_err(migration_error)?;
+                if ext_schema.as_deref() == Some("cc_lb_scheduler") {
+                    let sql = format!(
+                        "ALTER EXTENSION hstore SET SCHEMA {}",
+                        quote_pg_ident(&target_schema)
+                    );
+                    sqlx::query(sqlx::AssertSqlSafe(sql))
+                        .execute(&mut conn)
+                        .await
+                        .map_err(migration_error)?;
+                }
+                Ok(())
+            }
+            .await;
+            let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(SCHEDULER_SETUP_LOCK_KEY)
+                .execute(&mut conn)
+                .await;
+            outcome
+        })
+        .await
+        .map_err(migration_error)??;
+    }
+
+    let hstore_visible_after: bool = sqlx::query_scalar("SELECT to_regtype('hstore') IS NOT NULL")
+        .fetch_one(pool)
+        .await
+        .map_err(migration_error)?;
+    if hstore_visible_after {
+        return Ok(());
+    }
+    Err(SchedulerFactoryError::MigrationFailed {
+        message: "PostgreSQL `hstore` type is not visible on transaction-pooled scheduler connections; relocate it with `ALTER EXTENSION hstore SET SCHEMA public;` (or append `cc_lb_scheduler` after the application schema on the role `search_path`)".to_owned(),
+    })
+}
+
+#[cfg(feature = "postgres")]
 async fn run_postgres_scheduler_setup(
     connect_options: &sqlx::postgres::PgConnectOptions,
+    expected_database: Option<&str>,
 ) -> Result<(), SchedulerFactoryError> {
     let connect_options = connect_options.clone();
+    let expected_database = expected_database.map(str::to_owned);
     tokio::spawn(async move {
         use sqlx::Connection as _;
 
         let mut conn = sqlx::PgConnection::connect_with(&connect_options)
             .await
             .map_err(migration_error)?;
-        sqlx::query("SET search_path = cc_lb_scheduler, apalis, public")
-            .execute(&mut conn)
-            .await
-            .map_err(migration_error)?;
+        if let Some(expected_database) = expected_database.as_deref() {
+            let direct_database: String = sqlx::query_scalar("SELECT current_database()")
+                .fetch_one(&mut conn)
+                .await
+                .map_err(migration_error)?;
+            if direct_database != expected_database {
+                return Err(SchedulerFactoryError::ConnectionFailed {
+                    message: format!(
+                        "storage.url ({expected_database}) and storage.pool.listener_url ({direct_database}) resolve to different PostgreSQL databases"
+                    ),
+                });
+            }
+        }
         sqlx::query("SELECT pg_advisory_lock($1)")
             .bind(SCHEDULER_SETUP_LOCK_KEY)
             .execute(&mut conn)
             .await
             .map_err(migration_error)?;
-        sqlx::query("CREATE SCHEMA IF NOT EXISTS cc_lb_scheduler")
-            .execute(&mut conn)
-            .await
-            .map_err(migration_error)?;
         let setup_result: Result<(), SchedulerFactoryError> = async {
+            let hstore_schema = resolve_or_create_hstore_schema(&mut conn).await?;
+            sqlx::query("CREATE SCHEMA IF NOT EXISTS cc_lb_scheduler")
+                .execute(&mut conn)
+                .await
+                .map_err(migration_error)?;
+            let search_path = if matches!(
+                hstore_schema.as_str(),
+                "cc_lb_scheduler" | "apalis" | "public"
+            ) {
+                "SET search_path = cc_lb_scheduler, apalis, public".to_owned()
+            } else {
+                format!(
+                    "SET search_path = cc_lb_scheduler, apalis, {}, public",
+                    quote_pg_ident(&hstore_schema)
+                )
+            };
+            sqlx::query(sqlx::AssertSqlSafe(search_path))
+                .execute(&mut conn)
+                .await
+                .map_err(migration_error)?;
             reconcile_pre_1_0_apalis_migration_history(&mut conn).await?;
             let migrator = apalis_postgres::PostgresStorage::<()>::migrations();
             migrator

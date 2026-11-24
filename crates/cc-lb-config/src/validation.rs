@@ -249,6 +249,13 @@ fn validate_storage(config: &Config) -> Result<(), ConfigError> {
                 )
                 .into());
             }
+            if pool.pgbouncer_transaction_pooling && pool.statement_cache_capacity == Some(0) {
+                return Err(ValidationError::new(
+                    "storage.pool.statement_cache_capacity",
+                    "statement_cache_capacity must be greater than 0 when pgbouncer_transaction_pooling is enabled (SQLx 0.9 requires PgBouncer >= 1.21 prepared-statement tracking with a bounded cache)",
+                )
+                .into());
+            }
             if pool.statement_timeout_secs >= config.timeouts.upstream_total_secs {
                 return Err(ConfigError::StatementTimeoutExceedsRequestTimeout {
                     statement: pool.statement_timeout_secs,

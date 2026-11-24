@@ -85,7 +85,10 @@ async fn editor_reports_read_only_parent() {
 async fn editor_redacts_storage_url_as_whole_value() {
     let (dir, storage) = temp_storage().await;
     let secret = "postgres://secret-user:secret-password@localhost/secret-db";
-    let raw = format!("[storage]\nkind = \"postgres\"\nurl = \"{secret}\"\n");
+    let listener_secret = "postgres://listener-user:listener-password@direct-db/secret-db";
+    let raw = format!(
+        "[storage]\nkind = \"postgres\"\nurl = \"{secret}\"\n\n[storage.pool]\nlistener_url = \"{listener_secret}\"\n"
+    );
     let path = dir.path().join("cc-lb.toml");
     fs::write(&path, &raw).unwrap();
     let config = cc_lb_config::Config::from_stored_toml(&raw).unwrap();
@@ -98,10 +101,20 @@ async fn editor_redacts_storage_url_as_whole_value() {
         cc_lb_config::STORAGE_URL_REDACTION_SENTINEL
     );
     assert_eq!(
+        json["file_config"]["storage"]["pool"]["listener_url"],
+        cc_lb_config::STORAGE_URL_REDACTION_SENTINEL
+    );
+    assert_eq!(
         json["effective_config"]["storage"]["url"],
         cc_lb_config::STORAGE_URL_REDACTION_SENTINEL
     );
-    assert!(!String::from_utf8_lossy(&bytes).contains(secret));
+    assert_eq!(
+        json["effective_config"]["storage"]["pool"]["listener_url"],
+        cc_lb_config::STORAGE_URL_REDACTION_SENTINEL
+    );
+    let serialized = String::from_utf8_lossy(&bytes);
+    assert!(!serialized.contains(secret));
+    assert!(!serialized.contains(listener_secret));
 }
 
 #[tokio::test]

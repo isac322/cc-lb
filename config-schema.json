@@ -982,7 +982,7 @@
           "minimum": 0
         },
         "pgbouncer_transaction_pooling": {
-          "description": "Configure connections for PgBouncer transaction pooling (disables prepared-statement caching unless `statement_cache_capacity` is explicitly set and skips session-level `SET` statements in `after_connect`).",
+          "description": "Configure connections for PgBouncer transaction pooling (requires PgBouncer >= 1.21 with `max_prepared_statements > 0`, defaults `statement_cache_capacity` to `100` while rejecting `0`, and skips session-level `SET` statements in `after_connect`).",
           "type": "boolean"
         },
         "sslmode": {
@@ -993,7 +993,7 @@
           ]
         },
         "statement_cache_capacity": {
-          "description": "Optional SQLx prepared-statement cache capacity override (`0` disables prepared statement caching).",
+          "description": "Optional SQLx prepared-statement cache capacity override (must be greater than `0` when `pgbouncer_transaction_pooling` is enabled).",
           "type": [
             "integer",
             "null"
@@ -1011,7 +1011,8 @@
           "type": "boolean",
           "default": true
         }
-      }
+      },
+      "additionalProperties": false
     },
     "PriceCatalogConfig": {
       "type": "object",

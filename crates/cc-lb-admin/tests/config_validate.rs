@@ -236,6 +236,95 @@ async fn transient_storage_url_replacement_populates_an_absent_file_field() {
 }
 
 #[tokio::test]
+async fn storage_listener_url_sentinel_restores_from_file_or_requires_replacement() {
+    let (dir, storage) = temp_storage().await;
+    let secret = "postgres://user:pass@localhost/db";
+    let listener_secret = "postgres://listener-user:listener-pass@direct-db/db";
+    let raw = format!(
+        "[storage]\nkind = \"postgres\"\nurl = \"{secret}\"\n\n[storage.pool]\npgbouncer_transaction_pooling = true\nlistener_url = \"{listener_secret}\"\n"
+    );
+    let path = dir.path().join("cc-lb.toml");
+    std::fs::write(&path, &raw).unwrap();
+    let file_config = cc_lb_config::Config::from_stored_toml(&raw).unwrap();
+    let app_with_listener = config_admin_common::app(
+        config_admin_common::test_state_with_config_path(file_config, Some(storage), path),
+    );
+    let editor = authed_json(
+        app_with_listener.clone(),
+        "GET",
+        "/admin/v1/config/editor",
+        None,
+    )
+    .await
+    .2;
+    let mut draft = editor["file_config"].clone();
+    let _ = authed_json(
+        app_with_listener.clone(),
+        "PUT",
+        "/admin/v1/config/draft",
+        Some(put_body(draft.clone(), 0)),
+    )
+    .await;
+    let (_, _, restored, bytes) = authed_json(
+        app_with_listener,
+        "POST",
+        "/admin/v1/config/draft/validate",
+        Some(json!({ "expected_revision": 1 })),
+    )
+    .await;
+    assert_eq!(restored["file"]["valid"], true, "{restored}");
+    assert_eq!(restored["effective"]["valid"], true, "{restored}");
+    let body = String::from_utf8_lossy(&bytes);
+    assert!(!body.contains(secret));
+    assert!(!body.contains(listener_secret));
+
+    // When the current file has no storage.pool.listener_url, keeping the sentinel
+    // requires an explicit transient storage_listener_url_replacement.
+    let (dir2, storage2) = temp_storage().await;
+    let app_without_listener = app_with_file(&dir2, storage2);
+    draft["storage"]["pool"]["pgbouncer_transaction_pooling"] = json!(true);
+    let _ = authed_json(
+        app_without_listener.clone(),
+        "PUT",
+        "/admin/v1/config/draft",
+        Some(put_body(draft, 0)),
+    )
+    .await;
+    let (_, _, missing, _) = authed_json(
+        app_without_listener.clone(),
+        "POST",
+        "/admin/v1/config/draft/validate",
+        Some(json!({
+            "expected_revision": 1,
+            "storage_url_replacement": secret,
+        })),
+    )
+    .await;
+    assert_eq!(
+        missing["file"]["issues"][0]["path"],
+        "storage.pool.listener_url"
+    );
+    assert_eq!(
+        missing["file"]["issues"][0]["code"],
+        "secret_source_missing"
+    );
+
+    let (_, _, replaced, replaced_bytes) = authed_json(
+        app_without_listener,
+        "POST",
+        "/admin/v1/config/draft/validate",
+        Some(json!({
+            "expected_revision": 1,
+            "storage_url_replacement": secret,
+            "storage_listener_url_replacement": listener_secret,
+        })),
+    )
+    .await;
+    assert_eq!(replaced["file"]["valid"], true, "{replaced}");
+    assert!(!String::from_utf8_lossy(&replaced_bytes).contains(listener_secret));
+}
+
+#[tokio::test]
 async fn stale_validate_revision_returns_conflict() {
     let (dir, storage) = temp_storage().await;
     let app = app_with_file(&dir, storage);

@@ -133,7 +133,10 @@ pgbouncer_transaction_pooling = true
         pool.effective_listener_url(url),
         "postgres://primary.internal:5432/cclb"
     );
-    assert_eq!(pool.effective_statement_cache_capacity(), Some(0));
+    assert_eq!(
+        pool.effective_statement_cache_capacity(),
+        Some(cc_lb_config::DEFAULT_PGBOUNCER_STATEMENT_CACHE_CAPACITY)
+    );
 
     let invalid = Config {
         storage: StorageConfig::Postgres {
@@ -150,6 +153,46 @@ pgbouncer_transaction_pooling = true
         invalid.validate().is_err(),
         "pgbouncer_transaction_pooling without listener_url must fail validation"
     );
+
+    let zero_cache = Config {
+        storage: StorageConfig::Postgres {
+            url: "postgres://pgbouncer.internal:6432/cclb".to_owned(),
+            pool: PostgresPoolConfig {
+                pgbouncer_transaction_pooling: true,
+                listener_url: Some("postgres://primary.internal:5432/cclb".to_owned()),
+                statement_cache_capacity: Some(0),
+                ..PostgresPoolConfig::default()
+            },
+        },
+        ..Config::default()
+    };
+    let error = zero_cache.validate().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ConfigError::Validation(ref validation)
+                if validation.field == "storage.pool.statement_cache_capacity"
+        ),
+        "pgbouncer_transaction_pooling with statement_cache_capacity = 0 must fail validation: {error}"
+    );
+
+    let bounded_cache = Config {
+        storage: StorageConfig::Postgres {
+            url: "postgres://pgbouncer.internal:6432/cclb".to_owned(),
+            pool: PostgresPoolConfig {
+                pgbouncer_transaction_pooling: true,
+                listener_url: Some("postgres://primary.internal:5432/cclb".to_owned()),
+                statement_cache_capacity: Some(64),
+                ..PostgresPoolConfig::default()
+            },
+        },
+        ..Config::default()
+    };
+    bounded_cache.validate().unwrap();
+    let StorageConfig::Postgres { ref pool, .. } = bounded_cache.storage else {
+        panic!("expected postgres storage");
+    };
+    assert_eq!(pool.effective_statement_cache_capacity(), Some(64));
 }
 
 #[test]

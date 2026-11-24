@@ -412,6 +412,45 @@ async fn upstream_and_plan_metadata_emit_notifications(
     .await?;
     expect_upstream_notification(&mut listener, &warmup.id.to_string()).await?;
 
+    // Repeated identical validation errors and timestamp-only status writes
+    // must NOT emit cclb_upstream_changed notifications (avoids rebuild loops).
+    UpstreamStore::set_status(
+        storage,
+        warmup.id,
+        UpstreamStatusUpdate {
+            last_apply_error: Some(Some("test-err".to_owned())),
+            last_apply_at_unix_secs: Some(Some(1_900_000_005)),
+            ..UpstreamStatusUpdate::default()
+        },
+    )
+    .await?;
+    UpstreamStore::set_status(
+        storage,
+        warmup.id,
+        UpstreamStatusUpdate {
+            last_warmup_at_unix_secs: Some(Some(1_900_000_006)),
+            ..UpstreamStatusUpdate::default()
+        },
+    )
+    .await?;
+    sqlx::query("SELECT pg_notify('cclb_upstream_changed', $1)")
+        .bind("sentinel-no-status-noise")
+        .execute(pool)
+        .await?;
+    loop {
+        let notification = tokio::time::timeout(Duration::from_secs(10), listener.recv())
+            .await
+            .context("sentinel notification was not delivered")??;
+        if notification.channel() == "cclb_upstream_changed" {
+            ensure!(
+                notification.payload() == "sentinel-no-status-noise",
+                "unexpected upstream notification before sentinel: {}",
+                notification.payload()
+            );
+            break;
+        }
+    }
+
     let cleared = UpstreamStore::clear_warmup_dialect_plugin(storage, warmup.id, warmup.revision)
         .await?
         .context("warmup cleared")?;
@@ -442,7 +481,7 @@ async fn upstream_and_plan_metadata_emit_notifications(
         },
     )
     .await?;
-    expect_upstream_notification(&mut listener, "org-notify-h05").await?;
+    expect_upstream_notification(&mut listener, "organization_metadata:org-notify-h05").await?;
 
     UpstreamSubscriptionMetadataStore::put_upstream_subscription_metadata(
         storage,
@@ -458,7 +497,11 @@ async fn upstream_and_plan_metadata_emit_notifications(
         },
     )
     .await?;
-    expect_upstream_notification(&mut listener, &warmup.id.to_string()).await?;
+    expect_upstream_notification(
+        &mut listener,
+        &format!("subscription_metadata:{}", warmup.id),
+    )
+    .await?;
 
     PlanTierStore::append_upstream_plan_tier(
         storage,
@@ -479,7 +522,7 @@ async fn upstream_and_plan_metadata_emit_notifications(
         },
     )
     .await?;
-    expect_upstream_notification(&mut listener, &warmup.id.to_string()).await?;
+    expect_upstream_notification(&mut listener, &format!("plan_tier:{}", warmup.id)).await?;
 
     UpstreamStore::soft_delete(storage, warmup.id, cleared.revision).await?;
     expect_upstream_notification(&mut listener, &warmup.id.to_string()).await?;

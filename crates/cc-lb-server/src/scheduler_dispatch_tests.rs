@@ -5009,9 +5009,8 @@ async fn postgres_idle_keepalive_worker_renews_session_before_expiry() {
                 .fetch_all(&pg_pool)
                 .await
                 .expect("find postgres scheduler listeners");
-                // All three consumers listen on the same channel. Drop every listener
-                // in this isolated database so the keepalive listener is included.
-                if worker_types >= 3 && listener_pids.len() >= 3 {
+                // All three consumers share a single PostgresInsertFanout listener.
+                if worker_types >= 3 && listener_pids.len() == 1 {
                     break listener_pids;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -5053,8 +5052,8 @@ async fn postgres_idle_keepalive_worker_renews_session_before_expiry() {
         .await
         .expect("terminate postgres scheduler listeners");
         assert!(
-            terminated.len() >= 3 && terminated.iter().all(|t| *t),
-            "all three postgres scheduler listeners must terminate"
+            terminated.len() == 1 && terminated.iter().all(|t| *t),
+            "shared postgres scheduler listener must terminate"
         );
         tokio::time::timeout(Duration::from_secs(10), grabber)
             .await

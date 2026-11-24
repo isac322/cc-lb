@@ -20,6 +20,45 @@ pub trait ApalisPostSetupMigrationDatabase: Database {
 }
 
 #[cfg(feature = "sqlite")]
+async fn seed_sqlite_legacy_ledger_atomically(
+    conn: &mut sqlx::SqliteConnection,
+    migrator: &sqlx::migrate::Migrator,
+) -> Result<()> {
+    use sqlx::Connection as _;
+
+    let mut tx = conn.begin().await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS _cc_lb_scheduler_migrations (
+            version BIGINT PRIMARY KEY,
+            description TEXT NOT NULL,
+            installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            success BOOLEAN NOT NULL,
+            checksum BLOB NOT NULL,
+            execution_time BIGINT NOT NULL
+        )",
+    )
+    .execute(&mut *tx)
+    .await?;
+    for migration in migrator.iter().filter(|migration| {
+        !migration.migration_type.is_down_migration()
+            && migration.version <= LATEST_SQLITE_POST_SETUP_VERSION
+    }) {
+        sqlx::query(
+            "INSERT INTO _cc_lb_scheduler_migrations
+                (version, description, success, checksum, execution_time)
+             VALUES (?1, ?2, TRUE, ?3, -1)",
+        )
+        .bind(migration.version)
+        .bind(migration.description.as_ref())
+        .bind(migration.checksum.as_ref())
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
 impl ApalisPostSetupMigrationDatabase for sqlx::Sqlite {
     async fn apply_post_setup(pool: &Pool<Self>) -> Result<()> {
         let mut conn = pool.acquire().await?;
@@ -40,11 +79,7 @@ impl ApalisPostSetupMigrationDatabase for sqlx::Sqlite {
         .await?;
 
         if !ledger_exists && pre_ledger_sqlite_migrations_applied(&mut conn).await? {
-            migrator
-                .run_direct(Some(LATEST_SQLITE_POST_SETUP_VERSION), &mut *conn, true)
-                .await
-                .map_err(|err| SchedulerError::Database(err.into()))?;
-            return Ok(());
+            seed_sqlite_legacy_ledger_atomically(&mut conn, &migrator).await?;
         }
 
         migrator
@@ -129,6 +164,45 @@ impl ApalisPostSetupMigrationDatabase for sqlx::Postgres {
 }
 
 #[cfg(feature = "postgres")]
+async fn seed_postgres_legacy_ledger_atomically(
+    conn: &mut sqlx::PgConnection,
+    migrator: &sqlx::migrate::Migrator,
+) -> Result<()> {
+    use sqlx::Connection as _;
+
+    let mut tx = conn.begin().await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS cc_lb_scheduler._sqlx_post_setup_migrations (
+            version BIGINT PRIMARY KEY,
+            description TEXT NOT NULL,
+            installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+            success BOOLEAN NOT NULL,
+            checksum BYTEA NOT NULL,
+            execution_time BIGINT NOT NULL
+        )",
+    )
+    .execute(&mut *tx)
+    .await?;
+    for migration in migrator.iter().filter(|migration| {
+        !migration.migration_type.is_down_migration()
+            && migration.version <= LATEST_POST_SETUP_VERSION
+    }) {
+        sqlx::query(
+            "INSERT INTO cc_lb_scheduler._sqlx_post_setup_migrations
+                (version, description, success, checksum, execution_time)
+             VALUES ($1, $2, TRUE, $3, -1)",
+        )
+        .bind(migration.version)
+        .bind(migration.description.as_ref())
+        .bind(migration.checksum.as_ref())
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
 pub async fn apply_postgres_post_setup_migrations_on_conn(
     conn: &mut sqlx::PgConnection,
 ) -> Result<()> {
@@ -147,11 +221,7 @@ pub async fn apply_postgres_post_setup_migrations_on_conn(
     .await?;
 
     if !ledger_exists && pre_ledger_postgres_migrations_applied(conn).await? {
-        migrator
-            .run_direct(Some(LATEST_POST_SETUP_VERSION), conn, true)
-            .await
-            .map_err(|err| SchedulerError::Database(err.into()))?;
-        return Ok(());
+        seed_postgres_legacy_ledger_atomically(conn, &migrator).await?;
     }
 
     migrator
