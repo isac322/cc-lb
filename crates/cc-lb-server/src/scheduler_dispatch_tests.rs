@@ -5026,7 +5026,7 @@ async fn postgres_idle_keepalive_worker_renews_session_before_expiry() {
             while held.len() < 6 {
                 if let Ok(conn) = grab_pool.acquire().await {
                     held.push(conn);
-                    if held.len() >= 3
+                    if held.len() >= 5
                         && let Some(tx) = pre_held_tx.take()
                     {
                         let _ = tx.send(());

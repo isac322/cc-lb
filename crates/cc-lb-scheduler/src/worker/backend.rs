@@ -217,7 +217,6 @@ impl PostgresInsertFanout {
         cancel: tokio_util::sync::CancellationToken,
     ) {
         use backon::BackoffBuilder as _;
-        use futures_util::StreamExt as _;
 
         let make_backoff = || {
             backon::ExponentialBuilder::default()
@@ -235,10 +234,14 @@ impl PostgresInsertFanout {
             let connect = async {
                 let mut listener =
                     apalis_postgres::PgListener::connect_with(&listener_pool).await?;
+                // Disable sqlx's eager reconnect inside `try_recv()` so any dropped
+                // connection drops the `PgListener` (releasing its pool slot immediately)
+                // and goes through our cancellable backoff loop before reconnecting.
+                listener.eager_reconnect(false);
                 listener.listen("apalis::job::insert").await?;
                 Ok::<_, sqlx::Error>(listener)
             };
-            let listener = tokio::select! {
+            let mut listener = tokio::select! {
                 _ = cancel.cancelled() => return,
                 res = connect => match res {
                     Ok(listener) => listener,
@@ -252,12 +255,11 @@ impl PostgresInsertFanout {
                 }
             };
             backoff = make_backoff();
-            let mut stream = listener.into_stream().boxed();
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => return,
-                    item = stream.next() => match item {
-                        Some(Ok(notification)) => {
+                    item = listener.try_recv() => match item {
+                        Ok(Some(notification)) => {
                             if let Ok(event) = serde_json::from_str::<apalis_postgres::InsertEvent>(
                                 notification.payload(),
                             ) {
@@ -272,10 +274,11 @@ impl PostgresInsertFanout {
                                 });
                             }
                         }
-                        Some(Err(_)) | None => break,
+                        Ok(None) | Err(_) => break,
                     }
                 }
             }
+            drop(listener);
             let delay = backoff.next().unwrap_or(PUBSUB_RECONNECT_INTERVAL);
             tokio::select! {
                 _ = cancel.cancelled() => return,
