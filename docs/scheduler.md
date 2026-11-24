@@ -142,7 +142,7 @@ When deploying behind PgBouncer in transaction pooling mode (`storage.pool.pgbou
 
 - Configure `storage.pool.listener_url` to a direct PostgreSQL DSN (bypassing PgBouncer) so `LISTEN/NOTIFY`, startup migrations, and advisory locks remain session-pinned.
 - Use PgBouncer 1.21 or newer with `max_prepared_statements > 0` (at least `storage.pool.statement_cache_capacity`, `>= 200` recommended) and a bounded non-zero `storage.pool.statement_cache_capacity` (defaults to `100`; `0` is rejected because SQLx 0.9 sends named `Parse`+`Sync` before `Bind`).
-- Session-level `SET` statements (`statement_timeout`, `idle_in_transaction_session_timeout`, and `search_path`) are skipped in `after_connect`. Enforce timeouts in PgBouncer or PostgreSQL, and keep `hstore` on the pooled role's default `search_path` (fresh scheduler setups install `hstore` before switching `search_path` so custom application schemas remain intact).
+- Session-level `SET` statements (`statement_timeout`, `idle_in_transaction_session_timeout`, and `search_path`) are skipped in `after_connect`. Enforce timeouts in PgBouncer or PostgreSQL, and keep `hstore` on the pooled role's default `search_path` (fresh PgBouncer setups install `hstore` on the pooled role's default `search_path` before switching to `cc_lb_scheduler`, whereas unpooled setups keep fresh installations in `cc_lb_scheduler` and include any pre-installed `hstore` schema on query connections).
 
 Budget both pooled and direct sessions across all replicas:
 

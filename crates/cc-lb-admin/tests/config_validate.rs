@@ -419,3 +419,101 @@ async fn env_only_required_value_is_a_file_warning_and_valid_effective_value() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[tokio::test]
+async fn env_only_listener_url_is_a_file_warning_and_allows_saving() {
+    const LISTENER_CHILD: &str = "CC_LB_ADMIN_CONFIG_ENV_LISTENER_CHILD";
+    if let Ok(mode) = std::env::var(LISTENER_CHILD) {
+        let (dir, storage) = temp_storage().await;
+        let secret_url = "postgres://primary-user:primary-pass@pooler/db";
+        let raw = format!("[storage]\nkind = \"postgres\"\nurl = \"{secret_url}\"\n");
+        let path = dir.path().join("cc-lb.toml");
+        std::fs::write(&path, &raw).unwrap();
+        let file_config = cc_lb_config::Config::from_stored_toml(&raw).unwrap();
+        let app = config_admin_common::app(config_admin_common::test_state_with_config_path(
+            file_config,
+            Some(storage),
+            path.clone(),
+        ));
+        let (_, _, editor, _) =
+            authed_json(app.clone(), "GET", "/admin/v1/config/editor", None).await;
+        let expected_fingerprint = editor["file"]["fingerprint"].clone();
+        let mut draft = editor["file_config"].clone();
+        draft["storage"]["pool"] = json!({
+            "pgbouncer_transaction_pooling": true,
+        });
+        let _ = authed_json(
+            app.clone(),
+            "PUT",
+            "/admin/v1/config/draft",
+            Some(put_body(draft, 0)),
+        )
+        .await;
+        let (status, _, report, _) = authed_json(
+            app.clone(),
+            "POST",
+            "/admin/v1/config/draft/validate",
+            Some(json!({ "expected_revision": 1 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(report["file"]["valid"], true, "{report}");
+        assert!(
+            report["file"]["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|issue| {
+                    issue["path"] == "storage.pool.listener_url"
+                        && issue["code"] == "env_supplied_required_value"
+                        && issue["severity"] == "warning"
+                }),
+            "expected env_supplied_required_value warning: {report}"
+        );
+        if mode == "valid" {
+            assert_eq!(report["effective"]["valid"], true, "{report}");
+            let (save_status, _, saved, _) = authed_json(
+                app,
+                "POST",
+                "/admin/v1/config/save",
+                Some(json!({
+                    "expected_revision": 1,
+                    "expected_fingerprint": expected_fingerprint,
+                    "confirm_self_lockout": true,
+                })),
+            )
+            .await;
+            assert_eq!(save_status, StatusCode::OK, "{saved}");
+            let saved_toml = std::fs::read_to_string(&path).unwrap();
+            assert!(saved_toml.contains("pgbouncer_transaction_pooling = true"));
+            assert!(saved_toml.contains(secret_url));
+            assert!(!saved_toml.contains("listener_url"));
+            assert!(!saved_toml.contains("listener-pass"));
+        } else {
+            assert_eq!(report["effective"]["valid"], false, "{report}");
+        }
+        return;
+    }
+
+    for (mode, listener_env) in [
+        (
+            "valid",
+            "postgres://listener-user:listener-pass@direct-db/db",
+        ),
+        ("invalid", "not-a-postgres-url"),
+    ] {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("config_validate::env_only_listener_url_is_a_file_warning_and_allows_saving")
+            .env(LISTENER_CHILD, mode)
+            .env("CC_LB_STORAGE__POOL__LISTENER_URL", listener_env)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child ({mode}) failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

@@ -574,7 +574,30 @@ fn materialize_and_validate(
 
 fn validate_file_config(toml: &str, overrides: &[ConfigOverrideInfo]) -> ConfigValidationResult {
     match Config::from_stored_toml(toml) {
-        Ok(config) => validate_editor_config(&config),
+        Ok(mut config) => {
+            let env_supplied_listener_url = matches!(
+                &config.storage,
+                StorageConfig::Postgres { pool, .. }
+                    if pool.pgbouncer_transaction_pooling && pool.listener_url.is_none()
+            ) && overrides
+                .iter()
+                .any(|source| source.path == "storage.pool.listener_url");
+            if env_supplied_listener_url
+                && let StorageConfig::Postgres { pool, .. } = &mut config.storage
+            {
+                // Satisfy the cross-field presence rule while still running all other file checks.
+                pool.listener_url = Some("postgres://env-override.invalid/cc_lb".to_owned());
+            }
+            let mut result = validate_editor_config(&config);
+            if env_supplied_listener_url {
+                result.issues.push(warning_issue(
+                    "storage.pool.listener_url",
+                    "env_supplied_required_value",
+                    "storage.pool.listener_url is supplied by an active override and is not stored in the file",
+                ));
+            }
+            result
+        }
         Err(error) => {
             let mut issues = config_error_issues(error);
             for issue in &mut issues {
@@ -875,10 +898,14 @@ fn storage_listener_url(value: &Value) -> Option<&str> {
 }
 
 fn redact_storage_url(value: &mut Value) {
-    if let Some(url) = storage_url_mut(value) {
+    if let Some(url) = storage_url_mut(value)
+        && url.is_string()
+    {
         *url = Value::String(STORAGE_URL_REDACTION_SENTINEL.to_owned());
     }
-    if let Some(listener_url) = storage_listener_url_mut(value) {
+    if let Some(listener_url) = storage_listener_url_mut(value)
+        && listener_url.is_string()
+    {
         *listener_url = Value::String(STORAGE_URL_REDACTION_SENTINEL.to_owned());
     }
 }
