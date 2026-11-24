@@ -2298,3 +2298,90 @@ async fn scheduled_oauth_refresh_retains_lease_when_shutdown_cancels_after_provi
         server.abort();
     }
 }
+
+#[tokio::test]
+async fn scheduled_oauth_refresh_uses_persisted_lease_expiry_after_lost_renewal_ack() {
+    use cc_lb_storage_api::MetaStore;
+    use tokio::sync::watch;
+
+    let (allow_tx, allow_rx) = watch::channel(false);
+    let (endpoint, calls, mut entered_rx, _sent_rx, server) = spawn_controlled_token_server(
+        allow_rx,
+        StatusCode::GATEWAY_TIMEOUT,
+        r#"{"error":"gateway_timeout"}"#,
+    )
+    .await;
+    let mut fixture = DispatchFixture::new().await;
+    set_token_endpoint(&mut fixture, endpoint);
+    let upstream = fixture.oauth_upstream(false).await;
+    let starting_gen = upstream.oauth_token_generation;
+    let lease_key = crate::refresh::oauth_refresh_lease_meta_key(upstream.id);
+    let now = cc_lb_clock::unix_secs(fixture.clock.now());
+    let lease = crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+        fixture.storage.clone(),
+        fixture.storage.clone(),
+        upstream.id,
+        starting_gen,
+        now,
+    )
+    .await
+    .expect("lease acquire succeeds")
+    .expect("lease is free");
+
+    let exchange_handle = fixture.dispatch.spawn_leased_oauth_refresh(
+        OAuthRefreshJob::new(upstream.id),
+        lease,
+        fixture.dispatch.replica_id.expect("replica id set"),
+        starting_gen,
+        None,
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        entered_rx.wait_for(|&entered| entered),
+    )
+    .await
+    .expect("provider request enters within 2s")
+    .expect("entered watch stays open");
+
+    // Simulate a renewal committed in storage at now+115 whose acknowledgement and probe both
+    // failed, leaving the local heartbeat with an earlier now+90 expiry.
+    let initial_held = fixture
+        .storage
+        .get_meta_value(&lease_key)
+        .await
+        .expect("read initial lease")
+        .expect("initial lease present");
+    let parts: Vec<&str> = initial_held.split(':').collect();
+    assert_eq!(parts.len(), 4);
+    let renewed_expiry = now + 115;
+    let renewed_held = format!("held:{}:{}:{renewed_expiry}", parts[1], parts[2]);
+    fixture
+        .storage
+        .put_meta_value(&lease_key, &renewed_held)
+        .await
+        .expect("persist renewed expiry in storage");
+
+    allow_tx.send_replace(true);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), exchange_handle)
+        .await
+        .expect("scheduled refresh completes within 2s")
+        .expect("spawned task joins")
+        .expect("504 response maps to Retry");
+    assert_eq!(
+        outcome,
+        JobOutcome::Retry {
+            delay: Some(std::time::Duration::from_secs(116)),
+        }
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture
+            .storage
+            .get_meta_value(&lease_key)
+            .await
+            .expect("read retained renewed meta")
+            .as_deref(),
+        Some(renewed_held.as_str())
+    );
+    server.abort();
+}

@@ -800,6 +800,274 @@ async fn scheduled_oauth_refresh_retries_after_retained_503_lease_expiry_without
         .expect("worker task");
 }
 
+#[cfg(all(test, feature = "storage-sqlite"))]
+#[tokio::test]
+async fn scheduled_oauth_refresh_defers_non_conflict_commit_storage_error_past_retained_lease() {
+    use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
+    use cc_lb_clock::{Clock, TestClock, unix_secs};
+    use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
+    use cc_lb_scheduler::worker::{
+        AdaptiveJob, SchedulerBackend, SchedulerCtx, SchedulerPushTask, build_adaptive_worker,
+    };
+    use cc_lb_storage_api::{MetaStore, UpstreamStore};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct AbortOnDrop {
+        cancel: CancellationToken,
+        worker: tokio::task::JoinHandle<()>,
+        endpoint: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.cancel.cancel();
+            self.worker.abort();
+            self.endpoint.abort();
+        }
+    }
+
+    async fn wait_for_oauth_job(
+        pool: &sqlx::SqlitePool,
+        key: &str,
+        min_attempts: i64,
+        expected_status: &str,
+    ) -> (i64, i64) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let row: Option<(String, i64, i64)> = sqlx::query_as(
+                    "SELECT status, attempts, run_at FROM Jobs WHERE idempotency_key = ?",
+                )
+                .bind(key)
+                .fetch_optional(pool)
+                .await
+                .expect("read job row");
+                if let Some((status, attempts, run_at)) = row
+                    && attempts >= min_attempts
+                    && !matches!(status.as_str(), "Queued" | "Running")
+                {
+                    assert_eq!(status, expected_status);
+                    break (attempts, run_at);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("oauth job settles within 30s")
+    }
+
+    let fixture = Fixture::new().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let endpoint_calls = Arc::clone(&calls);
+    let router = axum::Router::new().route(
+        "/oauth/token",
+        axum::routing::post(move || {
+            let ordinal = endpoint_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            async move {
+                (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "access_token": format!("sk-ant-oat01-commit-err-{ordinal}"),
+                        "refresh_token": format!("sk-ant-ort01-commit-err-{ordinal}"),
+                        "expires_in": 3600,
+                        "token_type": "Bearer"
+                    })),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind oauth token endpoint");
+    let endpoint_url = format!(
+        "http://{}/oauth/token",
+        listener.local_addr().expect("endpoint address")
+    );
+    let endpoint = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .await
+            .expect("serve oauth endpoint");
+    });
+
+    const START_UNIX: u64 = 1_800_000_000;
+    let test_clock = Arc::new(TestClock::new_at_secs(START_UNIX));
+    let mut dispatch = fixture.dispatch(Arc::new(FailingPusher));
+    dispatch.clock = test_clock.clone();
+    let mut oauth_cfg = dispatch.oauth_cfg.as_ref().clone();
+    oauth_cfg.token_url = endpoint_url.parse().expect("parse token url");
+    dispatch.oauth_cfg = Arc::new(oauth_cfg);
+    dispatch.replica_id = Some(Uuid::new_v4());
+
+    let upstream = UpstreamStore::get_by_id(fixture.storage.as_ref(), fixture.upstream_id)
+        .await
+        .expect("load fixture upstream")
+        .expect("upstream exists");
+    let tokens = EncryptedOAuthTokens::encrypt(
+        dispatch.aead.as_ref(),
+        &OAuthTokenBundle {
+            oauth_profile: Default::default(),
+            access_token: "sk-ant-oat01-expired".to_owned(),
+            refresh_token: "sk-ant-ort01-existing".to_owned(),
+            expires_at_unix_secs: 1,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: None,
+            scopes: vec!["messages".to_owned()],
+            never_refresh: false,
+        },
+        upstream.id.as_bytes(),
+    )
+    .expect("encrypt expired token bundle");
+    fixture
+        .storage
+        .store_oauth_tokens(upstream.id, upstream.revision, tokens, false)
+        .await
+        .expect("store expired OAuth credential");
+    let starting_generation = fixture
+        .storage
+        .read_oauth_token_generation(upstream.id)
+        .await
+        .expect("read starting generation")
+        .expect("upstream exists");
+
+    sqlx::query(
+        "CREATE TRIGGER fail_oauth_token_commit \
+         BEFORE UPDATE ON upstream_oauth_token_v1 \
+         BEGIN \
+             SELECT RAISE(ABORT, 'simulated non-conflict commit storage error'); \
+         END;",
+    )
+    .execute(fixture.storage.pool())
+    .await
+    .expect("install commit failure trigger");
+
+    #[allow(clippy::infallible_destructuring_match)]
+    let pool = match &fixture.backend.backend {
+        SchedulerBackend::Sqlite(sqlite) => sqlite.pool().clone(),
+        #[cfg(feature = "storage-postgres")]
+        SchedulerBackend::Postgres(_) => panic!("expected SQLite scheduler"),
+    };
+
+    let cron_dispatch = dispatch.clone().cron_dispatch();
+    let adaptive_dispatch: cc_lb_scheduler::worker::AdaptiveDispatchFn = Arc::new(move |job| {
+        let dispatch = dispatch.clone();
+        Box::pin(async move {
+            match job {
+                cc_lb_scheduler::worker::AdaptiveJob::OAuthRefresh(_) => {
+                    dispatch.dispatch_entity(job).await
+                }
+                _ => Ok(JobOutcome::Noop),
+            }
+        })
+    });
+    let worker = build_adaptive_worker(
+        &fixture.backend.backend,
+        SchedulerCtx::new(
+            Default::default(),
+            adaptive_dispatch,
+            cron_dispatch,
+            Arc::new(SystemClock),
+        ),
+    )
+    .expect("build adaptive worker");
+    let cancel = CancellationToken::new();
+    let worker_cancel = cancel.clone();
+    let worker = tokio::spawn(async move {
+        worker
+            .run_until_cancelled(worker_cancel)
+            .await
+            .expect("run adaptive worker");
+    });
+    let mut tasks = AbortOnDrop {
+        cancel,
+        worker,
+        endpoint,
+    };
+
+    let upstream_id = upstream.id;
+    let job = OAuthRefreshJob::for_credential(upstream_id, starting_generation, 1);
+    let key = job.generation_idempotency_key(starting_generation, 1);
+    let lease_key = crate::refresh::oauth_refresh_lease_meta_key(upstream_id);
+    let real_before_attempt_1 = unix_secs(SystemClock.now());
+    fixture
+        .backend
+        .backend
+        .push_adaptive_task(SchedulerPushTask {
+            args: AdaptiveJob::OAuthRefresh(job),
+            idempotency_key: Some(key.clone()),
+            run_at_unix_secs: Some(0),
+            max_attempts: None,
+        })
+        .await
+        .expect("enqueue scheduled oauth refresh");
+
+    // Attempt 1 hits 200 OK from provider, fails non-conflict commit storage write via trigger,
+    // retains the lease, and must be persisted as Pending (not Failed) with run_at >= lease expiry.
+    let (attempts_1, run_at_1) = wait_for_oauth_job(&pool, &key, 1, "Pending").await;
+    assert_eq!(attempts_1, 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture
+            .storage
+            .read_oauth_token_generation(upstream_id)
+            .await
+            .expect("read generation after failed commit"),
+        Some(starting_generation)
+    );
+    let expected_expires_1 = START_UNIX + crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS;
+    let held_1 = fixture
+        .storage
+        .get_meta_value(&lease_key)
+        .await
+        .expect("read retained lease 1")
+        .expect("lease 1 row present");
+    assert!(held_1.starts_with(&format!("held:{starting_generation}:")));
+    assert!(held_1.ends_with(&format!(":{expected_expires_1}")));
+    assert!(
+        run_at_1
+            >= i64::try_from(real_before_attempt_1 + crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS)
+                .unwrap()
+    );
+
+    // Clear storage failure and advance past the retained lease expiry; Attempt 2 succeeds cleanly.
+    sqlx::query("DROP TRIGGER fail_oauth_token_commit")
+        .execute(fixture.storage.pool())
+        .await
+        .expect("drop commit failure trigger");
+    test_clock.advance_secs(crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1);
+    sqlx::query("UPDATE Jobs SET run_at = 0 WHERE idempotency_key = ?")
+        .bind(&key)
+        .execute(&pool)
+        .await
+        .expect("fast-forward attempt 2");
+
+    let (attempts_2, _) = wait_for_oauth_job(&pool, &key, 2, "Done").await;
+    assert_eq!(attempts_2, 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        fixture
+            .storage
+            .read_oauth_token_generation(upstream_id)
+            .await
+            .expect("read rotated generation"),
+        Some(starting_generation + 1)
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .get_meta_value(&lease_key)
+            .await
+            .expect("read idle lease")
+            .as_deref(),
+        Some(format!("idle:{}", starting_generation + 1).as_str())
+    );
+
+    tasks.cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(30), &mut tasks.worker)
+        .await
+        .expect("worker shuts down")
+        .expect("worker task");
+}
+
 #[tokio::test]
 async fn apalis_housekeeping_maintains_separate_sqlite_application_and_scheduler_files() {
     use cc_lb_clock::TestClock;
