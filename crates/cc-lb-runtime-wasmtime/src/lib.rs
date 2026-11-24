@@ -104,8 +104,12 @@ impl WasmtimeRuntime {
         self.register(HookKind::Filter, slot_key, name, wasm_bytes)
     }
 
-    /// Register (or replace) a shape-hook slot. The plugin module
-    /// must export provider-qualified `cc_lb_shape_<provider>` entrypoint(s).
+    /// Register (or replace) a shape-hook slot. The plugin module must declare
+    /// and export at least one shape-owned hook: provider-qualified
+    /// `cc_lb_shape_<provider>`, `cc_lb_transform_response_<provider>`,
+    /// `cc_lb_transform_sse_event_<provider>`, or
+    /// `cc_lb_transform_realtime_frame_<provider>` (and may additionally export
+    /// `cc_lb_shape_envelope_gemini` alongside `cc_lb_shape_gemini`).
     pub fn register_shape(
         &self,
         slot_key: RuntimeSlotKey,

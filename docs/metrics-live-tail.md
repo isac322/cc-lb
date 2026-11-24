@@ -1,6 +1,6 @@
 # Dashboard Live-Tail Metrics
 
-This is the canonical metric inventory for the dashboard live-tail redesign. Label values are backed by `cc_lb_event_pipeline::metrics_labels` where the label vocabulary is finite.
+This is the canonical metric inventory for the dashboard live-tail redesign. Where the label vocabulary is finite, reset reasons are backed by `ResetReason` in `crates/cc-lb-admin/src/events_routes.rs` and the remaining label families are backed by `crates/cc-lb-runtime-sync/src/live_tail/metrics_labels.rs`.
 
 | Metric | Type | Labels | Description | Expected steady state |
 | --- | --- | --- | --- | --- |
@@ -9,7 +9,7 @@ This is the canonical metric inventory for the dashboard live-tail redesign. Lab
 | `cc_lb_lifecycle_assembler_rows_total` | Counter | `outcome=written|written_orphan|written_after_grace|terminated_without_partial|orphan_ttl_evicted|cap_evicted` | Lifecycle assembler row outcomes, including orphan classification and map pressure evictions. | `written` dominates; orphan, TTL, and cap outcomes should be near zero. |
 | `sse_backfill_pages_total` | Counter | none | SSE backfill pages queried during initial connect or reconnect. | Increases with dashboard reconnects. |
 | `sse_backfill_rows_total` | Counter | none | Historical rows emitted through SSE backfill. | Usually low; spikes mean clients are reconnecting after gaps. |
-| `sse_reset_events_sent_total` | Counter | `reason=backfill_cap|bus_lagged|storage_error` | Server reset frames sent to force client resynchronization. | Zero or near zero; any sustained increase needs investigation. |
+| `sse_reset_events_sent_total` | Counter | `reason=backfill_cap|bus_lagged|storage_error|partial_cap` | Server reset frames sent to force client resynchronization. | Zero or near zero; any sustained increase needs investigation. |
 | `sse_reconnects_total` | Counter | none | Admin SSE stream connection attempts. | Tracks active dashboard reconnect cadence. |
 | `sse_malformed_frames_total` | Counter | none | Server-side SSE message frames that could not be serialized. | Always zero. |
 | `sse_storage_tail_polls_total` | Counter | none | Storage tail poll attempts by multi-instance pollers. | Increases every poll interval on the postgres backend, where pg_notify fanout is always on. Absent on sqlite. |
@@ -23,7 +23,7 @@ This is the canonical metric inventory for the dashboard live-tail redesign. Lab
 
 ## Label Taxonomy
 
-- Reset reasons are `ResetReason::{BackfillCap, BusLagged, StorageError}`.
+- Reset reasons are `ResetReason::{BackfillCap, BusLagged, StorageError, PartialCap}` (defined in `crates/cc-lb-admin/src/events_routes.rs`).
 - Partial triggers are `PartialTrigger::{RequestStarted, ParseCompleted, AuthCompleted, RouteCompleted, UpstreamResponseStarted, UsageObserved, StreamCompleted, RequestTerminated}`. All eight partial snapshots are memory-only; only the final request event is durable.
 - Notify drop reasons are `NotifyDropReason::{QueueFull, QueueClosed, SerializeError, PayloadTooLarge, PgError}`.
 - PG listener reconnect reasons are `PgListenerReconnectReason::{ConnectFailed, SubscribeFailed, RecvFailed}`.

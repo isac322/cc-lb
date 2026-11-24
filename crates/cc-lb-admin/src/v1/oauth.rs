@@ -261,6 +261,10 @@ struct DraftCompletion {
     encrypted_tokens: EncryptedOAuthTokens,
     subscription_metadata_record: UpstreamSubscriptionMetadataRecord,
     organization_metadata_record: Option<OrganizationMetadataRecord>,
+    // Kept in serialized drafts for rolling-upgrade compatibility with older
+    // replicas whose DraftCompletion deserializer requires this field.
+    #[serde(default)]
+    fetched_at_unix_secs: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1114,6 +1118,7 @@ async fn complete_oauth_draft(
             encrypted_tokens,
             subscription_metadata_record: records.subscription_metadata_record.clone(),
             organization_metadata_record: records.organization_metadata_record.clone(),
+            fetched_at_unix_secs: cc_lb_clock::unix_secs(state.clock.now()),
         };
 
         let mut in_flight = in_flight;
@@ -1334,6 +1339,7 @@ async fn create_upstream_from_oauth_draft(
             )
             .await;
         }
+        let _fetched_at_unix_secs = completion.fetched_at_unix_secs;
         let mut subscription_record = completion.subscription_metadata_record;
         subscription_record.upstream_id = created.id;
         if let Err(error) = storage
@@ -3505,10 +3511,40 @@ async fn start_provider_oauth(
 }
 #[cfg(test)]
 mod tests {
-    use cc_lb_storage_api::OrganizationMetadataRecord;
+    use cc_lb_aead::EncryptedOAuthTokens;
+    use cc_lb_storage_api::{OrganizationMetadataRecord, UpstreamSubscriptionMetadataRecord};
     use uuid::Uuid;
 
-    use super::{oauth_bootstrap_tasks, suggest_name};
+    use super::{DraftCompletion, oauth_bootstrap_tasks, suggest_name};
+
+    #[test]
+    fn draft_completion_preserves_fetched_at_unix_secs_for_rolling_upgrades() {
+        let completion = DraftCompletion {
+            encrypted_tokens: EncryptedOAuthTokens::from_ciphertext(vec![1, 2, 3]),
+            subscription_metadata_record: UpstreamSubscriptionMetadataRecord {
+                upstream_id: Uuid::nil(),
+                organization_uuid: None,
+                organization_role: None,
+                workspace_role: None,
+                observed_at_unix_millis: 0,
+                last_error: None,
+                raw_roles: None,
+                raw_bootstrap: None,
+            },
+            organization_metadata_record: None,
+            fetched_at_unix_secs: 1_700_000_000,
+        };
+
+        let mut json = serde_json::to_value(&completion).expect("serialize DraftCompletion");
+        assert_eq!(json["fetched_at_unix_secs"], 1_700_000_000);
+
+        json.as_object_mut()
+            .expect("json object")
+            .remove("fetched_at_unix_secs");
+        let decoded: DraftCompletion =
+            serde_json::from_value(json).expect("deserialize DraftCompletion without field");
+        assert_eq!(decoded.fetched_at_unix_secs, 0);
+    }
 
     #[test]
     fn suggest_name_uses_non_generic_org_name_with_rate_suffix() {
