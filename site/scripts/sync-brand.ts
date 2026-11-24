@@ -7,8 +7,6 @@ const siteRoot = resolve(import.meta.dir, '..');
 const assets = [
   ['assets/brand/lockup/cc-lb-lockup-horizontal-on-dark.svg', 'public/brand/lockup/cc-lb-lockup-horizontal-on-dark.svg'],
   ['assets/brand/lockup/cc-lb-lockup-horizontal-on-light.svg', 'public/brand/lockup/cc-lb-lockup-horizontal-on-light.svg'],
-  ['assets/brand/mark/cc-lb-mark-on-dark.svg', 'public/brand/mark/cc-lb-mark-on-dark.svg'],
-  ['assets/brand/mark/cc-lb-mark-on-light.svg', 'public/brand/mark/cc-lb-mark-on-light.svg'],
   ['assets/brand/favicon/favicon.svg', 'public/brand/favicon/favicon.svg'],
   ['assets/brand/favicon/favicon.ico', 'public/brand/favicon/favicon.ico'],
   ['assets/brand/favicon/apple-touch-icon.png', 'public/brand/favicon/apple-touch-icon.png'],

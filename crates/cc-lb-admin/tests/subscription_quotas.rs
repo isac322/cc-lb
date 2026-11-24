@@ -300,7 +300,7 @@ async fn subscription_quota_aggregate_refreshes_observed_at_from_latest_when_che
         "stale"
     );
 
-    let initial_aggregate = cc_lb_admin::subscription_quotas::build_cc_lb_aggregate_response(
+    let initial_aggregate = cc_lb_control::subscription_quotas::build_cc_lb_aggregate_response(
         server.storage.as_ref(),
         &server.dynamic_view,
         Some(vec![upstream_id]),
@@ -315,7 +315,7 @@ async fn subscription_quota_aggregate_refreshes_observed_at_from_latest_when_che
     )
     .await
     .unwrap();
-    cc_lb_admin::subscription_quotas::record_pool_quota_snapshots_now(
+    cc_lb_control::subscription_quotas::record_pool_quota_snapshots_now(
         server.storage.as_ref(),
         &initial_aggregate,
         &TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS),
@@ -337,7 +337,7 @@ async fn subscription_quota_aggregate_refreshes_observed_at_from_latest_when_che
         .record_subscription_quota_samples(&[moved_five_hour])
         .await
         .unwrap();
-    let second_aggregate = cc_lb_admin::subscription_quotas::build_cc_lb_aggregate_response(
+    let second_aggregate = cc_lb_control::subscription_quotas::build_cc_lb_aggregate_response(
         server.storage.as_ref(),
         &server.dynamic_view,
         Some(vec![upstream_id]),
@@ -352,7 +352,7 @@ async fn subscription_quota_aggregate_refreshes_observed_at_from_latest_when_che
     )
     .await
     .unwrap();
-    cc_lb_admin::subscription_quotas::record_pool_quota_snapshots_now(
+    cc_lb_control::subscription_quotas::record_pool_quota_snapshots_now(
         server.storage.as_ref(),
         &second_aggregate,
         &TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS + 60),
@@ -878,7 +878,7 @@ async fn subscription_quota_anthropic_absent_five_hour_is_excluded_from_pool_agg
         body["windows"][0]["provider_lots"][0]["upstream_id"],
         sampled_upstream.to_string()
     );
-    let aggregate = cc_lb_admin::subscription_quotas::build_cc_lb_aggregate_response(
+    let aggregate = cc_lb_control::subscription_quotas::build_cc_lb_aggregate_response(
         server.storage.as_ref(),
         &server.dynamic_view,
         None,
@@ -889,7 +889,7 @@ async fn subscription_quota_anthropic_absent_five_hour_is_excluded_from_pool_agg
     )
     .await
     .unwrap();
-    let snapshots = cc_lb_admin::subscription_quotas::pool_quota_snapshots_from_aggregate(
+    let snapshots = cc_lb_control::subscription_quotas::pool_quota_snapshots_from_aggregate(
         &aggregate,
         CHECKPOINT_TEST_NOW_UNIX_SECS as i64,
         CHECKPOINT_TEST_NOW_UNIX_SECS as i64 * 1_000,
@@ -953,7 +953,7 @@ async fn subscription_quota_anthropic_all_absent_five_hour_drops_from_pool_outpu
     assert_eq!(aggregate["windows"].as_array().map(Vec::len), Some(1));
     assert_eq!(aggregate["windows"][0]["window"], "7d");
     assert_close(aggregate["windows"][0]["utilization"].as_f64(), 0.60);
-    let oauth = cc_lb_admin::subscription_quotas::build_cc_lb_oauth_usage_response(
+    let oauth = cc_lb_control::subscription_quotas::build_cc_lb_oauth_usage_response(
         server.storage.as_ref(),
         &server.dynamic_view,
         &TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS),
@@ -1181,7 +1181,7 @@ async fn subscription_quota_openai_pool_uses_equal_mean_and_provider_isolation()
             .flat_map(|window| window["provider_lots"].as_array().into_iter().flatten())
             .all(|lot| lot["upstream_name"] != "claude-isolated")
     );
-    cc_lb_admin::subscription_quotas::record_provider_pool_quota_snapshots_now(
+    cc_lb_control::subscription_quotas::record_provider_pool_quota_snapshots_now(
         server.storage.as_ref(),
         &server.dynamic_view,
         Provider::Openai,
@@ -1313,7 +1313,7 @@ async fn subscription_quota_gemini_pool_uses_equal_mean() {
             expected_reset
         );
     }
-    cc_lb_admin::subscription_quotas::record_provider_pool_quota_snapshots_now(
+    cc_lb_control::subscription_quotas::record_provider_pool_quota_snapshots_now(
         server.storage.as_ref(),
         &server.dynamic_view,
         Provider::Gemini,
@@ -1751,7 +1751,7 @@ async fn provider_pool_history_freshness_boundary_recovery_and_projection() {
                 "no checkpoint backfill"
             );
         }
-        cc_lb_admin::subscription_quotas::record_provider_pool_quota_snapshots_now(
+        cc_lb_control::subscription_quotas::record_provider_pool_quota_snapshots_now(
             server.storage.as_ref(),
             &server.dynamic_view,
             provider,
@@ -1772,7 +1772,7 @@ async fn provider_pool_history_freshness_boundary_recovery_and_projection() {
         }
         // Different seconds retain the state transition in the snapshot key.
         clock.advance_secs(1);
-        cc_lb_admin::subscription_quotas::record_provider_pool_quota_snapshots_now(
+        cc_lb_control::subscription_quotas::record_provider_pool_quota_snapshots_now(
             server.storage.as_ref(),
             &server.dynamic_view,
             provider,
@@ -1814,7 +1814,7 @@ async fn provider_pool_history_freshness_boundary_recovery_and_projection() {
             windows.len(),
             "unchanged recovery is deadbanded"
         );
-        cc_lb_admin::subscription_quotas::record_provider_pool_quota_snapshots_now(
+        cc_lb_control::subscription_quotas::record_provider_pool_quota_snapshots_now(
             server.storage.as_ref(),
             &server.dynamic_view,
             provider,
@@ -2405,7 +2405,7 @@ async fn absence_create_upstream(
 // QA-03: Absent removes eligibility; Unobserved remains eligible and missing.
 async fn absence_eligibility_matrix() {
     let empty = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
-    let oauth = cc_lb_admin::subscription_quotas::build_cc_lb_oauth_usage_response(
+    let oauth = cc_lb_control::subscription_quotas::build_cc_lb_oauth_usage_response(
         empty.storage.as_ref(),
         &empty.dynamic_view,
         &TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS),
@@ -2702,7 +2702,7 @@ async fn absence_tombstone_and_recovery() {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(after_series, before_series);
         if provider == "anthropic" {
-            let oauth = cc_lb_admin::subscription_quotas::build_cc_lb_oauth_usage_response(
+            let oauth = cc_lb_control::subscription_quotas::build_cc_lb_oauth_usage_response(
                 server.storage.as_ref(),
                 &server.dynamic_view,
                 &TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS),
@@ -2921,7 +2921,7 @@ async fn absence_anthropic_pool_history_and_snapshots() {
         CHECKPOINT_TEST_NOW_UNIX_SECS - 120,
         CHECKPOINT_TEST_NOW_UNIX_SECS + 120,
     );
-    cc_lb_admin::subscription_quotas::record_provider_pool_quota_snapshots_now(
+    cc_lb_control::subscription_quotas::record_provider_pool_quota_snapshots_now(
         server.storage.as_ref(),
         &server.dynamic_view,
         Provider::Anthropic,
@@ -2972,7 +2972,7 @@ async fn absence_anthropic_pool_history_and_snapshots() {
         ])
         .await
         .unwrap();
-    cc_lb_admin::subscription_quotas::record_provider_pool_quota_snapshots_now(
+    cc_lb_control::subscription_quotas::record_provider_pool_quota_snapshots_now(
         server.storage.as_ref(),
         &server.dynamic_view,
         Provider::Anthropic,

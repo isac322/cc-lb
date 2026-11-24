@@ -1,6 +1,11 @@
-use std::future::Future;
+#[cfg(not(test))]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+#[cfg(test)]
+use std::{
+    future::Future,
+    sync::{Arc, Mutex},
+};
 
 /// Outcome of a single DNS resolution attempt inside the connector.
 ///
@@ -40,7 +45,8 @@ tokio::task_local! {
     pub static REQUEST_STAGE_TIMINGS: Arc<Mutex<RequestStageTimings>>;
 }
 
-pub async fn with_timings<F, T>(fut: F) -> (T, RequestStageTimings)
+#[cfg(test)]
+pub(crate) async fn with_timings<F, T>(fut: F) -> (T, RequestStageTimings)
 where
     F: Future<Output = T>,
 {
@@ -69,7 +75,7 @@ pub fn record_dns(elapsed: Duration, outcome: DnsResolutionOutcome) {
 
 /// Snapshot of the DNS fields of the current scope's timings.
 ///
-/// Outside a [`with_timings`] scope this returns the default (empty) snapshot.
+/// Outside a [`REQUEST_STAGE_TIMINGS`] scope this returns the default (empty) snapshot.
 pub fn dns_snapshot() -> DnsSnapshot {
     REQUEST_STAGE_TIMINGS
         .try_with(|ctx| {

@@ -154,11 +154,6 @@ impl ProviderRegistry {
             .map(|&idx| &self.adapters[idx])
     }
 
-    /// Looks up a registered adapter by string provider identifier.
-    pub fn get_by_str(&self, provider_id: &str) -> Option<&Arc<dyn ProviderAdapter>> {
-        self.get(&ProviderId::new(provider_id))
-    }
-
     /// Looks up the primary registered adapter for a wire [`Provider`] enum value.
     pub fn for_wire_provider(&self, provider: Provider) -> Option<&Arc<dyn ProviderAdapter>> {
         self.get(&ProviderId::from(provider)).or_else(|| {
@@ -183,11 +178,6 @@ impl ProviderRegistry {
         self.by_auth_kind
             .get(auth_kind_id)
             .map(|entry| &entry.descriptor)
-    }
-
-    /// Looks up an [`AuthKindDescriptor`] by string authentication kind identifier.
-    pub fn auth_kind_by_str(&self, auth_kind_id: &str) -> Option<&AuthKindDescriptor> {
-        self.auth_kind(&AuthKindId::new(auth_kind_id))
     }
 
     /// Looks up the [`AuthKindDescriptor`] matching a wire [`UpstreamKind`].

@@ -1,3 +1,5 @@
+use super::cache::request_cache_evidence;
+use super::routing::default_base_url;
 use super::*;
 
 pub type Body = AxumBody;
@@ -1119,14 +1121,6 @@ pub(crate) struct RequestEventContext {
     pub(crate) proxy_setup_ms: Option<u64>,
     pub(crate) stage_timings: AttemptTimings,
 }
-
-pub(crate) use crate::response_transform::{
-    ComposedSseResponseTransformHook, GEMINI_OAUTH_RESPONSE_TRANSFORM, ResponseTransformContext,
-    SseTransformOutcome, apply_buffered_transform_result, make_response_transform_error_frame,
-    sanitize_downstream_response_headers, sanitize_downstream_stream_headers,
-    sanitized_response_headers_for_plugin, transform_sse_event_bytes, translate_vertex_response,
-    unwrap_gemini_code_assist_body,
-};
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct AttemptTimings {

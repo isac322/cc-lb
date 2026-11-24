@@ -60,7 +60,7 @@ impl<'a> HeuristicClassifier<'a> {
         }
     }
 
-    pub fn classify(&self, _request_body: &Value, response_body: &Value) -> TurnDecision {
+    pub fn classify(&self, response_body: &Value) -> TurnDecision {
         let decision = self.classify_inner(response_body);
         metrics::record_classifier_decision(decision.as_metric_label());
         decision
@@ -146,8 +146,8 @@ mod tests {
         ClassifierConfig::default()
     }
 
-    fn classify(cfg: &ClassifierConfig, req: Value, resp: Value) -> TurnDecision {
-        HeuristicClassifier::new(cfg).classify(&req, &resp)
+    fn classify(cfg: &ClassifierConfig, _req: Value, resp: Value) -> TurnDecision {
+        HeuristicClassifier::new(cfg).classify(&resp)
     }
 
     #[test]

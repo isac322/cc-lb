@@ -8,4 +8,7 @@ pub mod aead_key;
 pub mod build_meta;
 pub mod live_tail;
 pub mod replica;
+pub mod runtime_utils;
 pub mod storage_factory;
+
+pub use runtime_utils::{await_or_abort, resolve_data_dir};

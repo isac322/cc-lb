@@ -242,7 +242,25 @@ mod tests {
     use tower_service::Service;
 
     use super::*;
-    use crate::request_timing::with_timings;
+
+    async fn with_timings<F, T>(
+        fut: F,
+    ) -> (
+        T,
+        cc_lb_proxy_telemetry::request_timing::RequestStageTimings,
+    )
+    where
+        F: Future<Output = T>,
+    {
+        let ctx = Arc::new(std::sync::Mutex::new(
+            cc_lb_proxy_telemetry::request_timing::RequestStageTimings::default(),
+        ));
+        let value = cc_lb_proxy_telemetry::request_timing::REQUEST_STAGE_TIMINGS
+            .scope(ctx.clone(), fut)
+            .await;
+        let snapshot = ctx.lock().unwrap().clone();
+        (value, snapshot)
+    }
 
     struct StubResolver<F> {
         resolve: F,
@@ -293,7 +311,7 @@ mod tests {
         );
         assert_eq!(
             timings.dns_outcome,
-            Some(crate::request_timing::DnsResolutionOutcome::Resolved)
+            Some(cc_lb_proxy_telemetry::request_timing::DnsResolutionOutcome::Resolved)
         );
     }
 
@@ -330,7 +348,7 @@ mod tests {
         );
         assert_eq!(
             timings.dns_outcome,
-            Some(crate::request_timing::DnsResolutionOutcome::Failed)
+            Some(cc_lb_proxy_telemetry::request_timing::DnsResolutionOutcome::Failed)
         );
         assert_eq!(timings.dns_attempts, 1);
     }

@@ -370,7 +370,10 @@
         "scopes": {
           "description": "Scopes requested on every Anthropic OAuth authorization.\n\nConnecting always asks Anthropic for a 365-day access token, which it\nonly grants for inference-only scopes: `org:create_api_key`,\n`user:sessions:claude_code`, and `user:mcp_servers` would each force a\nshorter lifetime, and cc-lb uses none of them. If Anthropic still\nrefuses or shortens the grant, the connect flow keeps the credential\nrefreshable instead.",
           "type": "array",
-          "default": [],
+          "default": [
+            "user:profile",
+            "user:inference"
+          ],
           "items": {
             "type": "string"
           }
@@ -769,11 +772,6 @@
     "OpenAiOAuthConfig": {
       "type": "object",
       "properties": {
-        "auth_url": {
-          "type": "string",
-          "format": "uri",
-          "default": "https://auth.openai.com/oauth/authorize"
-        },
         "authorize_url": {
           "type": "string",
           "format": "uri",

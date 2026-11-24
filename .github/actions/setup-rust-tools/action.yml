@@ -2,10 +2,6 @@ name: Setup Rust tools
 description: Restore or install pinned Rust 1.99.1 toolchain and shared Cargo CLI tools with a single unified cache.
 
 inputs:
-  profile:
-    description: Optional compatibility profile label (ignored; unified toolchain + tools cache is used).
-    required: false
-    default: "all"
   save-caches:
     description: Whether to save the unified toolchain/tools cache on miss (set false on fan-out shards).
     required: false

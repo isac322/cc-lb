@@ -6,12 +6,13 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::common::seed_app_testing_storage;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cc_lb_aead::AeadService;
 use cc_lb_clock::{ClockHandle, SystemClock};
 use cc_lb_config::{AdminAuthProviderConfig, Config, PostgresPoolConfig, StorageConfig};
-use cc_lb_server::app::{App, build_app_with_storage, seed_app_testing_storage};
+use cc_lb_server::app::{App, build_app_with_storage};
 use cc_lb_storage_api::{ManagedKeyStore, MetaStore, RequestEvent, RequestEventStore};
 use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage};

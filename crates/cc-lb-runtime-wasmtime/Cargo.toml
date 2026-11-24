@@ -31,6 +31,6 @@ serde.workspace = true
 metrics.workspace = true
 
 [dev-dependencies]
-wat = "1"
+wat.workspace = true
 metrics-exporter-prometheus.workspace = true
 serde_json.workspace = true

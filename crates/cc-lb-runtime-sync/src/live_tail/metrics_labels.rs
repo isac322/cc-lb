@@ -1,23 +1,4 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResetReason {
-    BackfillCap,
-    BusLagged,
-    StorageError,
-}
-
-impl ResetReason {
-    pub const ALL: [Self; 3] = [Self::BackfillCap, Self::BusLagged, Self::StorageError];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::BackfillCap => "backfill_cap",
-            Self::BusLagged => "bus_lagged",
-            Self::StorageError => "storage_error",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartialTrigger {
     RequestStarted,
     ParseCompleted,
@@ -128,13 +109,6 @@ mod tests {
 
     #[test]
     fn metric_label_vocabulary_matches_live_tail_runbook() {
-        assert_eq!(
-            ResetReason::ALL
-                .iter()
-                .map(|reason| reason.as_str())
-                .collect::<Vec<_>>(),
-            ["backfill_cap", "bus_lagged", "storage_error"]
-        );
         assert_eq!(
             PartialTrigger::ALL
                 .iter()

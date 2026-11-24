@@ -41,6 +41,12 @@ fn append_registry_entries(bytes: &mut Vec<u8>, entries: &[(Uuid, u64, [u8; 32])
     }
 }
 
+pub(crate) fn hex_sha256(sha256: &[u8; 32]) -> String {
+    let mut bytes = Vec::with_capacity(64);
+    append_sha256_hex(&mut bytes, sha256);
+    String::from_utf8(bytes).expect("hex ASCII is always valid UTF-8")
+}
+
 fn append_sha256_hex(bytes: &mut Vec<u8>, sha256: &[u8; 32]) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     for byte in sha256 {

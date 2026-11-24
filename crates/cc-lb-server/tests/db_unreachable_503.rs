@@ -7,6 +7,7 @@ use std::process::{Command, Output};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::common::{build_app_for_testing_postgres, seed_app_testing_storage};
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::http::{Request, Response, StatusCode};
@@ -14,9 +15,7 @@ use axum::response::IntoResponse;
 use axum::routing::any;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AdminAuthProviderConfig, Config, PostgresPoolConfig, StorageConfig};
-use cc_lb_server::app::{
-    App, build_app_for_testing_postgres, build_app_with_storage, seed_app_testing_storage,
-};
+use cc_lb_server::app::{App, build_app_with_storage};
 use cc_lb_storage_api::{ManagedKeyStore, Storage as StorageTrait};
 use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage};

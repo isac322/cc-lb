@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily, WireVersion};
+use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily};
 use cc_lb_plugin_wire::v2::{
     ArchivedFilterResponse as ArchivedFilterResponseV2,
     CachePricingSummary as CachePricingSummaryV2,
@@ -19,25 +19,7 @@ use crate::error::WasmtimeRuntimeError;
 
 use super::{probe_failed, sample_body, sample_model, sample_path};
 
-pub(super) fn probe_filter(
-    cell: &Arc<PluginCell>,
-    provider: ProviderFamily,
-    export: &str,
-    wire_version: WireVersion,
-) -> Result<(), WasmtimeRuntimeError> {
-    if wire_version != WireVersion::V3 {
-        return Err(probe_failed(
-            HookKind::Filter,
-            format!(
-                "wire v{} is unsupported for filter hooks",
-                wire_version.as_u8()
-            ),
-        ));
-    }
-    probe_filter_v3(cell, provider, export)
-}
-
-fn probe_filter_v3(
+pub(super) fn probe_filter_v3(
     cell: &Arc<PluginCell>,
     provider: ProviderFamily,
     export: &str,

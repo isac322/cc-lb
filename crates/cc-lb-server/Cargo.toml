@@ -5,7 +5,6 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-build = "build.rs"
 autotests = false
 
 [features]
@@ -17,20 +16,13 @@ storage-sqlite = [
     "cc-lb-runtime-sync/sqlite",
     "cc-lb-scheduler/default",
     "cc-lb-scheduler/sqlite",
-    "dep:apalis-sqlite",
     "dep:cc-lb-scheduler",
-    "dep:sqlx",
-    "sqlx/sqlite",
 ]
 storage-postgres = [
     "cc-lb-runtime-sync/postgres",
     "cc-lb-scheduler/postgres",
     "cc-lb-event-pipeline/postgres",
-    "dep:apalis-postgres",
     "dep:cc-lb-scheduler",
-    "dep:cc-lb-storage-postgres",
-    "dep:sqlx",
-    "sqlx/postgres",
 ]
 sqlite = ["storage-sqlite", "admin", "cc-lb-admin?/sqlite"]
 postgres = ["storage-postgres", "admin", "cc-lb-admin?/postgres"]
@@ -48,8 +40,6 @@ required-features = ["admin"]
 
 [dependencies]
 anyhow.workspace = true
-apalis-postgres = { version = "1.0.0", optional = true }
-apalis-sqlite = { version = "1.0.0", optional = true }
 async-stream.workspace = true
 async-trait.workspace = true
 arc-swap.workspace = true
@@ -81,20 +71,17 @@ cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
 cc-lb-signer-vertex = { path = "../cc-lb-signer-vertex" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
-cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres", optional = true }
-cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 cc-lb-upstream.workspace = true
 cc-lb-vertex-auth.workspace = true
 clap = { workspace = true, features = ["derive"] }
 futures-util = "0.3"
 http.workspace = true
 http-body-util.workspace = true
-hex.workspace = true
 hyper-rustls.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 metrics.workspace = true
 parking_lot = "0.13"
-rand = { version = "0.10", features = ["std", "std_rng"] }
+rand = { workspace = true, features = ["std", "std_rng"] }
 rkyv = { workspace = true, features = ["std", "bytecheck"] }
 reqwest.workspace = true
 rustls = { workspace = true, default-features = false, features = ["std", "ring", "tls12"] }
@@ -106,8 +93,6 @@ sonic-rs.workspace = true
 zstd.workspace = true
 sha2.workspace = true
 siphasher = "1"
-sqlx = { workspace = true, optional = true }
-tempfile.workspace = true
 thiserror.workspace = true
 tikv-jemallocator = "0.7"
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
@@ -123,16 +108,21 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 cc-lb-workspace-hack.workspace = true
+apalis-postgres = "1.0.0"
+apalis-sqlite = "1.0.0"
 base64.workspace = true
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
+cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 metrics-exporter-prometheus.workspace = true
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }
 flate2.workspace = true
+hex.workspace = true
 nix = { version = "0.31.3", features = ["resource"] }
 opentelemetry.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 reqwest = { workspace = true, features = ["multipart"] }
-sqlx.workspace = true
+sqlx = { workspace = true, features = ["sqlite", "postgres"] }
+tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true

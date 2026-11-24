@@ -230,12 +230,6 @@ struct DeviceState {
     user_code: String,
     poll_interval_secs: u64,
     expires_at_unix_secs: u64,
-    #[serde(default)]
-    authorization_code: Option<String>,
-    #[serde(default)]
-    code_verifier: Option<String>,
-    #[serde(default)]
-    pending_attempts: u32,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -267,6 +261,9 @@ struct DraftCompletion {
     encrypted_tokens: EncryptedOAuthTokens,
     subscription_metadata_record: UpstreamSubscriptionMetadataRecord,
     organization_metadata_record: Option<OrganizationMetadataRecord>,
+    // Kept in serialized drafts for rolling-upgrade compatibility with older
+    // replicas whose DraftCompletion deserializer requires this field.
+    #[serde(default)]
     fetched_at_unix_secs: u64,
 }
 
@@ -557,7 +554,7 @@ async fn start_oauth_draft(
                         .into_response();
                 }
             };
-        let auth_url = match AuthUrl::new(config.auth_url.to_string()) {
+        let auth_url = match AuthUrl::new(config.authorize_url.to_string()) {
             Ok(value) => value,
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
@@ -832,15 +829,11 @@ async fn complete_oauth_draft(
                     };
                     let (authorization_code, code_verifier) = match poll {
                         OpenAiDevicePoll::Pending => {
-                            let mut pending = in_flight;
-                            if let Some(device) = pending.device.as_mut() {
-                                device.pending_attempts = device.pending_attempts.saturating_add(1);
-                            }
                             if let Err(response) = persist_pkce_flow(
                                 &state,
                                 storage.as_ref(),
                                 &payload.state_token,
-                                &pending,
+                                &in_flight,
                             )
                             .await
                             {
@@ -2411,9 +2404,6 @@ async fn request_openai_device_code(
         user_code,
         poll_interval_secs,
         expires_at_unix_secs,
-        authorization_code: None,
-        code_verifier: None,
-        pending_attempts: 0,
     })
 }
 
@@ -3024,12 +3014,9 @@ async fn complete_provider_oauth(
                 };
                 let (authorization_code, code_verifier) = match poll {
                     OpenAiDevicePoll::Pending => {
-                        let mut pending = in_flight;
-                        if let Some(device) = pending.device.as_mut() {
-                            device.pending_attempts = device.pending_attempts.saturating_add(1);
-                        }
                         if let Err(response) =
-                            persist_pkce_flow(state, storage, &payload.state_token, &pending).await
+                            persist_pkce_flow(state, storage, &payload.state_token, &in_flight)
+                                .await
                         {
                             return response;
                         }
@@ -3402,7 +3389,7 @@ async fn start_provider_oauth(
                 }
             };
             let (Ok(auth), Ok(token)) = (
-                AuthUrl::new(config.auth_url.to_string()),
+                AuthUrl::new(config.authorize_url.to_string()),
                 TokenUrl::new(config.token_url.to_string()),
             ) else {
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -3524,10 +3511,40 @@ async fn start_provider_oauth(
 }
 #[cfg(test)]
 mod tests {
-    use cc_lb_storage_api::OrganizationMetadataRecord;
+    use cc_lb_aead::EncryptedOAuthTokens;
+    use cc_lb_storage_api::{OrganizationMetadataRecord, UpstreamSubscriptionMetadataRecord};
     use uuid::Uuid;
 
-    use super::{oauth_bootstrap_tasks, suggest_name};
+    use super::{DraftCompletion, oauth_bootstrap_tasks, suggest_name};
+
+    #[test]
+    fn draft_completion_preserves_fetched_at_unix_secs_for_rolling_upgrades() {
+        let completion = DraftCompletion {
+            encrypted_tokens: EncryptedOAuthTokens::from_ciphertext(vec![1, 2, 3]),
+            subscription_metadata_record: UpstreamSubscriptionMetadataRecord {
+                upstream_id: Uuid::nil(),
+                organization_uuid: None,
+                organization_role: None,
+                workspace_role: None,
+                observed_at_unix_millis: 0,
+                last_error: None,
+                raw_roles: None,
+                raw_bootstrap: None,
+            },
+            organization_metadata_record: None,
+            fetched_at_unix_secs: 1_700_000_000,
+        };
+
+        let mut json = serde_json::to_value(&completion).expect("serialize DraftCompletion");
+        assert_eq!(json["fetched_at_unix_secs"], 1_700_000_000);
+
+        json.as_object_mut()
+            .expect("json object")
+            .remove("fetched_at_unix_secs");
+        let decoded: DraftCompletion =
+            serde_json::from_value(json).expect("deserialize DraftCompletion without field");
+        assert_eq!(decoded.fetched_at_unix_secs, 0);
+    }
 
     #[test]
     fn suggest_name_uses_non_generic_org_name_with_rate_suffix() {

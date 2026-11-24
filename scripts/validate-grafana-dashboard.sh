@@ -43,8 +43,8 @@ fi
 # cross-check dashboard panel descriptions/links against real alert rules.
 alert_names_file="$(mktemp)"
 trap 'rm -f "$alert_names_file"' EXIT
-grep -h -R -E '^\s*-\s*alert:\s*\S+' "$REPO_ROOT/deploy/alerts" 2>/dev/null \
-  | sed -E 's/^\s*-\s*alert:\s*//' \
+grep -h -R -E '^[[:space:]]*-[[:space:]]*alert:[[:space:]]*[^[:space:]]+' "$REPO_ROOT/deploy/alerts" 2>/dev/null \
+  | sed -E 's/^[[:space:]]*-[[:space:]]*alert:[[:space:]]*//' \
   | sort -u > "$alert_names_file"
 
 fail=0
@@ -58,7 +58,6 @@ for dash in "${targets[@]}"; do
     continue
   fi
 
-  missing=$(jq -r 'del(.uid, .title, .schemaVersion, .panels) | if (.uid // empty) == "" or (.title // empty) == "" or (.schemaVersion // empty) == null or (.panels | length) == 0 then "missing" else "" end' "$dash" 2>/dev/null || echo missing)
   for field in uid title schemaVersion panels; do
     val=$(jq -r ".${field} // empty" "$dash")
     if [[ -z "$val" ]]; then
@@ -69,11 +68,6 @@ for dash in "${targets[@]}"; do
 
   # Panel IDs across the whole dashboard, flattening any row.panels[] into the pool.
   duplicate_ids=$(jq -r '
-    def gather:
-      (.panels // [])
-        | map(select(.type == "row") | (.panels // [])) as $nested
-        | (.panels // []) + ([($nested // [])[] // []] | add // [])
-      ;
     [.panels // [], (.panels[]? | select(.type == "row") | (.panels // []))] | flatten | map(.id) | group_by(.) | map(select(length > 1) | .[0]) | .[]?
   ' "$dash")
   if [[ -n "$duplicate_ids" ]]; then

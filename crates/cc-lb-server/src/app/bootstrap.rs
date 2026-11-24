@@ -1,4 +1,3 @@
-use std::fs;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -190,17 +189,12 @@ pub enum BuildError {
     SchedulerFactory(#[from] crate::scheduler_factory::SchedulerFactoryError),
     #[error("admin authentication configuration failed: {message}")]
     AdminAuth { message: String },
-    #[cfg(feature = "storage-postgres")]
-    #[error("storage connection failed: {message}")]
-    StorageConnect { message: String },
     #[error(transparent)]
     Tls(#[from] crate::tls::TlsError),
     #[error(transparent)]
     Rebind(#[from] crate::dynamic_view_builder::RebindError),
     #[error("wasmtime plugin runtime init failed: {0}")]
     WasmtimeRuntimeInit(#[source] cc_lb_runtime_wasmtime::WasmtimeRuntimeError),
-    #[error("storage is required")]
-    StorageRequired,
     #[error("storage master key env {env} is missing")]
     StorageKeyMissing { env: String },
     #[error("storage master key must be 32 bytes encoded as 64 hex characters")]
@@ -334,50 +328,50 @@ pub(super) async fn serve_runtime(
         cancel.cancel();
     }
     if let Some(task) = notifier_task {
-        await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
     }
     if let Some(task) = notify_listener_task {
-        await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
     }
     if let Some(cancel) = price_catalog_install_cancel {
         cancel.cancel();
     }
     if let Some(task) = price_catalog_install_task {
-        await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
     }
     if let Some(cancel) = wasmtime_pool_metrics_cancel {
         cancel.cancel();
     }
     if let Some(task) = wasmtime_pool_metrics_task {
-        await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
     }
     if let Some(cancel) = scheduler_cancel {
         cancel.cancel();
     }
     for task in scheduler_tasks {
-        await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
     }
     if let Some((admin_stop_tx, admin_task)) = admin_handle {
         let _ = admin_stop_tx.send(true);
-        await_or_abort(admin_task, SHUTDOWN_TASK_TIMEOUT).await;
+        cc_lb_runtime_sync::await_or_abort(admin_task, SHUTDOWN_TASK_TIMEOUT).await;
     }
     if let Some(task) = audit_writer_task {
-        await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
     }
     if let Some(task) = upstream_rate_limit_writer_task {
-        await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
     }
     if let Some(task) = subscription_quota_writer_task {
-        await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
     }
     if let Some(task) = prompt_cache_observation_writer_task {
-        await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
     }
     if let Some(tx) = event_fanout_shutdown_tx {
         let _ = tx.send(true);
     }
     for task in event_fanout_tasks {
-        await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
     }
     // Optional observations must not consume the durable writers' flush budget.
     // The worker has drained concurrently during the mandatory cleanup above.
@@ -453,23 +447,6 @@ pub(super) fn print_preflight_report(report: &preflight::PreflightReport) {
     }
 }
 
-pub async fn build_proxy_app(
-    config: Config,
-    role: ProxyRole,
-    clock: ClockHandle,
-) -> Result<ProxyApp, BuildError> {
-    build_proxy_app_with_path(config, None, role, clock).await
-}
-
-pub async fn build_proxy_app_with_path(
-    config: Config,
-    _config_path: Option<&Path>,
-    role: ProxyRole,
-    clock: ClockHandle,
-) -> Result<ProxyApp, BuildError> {
-    build_proxy_app_with_path_inner(config, role, None, clock).await
-}
-
 async fn build_proxy_app_with_path_inner(
     config: Config,
     role: ProxyRole,
@@ -503,7 +480,6 @@ async fn build_proxy_app_with_path_inner(
 
 pub async fn build_proxy_app_with_storage(
     config: Config,
-    _config_path: Option<&Path>,
     role: ProxyRole,
     managed_store: Arc<dyn ManagedKeyStore>,
     storage: Arc<dyn Storage>,
@@ -543,27 +519,11 @@ pub fn resolve_data_dir(
     config_value: Option<&Path>,
     env_var: &str,
 ) -> Result<PathBuf, BuildError> {
-    let data_dir = if let Ok(env_path) = std::env::var(env_var) {
-        PathBuf::from(env_path)
-    } else if let Some(cli_path) = cli {
-        cli_path.to_path_buf()
-    } else if let Some(config_path) = config_value {
-        config_path.to_path_buf()
-    } else {
-        PathBuf::from("./data")
-    };
-
-    if !data_dir.exists() {
-        fs::create_dir_all(&data_dir)?;
-        #[cfg(unix)]
-        {
-            use std::fs::Permissions;
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&data_dir, Permissions::from_mode(0o700))?;
-        }
-    }
-
-    Ok(data_dir)
+    Ok(cc_lb_runtime_sync::resolve_data_dir(
+        cli,
+        config_value,
+        env_var,
+    )?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1820,13 +1780,6 @@ pub(super) fn server_join_result(
     }
 }
 
-pub(super) async fn await_or_abort<T>(mut task: JoinHandle<T>, timeout: Duration) {
-    if tokio::time::timeout(timeout, &mut task).await.is_err() {
-        task.abort();
-        let _ = task.await;
-    }
-}
-
 pub(super) fn init_observability(config: &Config) -> Result<TracingGuard, BuildError> {
     let guard = cc_lb_observability::init(&ObservabilityConfig {
         tracing_level: config.observability.tracing_level.clone(),
@@ -1955,7 +1908,7 @@ mod tests {
         config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
         config.runtime.data_dir = Some(dir.path().to_path_buf());
         std::mem::forget(dir);
-        build_proxy_app_with_storage(config, None, role, managed_store, storage, aead, clock)
+        build_proxy_app_with_storage(config, role, managed_store, storage, aead, clock)
             .await
             .expect("build_proxy_app_with_storage")
     }

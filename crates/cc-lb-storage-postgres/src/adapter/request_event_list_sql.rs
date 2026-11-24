@@ -4,9 +4,7 @@ use cc_lb_storage_api::{
 };
 use sqlx::{FromRow, Postgres, QueryBuilder};
 
-use crate::adapter::{
-    PostgresStorage, u64_to_i64, unix_secs_to_datetime_lower, unix_secs_to_datetime_upper,
-};
+use crate::adapter::{PostgresStorage, u64_to_i64, unix_secs_to_datetime_opt};
 use crate::error_map::map_sqlx_error;
 
 use super::request_event_list_row::list_row_to_item;
@@ -213,12 +211,10 @@ pub(super) fn list_request_events_query(
     if query.limit == 0 || query.until_unix_secs < query.since_unix_secs {
         return Ok(None);
     }
-    let Some(since) =
-        unix_secs_to_datetime_lower(query.since_unix_secs, "request event list since")?
-    else {
+    let Some(since) = unix_secs_to_datetime_opt(query.since_unix_secs) else {
         return Ok(None);
     };
-    let until = unix_secs_to_datetime_upper(query.until_unix_secs, "request event list until")?;
+    let until = unix_secs_to_datetime_opt(query.until_unix_secs);
 
     let mut builder =
         QueryBuilder::<Postgres>::new(format!("{prefix}{LIST_REQUEST_EVENTS_SELECT}"));

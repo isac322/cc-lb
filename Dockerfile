@@ -66,7 +66,7 @@ SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 # git:       derives CC_LB_GIT_SHA fallback when GIT_SHA is empty.
 # make:      tikv-jemalloc-sys builds its vendored jemalloc via autotools (runs
 #            `make` on BUILDPLATFORM); the rust:alpine image does not ship it.
-# sccache: Rust compiler cache; uses the S3/garage backend when creds are passed.
+# sccache: Rust compiler cache when external cache config/creds are passed.
 # hadolint ignore=DL3018
 RUN apk add --no-cache clang lld git make sccache
 

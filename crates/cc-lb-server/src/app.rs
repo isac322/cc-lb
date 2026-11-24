@@ -92,15 +92,10 @@ use realtime_websocket::{
 use responses_websocket::*;
 
 #[cfg(feature = "admin")]
-pub use admin_wiring::{
-    App, build_app, build_app_for_testing, build_app_with_path, build_app_with_storage, run_serve,
-};
-#[cfg(all(feature = "admin", feature = "storage-postgres"))]
-pub use admin_wiring::{build_app_for_testing_postgres, seed_app_testing_storage};
+pub use admin_wiring::{App, build_app, build_app_with_path, build_app_with_storage, run_serve};
 pub use bootstrap::{
-    BuildError, ProxyApp, ProxyRole, ProxyServeOptions, ServeError, build_proxy_app,
-    build_proxy_app_with_path, build_proxy_app_with_storage, open_storage, resolve_data_dir,
-    run_proxy_serve,
+    BuildError, ProxyApp, ProxyRole, ProxyServeOptions, ServeError, build_proxy_app_with_storage,
+    open_storage, resolve_data_dir, run_proxy_serve,
 };
 
 #[cfg(feature = "admin")]

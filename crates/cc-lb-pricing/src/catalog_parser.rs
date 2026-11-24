@@ -44,7 +44,7 @@ pub(crate) fn parse_litellm_json(
             "input_cost_per_image_token",
             image_generation,
         ) else {
-            record_missing_catalog_field(
+            crate::cost::record_missing_price_field(
                 &model,
                 if image_generation {
                     "input_cost_per_image_token"
@@ -60,7 +60,7 @@ pub(crate) fn parse_litellm_json(
             "output_cost_per_image_token",
             image_generation,
         ) else {
-            record_missing_catalog_field(
+            crate::cost::record_missing_price_field(
                 &model,
                 if image_generation {
                     "output_cost_per_image_token"
@@ -540,15 +540,6 @@ fn usd_per_token_to_per_million(
     Ok(UsdPerMillion::from_micros_usd(
         micros_per_million.round() as u64
     ))
-}
-
-fn record_missing_catalog_field(model: &str, field: &'static str) {
-    metrics::counter!(
-        "cclb_price_catalog_missing_field_total",
-        "model" => model.to_owned(),
-        "field" => field
-    )
-    .increment(1);
 }
 
 // Frozen Standard-rate entries from #1163, checked 2026-11-09:

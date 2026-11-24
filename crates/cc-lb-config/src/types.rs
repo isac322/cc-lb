@@ -482,7 +482,6 @@ pub struct AnthropicOAuthConfig {
     /// shorter lifetime, and cc-lb uses none of them. If Anthropic still
     /// refuses or shortens the grant, the connect flow keeps the credential
     /// refreshable instead.
-    #[serde(default)]
     pub scopes: Vec<String>,
 }
 
@@ -504,7 +503,6 @@ impl Default for AnthropicOAuthConfig {
 #[serde(default)]
 pub struct OpenAiOAuthConfig {
     pub client_id: String,
-    pub auth_url: Url,
     pub authorize_url: Url,
     pub token_url: Url,
     pub browser_redirect_uri: Url,
@@ -518,7 +516,6 @@ impl Default for OpenAiOAuthConfig {
     fn default() -> Self {
         Self {
             client_id: OPENAI_CODEX_CLIENT_ID.to_owned(),
-            auth_url: Url::parse(OPENAI_OAUTH_AUTHORIZE_URL).expect("valid url"),
             authorize_url: Url::parse(OPENAI_OAUTH_AUTHORIZE_URL).expect("valid url"),
             token_url: Url::parse(OPENAI_OAUTH_TOKEN_URL).expect("valid url"),
             browser_redirect_uri: Url::parse(OPENAI_OAUTH_BROWSER_REDIRECT_URI).expect("valid url"),

@@ -30,7 +30,6 @@ The optional `[oauth.anthropic]`, `[oauth.openai]`, and `[oauth.gemini]` section
 ```toml
 [oauth.openai]
 client_id = "app_EMoamEEZ73f0CkXaXp7hrann"
-auth_url = "https://auth.openai.com/oauth/authorize"
 authorize_url = "https://auth.openai.com/oauth/authorize"
 token_url = "https://auth.openai.com/oauth/token"
 browser_redirect_uri = "http://localhost:1455/auth/callback"
@@ -48,7 +47,7 @@ client_id = "<ANTIGRAVITY_CLIENT_ID>"
 client_secret = "<ANTIGRAVITY_CLIENT_SECRET>"
 ```
 
-`auth_url` and `device_redirect_uri` serve the device-code flow. The browser fallback uses `authorize_url` and `browser_redirect_uri` so the operator can paste the localhost callback address from a remote browser.
+`device_usercode_url`, `device_token_url`, `device_verification_url`, and `device_redirect_uri` serve the device-code flow (requesting a user code, polling for device authorization to obtain an authorization code and PKCE verifier, directing the operator to the verification page, and providing the device callback URI). The browser flow starts at `authorize_url` and uses `browser_redirect_uri` so the operator can paste the localhost callback address from a remote browser. Both flows exchange the authorization code for tokens at `token_url`.
 
 ### Gemini OAuth profiles
 

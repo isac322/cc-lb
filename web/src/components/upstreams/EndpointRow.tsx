@@ -20,34 +20,16 @@ import { isStaleRevision, STALE_EDITOR_MESSAGE } from './staleRevision';
 const CLEAR_UNCONFIRMED =
   'Server did not confirm the switch to the default endpoint; the custom URL may still be set.';
 
-const DEFAULT_ENDPOINTS = {
-  anthropic_api_key: {
-    label: 'Anthropic',
-    baseUrl: 'https://api.anthropic.com/',
-  },
-  anthropic_oauth: {
-    label: 'Anthropic',
-    baseUrl: 'https://api.anthropic.com/',
-  },
-  openai_api_key: {
-    label: 'OpenAI',
-    baseUrl: 'https://api.openai.com/',
-  },
-  openai_oauth: {
-    label: 'OpenAI',
-    baseUrl: 'https://chatgpt.com/backend-api/codex',
-  },
-  gemini_api_key: {
-    label: 'Gemini',
-    baseUrl: 'https://generativelanguage.googleapis.com/',
-  },
-  gemini_oauth: {
-    label: 'Gemini',
-    baseUrl: 'https://cloudcode-pa.googleapis.com/v1internal',
-  },
+const DEFAULT_LABELS = {
+  anthropic_api_key: 'Anthropic',
+  anthropic_oauth: 'Anthropic',
+  openai_api_key: 'OpenAI',
+  openai_oauth: 'OpenAI',
+  gemini_api_key: 'Gemini',
+  gemini_oauth: 'Gemini',
 } satisfies Record<
   Exclude<Upstream['kind'], 'vertex_api_key' | 'vertex_credential'>,
-  { label: string; baseUrl: string }
+  string
 >;
 
 function endpointFor(upstream: Upstream) {
@@ -61,11 +43,14 @@ function endpointFor(upstream: Upstream) {
       baseUrl: defaultEndpointFor(upstream.kind, location),
     };
   }
-  return DEFAULT_ENDPOINTS[upstream.kind];
+  return {
+    label: DEFAULT_LABELS[upstream.kind],
+    baseUrl: defaultEndpointFor(upstream.kind),
+  };
 }
 
 function isDefaultBaseUrl(baseUrl: string, defaultBaseUrl: string) {
-  if (defaultBaseUrl === DEFAULT_ENDPOINTS.anthropic_api_key.baseUrl) {
+  if (defaultBaseUrl === defaultEndpointFor('anthropic_api_key')) {
     return isAnthropicBaseUrl(baseUrl);
   }
 

@@ -169,7 +169,10 @@ pub fn ensure_wasm_cached(
     ensure_wasm_cache_dirs(data_dir)?;
     let cache_dir = data_dir.join("plugins").join("wasm").join("cache");
     let tmp_dir = cache_dir.join(".tmp");
-    let target = cache_dir.join(format!("{}.wasm", hex_sha256(sha256)));
+    let target = cache_dir.join(format!(
+        "{}.wasm",
+        crate::revision_hash::hex_sha256(&sha256)
+    ));
     if target.exists() {
         return Ok(target);
     }
@@ -177,7 +180,10 @@ pub fn ensure_wasm_cached(
     let bytes = fetch().map_err(io::Error::other)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            format!("wasm blob {} not found", hex_sha256(sha256)),
+            format!(
+                "wasm blob {} not found",
+                crate::revision_hash::hex_sha256(&sha256)
+            ),
         )
     })?;
     let tmp = tmp_dir.join(format!("{}.wasm", uuid::Uuid::new_v4()));
@@ -820,7 +826,10 @@ pub(crate) async fn materialize_wasm(
         .join("plugins")
         .join("wasm")
         .join("cache")
-        .join(format!("{}.wasm", hex_sha256(sha256)));
+        .join(format!(
+            "{}.wasm",
+            crate::revision_hash::hex_sha256(&sha256)
+        ));
     if cache_path.exists() {
         return Ok(cache_path);
     }
@@ -2021,15 +2030,6 @@ fn upstream_matches(record: &UpstreamRecord, upstream: &Upstream) -> bool {
             Upstream::GeminiDirect { .. }
         )
     )
-}
-
-fn hex_sha256(sha256: [u8; 32]) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in sha256 {
-        use std::fmt::Write as _;
-        let _ = write!(&mut output, "{byte:02x}");
-    }
-    output
 }
 
 #[cfg(test)]

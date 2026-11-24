@@ -131,8 +131,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust-tools
-        with:
-          profile: fmt
       - run: cargo fmt --check
       - name: Audit-redaction lint
         run: bash scripts/lint-audit-redaction.sh
@@ -408,8 +406,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust-tools
-        with:
-          profile: clippy
       - uses: ./.github/actions/setup-rust-target-cache
         id: rust-cache
         with:
@@ -466,8 +462,6 @@ jobs:
           fi
       - uses: ./.github/actions/setup-rust-tools
         if: steps.decide.outputs.need_seed == 'true'
-        with:
-          profile: cov
       - uses: ./.github/actions/setup-rust-target-cache
         if: steps.decide.outputs.need_seed == 'true'
         id: rust-cache
@@ -512,8 +506,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust-tools
-        with:
-          profile: deny
       - run: cargo deny check
 
   promtool:
@@ -630,7 +622,6 @@ jobs:
       - uses: ./.github/actions/setup-rust-tools
         if: steps.filter.outputs.code != 'false'
         with:
-          profile: cov
           save-caches: "false"
       - uses: ./.github/actions/setup-rust-target-cache
         if: steps.filter.outputs.code != 'false'
@@ -673,8 +664,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust-tools
-        with:
-          profile: cov
       - uses: ./.github/actions/setup-rust-target-cache
         id: rust-cache
         with:
@@ -778,8 +767,6 @@ jobs:
           sparse-checkout: .github/actions
       - uses: ./.ci-actions/.github/actions/setup-rust-tools
         if: steps.llvm-check.outputs.hit != 'true'
-        with:
-          profile: cov
       - name: Stage lightweight LLVM coverage binaries
         if: steps.llvm-check.outputs.hit != 'true'
         run: |
@@ -866,8 +853,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust-tools
-        with:
-          profile: e2e
       - uses: ./.github/actions/setup-rust-target-cache
         id: rust-cache
         with:

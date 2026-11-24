@@ -1,4 +1,4 @@
-use cc_lb_engine::prompt_cache_simulator::{V3PromptCacheBlock, V3PromptCacheBlockSource};
+use cc_lb_routing_eval::prompt_cache_simulator::{V3PromptCacheBlock, V3PromptCacheBlockSource};
 use serde_json::{Value, json};
 
 pub fn prefix_oracle_bytes(model: &str, blocks: &[V3PromptCacheBlock]) -> Vec<u8> {

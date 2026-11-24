@@ -53,16 +53,6 @@ impl OAuthRefreshUpstreams for FakeUpstreams {
         state.record.oauth_token_generation = state.completed_generation;
         Ok(state.record.clone())
     }
-
-    async fn read_oauth_token_generation(&self, _id: Uuid) -> Result<Option<u64>> {
-        Ok(Some(
-            self.state
-                .lock()
-                .expect("upstreams lock")
-                .record
-                .oauth_token_generation,
-        ))
-    }
 }
 
 pub fn refreshable_record(upstream_id: Uuid, generation: u64) -> UpstreamRecord {

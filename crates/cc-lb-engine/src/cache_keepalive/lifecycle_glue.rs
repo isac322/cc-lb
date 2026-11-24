@@ -285,6 +285,10 @@ impl LifecycleKeepalive {
         }
     }
 
+    pub(crate) fn has_enqueuer(&self) -> bool {
+        self.enqueuer.is_some()
+    }
+
     pub(crate) fn with_enqueuer(&self, enqueuer: Arc<dyn CacheKeepaliveEnqueuer>) -> Self {
         Self {
             enqueuer: Some(enqueuer),
@@ -931,7 +935,7 @@ impl LifecycleKeepalive {
         let decision = if cache_metadata.cache_keepalive_surface.is_some() {
             super::TurnDecision::AgentInTurn
         } else {
-            HeuristicClassifier::new(&config.classifier).classify(request_json, response_body_json)
+            HeuristicClassifier::new(&config.classifier).classify(response_body_json)
         };
         match decision {
             super::TurnDecision::AgentInTurn => {

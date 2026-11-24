@@ -33,10 +33,9 @@ mod sqlite_tests {
         };
         config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
         config.runtime.data_dir = Some(dir.path().to_path_buf());
-        let app =
-            build_proxy_app_with_storage(config, None, role, managed_store, storage, aead, clock)
-                .await
-                .expect("build_proxy_app_with_storage");
+        let app = build_proxy_app_with_storage(config, role, managed_store, storage, aead, clock)
+            .await
+            .expect("build_proxy_app_with_storage");
         (dir, app)
     }
 

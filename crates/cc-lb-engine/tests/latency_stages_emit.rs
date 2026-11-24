@@ -14,14 +14,16 @@ use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_control::api_keys::limit_engine::LimitEngine;
 use cc_lb_control::event_bus::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY;
 use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, InMemoryBus};
-use cc_lb_engine::instrumented_connector::InstrumentedHttpsConnector;
+use cc_lb_engine::dns_cache::{
+    CachingDnsConnector, DnsResolveFuture, DnsResolver, DnsResolverConfig,
+};
 use cc_lb_engine::{
-    Body, BulkheadDispatch, BulkheadRegistry, BulkheadRuntimeConfig, CachingDnsConnector,
-    DispatchError, DnsResolveFuture, DnsResolver, DnsResolverConfig, Lifecycle, LifecycleConfig,
-    UpstreamDispatch,
+    Body, BulkheadDispatch, BulkheadRegistry, BulkheadRuntimeConfig, DispatchError, Lifecycle,
+    LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_event_pipeline::{RequestEventAssemblerHandle, spawn_request_event_assembler};
 use cc_lb_observability::NoopMetricsHook;
+use cc_lb_proxy_telemetry::instrumented_connector::InstrumentedHttpsConnector;
 use cc_lb_storage_api::Storage as StorageTrait;
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{KeyStatus, RequestEvent, StoredApiKeyRecord};
@@ -481,7 +483,7 @@ where
                 .map_err(|source| DispatchError::Transport {
                     source: Box::new(source),
                 })?;
-        cc_lb_engine::request_timing::finalize_connection_reused_if_unset();
+        cc_lb_proxy_telemetry::request_timing::finalize_connection_reused_if_unset();
         let (parts, body) = response.into_parts();
         Ok(Response::from_parts(parts, Body::new(body)))
     }

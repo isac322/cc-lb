@@ -16,4 +16,3 @@ url.workspace = true
 
 [dev-dependencies]
 cc-lb-workspace-hack.workspace = true
-serde_json.workspace = true

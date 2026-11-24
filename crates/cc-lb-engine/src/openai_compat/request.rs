@@ -415,7 +415,7 @@ pub fn trim_oldest_input(body: &Value) -> Option<Value> {
     }
     Some(b)
 }
-pub fn api_key_only_features(body: &Value, _transport: Transport) -> Vec<ApiKeyOnlyFeature> {
+pub fn api_key_only_features(body: &Value) -> Vec<ApiKeyOnlyFeature> {
     let mut r = Vec::new();
     if let Some(a) = body.get("tools").and_then(Value::as_array) {
         for t in a {
@@ -528,7 +528,7 @@ mod tests {
             http.body.as_ref().expect("HTTP normalizes null store")["store"],
             false
         );
-        assert!(api_key_only_features(&body, Transport::WebSocket).is_empty());
+        assert!(api_key_only_features(&body).is_empty());
     }
 
     #[test]

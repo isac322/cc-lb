@@ -68,11 +68,11 @@ Keep p95 `sse_storage_tail_lag_ms` below 1000 ms. If lag is high while storage C
 
 ## Metric Label Taxonomy
 
-The finite label vocabulary is documented in `docs/metrics-live-tail.md` and enforced in `crates/cc-lb-engine/src/metrics_labels.rs`.
+The finite label vocabulary is documented in `docs/metrics-live-tail.md`; reset reasons are enforced by `ResetReason` in `crates/cc-lb-admin/src/events_routes.rs`, and the remaining label families are enforced in `crates/cc-lb-runtime-sync/src/live_tail/metrics_labels.rs`.
 
 Operationally important labels:
 
-- Reset reasons: `backfill_cap`, `bus_lagged`, `storage_error`.
+- Reset reasons: `backfill_cap`, `bus_lagged`, `storage_error`, `partial_cap`.
 - Partial triggers: `request_started`, `parse_completed`, `auth_completed`, `route_completed`, `upstream_response_started`, `usage_observed`, `stream_completed`, `request_terminated`. These eight snapshots are memory-only; only final request events are persisted.
 - Notify sent outcomes: `sent`, `trimmed_sent`, `failed`.
 - Notify drop reasons: `queue_full`, `queue_closed`, `serialize_error`, `payload_too_large`, `pg_error`.

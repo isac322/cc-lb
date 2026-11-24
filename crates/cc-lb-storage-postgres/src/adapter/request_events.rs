@@ -13,8 +13,7 @@ use std::time::Duration;
 use super::request_event_list_sql::{self, parse_event_kind, parse_protocol, status_class_range};
 use crate::{
     adapter::{
-        PostgresStorage, i64_to_u64, u64_to_i64, unix_secs_to_datetime,
-        unix_secs_to_datetime_lower, unix_secs_to_datetime_upper,
+        PostgresStorage, i64_to_u64, u64_to_i64, unix_secs_to_datetime, unix_secs_to_datetime_opt,
     },
     error_map::map_sqlx_error,
 };
@@ -346,13 +345,10 @@ async fn request_event_key_last_used(
     if query.until_unix_secs < query.since_unix_secs {
         return Ok(Vec::new());
     }
-    let Some(since) =
-        unix_secs_to_datetime_lower(query.since_unix_secs, "request event key last-used since")?
-    else {
+    let Some(since) = unix_secs_to_datetime_opt(query.since_unix_secs) else {
         return Ok(Vec::new());
     };
-    let until =
-        unix_secs_to_datetime_upper(query.until_unix_secs, "request event key last-used until")?;
+    let until = unix_secs_to_datetime_opt(query.until_unix_secs);
 
     let rows = sqlx::query_as::<_, (String, i64)>(
         "SELECT key_id, EXTRACT(EPOCH FROM MAX(ts))::bigint AS last_used_at_unix_secs \
@@ -444,13 +440,10 @@ fn request_event_histogram_query(
     query: &RequestEventHistogramQuery,
 ) -> StorageResult<Option<QueryBuilder<Postgres>>> {
     let range_start_ms = query.since_unix_secs.saturating_mul(1_000);
-    let Some(since) =
-        unix_secs_to_datetime_lower(query.since_unix_secs, "request event histogram since")?
-    else {
+    let Some(since) = unix_secs_to_datetime_opt(query.since_unix_secs) else {
         return Ok(None);
     };
-    let until =
-        unix_secs_to_datetime_upper(query.until_unix_secs, "request event histogram until")?;
+    let until = unix_secs_to_datetime_opt(query.until_unix_secs);
 
     let mut builder =
         QueryBuilder::<Postgres>::new(format!("{prefix}SELECT LEAST(GREATEST((r.list_ts_ms - "));

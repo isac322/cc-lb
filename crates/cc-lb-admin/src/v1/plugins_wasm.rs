@@ -283,7 +283,7 @@ async fn upload_wasm_inner(
             "sha256 computation failed",
         ))
     })?;
-    let sha256_hex = hex_sha256(sha256);
+    let sha256_hex = hex::encode(sha256);
     let existing_by_name = storage
         .get_registry_entry_by_name(&registry_name)
         .await
@@ -331,7 +331,7 @@ async fn upload_wasm_inner(
                     &existing,
                 )?;
             }
-            let old_sha256_hex = hex_sha256(existing.sha256);
+            let old_sha256_hex = hex::encode(existing.sha256);
             let expected_revision = parts.expected_revision.unwrap_or(existing.revision);
             materialize_cache(state, &sha256_hex, &bytes)
                 .await
@@ -572,7 +572,7 @@ fn replacement_confirmation_required(
             "expected_revision": existing.revision,
             "current_version": existing.version,
             "incoming_version": incoming_version,
-            "current_sha256_hex": hex_sha256(existing.sha256),
+            "current_sha256_hex": hex::encode(existing.sha256),
             "incoming_sha256_hex": incoming_sha256_hex,
         })),
     )
@@ -654,7 +654,7 @@ async fn gc_wasm(
 /// Removes the cache file of an orphan blob whose storage row GC just deleted
 /// and returns the blob's hex SHA-256 for the GC report.
 async fn remove_orphan_cache_file(state: &AdminState, sha: [u8; 32]) -> String {
-    let sha_hex = hex_sha256(sha);
+    let sha_hex = hex::encode(sha);
     let cache_path = wasm_cache_path(state, &sha_hex);
     match tokio::fs::remove_file(&cache_path).await {
         Ok(()) => {}
@@ -911,13 +911,4 @@ fn admin_id(identity: &AdminIdentity) -> Uuid {
         &Uuid::NAMESPACE_URL,
         format!("{}/{}", identity.authority, identity.subject).as_bytes(),
     )
-}
-
-fn hex_sha256(sha256: [u8; 32]) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in sha256 {
-        use std::fmt::Write as _;
-        let _ = write!(&mut output, "{byte:02x}");
-    }
-    output
 }

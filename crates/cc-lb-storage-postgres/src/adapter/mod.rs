@@ -79,36 +79,10 @@ pub(crate) fn unix_secs_to_datetime(value: u64, field: &str) -> StorageResult<Da
         })
 }
 
-pub(crate) fn unix_secs_to_datetime_upper(
-    value: u64,
-    field: &str,
-) -> StorageResult<Option<DateTime<Utc>>> {
-    let Ok(seconds) = i64::try_from(value) else {
-        return Ok(None);
-    };
-    match Utc.timestamp_opt(seconds, 0).single() {
-        Some(value) => Ok(Some(value)),
-        None => {
-            let _ = field;
-            Ok(None)
-        }
-    }
-}
-
-pub(crate) fn unix_secs_to_datetime_lower(
-    value: u64,
-    field: &str,
-) -> StorageResult<Option<DateTime<Utc>>> {
-    let Ok(seconds) = i64::try_from(value) else {
-        return Ok(None);
-    };
-    match Utc.timestamp_opt(seconds, 0).single() {
-        Some(value) => Ok(Some(value)),
-        None => {
-            let _ = field;
-            Ok(None)
-        }
-    }
+pub(crate) fn unix_secs_to_datetime_opt(value: u64) -> Option<DateTime<Utc>> {
+    i64::try_from(value)
+        .ok()
+        .and_then(|seconds| Utc.timestamp_opt(seconds, 0).single())
 }
 
 pub(crate) fn datetime_to_unix_secs(value: DateTime<Utc>, field: &str) -> StorageResult<u64> {
