@@ -1681,3 +1681,126 @@ async fn superseded_oauth_refresh_job_repairs_missing_metadata_and_successor_wit
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn oauth_refresh_watchdog_reconciles_anthropic_metadata_even_when_refresh_job_already_exists()
+{
+    use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
+    use cc_lb_scheduler::jobs::watchdog::OAuthRefreshWatchdogJob;
+    use cc_lb_scheduler::worker::{CronJob, SchedulerBackend};
+
+    let fixture = DispatchFixture::new().await;
+    let upstream = fixture.oauth_upstream(false).await;
+    let generation = upstream.oauth_token_generation;
+    let expires_at =
+        crate::scheduler_dispatch::http::decrypt_bundle(&upstream, fixture.dispatch.aead.as_ref())
+            .expect("decrypt bundle")
+            .expires_at_unix_secs;
+
+    // Seed the canonical OAuthRefreshJob for the current generation BEFORE running the watchdog,
+    // leaving MetadataRefreshJob missing (as if metadata enqueue failed on the prior run).
+    let refresh_job = OAuthRefreshJob::for_credential(upstream.id, generation, expires_at);
+    let refresh_key = refresh_job.generation_idempotency_key(generation, expires_at);
+    fixture
+        .dispatch
+        .backend
+        .push_adaptive_task(SchedulerPushTask {
+            args: AdaptiveJob::OAuthRefresh(refresh_job),
+            idempotency_key: Some(refresh_key),
+            run_at_unix_secs: Some(OAuthRefreshJob::run_at_for_expires_at(expires_at)),
+            max_attempts: None,
+        })
+        .await
+        .expect("seed active current-generation refresh job");
+
+    let tick1 = cc_lb_clock::unix_secs(fixture.clock.now());
+    let outcome1 = fixture
+        .dispatch
+        .dispatch_singleton(CronJob::OAuthRefreshWatchdog(OAuthRefreshWatchdogJob::new(
+            tick1,
+        )))
+        .await
+        .expect("watchdog reconciles metadata even when refresh job exists");
+    assert_eq!(outcome1, JobOutcome::Done);
+
+    let metadata_job = MetadataRefreshJob::new(upstream.id, generation);
+    let canonical_meta_key = metadata_job.idempotency_key();
+    let pending = fixture
+        .dispatch
+        .backend
+        .list_adaptive_tasks(&Filter {
+            status: Some(TaskStatus::Pending),
+            page: 1,
+            page_size: Some(50),
+        })
+        .await
+        .expect("list pending after first watchdog tick");
+    assert!(
+        pending.iter().any(|task| {
+            task.idempotency_key.as_deref() == Some(canonical_meta_key.as_str())
+                && matches!(
+                    &task.args,
+                    AdaptiveJob::MetadataRefresh(m)
+                        if m.upstream_id == upstream.id && m.credential_generation == generation
+                )
+        }),
+        "watchdog must enqueue missing MetadataRefreshJob even though OAuthRefreshJob is already active"
+    );
+
+    #[allow(irrefutable_let_patterns)]
+    let SchedulerBackend::Sqlite(sqlite) = &fixture.dispatch.backend else {
+        panic!("expected sqlite backend");
+    };
+
+    // Once MetadataRefreshJob is Done, a subsequent watchdog tick must NOT duplicate it.
+    sqlx::query("UPDATE Jobs SET status = 'Done', done_at = ?1 WHERE idempotency_key = ?2")
+        .bind(i64::try_from(tick1).expect("tick1 fits i64"))
+        .bind(&canonical_meta_key)
+        .execute(sqlite.pool())
+        .await
+        .expect("mark canonical metadata job Done");
+
+    let outcome2 = fixture
+        .dispatch
+        .dispatch_singleton(CronJob::OAuthRefreshWatchdog(OAuthRefreshWatchdogJob::new(
+            tick1 + 100,
+        )))
+        .await
+        .expect("watchdog after Done metadata");
+    assert_eq!(outcome2, JobOutcome::Done);
+
+    let meta_rows_after_done: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM Jobs WHERE idempotency_key LIKE ?1")
+            .bind(format!("{canonical_meta_key}%"))
+            .fetch_one(sqlite.pool())
+            .await
+            .expect("count metadata rows after Done");
+    assert_eq!(meta_rows_after_done, 1);
+
+    // If the canonical MetadataRefreshJob is Killed/exhausted, the watchdog seeds a distinct
+    // recovery metadata job for the current generation.
+    sqlx::query("UPDATE Jobs SET status = 'Killed' WHERE idempotency_key = ?1")
+        .bind(&canonical_meta_key)
+        .execute(sqlite.pool())
+        .await
+        .expect("mark canonical metadata job Killed");
+
+    let tick3 = tick1 + 200;
+    let outcome3 = fixture
+        .dispatch
+        .dispatch_singleton(CronJob::OAuthRefreshWatchdog(OAuthRefreshWatchdogJob::new(
+            tick3,
+        )))
+        .await
+        .expect("watchdog recovers killed metadata job");
+    assert_eq!(outcome3, JobOutcome::Done);
+
+    let recovery_meta_key = format!("{canonical_meta_key}:watchdog:{tick3}");
+    let recovery_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM Jobs WHERE idempotency_key = ?1")
+            .bind(&recovery_meta_key)
+            .fetch_one(sqlite.pool())
+            .await
+            .expect("count recovery metadata job");
+    assert_eq!(recovery_count, 1);
+}

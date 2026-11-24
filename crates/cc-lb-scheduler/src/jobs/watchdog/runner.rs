@@ -7,7 +7,9 @@ use uuid::Uuid;
 use crate::error::{Result, SchedulerError};
 use crate::jobs::oauth_refresh::OAuthRefreshJob;
 use crate::jobs::warmup::UpstreamWarmupJob;
-use crate::worker::{AdaptiveJob, SchedulerBackend, SchedulerPushTask, TaskStatus};
+use crate::worker::{
+    AdaptiveJob, AdaptiveTaskKeyState, SchedulerBackend, SchedulerPushTask, TaskStatus,
+};
 
 const PAGE_SIZE: u32 = 500;
 const ACTIVE_STATUSES: [TaskStatus; 4] = [
@@ -95,6 +97,7 @@ pub struct OAuthRefreshWatchdogResult {
 pub async fn run_oauth_refresh_watchdog(
     backend: &SchedulerBackend,
     targets: &[OAuthRefreshWatchdogTarget],
+    tick_unix_secs: u64,
 ) -> Result<OAuthRefreshWatchdogResult> {
     let active_jobs = active_oauth_refresh_jobs(backend).await?;
     let mut seeded = 0;
@@ -115,25 +118,49 @@ pub async fn run_oauth_refresh_watchdog(
             target.expected_generation,
             target.expected_expires_at_unix_secs,
         );
-        let idempotency_key = job.generation_idempotency_key(
+        let run_at = OAuthRefreshJob::run_at_for_expires_at(target.expected_expires_at_unix_secs);
+        let primary_key = job.generation_idempotency_key(
             target.expected_generation,
             target.expected_expires_at_unix_secs,
         );
-        let task = SchedulerPushTask {
-            args: AdaptiveJob::OAuthRefresh(job),
-            idempotency_key: Some(idempotency_key),
-            run_at_unix_secs: Some(OAuthRefreshJob::run_at_for_expires_at(
-                target.expected_expires_at_unix_secs,
-            )),
+        let primary_task = SchedulerPushTask {
+            args: AdaptiveJob::OAuthRefresh(job.clone()),
+            idempotency_key: Some(primary_key.clone()),
+            run_at_unix_secs: Some(run_at),
             max_attempts: None,
         };
-        match backend.push_adaptive_task(task).await {
-            Ok(()) => {
-                seeded += 1;
-                seeded_targets.push(*target);
+        let pushed = match backend.push_adaptive_task(primary_task).await {
+            Ok(()) => true,
+            Err(SchedulerError::Conflict(_)) => {
+                match backend.adaptive_task_key_state(&primary_key).await? {
+                    AdaptiveTaskKeyState::Active => false,
+                    AdaptiveTaskKeyState::Missing
+                    | AdaptiveTaskKeyState::Done
+                    | AdaptiveTaskKeyState::TerminalFailure => {
+                        let recovery_key = job.watchdog_recovery_idempotency_key(
+                            target.expected_generation,
+                            target.expected_expires_at_unix_secs,
+                            tick_unix_secs,
+                        );
+                        let recovery_task = SchedulerPushTask {
+                            args: AdaptiveJob::OAuthRefresh(job),
+                            idempotency_key: Some(recovery_key),
+                            run_at_unix_secs: Some(run_at),
+                            max_attempts: None,
+                        };
+                        match backend.push_adaptive_task(recovery_task).await {
+                            Ok(()) => true,
+                            Err(SchedulerError::Conflict(_)) => false,
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }
             }
-            Err(SchedulerError::Conflict(_)) => {}
             Err(error) => return Err(error),
+        };
+        if pushed {
+            seeded += 1;
+            seeded_targets.push(*target);
         }
     }
     Ok(OAuthRefreshWatchdogResult {

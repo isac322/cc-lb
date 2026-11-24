@@ -178,7 +178,9 @@ pub struct UpstreamStatusUpdate {
 pub struct OAuthRefreshFence {
     pub expected_generation: u64,
     pub lease_meta_key: String,
-    pub expected_lease_token: String,
+    /// Stable holder prefix across heartbeat renewals (e.g. `held:{generation}:{holder}:`).
+    /// Must be non-empty.
+    pub expected_lease_prefix: String,
 }
 
 #[async_trait]

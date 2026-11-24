@@ -32,6 +32,8 @@ mod spike_uniqueness_sqlite;
 mod usage_rollup;
 #[path = "watchdog_tests.rs"]
 mod watchdog_tests;
+#[path = "watchdog_tests_postgres.rs"]
+mod watchdog_tests_postgres;
 #[path = "watchdog_warmup_cycle_keys.rs"]
 mod watchdog_warmup_cycle_keys;
 #[path = "worker.rs"]

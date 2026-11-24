@@ -40,6 +40,14 @@ pub struct SchedulerTaskRow<Args> {
     pub max_attempts: i32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdaptiveTaskKeyState {
+    Missing,
+    Active,
+    Done,
+    TerminalFailure,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SchedulerPushTask<Args> {
     pub args: Args,
@@ -49,6 +57,22 @@ pub struct SchedulerPushTask<Args> {
 }
 
 impl SchedulerBackend {
+    pub async fn adaptive_task_key_state(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<AdaptiveTaskKeyState, SchedulerError> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(sqlite) => {
+                sqlite_adaptive_task_key_state(sqlite.pool(), idempotency_key).await
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => {
+                postgres_adaptive_task_key_state(postgres.pool(), idempotency_key).await
+            }
+        }
+    }
+
     pub async fn push_adaptive_task(
         &self,
         task: SchedulerPushTask<AdaptiveJob>,
@@ -160,6 +184,55 @@ impl SchedulerBackend {
             }
         }
     }
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+fn classify_task_key_state(row: Option<(String, i32, i32)>) -> AdaptiveTaskKeyState {
+    let Some((status, attempts, max_attempts)) = row else {
+        return AdaptiveTaskKeyState::Missing;
+    };
+    match status.as_str() {
+        "Pending" | "Queued" | "Running" => AdaptiveTaskKeyState::Active,
+        "Failed" if attempts < max_attempts => AdaptiveTaskKeyState::Active,
+        "Done" => AdaptiveTaskKeyState::Done,
+        _ => AdaptiveTaskKeyState::TerminalFailure,
+    }
+}
+
+#[cfg(feature = "sqlite")]
+async fn sqlite_adaptive_task_key_state(
+    pool: &sqlx::SqlitePool,
+    idempotency_key: &str,
+) -> Result<AdaptiveTaskKeyState, SchedulerError> {
+    let row: Option<(String, i32, i32)> = sqlx::query_as(
+        "SELECT status, attempts, max_attempts \
+         FROM Jobs \
+         WHERE job_type = ?1 AND idempotency_key = ?2 \
+         LIMIT 1",
+    )
+    .bind(ADAPTIVE_QUEUE)
+    .bind(idempotency_key)
+    .fetch_optional(pool)
+    .await?;
+    Ok(classify_task_key_state(row))
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_adaptive_task_key_state(
+    pool: &sqlx::PgPool,
+    idempotency_key: &str,
+) -> Result<AdaptiveTaskKeyState, SchedulerError> {
+    let row: Option<(String, i32, i32)> = sqlx::query_as(
+        "SELECT status, attempts, max_attempts \
+         FROM apalis.jobs \
+         WHERE job_type = $1 AND idempotency_key = $2 \
+         LIMIT 1",
+    )
+    .bind(ADAPTIVE_QUEUE)
+    .bind(idempotency_key)
+    .fetch_optional(pool)
+    .await?;
+    Ok(classify_task_key_state(row))
 }
 
 #[cfg(feature = "sqlite")]

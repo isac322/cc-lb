@@ -350,7 +350,7 @@ async fn oauth_refresh_watchdog_ignores_obsolete_generation_job_and_seeds_curren
     }];
 
     // Generation-1 job must NOT mask missing generation-2 successor.
-    let first = run_oauth_refresh_watchdog(&fixture.backend, &targets).await?;
+    let first = run_oauth_refresh_watchdog(&fixture.backend, &targets, TICK_UNIX_SECS).await?;
     assert_eq!(first.seeded, 1);
     assert_eq!(first.seeded_targets, targets);
 
@@ -367,8 +367,115 @@ async fn oauth_refresh_watchdog_ignores_obsolete_generation_job_and_seeds_curren
     );
 
     // Subsequent watchdog run sees the active generation-2 successor and does not re-seed.
-    let second = run_oauth_refresh_watchdog(&fixture.backend, &targets).await?;
+    let second =
+        run_oauth_refresh_watchdog(&fixture.backend, &targets, TICK_UNIX_SECS + 60).await?;
     assert_eq!(second.seeded, 0);
     assert!(second.seeded_targets.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn oauth_refresh_watchdog_recovers_exhausted_failed_and_killed_same_generation_rows()
+-> TestResult<()> {
+    use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
+    use cc_lb_scheduler::jobs::watchdog::{OAuthRefreshWatchdogTarget, run_oauth_refresh_watchdog};
+
+    for terminal_status in ["Failed", "Killed"] {
+        let fixture = Fixture::new().await?;
+        let upstream_id = Uuid::new_v4();
+        let target_expires = TICK_UNIX_SECS + 3_600;
+        let generation = 3;
+        let canonical_job =
+            OAuthRefreshJob::for_credential(upstream_id, generation, target_expires);
+        let canonical_key = canonical_job.generation_idempotency_key(generation, target_expires);
+
+        fixture
+            .backend
+            .push_adaptive_task(SchedulerPushTask {
+                args: AdaptiveJob::OAuthRefresh(canonical_job.clone()),
+                idempotency_key: Some(canonical_key.clone()),
+                run_at_unix_secs: Some(OAuthRefreshJob::run_at_for_expires_at(target_expires)),
+                max_attempts: Some(5),
+            })
+            .await?;
+
+        // Retryable Failed (attempts < max_attempts) must remain covered and NOT re-seed.
+        sqlx::query(
+            "UPDATE Jobs SET status = 'Failed', attempts = 2, max_attempts = 5 WHERE idempotency_key = ?1",
+        )
+        .bind(&canonical_key)
+        .execute(&fixture.pool)
+        .await?;
+        let target = OAuthRefreshWatchdogTarget {
+            upstream_id,
+            expected_generation: generation,
+            expected_expires_at_unix_secs: target_expires,
+            is_anthropic_oauth: false,
+        };
+        let retryable =
+            run_oauth_refresh_watchdog(&fixture.backend, &[target], TICK_UNIX_SECS).await?;
+        assert_eq!(
+            retryable.seeded, 0,
+            "{terminal_status}: retryable Failed should stay covered"
+        );
+
+        // Mark canonical row terminal (`Killed` or exhausted `Failed`).
+        let attempts = if terminal_status == "Failed" { 5 } else { 1 };
+        sqlx::query(
+            "UPDATE Jobs SET status = ?1, attempts = ?2, max_attempts = 5 WHERE idempotency_key = ?3",
+        )
+        .bind(terminal_status)
+        .bind(attempts)
+        .bind(&canonical_key)
+        .execute(&fixture.pool)
+        .await?;
+
+        let first = run_oauth_refresh_watchdog(&fixture.backend, &[target], TICK_UNIX_SECS).await?;
+        assert_eq!(first.seeded, 1, "{terminal_status}: recovery must seed");
+        assert_eq!(first.seeded_targets, vec![target]);
+
+        let recovery_key_1 = canonical_job.watchdog_recovery_idempotency_key(
+            generation,
+            target_expires,
+            TICK_UNIX_SECS,
+        );
+        assert_eq!(fixture.count_key(&recovery_key_1).await?, 1);
+        let payload = fixture.job_payload(&recovery_key_1).await?;
+        assert_eq!(
+            payload,
+            serde_json::to_value(AdaptiveJob::OAuthRefresh(canonical_job.clone()))?,
+            "recovery job must retain generation and expiry fences"
+        );
+        let run_at: i64 = sqlx::query_scalar("SELECT run_at FROM Jobs WHERE idempotency_key = ?1")
+            .bind(&recovery_key_1)
+            .fetch_one(&fixture.pool)
+            .await?;
+        assert_eq!(
+            u64::try_from(run_at)?,
+            OAuthRefreshJob::run_at_for_expires_at(target_expires)
+        );
+
+        // Next tick sees the active recovery row and does NOT seed again.
+        let second =
+            run_oauth_refresh_watchdog(&fixture.backend, &[target], TICK_UNIX_SECS + 60).await?;
+        assert_eq!(second.seeded, 0);
+
+        // If the first recovery row also exhausts, a later tick seeds a fresh recovery row.
+        sqlx::query(
+            "UPDATE Jobs SET status = 'Failed', attempts = 5, max_attempts = 5 WHERE idempotency_key = ?1",
+        )
+        .bind(&recovery_key_1)
+        .execute(&fixture.pool)
+        .await?;
+        let third =
+            run_oauth_refresh_watchdog(&fixture.backend, &[target], TICK_UNIX_SECS + 120).await?;
+        assert_eq!(third.seeded, 1);
+        let recovery_key_2 = canonical_job.watchdog_recovery_idempotency_key(
+            generation,
+            target_expires,
+            TICK_UNIX_SECS + 120,
+        );
+        assert_eq!(fixture.count_key(&recovery_key_2).await?, 1);
+    }
     Ok(())
 }

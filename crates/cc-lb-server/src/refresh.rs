@@ -72,6 +72,9 @@ fn parse_oauth_refresh_lease(raw: &str) -> Option<ParsedOAuthRefreshLease> {
         "held" => {
             let generation = parts.next()?.parse().ok()?;
             let holder = parts.next()?.to_owned();
+            if holder.is_empty() {
+                return None;
+            }
             let expires_at_unix_secs = parts.next()?.parse().ok()?;
             if parts.next().is_some() {
                 return None;
@@ -156,17 +159,41 @@ pub(crate) async fn renew_oauth_refresh_lease(
     }
 }
 
+fn oauth_refresh_lease_fence_prefix(token: &str) -> String {
+    match parse_oauth_refresh_lease(token) {
+        Some(ParsedOAuthRefreshLease::Held {
+            generation, holder, ..
+        }) => format!("held:{generation}:{holder}:"),
+        _ => token.to_owned(),
+    }
+}
+
 pub(crate) async fn release_oauth_refresh_lease(
     meta: &dyn MetaStore,
     upstream_id: Uuid,
     lease_token: &str,
     final_generation: u64,
 ) -> StorageResult<()> {
+    let prefix = oauth_refresh_lease_fence_prefix(lease_token);
+    if prefix.is_empty() {
+        return Ok(());
+    }
     let key = oauth_refresh_lease_meta_key(upstream_id);
     let idle = format!("idle:{final_generation}");
-    let _ = meta
-        .compare_and_put_meta_value(&key, Some(lease_token), &idle)
-        .await?;
+    for _ in 0..OAUTH_REFRESH_LEASE_CAS_ATTEMPTS {
+        let Some(existing) = meta.get_meta_value(&key).await? else {
+            return Ok(());
+        };
+        if !existing.starts_with(&prefix) {
+            return Ok(());
+        }
+        if meta
+            .compare_and_put_meta_value(&key, Some(&existing), &idle)
+            .await?
+        {
+            return Ok(());
+        }
+    }
     Ok(())
 }
 
@@ -458,6 +485,7 @@ impl ActiveOAuthRefreshLease {
                 }
                 let renew_result = tokio::select! {
                     biased;
+                    _ = stop_bg.cancelled() => break,
                     _ = parent_bg.cancelled() => break,
                     () = &mut expiry_sleep => {
                         mark_lease_lost(&state_bg, &lease_cancel_bg).await;
@@ -542,11 +570,7 @@ impl ActiveOAuthRefreshLease {
         matches!(&*self.state.lock().await, LeaseHeartbeatState::Lost)
     }
 
-    pub(crate) async fn stop_and_fence(&mut self) -> Result<Option<OAuthRefreshFence>, ()> {
-        self.stop_heartbeat.cancel();
-        if let Some(handle) = self.heartbeat.take() {
-            let _ = handle.await;
-        }
+    pub(crate) async fn fence(&self) -> Result<Option<OAuthRefreshFence>, ()> {
         let guard = self.state.lock().await;
         match &*guard {
             LeaseHeartbeatState::Active(token) => Ok(self
@@ -555,7 +579,7 @@ impl ActiveOAuthRefreshLease {
                 .map(|lease_meta_key| OAuthRefreshFence {
                     expected_generation: self.expected_generation,
                     lease_meta_key,
-                    expected_lease_token: token.clone(),
+                    expected_lease_prefix: oauth_refresh_lease_fence_prefix(token),
                 })),
             LeaseHeartbeatState::Lost | LeaseHeartbeatState::Released => Err(()),
         }
@@ -1834,10 +1858,7 @@ async fn refresh_flow(
             let encrypted = EncryptedOAuthTokens::encrypt(aead, &bundle, upstream.id.as_bytes())
                 .map_err(|_| RefreshError::Encrypt)?;
             let updated = if let Some(lease) = active_lease.as_deref_mut() {
-                let fence = lease
-                    .stop_and_fence()
-                    .await
-                    .map_err(|()| RefreshError::LeaseLost)?;
+                let fence = lease.fence().await.map_err(|()| RefreshError::LeaseLost)?;
                 match fence {
                     Some(fence) => {
                         let updated = match stores
@@ -2761,7 +2782,7 @@ mod tests {
         );
 
         let fence = active
-            .stop_and_fence()
+            .fence()
             .await
             .map_err(|()| "expected active fence")?
             .ok_or("expected MetaStore fence")?;
@@ -2802,10 +2823,10 @@ mod tests {
         )
         .await?
         .ok_or("second lease should succeed")?;
-        let mut active2 = super::ActiveOAuthRefreshLease::start_with_interval(
+        let active2 = super::ActiveOAuthRefreshLease::start_with_interval(
             fixture.storage.clone(),
-            clock_handle,
-            parent_cancel,
+            clock_handle.clone(),
+            parent_cancel.clone(),
             lease2.clone(),
             gen2,
             Duration::from_millis(5),
@@ -2821,12 +2842,12 @@ mod tests {
             .await
             .map_err(|_| "lease loss did not cancel active request token")?;
         assert!(active2.is_lost().await);
-        assert!(active2.stop_and_fence().await.is_err());
+        assert!(active2.fence().await.is_err());
 
         let stale_fence = cc_lb_storage_api::OAuthRefreshFence {
             expected_generation: gen2,
             lease_meta_key: lease_key.clone(),
-            expected_lease_token: lease2.token,
+            expected_lease_prefix: super::oauth_refresh_lease_fence_prefix(&lease2.token),
         };
         let lost_tokens = EncryptedOAuthTokens::encrypt(
             fixture.aead.as_ref(),
@@ -2862,6 +2883,173 @@ mod tests {
         assert_eq!(
             fixture.storage.get_meta_value(&lease_key).await?.as_deref(),
             Some(competing_holder.as_str())
+        );
+
+        // Phase 3: Empty fence prefix fails closed, and prefix-matched fence stays valid
+        // across renewals occurring between fence creation and storage commit.
+        let empty_prefix_fence = cc_lb_storage_api::OAuthRefreshFence {
+            expected_generation: gen2,
+            lease_meta_key: lease_key.clone(),
+            expected_lease_prefix: String::new(),
+        };
+        let empty_tokens = EncryptedOAuthTokens::encrypt(
+            fixture.aead.as_ref(),
+            &OAuthTokenBundle {
+                oauth_profile: Default::default(),
+                access_token: "sk-ant-oat01-empty".to_owned(),
+                refresh_token: "sk-ant-ort01-empty".to_owned(),
+                expires_at_unix_secs: now2 + 7200,
+                refresh_token_expires_at_unix_secs: None,
+                account_id: None,
+                project_id: None,
+                scopes: vec!["messages".to_owned()],
+                never_refresh: false,
+            },
+            upstream_id.as_bytes(),
+        )?;
+        assert!(matches!(
+            fixture
+                .storage
+                .complete_refresh_fenced(
+                    upstream_id,
+                    Uuid::new_v4(),
+                    empty_tokens,
+                    &empty_prefix_fence
+                )
+                .await
+                .expect_err("empty fence prefix must fail closed"),
+            cc_lb_storage_api::StorageError::Conflict { .. }
+        ));
+
+        fixture
+            .storage
+            .put_meta_value(&lease_key, &format!("idle:{gen2}"))
+            .await?;
+        let now3 = cc_lb_clock::unix_secs(test_clock.now());
+        let lease3 = super::try_acquire_oauth_refresh_lease(
+            fixture.storage.as_ref(),
+            upstream_id,
+            gen2,
+            now3,
+        )
+        .await?
+        .ok_or("third lease should succeed")?;
+        let mut active3 = super::ActiveOAuthRefreshLease::start_with_interval(
+            fixture.storage.clone(),
+            clock_handle,
+            parent_cancel,
+            lease3.clone(),
+            gen2,
+            Duration::from_millis(5),
+        );
+        // Obtain the fence BEFORE heartbeat renews the token timestamp.
+        let pre_renew_fence = active3
+            .fence()
+            .await
+            .map_err(|()| "expected active pre-renewal fence")?
+            .ok_or("expected MetaStore fence")?;
+        test_clock.advance_secs(40);
+        let renew_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(current_val) = fixture.storage.get_meta_value(&lease_key).await?
+                && current_val != lease3.token
+            {
+                assert!(current_val.starts_with(&pre_renew_fence.expected_lease_prefix));
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < renew_deadline,
+                "lease did not keep renewing after fence() call"
+            );
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        // Another acquirer at now3 + 100 still sees the renewed lease as held.
+        assert!(
+            super::try_acquire_oauth_refresh_lease(
+                fixture.storage.as_ref(),
+                upstream_id,
+                gen2,
+                now3 + 100,
+            )
+            .await?
+            .is_none()
+        );
+        let commit3_tokens = EncryptedOAuthTokens::encrypt(
+            fixture.aead.as_ref(),
+            &OAuthTokenBundle {
+                oauth_profile: Default::default(),
+                access_token: "sk-ant-oat01-fenced-renewed".to_owned(),
+                refresh_token: "sk-ant-ort01-fenced-renewed".to_owned(),
+                expires_at_unix_secs: now3 + 7200,
+                refresh_token_expires_at_unix_secs: None,
+                account_id: None,
+                project_id: None,
+                scopes: vec!["messages".to_owned()],
+                never_refresh: false,
+            },
+            upstream_id.as_bytes(),
+        )?;
+        let committed3 = fixture
+            .storage
+            .complete_refresh_fenced(
+                upstream_id,
+                Uuid::new_v4(),
+                commit3_tokens,
+                &pre_renew_fence,
+            )
+            .await?;
+        active3.mark_committed_and_released().await;
+        assert_eq!(committed3.oauth_token_generation, gen2 + 1);
+        assert_eq!(
+            fixture.storage.get_meta_value(&lease_key).await?.as_deref(),
+            Some(format!("idle:{}", gen2 + 1).as_str())
+        );
+
+        // Prefix-aware release clears a renewed timestamp for the same holder,
+        // while leaving a competitor holder untouched.
+        let lease4 = super::try_acquire_oauth_refresh_lease(
+            fixture.storage.as_ref(),
+            upstream_id,
+            gen2 + 1,
+            now3 + 200,
+        )
+        .await?
+        .ok_or("fourth lease should succeed")?;
+        let renewed4 = super::renew_oauth_refresh_lease(
+            fixture.storage.as_ref(),
+            upstream_id,
+            &lease4.token,
+            now3 + 230,
+        )
+        .await?
+        .ok_or("renew4 should succeed")?;
+        assert_ne!(renewed4, lease4.token);
+        super::release_oauth_refresh_lease(
+            fixture.storage.as_ref(),
+            upstream_id,
+            &lease4.token,
+            gen2 + 1,
+        )
+        .await?;
+        assert_eq!(
+            fixture.storage.get_meta_value(&lease_key).await?.as_deref(),
+            Some(format!("idle:{}", gen2 + 1).as_str())
+        );
+        let competitor4 = format!("held:{}:other:{}", gen2 + 1, now3 + 300);
+        fixture
+            .storage
+            .put_meta_value(&lease_key, &competitor4)
+            .await?;
+        super::release_oauth_refresh_lease(
+            fixture.storage.as_ref(),
+            upstream_id,
+            &lease4.token,
+            gen2 + 99,
+        )
+        .await?;
+        assert_eq!(
+            fixture.storage.get_meta_value(&lease_key).await?.as_deref(),
+            Some(competitor4.as_str())
         );
         Ok(())
     }
@@ -2938,7 +3126,7 @@ mod tests {
         // Case 1: Repeated transient storage errors never extend the expiry deadline,
         // so the exchange cancels strictly at `effective_ttl`.
         let calls = Arc::new(AtomicUsize::new(0));
-        let mut active_err = super::ActiveOAuthRefreshLease::start_with_controller_for_tests(
+        let active_err = super::ActiveOAuthRefreshLease::start_with_controller_for_tests(
             Arc::new(ErrorRenewController {
                 calls: Arc::clone(&calls),
             }),
@@ -2958,11 +3146,11 @@ mod tests {
         .await
         .map_err(|_| "expiry deadline did not cancel on repeated transient errors")?;
         assert!(active_err.is_lost().await);
-        assert!(active_err.stop_and_fence().await.is_err());
+        assert!(active_err.fence().await.is_err());
         assert!(calls.load(Ordering::SeqCst) >= 1);
 
         // Case 2: A slow/hung storage renew call is itself bounded by the expiry deadline.
-        let mut active_hung = super::ActiveOAuthRefreshLease::start_with_controller_for_tests(
+        let active_hung = super::ActiveOAuthRefreshLease::start_with_controller_for_tests(
             Arc::new(HungRenewController),
             clock,
             parent_cancel,
@@ -2980,7 +3168,7 @@ mod tests {
         .await
         .map_err(|_| "expiry deadline did not cancel while renew was hung")?;
         assert!(active_hung.is_lost().await);
-        assert!(active_hung.stop_and_fence().await.is_err());
+        assert!(active_hung.fence().await.is_err());
         Ok(())
     }
 
@@ -3173,7 +3361,7 @@ mod tests {
                 &cc_lb_storage_api::OAuthRefreshFence {
                     expected_generation: 1,
                     lease_meta_key: "oauth_refresh_lease:v1:test".to_owned(),
-                    expected_lease_token: "held:1:test:999".to_owned(),
+                    expected_lease_prefix: "held:1:test:".to_owned(),
                 },
             )
             .await

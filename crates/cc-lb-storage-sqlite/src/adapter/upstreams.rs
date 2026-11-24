@@ -639,6 +639,9 @@ async fn complete_split_refresh_fenced(
     tokens: EncryptedOAuthTokens,
     fence: &OAuthRefreshFence,
 ) -> StorageResult<UpstreamRecord> {
+    if fence.expected_lease_prefix.is_empty() {
+        return Err(conflict("empty oauth refresh lease fence"));
+    }
     let mut tx = storage.begin_immediate().await?;
     ensure_split_spec_active_in_tx(&mut tx, id).await?;
     let current_gen: Option<i64> = sqlx::query_scalar(
@@ -659,13 +662,15 @@ async fn complete_split_refresh_fenced(
         .checked_add(1)
         .ok_or_else(|| conflict("oauth token generation overflow"))?;
     let idle_value = format!("idle:{next_gen}");
-    let lease_update = sqlx::query("UPDATE meta_v1 SET value = ? WHERE key = ? AND value = ?")
-        .bind(&idle_value)
-        .bind(&fence.lease_meta_key)
-        .bind(&fence.expected_lease_token)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
+    let lease_update = sqlx::query(
+        "UPDATE meta_v1 SET value = ?1 WHERE key = ?2 AND substr(value, 1, length(?3)) = ?3",
+    )
+    .bind(&idle_value)
+    .bind(&fence.lease_meta_key)
+    .bind(&fence.expected_lease_prefix)
+    .execute(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
     if lease_update.rows_affected() != 1 {
         return Err(conflict("oauth refresh lease ownership lost"));
     }

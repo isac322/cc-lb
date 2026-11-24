@@ -177,15 +177,32 @@ impl SchedulerDispatch {
         job: OAuthRefreshWatchdogJob,
     ) -> SchedulerResult<JobOutcome> {
         let targets = self.list_oauth_refresh_watchdog_targets().await?;
-        let result = run_oauth_refresh_watchdog(&self.backend, &targets).await?;
-        for target in &result.seeded_targets {
-            if target.is_anthropic_oauth {
-                self.enqueue_metadata_refresh(MetadataRefreshJob::new(
-                    target.upstream_id,
-                    target.expected_generation,
-                ))
-                .await?;
+        let result =
+            run_oauth_refresh_watchdog(&self.backend, &targets, job.tick_unix_secs).await?;
+        let mut first_metadata_error = None;
+        for target in &targets {
+            if !target.is_anthropic_oauth {
+                continue;
             }
+            if let Err(error) = self
+                .reconcile_metadata_refresh(
+                    MetadataRefreshJob::new(target.upstream_id, target.expected_generation),
+                    job.tick_unix_secs,
+                )
+                .await
+            {
+                tracing::warn!(
+                    tick_unix_secs = job.tick_unix_secs,
+                    upstream_id = %target.upstream_id,
+                    generation = target.expected_generation,
+                    %error,
+                    "oauth refresh watchdog metadata reconciliation failed",
+                );
+                first_metadata_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = first_metadata_error {
+            return Err(error);
         }
         tracing::info!(
             tick_unix_secs = job.tick_unix_secs,
