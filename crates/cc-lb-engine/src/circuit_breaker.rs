@@ -15,6 +15,22 @@ use crate::lifecycle::{Body, DispatchError, UpstreamDispatch};
 use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 
 const HALF_OPEN_INITIALIZING: u32 = u32::MAX;
+const FAILURE_COUNT_BITS: u32 = 24;
+const FAILURE_COUNT_MASK: u64 = (1u64 << FAILURE_COUNT_BITS) - 1;
+const MAX_FAILURE_COUNT: u32 = FAILURE_COUNT_MASK as u32;
+const MAX_FAILURE_TS: u64 = u64::MAX >> FAILURE_COUNT_BITS;
+
+fn pack_failure_state(last_failure_ts: u64, count: u32) -> u64 {
+    let ts = last_failure_ts.min(MAX_FAILURE_TS);
+    let count = u64::from(count.min(MAX_FAILURE_COUNT));
+    (ts << FAILURE_COUNT_BITS) | count
+}
+
+fn unpack_failure_state(packed: u64) -> (u64, u32) {
+    let ts = packed >> FAILURE_COUNT_BITS;
+    let count = (packed & FAILURE_COUNT_MASK) as u32;
+    (ts, count)
+}
 
 static REGISTER_CIRCUIT_BREAKER_METRICS: Once = Once::new();
 
@@ -77,8 +93,7 @@ pub struct CircuitBreaker {
     pub upstream_name: String,
     pub config: BreakerRuntimeConfig,
     pub state: ArcSwap<BreakerState>,
-    pub failures: AtomicU32,
-    pub last_failure_ts: AtomicU64,
+    failure_state: AtomicU64,
     pub last_open_ts: AtomicU64,
     pub half_open_in_flight: AtomicU32,
     clock: Arc<dyn Clock>,
@@ -95,8 +110,7 @@ impl CircuitBreaker {
             upstream_name: upstream_name.into(),
             config,
             state: ArcSwap::from_pointee(BreakerState::Closed),
-            failures: AtomicU32::new(0),
-            last_failure_ts: AtomicU64::new(0),
+            failure_state: AtomicU64::new(0),
             last_open_ts: AtomicU64::new(0),
             half_open_in_flight: AtomicU32::new(0),
             clock,
@@ -118,7 +132,7 @@ impl CircuitBreaker {
     }
 
     pub fn failure_count(&self) -> u32 {
-        self.failures.load(Ordering::SeqCst)
+        unpack_failure_state(self.failure_state.load(Ordering::SeqCst)).1
     }
 
     pub fn half_open_in_flight(&self) -> u32 {
@@ -204,24 +218,36 @@ impl CircuitBreaker {
     }
 
     fn increment_failures(&self, now: u64) -> u32 {
-        let last_failure = self.last_failure_ts.load(Ordering::SeqCst);
-        let elapsed = now.saturating_sub(last_failure);
-        let outside_window =
-            self.failure_count() == 0 || elapsed > self.config.failure_window.as_secs();
-        self.last_failure_ts.store(now, Ordering::SeqCst);
-        if outside_window {
-            self.failures.store(1, Ordering::SeqCst);
-            1
-        } else {
-            self.failures
-                .fetch_add(1, Ordering::SeqCst)
-                .saturating_add(1)
+        let now_clamped = now.min(MAX_FAILURE_TS);
+        let window_secs = self.config.failure_window.as_secs();
+        let mut current = self.failure_state.load(Ordering::SeqCst);
+        loop {
+            let (last_failure, count) = unpack_failure_state(current);
+            let elapsed = now_clamped.saturating_sub(last_failure);
+            let outside_window = count == 0 || elapsed > window_secs;
+            let (next_ts, next_count) = if outside_window {
+                (now_clamped, 1)
+            } else {
+                (
+                    last_failure.max(now_clamped),
+                    count.saturating_add(1).min(MAX_FAILURE_COUNT),
+                )
+            };
+            let next = pack_failure_state(next_ts, next_count);
+            match self.failure_state.compare_exchange_weak(
+                current,
+                next,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return next_count,
+                Err(observed) => current = observed,
+            }
         }
     }
 
     fn reset_closed_counters(&self) {
-        self.failures.store(0, Ordering::SeqCst);
-        self.last_failure_ts.store(0, Ordering::SeqCst);
+        self.failure_state.store(0, Ordering::SeqCst);
         self.last_open_ts.store(0, Ordering::SeqCst);
         self.half_open_in_flight.store(0, Ordering::SeqCst);
     }
@@ -535,5 +561,190 @@ mod tests {
         let names = registry.names();
         assert_eq!(names.len(), 5);
         assert!(names.iter().all(|n| n.starts_with("upstream-")));
+    }
+
+    #[test]
+    fn concurrent_increment_failures_from_zero_never_loses_increments() {
+        use std::sync::Barrier;
+
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 50;
+
+        for _ in 0..ROUNDS {
+            let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+            let breaker = CircuitBreaker::new(
+                "concurrent-zero",
+                BreakerRuntimeConfig {
+                    failures_to_open: 100,
+                    failure_window: Duration::from_secs(10),
+                    half_open_after: Duration::from_secs(30),
+                    half_open_max_in_flight: 1,
+                },
+                clock,
+            );
+            let barrier = Arc::new(Barrier::new(THREADS));
+            let mut results: Vec<u32> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..THREADS)
+                    .map(|_| {
+                        let breaker = Arc::clone(&breaker);
+                        let barrier = Arc::clone(&barrier);
+                        scope.spawn(move || {
+                            barrier.wait();
+                            breaker.increment_failures(100)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().expect("worker thread should succeed"))
+                    .collect()
+            });
+            results.sort_unstable();
+            assert_eq!(results, (1..=THREADS as u32).collect::<Vec<_>>());
+            assert_eq!(breaker.failure_count(), THREADS as u32);
+        }
+    }
+
+    #[test]
+    fn concurrent_increment_failures_after_window_expiry_never_loses_increments() {
+        use std::sync::Barrier;
+
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 50;
+
+        for _ in 0..ROUNDS {
+            let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+            let breaker = CircuitBreaker::new(
+                "concurrent-expired",
+                BreakerRuntimeConfig {
+                    failures_to_open: 100,
+                    failure_window: Duration::from_secs(10),
+                    half_open_after: Duration::from_secs(30),
+                    half_open_max_in_flight: 1,
+                },
+                clock,
+            );
+            assert_eq!(breaker.increment_failures(100), 1);
+
+            let barrier = Arc::new(Barrier::new(THREADS));
+            let mut results: Vec<u32> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..THREADS)
+                    .map(|_| {
+                        let breaker = Arc::clone(&breaker);
+                        let barrier = Arc::clone(&barrier);
+                        scope.spawn(move || {
+                            barrier.wait();
+                            breaker.increment_failures(111)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().expect("worker thread should succeed"))
+                    .collect()
+            });
+            results.sort_unstable();
+            assert_eq!(results, (1..=THREADS as u32).collect::<Vec<_>>());
+            assert_eq!(breaker.failure_count(), THREADS as u32);
+        }
+    }
+
+    #[test]
+    fn concurrent_failures_reliably_open_threshold_two_breaker() {
+        use std::sync::Barrier;
+
+        const ROUNDS: usize = 50;
+
+        for after_window_expiry in [false, true] {
+            for _ in 0..ROUNDS {
+                let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+                let breaker = CircuitBreaker::new(
+                    "threshold-two",
+                    BreakerRuntimeConfig {
+                        failures_to_open: 2,
+                        failure_window: Duration::from_secs(10),
+                        half_open_after: Duration::from_secs(30),
+                        half_open_max_in_flight: 1,
+                    },
+                    Arc::clone(&clock) as ClockHandle,
+                );
+                if after_window_expiry {
+                    breaker.permit().expect("closed permit").record_failure();
+                    assert_eq!(breaker.current_state(), BreakerState::Closed);
+                    assert_eq!(breaker.failure_count(), 1);
+                    clock.advance_secs(11);
+                }
+
+                let p1 = breaker.permit().expect("first closed permit");
+                let p2 = breaker.permit().expect("second closed permit");
+                let barrier = Arc::new(Barrier::new(2));
+
+                std::thread::scope(|scope| {
+                    let b1 = Arc::clone(&barrier);
+                    let h1 = scope.spawn(move || {
+                        b1.wait();
+                        p1.record_failure();
+                    });
+                    let b2 = Arc::clone(&barrier);
+                    let h2 = scope.spawn(move || {
+                        b2.wait();
+                        p2.record_failure();
+                    });
+                    h1.join().expect("thread 1 should succeed");
+                    h2.join().expect("thread 2 should succeed");
+                });
+
+                assert_eq!(
+                    breaker.current_state(),
+                    BreakerState::Open,
+                    "after_window_expiry={after_window_expiry}"
+                );
+                assert_eq!(
+                    breaker.failure_count(),
+                    2,
+                    "after_window_expiry={after_window_expiry}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pack_and_unpack_failure_state_saturates_without_cross_field_corruption() {
+        assert_eq!(unpack_failure_state(pack_failure_state(0, 0)), (0, 0));
+        assert_eq!(
+            unpack_failure_state(pack_failure_state(1_750_000_000, 42)),
+            (1_750_000_000, 42)
+        );
+        assert_eq!(
+            unpack_failure_state(pack_failure_state(MAX_FAILURE_TS, MAX_FAILURE_COUNT)),
+            (MAX_FAILURE_TS, MAX_FAILURE_COUNT)
+        );
+        assert_eq!(
+            unpack_failure_state(pack_failure_state(u64::MAX, u32::MAX)),
+            (MAX_FAILURE_TS, MAX_FAILURE_COUNT)
+        );
+    }
+
+    #[test]
+    fn failure_window_boundary_and_reset_closed_counters() {
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+        let breaker = CircuitBreaker::new(
+            "window-boundary",
+            BreakerRuntimeConfig {
+                failures_to_open: 5,
+                failure_window: Duration::from_secs(10),
+                half_open_after: Duration::from_secs(30),
+                half_open_max_in_flight: 1,
+            },
+            clock,
+        );
+
+        assert_eq!(breaker.increment_failures(100), 1);
+        assert_eq!(breaker.increment_failures(110), 2);
+        assert_eq!(breaker.increment_failures(121), 1);
+
+        breaker.reset_closed_counters();
+        assert_eq!(breaker.failure_count(), 0);
+        assert_eq!(breaker.increment_failures(121), 1);
     }
 }
