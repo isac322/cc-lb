@@ -952,6 +952,52 @@ fn openai_refresh_success_requires_a_published_native_main_window() {
 }
 
 #[test]
+fn codex_api_response_ignores_additional_rate_limits_for_base_windows() {
+    let value = serde_json::json!({
+        "rate_limit": {
+            "primary_window": {
+                "used_percent": 15.0,
+                "limit_window_seconds": 18_000,
+                "reset_at": 1_800_000_300
+            },
+            "secondary_window": {
+                "used_percent": 25.0,
+                "limit_window_seconds": 604_800,
+                "reset_at": 1_800_600_000
+            }
+        },
+        "additional_rate_limits": [
+            {
+                "limit_name": "GPT-5.3-Codex-Spark",
+                "metered_feature": "codex_bengalfox",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 100.0,
+                        "limit_window_seconds": 18_000,
+                        "reset_at": 1_800_000_300
+                    },
+                    "secondary_window": {
+                        "used_percent": 100.0,
+                        "limit_window_seconds": 604_800,
+                        "reset_at": 1_800_600_000
+                    }
+                }
+            }
+        ]
+    });
+    let records = records_from_openai_api(Uuid::nil(), &value, 1_700_000_000_000);
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        record(&records, SubscriptionQuotaWindow::FiveHour).utilization,
+        Some(0.15)
+    );
+    assert_eq!(
+        record(&records, SubscriptionQuotaWindow::SevenDay).utilization,
+        Some(0.25)
+    );
+}
+
+#[test]
 fn gemini_period_unknown_state_matrix() {
     let observed_at = 1_793_527_200_000;
     for (model, name, group, windows) in [

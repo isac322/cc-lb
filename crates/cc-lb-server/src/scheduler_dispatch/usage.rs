@@ -408,7 +408,14 @@ fn records_from_openai_api(
     observed_at_unix_millis: u64,
 ) -> Vec<SubscriptionQuotaSample> {
     let mut records = Vec::new();
-    collect_openai_windows(value, &mut records, upstream_id, observed_at_unix_millis);
+    if let Some(rate_limit) = value.get("rate_limit") {
+        collect_openai_windows(
+            rate_limit,
+            &mut records,
+            upstream_id,
+            observed_at_unix_millis,
+        );
+    }
     let has_base_window = !records.is_empty();
     if let Some(credits) = codex_credits_from_value(value) {
         let mut record = base_record(

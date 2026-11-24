@@ -284,18 +284,23 @@ fn parse_codex_credits(headers: &http::HeaderMap) -> Option<SubscriptionQuotaCre
         .get("x-codex-credits-unlimited")
         .and_then(|value| value.to_str().ok())
         .and_then(parse_codex_bool);
+    let limit_reached = headers
+        .get("x-codex-credits-limit-reached")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_codex_bool);
     let balance = headers
         .get("x-codex-credits-balance")
         .and_then(|value| value.to_str().ok())
         .filter(|value| cc_lb_domain::is_credit_balance(value))
         .map(str::to_owned);
-    if has_credits.is_none() && unlimited.is_none() && balance.is_none() {
+    if has_credits.is_none() && unlimited.is_none() && limit_reached.is_none() && balance.is_none()
+    {
         return None;
     }
     Some(SubscriptionQuotaCredits {
         has_credits,
         unlimited,
-        limit_reached: None,
+        limit_reached,
         balance,
         approx_local_messages: None,
         approx_cloud_messages: None,
