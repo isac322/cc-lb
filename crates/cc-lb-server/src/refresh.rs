@@ -114,13 +114,10 @@ async fn reconcile_exact_oauth_refresh_lease(
     final_generation: u64,
 ) -> StorageResult<()> {
     let key = oauth_refresh_lease_meta_key(upstream_id);
-    let Some(existing) = meta.get_meta_value(&key).await? else {
-        return Ok(());
-    };
-    if existing != attempted_token {
-        return Ok(());
-    }
     let idle = format!("idle:{final_generation}");
+    // Issue the exact-token conditional write directly (no unlocked pre-read)
+    // so cleanup serializes on the backend's per-key lock behind any in-flight
+    // COMMIT from the original claim transaction.
     let _ = meta
         .compare_and_put_meta_value(&key, Some(attempted_token), &idle)
         .await?;
@@ -207,7 +204,9 @@ pub(crate) async fn renew_oauth_refresh_lease(
     now_unix_secs: u64,
 ) -> StorageResult<Option<String>> {
     let Some(ParsedOAuthRefreshLease::Held {
-        generation, holder, ..
+        generation,
+        holder,
+        expires_at_unix_secs: current_expires_at,
     }) = parse_oauth_refresh_lease(current_token)
     else {
         return Ok(None);
@@ -215,14 +214,71 @@ pub(crate) async fn renew_oauth_refresh_lease(
     let key = oauth_refresh_lease_meta_key(upstream_id);
     let expires_at = now_unix_secs.saturating_add(OAUTH_REFRESH_LEASE_TTL_SECS);
     let next_token = format!("held:{generation}:{holder}:{expires_at}");
-    if meta
+    match meta
         .compare_and_put_meta_value(&key, Some(current_token), &next_token)
-        .await?
+        .await
     {
-        Ok(Some(next_token))
-    } else {
-        Ok(None)
+        Ok(true) => return Ok(Some(next_token)),
+        Ok(false) => {}
+        Err(error) => {
+            if next_token != current_token
+                && matches!(
+                    meta.compare_and_put_meta_value(&key, Some(&next_token), &next_token)
+                        .await,
+                    Ok(true)
+                )
+            {
+                return Ok(Some(next_token));
+            }
+            return Err(error);
+        }
     }
+
+    for _ in 0..OAUTH_REFRESH_LEASE_CAS_ATTEMPTS {
+        let Some(existing) = meta.get_meta_value(&key).await? else {
+            return Ok(None);
+        };
+        match parse_oauth_refresh_lease(&existing) {
+            Some(ParsedOAuthRefreshLease::Held {
+                generation: stored_gen,
+                holder: stored_holder,
+                expires_at_unix_secs: stored_expires_at,
+            }) if stored_gen == generation
+                && stored_holder == holder
+                && stored_expires_at >= current_expires_at
+                && now_unix_secs < stored_expires_at =>
+            {
+                let reconciled_expires_at = expires_at.max(stored_expires_at);
+                let reconciled_token =
+                    format!("held:{generation}:{holder}:{reconciled_expires_at}");
+                match meta
+                    .compare_and_put_meta_value(&key, Some(&existing), &reconciled_token)
+                    .await
+                {
+                    Ok(true) => return Ok(Some(reconciled_token)),
+                    Ok(false) => continue,
+                    Err(error) => {
+                        if reconciled_token != existing
+                            && matches!(
+                                meta.compare_and_put_meta_value(
+                                    &key,
+                                    Some(&reconciled_token),
+                                    &reconciled_token,
+                                )
+                                .await,
+                                Ok(true)
+                            )
+                        {
+                            return Ok(Some(reconciled_token));
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+            _ => return Ok(None),
+        }
+    }
+    Ok(None)
 }
 
 fn oauth_refresh_lease_fence_prefix(token: &str) -> String {
@@ -246,6 +302,15 @@ pub(crate) async fn release_oauth_refresh_lease(
     }
     let key = oauth_refresh_lease_meta_key(upstream_id);
     let idle = format!("idle:{final_generation}");
+    // Try releasing the exact token directly before falling back to prefix
+    // discovery so un-renewed releases serialize on the backend's per-key
+    // lock behind any in-flight COMMIT.
+    if meta
+        .compare_and_put_meta_value(&key, Some(lease_token), &idle)
+        .await?
+    {
+        return Ok(());
+    }
     for _ in 0..OAUTH_REFRESH_LEASE_CAS_ATTEMPTS {
         let Some(existing) = meta.get_meta_value(&key).await? else {
             return Ok(());
@@ -5725,6 +5790,570 @@ mod tests {
             .finish_fallback_claim(upstream_id, &healthy_lease, starting_gen)
             .await?;
         assert_eq!(fixture.refresh_call_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth_refresh_lease_serializes_ambiguous_cleanup_before_commit_visibility()
+    -> Result<(), Box<dyn std::error::Error>> {
+        type PendingMetaWrite = (String, Option<String>, String);
+
+        struct DeferredCommitVisibilityMetaStore {
+            inner: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+            pending_commit: std::sync::Mutex<Option<PendingMetaWrite>>,
+            defer_next_put: AtomicBool,
+            deferred_flushes: AtomicUsize,
+        }
+
+        impl DeferredCommitVisibilityMetaStore {
+            async fn flush_pending(&self) -> StorageResult<()> {
+                let pending = {
+                    let mut guard = self
+                        .pending_commit
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    guard.take()
+                };
+                if let Some((key, expected, value)) = pending {
+                    self.deferred_flushes.fetch_add(1, Ordering::SeqCst);
+                    let _ = self
+                        .inner
+                        .compare_and_put_meta_value(&key, expected.as_deref(), &value)
+                        .await?;
+                }
+                Ok(())
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl MetaStore for DeferredCommitVisibilityMetaStore {
+            async fn initialize(&self) -> StorageResult<()> {
+                self.inner.initialize().await
+            }
+
+            async fn backend_kind(&self) -> StorageResult<cc_lb_storage_api::BackendKind> {
+                self.inner.backend_kind().await
+            }
+
+            async fn get_meta_value(&self, key: &str) -> StorageResult<Option<String>> {
+                // Intentionally read without flushing `pending_commit` to model an
+                // unlocked PostgreSQL SELECT observing pre-commit state while COMMIT finishes.
+                self.inner.get_meta_value(key).await
+            }
+
+            async fn put_meta_value(&self, key: &str, value: &str) -> StorageResult<()> {
+                self.flush_pending().await?;
+                self.inner.put_meta_value(key, value).await
+            }
+
+            async fn compare_and_put_meta_value(
+                &self,
+                key: &str,
+                expected: Option<&str>,
+                value: &str,
+            ) -> StorageResult<bool> {
+                // Serialized behind the backend per-key transaction lock: any
+                // in-flight COMMIT finishes before the next CAS executes.
+                self.flush_pending().await?;
+                if self.defer_next_put.swap(false, Ordering::SeqCst) {
+                    let mut guard = self
+                        .pending_commit
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    *guard = Some((
+                        key.to_owned(),
+                        expected.map(str::to_owned),
+                        value.to_owned(),
+                    ));
+                    return Err(cc_lb_storage_api::StorageError::Transient {
+                        retryable: true,
+                        source: Box::new(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionReset,
+                            "simulated connection drop before COMMIT visibility",
+                        )),
+                    });
+                }
+                self.inner
+                    .compare_and_put_meta_value(key, expected, value)
+                    .await
+            }
+
+            async fn verify_schema_current(&self) -> StorageResult<()> {
+                self.inner.verify_schema_current().await
+            }
+        }
+
+        // Sub-case A: `try_acquire_oauth_refresh_lease` receives a dropped-connection Err before
+        // COMMIT becomes visible; `reconcile_exact_oauth_refresh_lease` issues the direct CAS,
+        // serializing behind the pending commit and releasing it without an unlocked pre-read.
+        let (fixture_a, upstream_a, gen_a) = setup_killed_oauth_job_fixture().await?;
+        let lease_key_a = super::oauth_refresh_lease_meta_key(upstream_a);
+        let deferred_a = Arc::new(DeferredCommitVisibilityMetaStore {
+            inner: fixture_a.storage.clone(),
+            pending_commit: std::sync::Mutex::new(None),
+            defer_next_put: AtomicBool::new(true),
+            deferred_flushes: AtomicUsize::new(0),
+        });
+        let now_a = cc_lb_clock::unix_secs(fixture_a.clock.now());
+        let err_a =
+            super::try_acquire_oauth_refresh_lease(deferred_a.as_ref(), upstream_a, gen_a, now_a)
+                .await
+                .expect_err("deferred ambiguous commit must return Err");
+        assert!(matches!(
+            err_a,
+            cc_lb_storage_api::StorageError::Transient { .. }
+        ));
+        assert_eq!(deferred_a.deferred_flushes.load(Ordering::SeqCst), 1);
+        assert!(
+            deferred_a
+                .pending_commit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        );
+        assert_eq!(
+            fixture_a
+                .storage
+                .get_meta_value(&lease_key_a)
+                .await?
+                .as_deref(),
+            Some(format!("idle:{gen_a}").as_str())
+        );
+        let healthy_lease_a = super::try_acquire_oauth_refresh_lease(
+            fixture_a.storage.as_ref(),
+            upstream_a,
+            gen_a,
+            now_a,
+        )
+        .await?
+        .ok_or("healthy worker A must immediately acquire serialized cleaned lease")?;
+        super::release_oauth_refresh_lease(
+            fixture_a.storage.as_ref(),
+            upstream_a,
+            &healthy_lease_a.token,
+            gen_a,
+        )
+        .await?;
+
+        // Sub-case B: Outer `release_oauth_refresh_lease` serializes ahead of commit visibility
+        // even while an unlocked `get_meta_value` still observes `None`.
+        let (fixture_b, upstream_b, gen_b) = setup_killed_oauth_job_fixture().await?;
+        let lease_key_b = super::oauth_refresh_lease_meta_key(upstream_b);
+        let now_b = cc_lb_clock::unix_secs(fixture_b.clock.now());
+        let holder_b = Uuid::new_v4().to_string();
+        let token_b = super::oauth_refresh_lease_token(gen_b, &holder_b, now_b);
+        let deferred_b = Arc::new(DeferredCommitVisibilityMetaStore {
+            inner: fixture_b.storage.clone(),
+            pending_commit: std::sync::Mutex::new(Some((
+                lease_key_b.clone(),
+                None,
+                token_b.clone(),
+            ))),
+            defer_next_put: AtomicBool::new(false),
+            deferred_flushes: AtomicUsize::new(0),
+        });
+        assert_eq!(deferred_b.get_meta_value(&lease_key_b).await?, None);
+        super::release_oauth_refresh_lease(deferred_b.as_ref(), upstream_b, &token_b, gen_b)
+            .await?;
+        assert_eq!(deferred_b.deferred_flushes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture_b
+                .storage
+                .get_meta_value(&lease_key_b)
+                .await?
+                .as_deref(),
+            Some(format!("idle:{gen_b}").as_str())
+        );
+
+        // Sub-case C: Outer cleanup with a different caller token waits behind a foreign pending
+        // commit without clobbering that foreign holder's lease.
+        let (fixture_c, upstream_c, gen_c) = setup_killed_oauth_job_fixture().await?;
+        let lease_key_c = super::oauth_refresh_lease_meta_key(upstream_c);
+        let now_c = cc_lb_clock::unix_secs(fixture_c.clock.now());
+        let other_token_c =
+            super::oauth_refresh_lease_token(gen_c, &Uuid::new_v4().to_string(), now_c);
+        let stale_caller_token_c =
+            super::oauth_refresh_lease_token(gen_c, &Uuid::new_v4().to_string(), now_c);
+        let deferred_c = Arc::new(DeferredCommitVisibilityMetaStore {
+            inner: fixture_c.storage.clone(),
+            pending_commit: std::sync::Mutex::new(Some((
+                lease_key_c.clone(),
+                None,
+                other_token_c.clone(),
+            ))),
+            defer_next_put: AtomicBool::new(false),
+            deferred_flushes: AtomicUsize::new(0),
+        });
+        super::release_oauth_refresh_lease(
+            deferred_c.as_ref(),
+            upstream_c,
+            &stale_caller_token_c,
+            gen_c,
+        )
+        .await?;
+        assert_eq!(deferred_c.deferred_flushes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture_c
+                .storage
+                .get_meta_value(&lease_key_c)
+                .await?
+                .as_deref(),
+            Some(other_token_c.as_str())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth_refresh_lease_recovers_after_lost_renewal_ack_while_exchange_in_flight()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::sync::watch;
+
+        struct LostRenewalAckMetaStore {
+            inner: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+            initial_token: String,
+            expected_recovered_token: String,
+            fail_commit_and_probe_remaining: AtomicUsize,
+            lost_ack: watch::Sender<bool>,
+            recovered: watch::Sender<bool>,
+        }
+
+        #[async_trait::async_trait]
+        impl MetaStore for LostRenewalAckMetaStore {
+            async fn initialize(&self) -> StorageResult<()> {
+                self.inner.initialize().await
+            }
+
+            async fn backend_kind(&self) -> StorageResult<cc_lb_storage_api::BackendKind> {
+                self.inner.backend_kind().await
+            }
+
+            async fn get_meta_value(&self, key: &str) -> StorageResult<Option<String>> {
+                self.inner.get_meta_value(key).await
+            }
+
+            async fn put_meta_value(&self, key: &str, value: &str) -> StorageResult<()> {
+                self.inner.put_meta_value(key, value).await
+            }
+
+            async fn compare_and_put_meta_value(
+                &self,
+                key: &str,
+                expected: Option<&str>,
+                value: &str,
+            ) -> StorageResult<bool> {
+                if expected == Some(value)
+                    && self.fail_commit_and_probe_remaining.load(Ordering::SeqCst) > 0
+                {
+                    self.fail_commit_and_probe_remaining
+                        .fetch_sub(1, Ordering::SeqCst);
+                    return Err(cc_lb_storage_api::StorageError::Transient {
+                        retryable: true,
+                        source: Box::new(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionReset,
+                            "simulated lost renewal probe ack",
+                        )),
+                    });
+                }
+                let applied = self
+                    .inner
+                    .compare_and_put_meta_value(key, expected, value)
+                    .await?;
+                if applied
+                    && expected == Some(self.initial_token.as_str())
+                    && value != self.initial_token
+                    && self.fail_commit_and_probe_remaining.load(Ordering::SeqCst) > 0
+                {
+                    self.fail_commit_and_probe_remaining
+                        .fetch_sub(1, Ordering::SeqCst);
+                    self.lost_ack.send_replace(true);
+                    return Err(cc_lb_storage_api::StorageError::Transient {
+                        retryable: true,
+                        source: Box::new(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionReset,
+                            "simulated lost renewal COMMIT ack",
+                        )),
+                    });
+                }
+                if applied && value == self.expected_recovered_token {
+                    self.recovered.send_replace(true);
+                }
+                Ok(applied)
+            }
+
+            async fn verify_schema_current(&self) -> StorageResult<()> {
+                self.inner.verify_schema_current().await
+            }
+        }
+
+        // Sub-case 1: Live `refresh_flow` exchange stays in flight while the heartbeat renewal
+        // commits to SQLite and loses both its initial ack and immediate probe; subsequent
+        // heartbeat reconciles stored holder + expiry instead of cancelling the live exchange.
+        let fixture1 = LazyRefreshFixture::new(Duration::ZERO).await;
+        fixture1.hold_refresh_response();
+        let upstream1 = fixture1.create_oauth_upstream().await;
+        let record1 = UpstreamStore::get_by_id(fixture1.storage.as_ref(), upstream1)
+            .await?
+            .ok_or("missing upstream1")?;
+        let gen1 = record1.oauth_token_generation;
+        let lease_key1 = super::oauth_refresh_lease_meta_key(upstream1);
+        let test_clock1 = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let initial_now1 = cc_lb_clock::unix_secs(test_clock1.now());
+        let initial_lease1 = super::try_acquire_oauth_refresh_lease(
+            fixture1.storage.as_ref(),
+            upstream1,
+            gen1,
+            initial_now1,
+        )
+        .await?
+        .ok_or("initial lease 1 must succeed")?;
+        let holder1 = match super::parse_oauth_refresh_lease(&initial_lease1.token) {
+            Some(super::ParsedOAuthRefreshLease::Held { holder, .. }) => holder,
+            _ => return Err("expected held initial lease 1".into()),
+        };
+        let expected_recovered1 =
+            super::oauth_refresh_lease_token(gen1, &holder1, initial_now1 + 50);
+        let (lost_ack_tx1, mut lost_ack_rx1) = watch::channel(false);
+        let (recovered_tx1, mut recovered_rx1) = watch::channel(false);
+        let lost_meta1 = Arc::new(LostRenewalAckMetaStore {
+            inner: fixture1.storage.clone(),
+            initial_token: initial_lease1.token.clone(),
+            expected_recovered_token: expected_recovered1.clone(),
+            fail_commit_and_probe_remaining: AtomicUsize::new(2),
+            lost_ack: lost_ack_tx1,
+            recovered: recovered_tx1,
+        });
+        let parent_cancel1 = CancellationToken::new();
+        let mut active1 = super::ActiveOAuthRefreshLease::start_with_interval(
+            lost_meta1,
+            test_clock1.clone(),
+            parent_cancel1.clone(),
+            initial_lease1.clone(),
+            gen1,
+            Duration::from_millis(20),
+        );
+        let lease_cancel1 = active1.cancel_token();
+        let stores1 = fixture1.stores.clone();
+        let aead1 = fixture1.aead.clone();
+        let oauth_cfg1 = fixture1.oauth_cfg.clone();
+        let clock1_for_flow: ClockHandle = test_clock1.clone();
+        let flow_cancel1 = lease_cancel1.clone();
+        let refresh_handle1 = tokio::spawn(async move {
+            let outcome = super::refresh_flow(
+                &stores1,
+                stores1.audit.as_deref(),
+                &aead1,
+                &oauth_cfg1,
+                &cc_lb_config::Config::default(),
+                Uuid::new_v4(),
+                &super::TokenHttpClient::new(Duration::from_secs(30)),
+                &flow_cancel1,
+                record1,
+                clock1_for_flow.as_ref(),
+                Some(&mut active1),
+                Some(gen1),
+            )
+            .await;
+            (outcome, active1)
+        });
+        fixture1.wait_for_refresh_start().await;
+        test_clock1.advance_secs(25);
+        tokio::time::timeout(Duration::from_secs(2), lost_ack_rx1.wait_for(|&lost| lost)).await??;
+        let expected_first_renew1 =
+            super::oauth_refresh_lease_token(gen1, &holder1, initial_now1 + 25);
+        assert_eq!(
+            fixture1
+                .storage
+                .get_meta_value(&lease_key1)
+                .await?
+                .as_deref(),
+            Some(expected_first_renew1.as_str())
+        );
+        assert!(!lease_cancel1.is_cancelled());
+
+        test_clock1.advance_secs(25);
+        tokio::time::timeout(Duration::from_secs(2), recovered_rx1.wait_for(|&done| done))
+            .await??;
+        assert!(!lease_cancel1.is_cancelled());
+        assert_eq!(
+            fixture1
+                .storage
+                .get_meta_value(&lease_key1)
+                .await?
+                .as_deref(),
+            Some(expected_recovered1.as_str())
+        );
+
+        fixture1.release_refresh_response();
+        let (flow_outcome1, active1) =
+            tokio::time::timeout(Duration::from_secs(2), refresh_handle1).await??;
+        let refreshed1 = flow_outcome1?;
+        assert_eq!(refreshed1.generation, gen1 + 1);
+        assert!(!active1.is_lost().await);
+        active1.release(refreshed1.generation).await?;
+        assert_eq!(
+            fixture1
+                .storage
+                .get_meta_value(&lease_key1)
+                .await?
+                .as_deref(),
+            Some(format!("idle:{}", gen1 + 1).as_str())
+        );
+
+        // Sub-case 2: Immediate serialized probe confirms an ambiguous renewal even when
+        // the write finished after a dropped COMMIT acknowledgement.
+        struct DeferredRenewMetaStore {
+            inner: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+            pending: std::sync::Mutex<Option<(String, Option<String>, String)>>,
+            defer_next_put: AtomicBool,
+        }
+
+        #[async_trait::async_trait]
+        impl MetaStore for DeferredRenewMetaStore {
+            async fn initialize(&self) -> StorageResult<()> {
+                self.inner.initialize().await
+            }
+
+            async fn backend_kind(&self) -> StorageResult<cc_lb_storage_api::BackendKind> {
+                self.inner.backend_kind().await
+            }
+
+            async fn get_meta_value(&self, key: &str) -> StorageResult<Option<String>> {
+                self.inner.get_meta_value(key).await
+            }
+
+            async fn put_meta_value(&self, key: &str, value: &str) -> StorageResult<()> {
+                self.inner.put_meta_value(key, value).await
+            }
+
+            async fn compare_and_put_meta_value(
+                &self,
+                key: &str,
+                expected: Option<&str>,
+                value: &str,
+            ) -> StorageResult<bool> {
+                let pending = {
+                    let mut guard = self
+                        .pending
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    guard.take()
+                };
+                if let Some((p_key, p_expected, p_value)) = pending {
+                    let _ = self
+                        .inner
+                        .compare_and_put_meta_value(&p_key, p_expected.as_deref(), &p_value)
+                        .await?;
+                }
+                if self.defer_next_put.swap(false, Ordering::SeqCst) {
+                    let mut guard = self
+                        .pending
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    *guard = Some((
+                        key.to_owned(),
+                        expected.map(str::to_owned),
+                        value.to_owned(),
+                    ));
+                    return Err(cc_lb_storage_api::StorageError::Transient {
+                        retryable: true,
+                        source: Box::new(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionReset,
+                            "simulated lost renewal ack before visibility",
+                        )),
+                    });
+                }
+                self.inner
+                    .compare_and_put_meta_value(key, expected, value)
+                    .await
+            }
+
+            async fn verify_schema_current(&self) -> StorageResult<()> {
+                self.inner.verify_schema_current().await
+            }
+        }
+
+        let (fixture2, upstream2, gen2) = setup_killed_oauth_job_fixture().await?;
+        let lease_key2 = super::oauth_refresh_lease_meta_key(upstream2);
+        let now2 = cc_lb_clock::unix_secs(fixture2.clock.now());
+        let lease2 = super::try_acquire_oauth_refresh_lease(
+            fixture2.storage.as_ref(),
+            upstream2,
+            gen2,
+            now2,
+        )
+        .await?
+        .ok_or("lease 2 must succeed")?;
+        let holder2 = match super::parse_oauth_refresh_lease(&lease2.token) {
+            Some(super::ParsedOAuthRefreshLease::Held { holder, .. }) => holder,
+            _ => return Err("expected held lease 2".into()),
+        };
+        let deferred2 = Arc::new(DeferredRenewMetaStore {
+            inner: fixture2.storage.clone(),
+            pending: std::sync::Mutex::new(None),
+            defer_next_put: AtomicBool::new(true),
+        });
+        let renewed2 = super::renew_oauth_refresh_lease(
+            deferred2.as_ref(),
+            upstream2,
+            &lease2.token,
+            now2 + 25,
+        )
+        .await?
+        .ok_or("serialized probe must confirm deferred renewal commit")?;
+        let expected_renew2 = super::oauth_refresh_lease_token(gen2, &holder2, now2 + 25);
+        assert_eq!(renewed2, expected_renew2);
+        assert_eq!(
+            fixture2
+                .storage
+                .get_meta_value(&lease_key2)
+                .await?
+                .as_deref(),
+            Some(expected_renew2.as_str())
+        );
+
+        // Sub-case 3: Direct mismatch with stale `lease2.token` against SQLite's `expected_renew2`
+        // reconciles to `now2 + 50`; foreign holder and expired own lease fail closed (`None`).
+        let reconciled3 = super::renew_oauth_refresh_lease(
+            fixture2.storage.as_ref(),
+            upstream2,
+            &lease2.token,
+            now2 + 50,
+        )
+        .await?
+        .ok_or("same-holder mismatch must reconcile and extend")?;
+        let expected_reconciled3 = super::oauth_refresh_lease_token(gen2, &holder2, now2 + 50);
+        assert_eq!(reconciled3, expected_reconciled3);
+
+        let foreign_token = super::oauth_refresh_lease_token(gen2, "foreign-holder", now2 + 60);
+        fixture2
+            .storage
+            .put_meta_value(&lease_key2, &foreign_token)
+            .await?;
+        assert_eq!(
+            super::renew_oauth_refresh_lease(
+                fixture2.storage.as_ref(),
+                upstream2,
+                &lease2.token,
+                now2 + 60,
+            )
+            .await?,
+            None
+        );
+
+        fixture2
+            .storage
+            .put_meta_value(&lease_key2, &expected_renew2)
+            .await?;
+        assert_eq!(
+            super::renew_oauth_refresh_lease(
+                fixture2.storage.as_ref(),
+                upstream2,
+                &lease2.token,
+                now2 + 120,
+            )
+            .await?,
+            None
+        );
         Ok(())
     }
 
