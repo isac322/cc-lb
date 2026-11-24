@@ -121,10 +121,9 @@ async fn pgbouncer_transaction_pooling_keeps_hstore_visible_for_adaptive_and_cro
             .context("cron TaskSink enqueue under pgbouncer_transaction_pooling")?;
 
             // Simulated rolling-upgrade path: if an older setup installed hstore inside
-            // cc_lb_scheduler, reopening with pgbouncer_transaction_pooling and a role
-            // search_path of `app, public` relocates hstore strictly to `public` (NOT `app`)
-            // so both pooled and running unpooled replicas (`cc_lb_scheduler, apalis, public`)
-            // keep resolving `hstore`.
+            // cc_lb_scheduler, reopening with pgbouncer_transaction_pooling must NEVER
+            // automatically relocate `hstore` out of `cc_lb_scheduler` (which could break
+            // live unpooled replicas if their role lacks USAGE on the target schema).
             sqlx::query("CREATE SCHEMA IF NOT EXISTS app")
                 .execute(pg_backend.pool())
                 .await
@@ -135,6 +134,8 @@ async fn pgbouncer_transaction_pooling_keeps_hstore_visible_for_adaptive_and_cro
                 .context("relocate hstore to cc_lb_scheduler to simulate legacy upgrade")?;
             pg_backend.pool().close().await;
 
+            // Role omitting `cc_lb_scheduler` (`search_path = app, public`) must fail closed
+            // cleanly and leave `hstore` untouched in `cc_lb_scheduler`.
             let mut app_public_url = database_url.clone();
             app_public_url
                 .query_pairs_mut()
@@ -147,93 +148,19 @@ async fn pgbouncer_transaction_pooling_keeps_hstore_visible_for_adaptive_and_cro
                     ..cc_lb_config::PostgresPoolConfig::default()
                 },
             };
-            let reopened = cc_lb_scheduler::factory::open_scheduler_storage(
+            let app_public_err = cc_lb_scheduler::factory::open_scheduler_storage(
                 &app_public_config,
                 &SchedulerConfig::default(),
                 Arc::new(SystemClock),
             )
             .await
-            .context("reopen scheduler storage after legacy hstore placement")?;
-            let SchedulerBackend::Postgres(ref reopened_pg) = reopened.backend else {
-                bail!("expected postgres scheduler backend");
-            };
-            let relocated_schema: String = sqlx::query_scalar(
-                "SELECT n.nspname::text \
-                 FROM pg_extension e \
-                 JOIN pg_namespace n ON n.oid = e.extnamespace \
-                 WHERE e.extname = 'hstore'",
-            )
-            .fetch_one(reopened_pg.pool())
-            .await?;
-            ensure!(
-                relocated_schema == "public",
-                "rolling upgrade must relocate hstore to public, not app (got {relocated_schema})"
-            );
-            let upstream_id_2 = Uuid::new_v4();
-            reopened
-                .backend
-                .push_adaptive_task(SchedulerPushTask {
-                    args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id_2)),
-                    idempotency_key: Some(format!("pgbouncer:adaptive:{upstream_id_2}")),
-                    run_at_unix_secs: None,
-                    max_attempts: Some(5),
-                })
-                .await
-                .context("adaptive enqueue after hstore relocation")?;
-            // Simulated already-running unpooled peer session (`cc_lb_scheduler, apalis, public`)
-            // continues resolving `hstore` while PgBouncer replicas start up.
-            let unpooled_peer = sqlx::postgres::PgPoolOptions::new()
-                .max_connections(1)
-                .connect(&db_url)
-                .await?;
-            sqlx::query("SET search_path = cc_lb_scheduler, apalis, public")
-                .execute(&mut *unpooled_peer.acquire().await?)
-                .await?;
-            sqlx::query_scalar::<_, bool>("SELECT to_regtype('hstore') IS NOT NULL")
-                .fetch_one(&unpooled_peer)
-                .await?
-                .then_some(())
-                .context("unpooled peer lost hstore visibility")?;
-            unpooled_peer.close().await;
-            reopened_pg.pool().close().await;
-
-            // If a pooled role omits `public` (`search_path = app`) while hstore lives in
-            // `cc_lb_scheduler`, startup must fail WITHOUT moving hstore into `app` so running
-            // unpooled replicas are never broken.
-            let move_back_pool = PgPoolOptions::new()
-                .max_connections(1)
-                .connect(&db_url)
-                .await?;
-            sqlx::query("ALTER EXTENSION hstore SET SCHEMA cc_lb_scheduler")
-                .execute(&move_back_pool)
-                .await?;
-            move_back_pool.close().await;
-
-            let mut app_only_url = database_url.clone();
-            app_only_url
-                .query_pairs_mut()
-                .append_pair("options", "-c search_path=app");
-            let app_only_config = cc_lb_config::StorageConfig::Postgres {
-                url: app_only_url.to_string(),
-                pool: cc_lb_config::PostgresPoolConfig {
-                    listener_url: Some(db_url.clone()),
-                    pgbouncer_transaction_pooling: true,
-                    ..cc_lb_config::PostgresPoolConfig::default()
-                },
-            };
-            let app_only_err = cc_lb_scheduler::factory::open_scheduler_storage(
-                &app_only_config,
-                &SchedulerConfig::default(),
-                Arc::new(SystemClock),
-            )
-            .await
-            .expect_err("search_path=app without public/cc_lb_scheduler must reject instead of relocating");
+            .expect_err("legacy cc_lb_scheduler.hstore must not auto-relocate during rollout");
             ensure!(
                 matches!(
-                    app_only_err,
+                    app_public_err,
                     cc_lb_scheduler::factory::SchedulerFactoryError::MigrationFailed { .. }
                 ),
-                "unexpected error for search_path=app: {app_only_err}"
+                "unexpected error for search_path=app,public with legacy hstore: {app_public_err}"
             );
             let check_pool = PgPoolOptions::new().max_connections(1).connect(&db_url).await?;
             let schema_after_reject: String = sqlx::query_scalar(
@@ -249,6 +176,43 @@ async fn pgbouncer_transaction_pooling_keeps_hstore_visible_for_adaptive_and_cro
                 schema_after_reject == "cc_lb_scheduler",
                 "rejected rollout must leave hstore in cc_lb_scheduler (got {schema_after_reject})"
             );
+
+            // Role including `cc_lb_scheduler` (`search_path = app, cc_lb_scheduler`) succeeds
+            // without moving `hstore`, preserving compatibility with unpooled peers.
+            let mut app_with_sched_url = database_url.clone();
+            app_with_sched_url
+                .query_pairs_mut()
+                .append_pair("options", "-c search_path=app,cc_lb_scheduler");
+            let app_with_sched_config = cc_lb_config::StorageConfig::Postgres {
+                url: app_with_sched_url.to_string(),
+                pool: cc_lb_config::PostgresPoolConfig {
+                    listener_url: Some(db_url.clone()),
+                    pgbouncer_transaction_pooling: true,
+                    ..cc_lb_config::PostgresPoolConfig::default()
+                },
+            };
+            let reopened = cc_lb_scheduler::factory::open_scheduler_storage(
+                &app_with_sched_config,
+                &SchedulerConfig::default(),
+                Arc::new(SystemClock),
+            )
+            .await
+            .context("reopen scheduler storage when pooled search_path includes cc_lb_scheduler")?;
+            let SchedulerBackend::Postgres(ref reopened_pg) = reopened.backend else {
+                bail!("expected postgres scheduler backend");
+            };
+            let upstream_id_2 = Uuid::new_v4();
+            reopened
+                .backend
+                .push_adaptive_task(SchedulerPushTask {
+                    args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id_2)),
+                    idempotency_key: Some(format!("pgbouncer:adaptive:{upstream_id_2}")),
+                    run_at_unix_secs: None,
+                    max_attempts: Some(5),
+                })
+                .await
+                .context("adaptive enqueue with search_path including cc_lb_scheduler")?;
+            reopened_pg.pool().close().await;
             Ok(())
         })
         .catch_unwind(),
@@ -259,6 +223,131 @@ async fn pgbouncer_transaction_pooling_keeps_hstore_visible_for_adaptive_and_cro
         Ok(Ok(result)) => result,
         Ok(Err(_)) => Err(anyhow::anyhow!("pgbouncer hstore test panicked")),
         Err(elapsed) => Err(anyhow::Error::new(elapsed).context("pgbouncer hstore test timed out")),
+    };
+    let drop_result = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"DROP DATABASE "{database_name}" WITH (FORCE)"#
+    )))
+    .execute(&admin_pool)
+    .await;
+    admin_pool.close().await;
+    match (test_result, drop_result) {
+        (Ok(()), Ok(_)) => Ok(()),
+        (Err(e), Ok(_)) => Err(e),
+        (Ok(()), Err(d)) => Err(d.into()),
+        (Err(e), Err(d)) => Err(anyhow::anyhow!("test failed: {e:#}; drop failed: {d}")),
+    }
+}
+
+#[tokio::test]
+async fn pgbouncer_fresh_hstore_uses_pooled_role_search_path_when_split_from_listener() -> Result<()>
+{
+    let admin_url = std::env::var("DATABASE_URL")
+        .context("DATABASE_URL must be set to a PostgreSQL administrative database")?;
+    ensure!(
+        !admin_url.trim().is_empty(),
+        "DATABASE_URL must not be empty"
+    );
+    let database_name = format!("cclb_pgbouncer_split_{}", Uuid::new_v4().simple());
+    let mut database_url = Url::parse(&admin_url).context("parse DATABASE_URL")?;
+    database_url.set_path(&database_name);
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .context("connect to PostgreSQL administrative database")?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"CREATE DATABASE "{database_name}""#
+    )))
+    .execute(&admin_pool)
+    .await
+    .with_context(|| format!("create blank isolated database {database_name}"))?;
+
+    let test_result = timeout(
+        Duration::from_secs(45),
+        AssertUnwindSafe(async {
+            let direct_pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(database_url.as_str())
+                .await?;
+            sqlx::query("CREATE SCHEMA IF NOT EXISTS app")
+                .execute(&direct_pool)
+                .await?;
+            direct_pool.close().await;
+
+            // Pooled role can see ONLY `app` (not `public`), while migration listener role sees `app, public`.
+            // Fresh install must pick `app` from the pooled query role's search_path instead of installing in `public`.
+            let mut pooled_url = database_url.clone();
+            pooled_url
+                .query_pairs_mut()
+                .append_pair("options", "-c search_path=app");
+            let mut listener_url = database_url.clone();
+            listener_url
+                .query_pairs_mut()
+                .append_pair("options", "-c search_path=public,app");
+            let storage_config = cc_lb_config::StorageConfig::Postgres {
+                url: pooled_url.to_string(),
+                pool: cc_lb_config::PostgresPoolConfig {
+                    listener_url: Some(listener_url.to_string()),
+                    pgbouncer_transaction_pooling: true,
+                    ..cc_lb_config::PostgresPoolConfig::default()
+                },
+            };
+
+            let opened = cc_lb_scheduler::factory::open_scheduler_storage(
+                &storage_config,
+                &SchedulerConfig::default(),
+                Arc::new(SystemClock),
+            )
+            .await
+            .context("open fresh split-role pgbouncer scheduler storage")?;
+            let SchedulerBackend::Postgres(ref pg_backend) = opened.backend else {
+                bail!("expected postgres scheduler backend");
+            };
+            let hstore_schema: String = sqlx::query_scalar(
+                "SELECT n.nspname::text \
+                 FROM pg_extension e \
+                 JOIN pg_namespace n ON n.oid = e.extnamespace \
+                 WHERE e.extname = 'hstore'",
+            )
+            .fetch_one(pg_backend.pool())
+            .await?;
+            ensure!(
+                hstore_schema == "app",
+                "fresh pgbouncer install must choose pooled role schema `app` (got {hstore_schema})"
+            );
+            let upstream_id = Uuid::new_v4();
+            opened
+                .backend
+                .push_adaptive_task(SchedulerPushTask {
+                    args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
+                    idempotency_key: Some(format!("pgbouncer:split:{upstream_id}")),
+                    run_at_unix_secs: None,
+                    max_attempts: Some(5),
+                })
+                .await
+                .context("adaptive enqueue with split search_path")?;
+            let mut cron_storage =
+                apalis_postgres::PostgresStorage::<CronJob>::new(pg_backend.pool())
+                    .with_config(apalis_postgres::Config::default().queue(CRON_QUEUE));
+            apalis::prelude::TaskSink::push(
+                &mut cron_storage,
+                CronJob::UsageRollup(Default::default()),
+            )
+            .await
+            .context("cron TaskSink enqueue with split search_path")?;
+            pg_backend.pool().close().await;
+            Ok(())
+        })
+        .catch_unwind(),
+    )
+    .await;
+
+    let test_result = match test_result {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(anyhow::anyhow!("pgbouncer split hstore test panicked")),
+        Err(elapsed) => {
+            Err(anyhow::Error::new(elapsed).context("pgbouncer split hstore test timed out"))
+        }
     };
     let drop_result = sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"DROP DATABASE "{database_name}" WITH (FORCE)"#

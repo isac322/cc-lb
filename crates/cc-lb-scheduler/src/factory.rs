@@ -207,10 +207,16 @@ async fn open_postgres(
     }
 
     let pgbouncer_tx_pooling = storage_pool.pgbouncer_transaction_pooling;
+    let pooled_search_path = if pgbouncer_tx_pooling {
+        Some(probe_pooled_search_path(url, &connect_options, acquire_timeout).await?)
+    } else {
+        None
+    };
     let hstore_schema = run_postgres_scheduler_setup(
         direct_listener_url,
         &direct_connect_options,
         pgbouncer_tx_pooling,
+        pooled_search_path.as_deref(),
         acquire_timeout,
     )
     .await?;
@@ -257,13 +263,7 @@ async fn open_postgres(
         .await
         .map_err(|error| connection_error_with_host(url, error))?;
     if pgbouncer_tx_pooling {
-        ensure_pooled_hstore_visible(
-            &pool,
-            direct_listener_url,
-            &direct_connect_options,
-            acquire_timeout,
-        )
-        .await?;
+        ensure_pooled_hstore_visible(&pool).await?;
     }
     let listener_pool = PgPoolOptions::new()
         .max_connections(2)
@@ -559,37 +559,87 @@ async fn install_hstore_extension(
 }
 
 #[cfg(feature = "postgres")]
-async fn install_hstore_for_pooled_connections(
-    conn: &mut sqlx::PgConnection,
-) -> Result<String, SchedulerFactoryError> {
-    let install_in_public: bool = sqlx::query_scalar(
-        "SELECT 'public' = ANY(current_schemas(false)) AND has_schema_privilege('public', 'CREATE')",
+async fn probe_pooled_search_path(
+    url: &str,
+    connect_options: &sqlx::postgres::PgConnectOptions,
+    acquire_timeout: std::time::Duration,
+) -> Result<Vec<String>, SchedulerFactoryError> {
+    let mut conn = connect_direct_postgres_with_timeout(
+        url,
+        connect_options,
+        acquire_timeout,
+        "scheduler pooled search_path probe",
     )
-    .fetch_one(&mut *conn)
+    .await?;
+    let schemas: Vec<String> = tokio::time::timeout(
+        acquire_timeout,
+        sqlx::query_scalar("SELECT current_schemas(false)::text[]").fetch_one(&mut conn),
+    )
     .await
-    .map_err(migration_error)?;
-    if install_in_public {
-        sqlx::query("CREATE EXTENSION IF NOT EXISTS hstore SCHEMA public")
-            .execute(&mut *conn)
-            .await
-            .map_err(migration_error)?;
-        return find_hstore_schema(conn).await?.ok_or_else(|| {
-            SchedulerFactoryError::MigrationFailed {
-                message: "hstore extension was not found after CREATE EXTENSION IF NOT EXISTS hstore SCHEMA public"
-                    .to_owned(),
-            }
-        });
-    }
-    install_hstore_extension(conn).await
+    .map_err(|_| SchedulerFactoryError::ConnectionFailed {
+        message: format!("{}: pooled search_path check timed out", host_only(url)),
+    })?
+    .map_err(|error| connection_error_with_host(url, error))?;
+    Ok(schemas)
 }
 
 #[cfg(feature = "postgres")]
-async fn ensure_pooled_hstore_visible(
-    pool: &sqlx::PgPool,
-    direct_listener_url: &str,
-    direct_connect_options: &sqlx::postgres::PgConnectOptions,
-    acquire_timeout: std::time::Duration,
-) -> Result<(), SchedulerFactoryError> {
+async fn install_hstore_for_pooled_connections(
+    conn: &mut sqlx::PgConnection,
+    pooled_search_path: Option<&[String]>,
+) -> Result<String, SchedulerFactoryError> {
+    let search_path = match pooled_search_path {
+        Some(schemas) if !schemas.is_empty() => schemas.to_vec(),
+        _ => sqlx::query_scalar::<_, Vec<String>>("SELECT current_schemas(false)::text[]")
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(migration_error)?,
+    };
+    // Prefer `public` when it is both on the pooled query role's search_path and writable
+    // by the setup connection so pooled and unpooled peers share one visible placement.
+    let mut candidates: Vec<&str> = Vec::with_capacity(search_path.len());
+    if search_path.iter().any(|s| s == "public") {
+        candidates.push("public");
+    }
+    for schema in &search_path {
+        if schema != "public" {
+            candidates.push(schema.as_str());
+        }
+    }
+    for schema in candidates {
+        let can_create: bool = sqlx::query_scalar("SELECT has_schema_privilege($1, 'CREATE')")
+            .bind(schema)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(migration_error)?;
+        if can_create {
+            let sql = format!(
+                "CREATE EXTENSION IF NOT EXISTS hstore SCHEMA {}",
+                quote_pg_ident(schema)
+            );
+            sqlx::query(sqlx::AssertSqlSafe(sql))
+                .execute(&mut *conn)
+                .await
+                .map_err(migration_error)?;
+            return find_hstore_schema(conn).await?.ok_or_else(|| {
+                SchedulerFactoryError::MigrationFailed {
+                    message: format!(
+                        "hstore extension was not found after CREATE EXTENSION IF NOT EXISTS hstore SCHEMA {schema}"
+                    ),
+                }
+            });
+        }
+    }
+    Err(SchedulerFactoryError::MigrationFailed {
+        message: format!(
+            "no schema in the pooled query role's search_path ({}) is writable to install `hstore`; install `hstore` in one of those schemas or grant CREATE on `public`",
+            search_path.join(", ")
+        ),
+    })
+}
+
+#[cfg(feature = "postgres")]
+async fn ensure_pooled_hstore_visible(pool: &sqlx::PgPool) -> Result<(), SchedulerFactoryError> {
     let hstore_visible: bool = sqlx::query_scalar("SELECT to_regtype('hstore') IS NOT NULL")
         .fetch_one(pool)
         .await
@@ -598,60 +648,28 @@ async fn ensure_pooled_hstore_visible(
         return Ok(());
     }
 
-    // Relocate legacy `cc_lb_scheduler.hstore` strictly to `public` (and only when
-    // `public` is on the pooled role's search_path) so running unpooled replicas using
-    // `cc_lb_scheduler, apalis, public` keep resolving `hstore` during rolling upgrades.
-    let public_in_search_path: bool =
-        sqlx::query_scalar("SELECT 'public' = ANY(current_schemas(false))")
-            .fetch_one(pool)
-            .await
-            .map_err(migration_error)?;
-    if public_in_search_path {
-        let direct_listener_url = direct_listener_url.to_owned();
-        let direct_options = direct_connect_options.clone();
-        tokio::spawn(async move {
-            let mut conn = connect_direct_postgres_with_timeout(
-                &direct_listener_url,
-                &direct_options,
-                acquire_timeout,
-                "scheduler setup connection",
-            )
-            .await?;
-            sqlx::query("SELECT pg_advisory_lock($1)")
-                .bind(SCHEDULER_SETUP_LOCK_KEY)
-                .execute(&mut conn)
-                .await
-                .map_err(migration_error)?;
-            let outcome: Result<(), SchedulerFactoryError> = async {
-                let ext_schema = find_hstore_schema(&mut conn).await?;
-                if ext_schema.as_deref() == Some("cc_lb_scheduler") {
-                    sqlx::query("ALTER EXTENSION hstore SET SCHEMA public")
-                        .execute(&mut conn)
-                        .await
-                        .map_err(migration_error)?;
-                }
-                Ok(())
-            }
-            .await;
-            let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
-                .bind(SCHEDULER_SETUP_LOCK_KEY)
-                .execute(&mut conn)
-                .await;
-            outcome
-        })
-        .await
-        .map_err(migration_error)??;
-    }
-
-    let hstore_visible_after: bool = sqlx::query_scalar("SELECT to_regtype('hstore') IS NOT NULL")
-        .fetch_one(pool)
-        .await
-        .map_err(migration_error)?;
-    if hstore_visible_after {
-        return Ok(());
-    }
+    let existing_schema: Option<String> = sqlx::query_scalar(
+        "SELECT n.nspname::text \
+         FROM pg_extension e \
+         JOIN pg_namespace n ON n.oid = e.extnamespace \
+         WHERE e.extname = 'hstore'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(migration_error)?;
+    let location_hint = match existing_schema.as_deref() {
+        Some(schema) => format!(
+            "`hstore` is currently installed in schema `{schema}`, which is not on the pooled role's `search_path`; append `{schema}` after the application schema on the pooled role's `search_path`, or relocate it manually with `ALTER EXTENSION hstore SET SCHEMA public;` after verifying every active unpooled role has `USAGE` on `public`"
+        ),
+        None => {
+            "install the PostgreSQL `hstore` extension into a schema on the pooled role's `search_path`"
+                .to_owned()
+        }
+    };
     Err(SchedulerFactoryError::MigrationFailed {
-        message: "PostgreSQL `hstore` type is not visible on transaction-pooled scheduler connections; include `public` in the pooled role's `search_path` and run `ALTER EXTENSION hstore SET SCHEMA public;` (or append `cc_lb_scheduler` after the application schema on the role `search_path`)".to_owned(),
+        message: format!(
+            "PostgreSQL `hstore` type is not visible on transaction-pooled scheduler connections; {location_hint}"
+        ),
     })
 }
 
@@ -660,10 +678,12 @@ async fn run_postgres_scheduler_setup(
     direct_listener_url: &str,
     connect_options: &sqlx::postgres::PgConnectOptions,
     pgbouncer_transaction_pooling: bool,
+    pooled_search_path: Option<&[String]>,
     acquire_timeout: std::time::Duration,
 ) -> Result<String, SchedulerFactoryError> {
     let direct_listener_url = direct_listener_url.to_owned();
     let connect_options = connect_options.clone();
+    let pooled_search_path = pooled_search_path.map(ToOwned::to_owned);
     tokio::spawn(async move {
         let mut conn = connect_direct_postgres_with_timeout(
             &direct_listener_url,
@@ -679,12 +699,18 @@ async fn run_postgres_scheduler_setup(
             .map_err(migration_error)?;
         let setup_result: Result<String, SchedulerFactoryError> = async {
             let hstore_schema = if pgbouncer_transaction_pooling {
-                // Install BEFORE switching search_path, preferring `public` when writable
-                // on the pooled role's search_path so both pooled and unpooled peers can
-                // resolve unqualified `hstore`.
+                // Install BEFORE switching search_path, selecting a schema visible to the
+                // pooled query role's search_path so pooled connections resolve `hstore`
+                // without session `SET search_path`.
                 let schema = match find_hstore_schema(&mut conn).await? {
                     Some(schema) => schema,
-                    None => install_hstore_for_pooled_connections(&mut conn).await?,
+                    None => {
+                        install_hstore_for_pooled_connections(
+                            &mut conn,
+                            pooled_search_path.as_deref(),
+                        )
+                        .await?
+                    }
                 };
                 sqlx::query("CREATE SCHEMA IF NOT EXISTS cc_lb_scheduler")
                     .execute(&mut conn)

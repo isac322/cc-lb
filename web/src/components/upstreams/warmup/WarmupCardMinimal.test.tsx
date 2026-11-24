@@ -1023,4 +1023,53 @@ describe('WarmupCardMinimal fire now lanes', () => {
       vi.useRealTimers();
     }
   });
+
+  test('preserves toast feedback identifying upstream if card remounts while firing', async () => {
+    const { toast } = await import('sonner');
+    const toastSuccessSpy = vi.spyOn(toast, 'success');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { promise, resolve } =
+      Promise.withResolvers<queries.FireNowResponse>();
+    vi.mocked(queries.useFireNowUpstreamWarmup).mockReturnValue({
+      isPending: false,
+      mutateAsync: vi.fn(() => promise),
+    } as never);
+    try {
+      const initialUpstream = makeOauthUpstream({
+        name: 'Primary Claude Account',
+        warmup_dialect_plugin: { wasm_registry_id: 'shape-a', config: {} },
+      });
+      const updatedUpstream = makeOauthUpstream({
+        name: 'Primary Claude Account',
+        warmup_dialect_plugin: { wasm_registry_id: 'shape-b', config: {} },
+      });
+      const user = userEvent.setup();
+      const { rerender } = render(
+        <WarmupCardMinimal upstream={initialUpstream} />,
+      );
+
+      await user.click(screen.getByRole('button', { name: 'Fire now' }));
+      const dialog = await screen.findByRole('alertdialog');
+      await user.click(
+        within(dialog).getByRole('button', { name: 'Fire now' }),
+      );
+
+      // Simulate poll delivering a plugin update that remounts via stateKey.
+      rerender(<WarmupCardMinimal upstream={updatedUpstream} />);
+
+      await act(async () => {
+        resolve(makeFireNowSuccess());
+        await promise;
+      });
+
+      expect(toastSuccessSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Primary Claude Account'),
+        expect.any(Object),
+      );
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      toastSuccessSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
 });
