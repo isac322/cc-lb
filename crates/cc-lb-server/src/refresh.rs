@@ -38,7 +38,7 @@ use crate::dynamic_view_builder::Stores;
 
 const LAZY_REFRESH_CONTENTION_WAIT_SECS: u64 = 60;
 const LAZY_REFRESH_POLL_INTERVAL_SECS: u64 = 1;
-const OAUTH_REFRESH_LEASE_TTL_SECS: u64 = 90;
+pub(crate) const OAUTH_REFRESH_LEASE_TTL_SECS: u64 = 90;
 const OAUTH_REFRESH_LEASE_RENEW_INTERVAL_SECS: u64 = 25;
 const OAUTH_REFRESH_LEASE_SAFETY_MARGIN_SECS: u64 = 1;
 const OAUTH_REFRESH_LEASE_CAS_ATTEMPTS: usize = 4;
@@ -2325,17 +2325,26 @@ pub enum RefreshError {
     NotRefreshable,
 }
 
+pub(crate) fn oauth_refresh_http_status_proves_no_rotation(status: StatusCode) -> bool {
+    status.is_client_error() && status != StatusCode::REQUEST_TIMEOUT
+}
+
 fn refresh_outcome_is_ambiguous_after_send(outcome: &Result<u64, RefreshError>) -> bool {
-    matches!(
-        outcome,
-        Err(RefreshError::Cancelled
+    match outcome {
+        Err(
+            RefreshError::Cancelled
             | RefreshError::Http(_)
             | RefreshError::Parse(_)
             | RefreshError::Encrypt
             | RefreshError::Storage(_)
             | RefreshError::LeaseLost
-            | RefreshError::MetadataHook(_))
-    )
+            | RefreshError::MetadataHook(_),
+        ) => true,
+        Err(RefreshError::Status(status) | RefreshError::ReconnectRequired(status)) => {
+            !oauth_refresh_http_status_proves_no_rotation(*status)
+        }
+        _ => false,
+    }
 }
 
 async fn check_refresh_allowed(
@@ -7628,6 +7637,135 @@ mod tests {
         assert!(direct_claim.is_none());
 
         fixture.release_refresh_response();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lazy_refresher_retains_fallback_lease_on_gateway_timeout_and_releases_on_client_rejection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::StatusCode;
+
+        async fn spawn_status_token_server(
+            status: StatusCode,
+            body: &'static str,
+        ) -> (Url, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let recorded = Arc::clone(&calls);
+            let app = axum::Router::new().route(
+                "/oauth/token",
+                axum::routing::post(move || {
+                    let recorded = Arc::clone(&recorded);
+                    async move {
+                        recorded.fetch_add(1, Ordering::SeqCst);
+                        (status, [("content-type", "application/json")], body)
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind status token server");
+            let addr = listener.local_addr().expect("status token server addr");
+            let url = Url::parse(&format!("http://{addr}/oauth/token")).expect("token url");
+            let task = tokio::spawn(async move {
+                let _ = axum::serve(listener, app).await;
+            });
+            (url, calls, task)
+        }
+
+        async fn run_case(
+            status: StatusCode,
+            body: &'static str,
+        ) -> Result<
+            (LazyRefreshFixture, Uuid, u64, String, Arc<AtomicUsize>),
+            Box<dyn std::error::Error>,
+        > {
+            let (fixture, upstream_id, starting_generation) =
+                setup_killed_oauth_job_fixture().await?;
+            let (endpoint, calls, server) = spawn_status_token_server(status, body).await;
+            let lease_key = super::oauth_refresh_lease_meta_key(upstream_id);
+            let claims = Arc::new(super::ApalisLazyRefreshClaimGuard::new(
+                fixture.scheduler_backend.clone(),
+                fixture.storage.clone(),
+            ));
+            let mut oauth_cfg = (*fixture.oauth_cfg).clone();
+            oauth_cfg.token_url = endpoint;
+            let refresher = LazyRefresher::new_with_claim_guard_for_tests(
+                LazyRefresherDeps {
+                    google_config: Default::default(),
+                    stores: fixture.stores.clone(),
+                    aead: fixture.aead.clone(),
+                    oauth_cfg: Arc::new(oauth_cfg),
+                    clock: fixture.clock.clone(),
+                },
+                Uuid::new_v4(),
+                None,
+                CancellationToken::new(),
+                claims,
+                LazyRefreshContentionConfig::for_tests(
+                    Duration::from_secs(5),
+                    Duration::from_millis(5),
+                ),
+                fixture.scheduler_backend.clone(),
+            );
+            let outcome =
+                tokio::time::timeout(Duration::from_secs(2), refresher.refresh_one(upstream_id))
+                    .await
+                    .expect("fallback refresh settles within 2s");
+            assert!(outcome.is_err());
+            server.abort();
+            Ok((fixture, upstream_id, starting_generation, lease_key, calls))
+        }
+
+        // 504 Gateway Timeout keeps the held lease until TTL expiry so concurrent callers cannot replay.
+        let (fixture_504, upstream_504, gen_504, lease_key_504, calls_504) = run_case(
+            StatusCode::GATEWAY_TIMEOUT,
+            r#"{"error":"gateway_timeout"}"#,
+        )
+        .await?;
+        assert_eq!(calls_504.load(Ordering::SeqCst), 1);
+        let retained_504 = fixture_504
+            .storage
+            .get_meta_value(&lease_key_504)
+            .await?
+            .ok_or("expected held lease after 504 gateway timeout")?;
+        assert!(retained_504.starts_with(&format!("held:{gen_504}:")));
+        assert!(
+            super::try_acquire_oauth_refresh_lease_cancellation_safe(
+                fixture_504.storage.clone(),
+                fixture_504.storage.clone(),
+                upstream_504,
+                gen_504,
+                cc_lb_clock::unix_secs(fixture_504.clock.now()),
+            )
+            .await?
+            .is_none()
+        );
+
+        // Conclusive OAuth 4xx rejections immediately release back to `idle:{gen}`.
+        for (status, body) in [
+            (StatusCode::TOO_MANY_REQUESTS, r#"{"error":"rate_limited"}"#),
+            (StatusCode::UNAUTHORIZED, r#"{"error":"invalid_grant"}"#),
+        ] {
+            let (fixture, upstream_id, starting_generation, lease_key, calls) =
+                run_case(status, body).await?;
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                fixture.storage.get_meta_value(&lease_key).await?.as_deref(),
+                Some(format!("idle:{starting_generation}").as_str())
+            );
+            assert!(
+                super::try_acquire_oauth_refresh_lease_cancellation_safe(
+                    fixture.storage.clone(),
+                    fixture.storage.clone(),
+                    upstream_id,
+                    starting_generation,
+                    cc_lb_clock::unix_secs(fixture.clock.now()),
+                )
+                .await?
+                .is_some()
+            );
+        }
+
         Ok(())
     }
 

@@ -516,7 +516,9 @@ impl SchedulerDispatch {
             Err(RefreshRequestError::Endpoint { status, body })
                 if is_terminal_refresh_failure(status.as_u16(), &body) =>
             {
-                if let Some(flag) = definite_no_rotation {
+                if crate::refresh::oauth_refresh_http_status_proves_no_rotation(status)
+                    && let Some(flag) = definite_no_rotation
+                {
                     flag.store(true, Ordering::SeqCst);
                 }
                 let reason = if status == http::StatusCode::UNAUTHORIZED {
@@ -528,7 +530,9 @@ impl SchedulerDispatch {
                 return Ok(RefreshOutcome::NotRefreshable);
             }
             Err(RefreshRequestError::Endpoint { status, .. }) => {
-                if let Some(flag) = definite_no_rotation {
+                if crate::refresh::oauth_refresh_http_status_proves_no_rotation(status)
+                    && let Some(flag) = definite_no_rotation
+                {
                     flag.store(true, Ordering::SeqCst);
                 }
                 return Err(SchedulerError::Job(format!(

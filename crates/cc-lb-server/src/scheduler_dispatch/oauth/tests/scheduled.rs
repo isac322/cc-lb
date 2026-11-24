@@ -254,18 +254,43 @@ async fn transient_refresh_responses_keep_existing_retry_policy() {
         let mut fixture = DispatchFixture::new().await;
         set_token_endpoint(&mut fixture, endpoint);
         let upstream = fixture.oauth_upstream(false).await;
-        for _ in 0..2 {
+        assert_eq!(
+            fixture
+                .dispatch
+                .dispatch_oauth_refresh(OAuthRefreshJob::new(upstream.id))
+                .await
+                .expect("retryable response"),
+            JobOutcome::Retry {
+                delay: Some(std::time::Duration::from_secs(30)),
+            }
+        );
+        if status.is_server_error() {
+            // Ambiguous 5xx responses keep the held lease until TTL expiry before re-sending.
             assert_eq!(
                 fixture
                     .dispatch
                     .dispatch_oauth_refresh(OAuthRefreshJob::new(upstream.id))
                     .await
-                    .expect("retryable response"),
+                    .expect("held 5xx lease retries without calling provider"),
                 JobOutcome::Retry {
                     delay: Some(std::time::Duration::from_secs(30)),
                 }
             );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            fixture
+                .clock
+                .advance_secs(crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1);
         }
+        assert_eq!(
+            fixture
+                .dispatch
+                .dispatch_oauth_refresh(OAuthRefreshJob::new(upstream.id))
+                .await
+                .expect("retryable response after rejection or lease expiry"),
+            JobOutcome::Retry {
+                delay: Some(std::time::Duration::from_secs(30)),
+            }
+        );
         let stored = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
             .await
             .expect("load transient state")
@@ -1808,6 +1833,7 @@ async fn oauth_refresh_watchdog_reconciles_anthropic_metadata_even_when_refresh_
 async fn spawn_controlled_token_server(
     allow_response: tokio::sync::watch::Receiver<bool>,
     response_status: StatusCode,
+    response_body: &'static str,
 ) -> (
     Url,
     Arc<AtomicUsize>,
@@ -1831,19 +1857,11 @@ async fn spawn_controlled_token_server(
                 entered_tx.send_replace(true);
                 let _ = allow.wait_for(|&go| go).await;
                 sent_tx.send_replace(true);
-                if response_status.is_success() {
-                    (
-                        StatusCode::OK,
-                        [("content-type", "application/json")],
-                        r#"{"access_token":"rotated-access","refresh_token":"rotated-refresh","token_type":"Bearer","expires_in":3600}"#,
-                    )
-                } else {
-                    (
-                        response_status,
-                        [("content-type", "application/json")],
-                        r#"{"error":"server_error"}"#,
-                    )
-                }
+                (
+                    response_status,
+                    [("content-type", "application/json")],
+                    response_body,
+                )
             }
         }),
     );
@@ -1868,11 +1886,13 @@ async fn scheduled_oauth_refresh_timeout_after_provider_request_preserves_owners
  {
     use tokio::sync::watch;
 
+    const OK_ROTATED_BODY: &str = r#"{"access_token":"rotated-access","refresh_token":"rotated-refresh","token_type":"Bearer","expires_in":3600}"#;
+
     // Sub-case A: `spawn_leased_oauth_refresh` continues owning lease + completing fenced
     // rotation if the caller drops or times out while `/oauth/token` response is in flight.
     let (allow_tx1, allow_rx1) = watch::channel(false);
     let (endpoint1, calls1, mut entered_rx1, _sent_rx1, server1) =
-        spawn_controlled_token_server(allow_rx1, StatusCode::OK).await;
+        spawn_controlled_token_server(allow_rx1, StatusCode::OK, OK_ROTATED_BODY).await;
     let mut fixture1 = DispatchFixture::new().await;
     set_token_endpoint(&mut fixture1, endpoint1);
     let upstream1 = fixture1.oauth_upstream(false).await;
@@ -1958,7 +1978,7 @@ async fn scheduled_oauth_refresh_timeout_after_provider_request_preserves_owners
     // ENTITY_TIMEOUT) leaves the lease held and blocks concurrent retries from re-sending.
     let (allow_tx2, allow_rx2) = watch::channel(false);
     let (endpoint2, calls2, mut entered_rx2, mut sent_rx2, server2) =
-        spawn_controlled_token_server(allow_rx2, StatusCode::OK).await;
+        spawn_controlled_token_server(allow_rx2, StatusCode::OK, OK_ROTATED_BODY).await;
     let mut fixture2 = DispatchFixture::new().await;
     set_token_endpoint(&mut fixture2, endpoint2);
     let upstream2 = fixture2.oauth_upstream(false).await;
@@ -2015,7 +2035,8 @@ async fn scheduled_oauth_refresh_retains_lease_when_shutdown_cancels_after_provi
     // replica cannot re-send the rotating refresh token.
     let (_allow_tx1, allow_rx1) = watch::channel(false);
     let (endpoint1, calls1, mut entered_rx1, _sent_rx1, server1) =
-        spawn_controlled_token_server(allow_rx1, StatusCode::OK).await;
+        spawn_controlled_token_server(allow_rx1, StatusCode::OK, r#"{"access_token":"rotated"}"#)
+            .await;
     let mut fixture1 = DispatchFixture::new().await;
     set_token_endpoint(&mut fixture1, endpoint1);
     let upstream1 = fixture1.oauth_upstream(false).await;
@@ -2088,11 +2109,15 @@ async fn scheduled_oauth_refresh_retains_lease_when_shutdown_cancels_after_provi
     assert_eq!(calls1.load(Ordering::SeqCst), 1);
     server1.abort();
 
-    // Sub-case B: An explicit non-2xx HTTP rejection (`RefreshRequestError::Endpoint`) proves no
-    // rotation occurred and releases the lease immediately back to `idle:{starting_gen}`.
+    // Sub-case B: Gateway timeout (`504 Gateway Timeout`) leaves downstream uncertain whether
+    // upstream rotated the refresh token, so the lease stays held until TTL expiry.
     let (_allow_tx2, allow_rx2) = watch::channel(true);
-    let (endpoint2, calls2, _entered_rx2, mut sent_rx2, server2) =
-        spawn_controlled_token_server(allow_rx2, StatusCode::SERVICE_UNAVAILABLE).await;
+    let (endpoint2, calls2, _entered_rx2, mut sent_rx2, server2) = spawn_controlled_token_server(
+        allow_rx2,
+        StatusCode::GATEWAY_TIMEOUT,
+        r#"{"error":"gateway_timeout"}"#,
+    )
+    .await;
     let mut fixture2 = DispatchFixture::new().await;
     set_token_endpoint(&mut fixture2, endpoint2);
     let upstream2 = fixture2.oauth_upstream(false).await;
@@ -2121,7 +2146,7 @@ async fn scheduled_oauth_refresh_retains_lease_when_shutdown_cancels_after_provi
         )
         .await
         .expect("spawned task joins")
-        .expect("503 response maps to Retry");
+        .expect("504 response maps to Retry");
     assert_eq!(
         outcome2,
         JobOutcome::Retry {
@@ -2133,17 +2158,127 @@ async fn scheduled_oauth_refresh_retains_lease_when_shutdown_cancels_after_provi
         sent_rx2.wait_for(|&sent| sent),
     )
     .await
-    .expect("503 response sent within 2s")
+    .expect("504 response sent within 2s")
     .expect("sent watch stays open");
     assert_eq!(calls2.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        fixture2
-            .storage
-            .get_meta_value(&lease_key2)
-            .await
-            .expect("read released meta")
-            .as_deref(),
-        Some(format!("idle:{starting_gen2}").as_str())
+    let held_after_504 = fixture2
+        .storage
+        .get_meta_value(&lease_key2)
+        .await
+        .expect("read retained 504 meta")
+        .expect("504 lease row exists");
+    assert!(held_after_504.starts_with(&format!("held:{starting_gen2}:")));
+    assert!(
+        crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+            fixture2.storage.clone(),
+            fixture2.storage.clone(),
+            upstream2.id,
+            starting_gen2,
+            now2,
+        )
+        .await
+        .expect("check retained 504 claim")
+        .is_none()
+    );
+    assert!(
+        crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+            fixture2.storage.clone(),
+            fixture2.storage.clone(),
+            upstream2.id,
+            starting_gen2,
+            now2 + crate::refresh::OAUTH_REFRESH_LEASE_TTL_SECS + 1,
+        )
+        .await
+        .expect("check claim after 504 TTL expiry")
+        .is_some()
     );
     server2.abort();
+
+    // Sub-case C: Conclusive OAuth 4xx rejections (`429`, `401`) prove no rotation occurred and
+    // immediately release the lease back to `idle:{starting_gen}`.
+    for (status, body, expected_outcome, expected_error) in [
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":"rate_limited"}"#,
+            JobOutcome::Retry {
+                delay: Some(std::time::Duration::from_secs(30)),
+            },
+            None,
+        ),
+        (
+            StatusCode::UNAUTHORIZED,
+            r#"{"error":"invalid_grant"}"#,
+            JobOutcome::Skip,
+            Some("status_401"),
+        ),
+    ] {
+        let (_allow_tx, allow_rx) = watch::channel(true);
+        let (endpoint, calls, _entered_rx, mut sent_rx, server) =
+            spawn_controlled_token_server(allow_rx, status, body).await;
+        let mut fixture = DispatchFixture::new().await;
+        set_token_endpoint(&mut fixture, endpoint);
+        let upstream = fixture.oauth_upstream(false).await;
+        let starting_gen = upstream.oauth_token_generation;
+        let lease_key = crate::refresh::oauth_refresh_lease_meta_key(upstream.id);
+        let now = cc_lb_clock::unix_secs(fixture.clock.now());
+        let lease = crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+            fixture.storage.clone(),
+            fixture.storage.clone(),
+            upstream.id,
+            starting_gen,
+            now,
+        )
+        .await
+        .expect("lease acquire succeeds")
+        .expect("lease is free");
+
+        let outcome = fixture
+            .dispatch
+            .spawn_leased_oauth_refresh(
+                OAuthRefreshJob::new(upstream.id),
+                lease,
+                fixture.dispatch.replica_id.expect("replica id set"),
+                starting_gen,
+                None,
+            )
+            .await
+            .expect("spawned task joins")
+            .expect("4xx response yields expected outcome");
+        assert_eq!(outcome, expected_outcome);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sent_rx.wait_for(|&sent| sent),
+        )
+        .await
+        .expect("4xx response sent within 2s")
+        .expect("sent watch stays open");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture
+                .storage
+                .get_meta_value(&lease_key)
+                .await
+                .expect("read released meta")
+                .as_deref(),
+            Some(format!("idle:{starting_gen}").as_str())
+        );
+        assert!(
+            crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+                fixture.storage.clone(),
+                fixture.storage.clone(),
+                upstream.id,
+                starting_gen,
+                now,
+            )
+            .await
+            .expect("check immediate reacquisition")
+            .is_some()
+        );
+        let stored = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
+            .await
+            .expect("load upstream")
+            .expect("upstream exists");
+        assert_eq!(stored.last_apply_error.as_deref(), expected_error);
+        server.abort();
+    }
 }
