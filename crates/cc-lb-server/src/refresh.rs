@@ -430,6 +430,7 @@ pub(crate) struct ActiveOAuthRefreshLease {
     stop_heartbeat: CancellationToken,
     heartbeat: Option<tokio::task::JoinHandle<()>>,
     released: bool,
+    provider_exchange_started: bool,
 }
 
 async fn take_release_token(state: &tokio::sync::Mutex<LeaseHeartbeatState>) -> Option<String> {
@@ -450,31 +451,11 @@ impl Drop for ActiveOAuthRefreshLease {
     fn drop(&mut self) {
         self.stop_heartbeat.cancel();
         self.lease_cancel.cancel();
-        if self.released {
+        if self.released || self.provider_exchange_started {
             return;
         }
-        let Some(handle) = self.heartbeat.take() else {
-            return;
-        };
-        if let Ok(rt) = tokio::runtime::Handle::try_current() {
-            let upstream_id = self.upstream_id;
-            let expected_generation = self.expected_generation;
-            let controller = Arc::clone(&self.controller);
-            let state = Arc::clone(&self.state);
-            rt.spawn(async move {
-                let _ = handle.await;
-                if let Some(token) = take_release_token(&state).await
-                    && let Err(error) = controller
-                        .release(upstream_id, &token, expected_generation)
-                        .await
-                {
-                    tracing::warn!(
-                        error = %error,
-                        upstream_id = %upstream_id,
-                        "failed to release dropped oauth refresh lease",
-                    );
-                }
-            });
+        if self.heartbeat.is_some() && tokio::runtime::Handle::try_current().is_ok() {
+            drop(self.spawn_release(self.expected_generation));
         }
     }
 }
@@ -772,11 +753,16 @@ impl ActiveOAuthRefreshLease {
             stop_heartbeat,
             heartbeat: Some(heartbeat),
             released: false,
+            provider_exchange_started: false,
         }
     }
 
     pub(crate) fn cancel_token(&self) -> CancellationToken {
         self.lease_cancel.clone()
+    }
+
+    pub(crate) fn mark_provider_exchange_started(&mut self) {
+        self.provider_exchange_started = true;
     }
 
     pub(crate) async fn is_lost(&self) -> bool {
@@ -807,18 +793,41 @@ impl ActiveOAuthRefreshLease {
         *self.state.lock().await = LeaseHeartbeatState::Released;
     }
 
-    pub(crate) async fn release(mut self, final_generation: u64) -> StorageResult<()> {
+    fn spawn_release(
+        &mut self,
+        final_generation: u64,
+    ) -> tokio::task::JoinHandle<StorageResult<()>> {
         self.released = true;
         self.stop_heartbeat.cancel();
-        if let Some(handle) = self.heartbeat.take() {
-            let _ = handle.await;
-        }
-        if let Some(token) = take_release_token(&self.state).await {
-            self.controller
-                .release(self.upstream_id, &token, final_generation)
-                .await?;
-        }
-        Ok(())
+        let heartbeat = self.heartbeat.take();
+        let upstream_id = self.upstream_id;
+        let controller = Arc::clone(&self.controller);
+        let state = Arc::clone(&self.state);
+        tokio::spawn(async move {
+            if let Some(handle) = heartbeat {
+                let _ = handle.await;
+            }
+            if let Some(token) = take_release_token(&state).await
+                && let Err(error) = controller
+                    .release(upstream_id, &token, final_generation)
+                    .await
+            {
+                tracing::warn!(
+                    error = %error,
+                    upstream_id = %upstream_id,
+                    "failed to release oauth refresh lease",
+                );
+                return Err(error);
+            }
+            Ok(())
+        })
+    }
+
+    pub(crate) async fn release(mut self, final_generation: u64) -> StorageResult<()> {
+        let release_task = self.spawn_release(final_generation);
+        release_task.await.map_err(|_| StorageError::Fatal {
+            message: "oauth refresh lease release task aborted".to_owned(),
+        })?
     }
 }
 
@@ -2382,6 +2391,9 @@ async fn refresh_flow(
     let effective_cancel = active_lease
         .as_ref()
         .map_or_else(|| cancel.clone(), |lease| lease.cancel_token());
+    if let Some(lease) = active_lease.as_deref_mut() {
+        lease.mark_provider_exchange_started();
+    }
     let token = request_refresh(
         http,
         oauth_cfg,
@@ -7113,6 +7125,393 @@ mod tests {
             fixture2.storage.as_ref(),
             upstream2,
             &healthy_lease2.token,
+            gen2,
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn active_oauth_refresh_lease_release_survives_caller_cancellation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::sync::watch;
+
+        struct DelayedReleaseMetaStore {
+            inner: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+            release_on_idle: AtomicBool,
+            release_entered: watch::Sender<bool>,
+            allow_release: watch::Receiver<bool>,
+            release_finished: watch::Sender<bool>,
+        }
+
+        #[async_trait::async_trait]
+        impl MetaStore for DelayedReleaseMetaStore {
+            async fn initialize(&self) -> StorageResult<()> {
+                self.inner.initialize().await
+            }
+
+            async fn backend_kind(&self) -> StorageResult<cc_lb_storage_api::BackendKind> {
+                self.inner.backend_kind().await
+            }
+
+            async fn get_meta_value(&self, key: &str) -> StorageResult<Option<String>> {
+                self.inner.get_meta_value(key).await
+            }
+
+            async fn put_meta_value(&self, key: &str, value: &str) -> StorageResult<()> {
+                self.inner.put_meta_value(key, value).await
+            }
+
+            async fn compare_and_put_meta_value(
+                &self,
+                key: &str,
+                expected: Option<&str>,
+                value: &str,
+            ) -> StorageResult<bool> {
+                if self.release_on_idle.load(Ordering::SeqCst) && value.starts_with("idle:") {
+                    self.release_entered.send_replace(true);
+                    let mut allow = self.allow_release.clone();
+                    let _ = allow.wait_for(|&go| go).await;
+                    let applied = self
+                        .inner
+                        .compare_and_put_meta_value(key, expected, value)
+                        .await?;
+                    self.release_finished.send_replace(true);
+                    return Ok(applied);
+                }
+                self.inner
+                    .compare_and_put_meta_value(key, expected, value)
+                    .await
+            }
+
+            async fn verify_schema_current(&self) -> StorageResult<()> {
+                self.inner.verify_schema_current().await
+            }
+        }
+
+        // Case 1: Caller cancels while explicit `release()` awaits conditional CAS write.
+        let (fixture1, upstream1, gen1) = setup_killed_oauth_job_fixture().await?;
+        let lease_key1 = super::oauth_refresh_lease_meta_key(upstream1);
+        let now1 = cc_lb_clock::unix_secs(fixture1.clock.now());
+        let lease1 = super::try_acquire_oauth_refresh_lease(
+            fixture1.storage.as_ref(),
+            upstream1,
+            gen1,
+            now1,
+        )
+        .await?
+        .ok_or("lease 1 must succeed")?;
+        let (entered_tx1, mut entered_rx1) = watch::channel(false);
+        let (allow_tx1, allow_rx1) = watch::channel(false);
+        let (finished_tx1, mut finished_rx1) = watch::channel(false);
+        let delayed1 = Arc::new(DelayedReleaseMetaStore {
+            inner: fixture1.storage.clone(),
+            release_on_idle: AtomicBool::new(true),
+            release_entered: entered_tx1,
+            allow_release: allow_rx1,
+            release_finished: finished_tx1,
+        });
+        let active1 = super::ActiveOAuthRefreshLease::start_with_interval(
+            delayed1,
+            fixture1.clock.clone(),
+            CancellationToken::new(),
+            lease1.clone(),
+            gen1,
+            Duration::from_secs(60),
+        );
+        tokio::select! {
+            biased;
+            res = active1.release(gen1) => {
+                panic!("paused explicit release should not finish before allow_release: {res:?}");
+            }
+            wait_res = tokio::time::timeout(
+                Duration::from_secs(2),
+                entered_rx1.wait_for(|&entered| entered),
+            ) => {
+                wait_res??;
+            }
+        }
+        assert_eq!(
+            fixture1
+                .storage
+                .get_meta_value(&lease_key1)
+                .await?
+                .as_deref(),
+            Some(lease1.token.as_str())
+        );
+        allow_tx1.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(2), finished_rx1.wait_for(|&done| done)).await??;
+        assert_eq!(
+            fixture1
+                .storage
+                .get_meta_value(&lease_key1)
+                .await?
+                .as_deref(),
+            Some(format!("idle:{gen1}").as_str())
+        );
+        let healthy1 = super::try_acquire_oauth_refresh_lease(
+            fixture1.storage.as_ref(),
+            upstream1,
+            gen1,
+            now1,
+        )
+        .await?
+        .ok_or("healthy worker 1 must immediately acquire released lease")?;
+        super::release_oauth_refresh_lease(
+            fixture1.storage.as_ref(),
+            upstream1,
+            &healthy1.token,
+            gen1,
+        )
+        .await?;
+
+        // Case 2: Explicit `release()` future is dropped right after its first poll while
+        // joining heartbeat / before `release_finished`; detached task still finishes cleanup.
+        struct NotifyWake(Arc<Notify>);
+        impl std::task::Wake for NotifyWake {
+            fn wake(self: Arc<Self>) {
+                self.0.notify_one();
+            }
+        }
+
+        let (fixture2, upstream2, gen2) = setup_killed_oauth_job_fixture().await?;
+        let lease_key2 = super::oauth_refresh_lease_meta_key(upstream2);
+        let now2 = cc_lb_clock::unix_secs(fixture2.clock.now());
+        let lease2 = super::try_acquire_oauth_refresh_lease(
+            fixture2.storage.as_ref(),
+            upstream2,
+            gen2,
+            now2,
+        )
+        .await?
+        .ok_or("lease 2 must succeed")?;
+        let (entered_tx2, mut entered_rx2) = watch::channel(false);
+        let (allow_tx2, allow_rx2) = watch::channel(false);
+        let (finished_tx2, mut finished_rx2) = watch::channel(false);
+        let delayed2 = Arc::new(DelayedReleaseMetaStore {
+            inner: fixture2.storage.clone(),
+            release_on_idle: AtomicBool::new(true),
+            release_entered: entered_tx2,
+            allow_release: allow_rx2,
+            release_finished: finished_tx2,
+        });
+        let active2 = super::ActiveOAuthRefreshLease::start_with_interval(
+            delayed2,
+            fixture2.clock.clone(),
+            CancellationToken::new(),
+            lease2.clone(),
+            gen2,
+            Duration::from_secs(60),
+        );
+        let notify2 = Arc::new(Notify::new());
+        let waker2 = std::task::Waker::from(Arc::new(NotifyWake(Arc::clone(&notify2))));
+        let mut cx2 = std::task::Context::from_waker(&waker2);
+        let mut rel_fut2 = Box::pin(active2.release(gen2));
+        assert!(rel_fut2.as_mut().poll(&mut cx2).is_pending());
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            entered_rx2.wait_for(|&entered| entered),
+        )
+        .await??;
+        drop(rel_fut2);
+        assert_eq!(
+            fixture2
+                .storage
+                .get_meta_value(&lease_key2)
+                .await?
+                .as_deref(),
+            Some(lease2.token.as_str())
+        );
+        allow_tx2.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(2), finished_rx2.wait_for(|&done| done)).await??;
+        assert_eq!(
+            fixture2
+                .storage
+                .get_meta_value(&lease_key2)
+                .await?
+                .as_deref(),
+            Some(format!("idle:{gen2}").as_str())
+        );
+        let healthy2 = super::try_acquire_oauth_refresh_lease(
+            fixture2.storage.as_ref(),
+            upstream2,
+            gen2,
+            now2,
+        )
+        .await?
+        .ok_or("healthy worker 2 must immediately acquire released lease")?;
+        super::release_oauth_refresh_lease(
+            fixture2.storage.as_ref(),
+            upstream2,
+            &healthy2.token,
+            gen2,
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn active_oauth_refresh_lease_drop_respects_provider_exchange_started()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::sync::watch;
+
+        struct DropObserveMetaStore {
+            inner: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+            idle_writes: AtomicUsize,
+            released: watch::Sender<bool>,
+        }
+
+        #[async_trait::async_trait]
+        impl MetaStore for DropObserveMetaStore {
+            async fn initialize(&self) -> StorageResult<()> {
+                self.inner.initialize().await
+            }
+
+            async fn backend_kind(&self) -> StorageResult<cc_lb_storage_api::BackendKind> {
+                self.inner.backend_kind().await
+            }
+
+            async fn get_meta_value(&self, key: &str) -> StorageResult<Option<String>> {
+                self.inner.get_meta_value(key).await
+            }
+
+            async fn put_meta_value(&self, key: &str, value: &str) -> StorageResult<()> {
+                self.inner.put_meta_value(key, value).await
+            }
+
+            async fn compare_and_put_meta_value(
+                &self,
+                key: &str,
+                expected: Option<&str>,
+                value: &str,
+            ) -> StorageResult<bool> {
+                let applied = self
+                    .inner
+                    .compare_and_put_meta_value(key, expected, value)
+                    .await?;
+                if applied && value.starts_with("idle:") {
+                    self.idle_writes.fetch_add(1, Ordering::SeqCst);
+                    self.released.send_replace(true);
+                }
+                Ok(applied)
+            }
+
+            async fn verify_schema_current(&self) -> StorageResult<()> {
+                self.inner.verify_schema_current().await
+            }
+        }
+
+        // Case 1: Dropped before provider exchange starts -> releases promptly to `idle:{gen}`.
+        let (fixture1, upstream1, gen1) = setup_killed_oauth_job_fixture().await?;
+        let lease_key1 = super::oauth_refresh_lease_meta_key(upstream1);
+        let now1 = cc_lb_clock::unix_secs(fixture1.clock.now());
+        let lease1 = super::try_acquire_oauth_refresh_lease(
+            fixture1.storage.as_ref(),
+            upstream1,
+            gen1,
+            now1,
+        )
+        .await?
+        .ok_or("lease 1 must succeed")?;
+        let (released_tx1, mut released_rx1) = watch::channel(false);
+        let obs1 = Arc::new(DropObserveMetaStore {
+            inner: fixture1.storage.clone(),
+            idle_writes: AtomicUsize::new(0),
+            released: released_tx1,
+        });
+        let active1 = super::ActiveOAuthRefreshLease::start_with_interval(
+            obs1.clone(),
+            fixture1.clock.clone(),
+            CancellationToken::new(),
+            lease1,
+            gen1,
+            Duration::from_secs(60),
+        );
+        drop(active1);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            released_rx1.wait_for(|&released| released),
+        )
+        .await??;
+        assert_eq!(obs1.idle_writes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture1
+                .storage
+                .get_meta_value(&lease_key1)
+                .await?
+                .as_deref(),
+            Some(format!("idle:{gen1}").as_str())
+        );
+        let healthy1 = super::try_acquire_oauth_refresh_lease(
+            fixture1.storage.as_ref(),
+            upstream1,
+            gen1,
+            now1,
+        )
+        .await?
+        .ok_or("peer 1 must acquire lease dropped before exchange started")?;
+        super::release_oauth_refresh_lease(
+            fixture1.storage.as_ref(),
+            upstream1,
+            &healthy1.token,
+            gen1,
+        )
+        .await?;
+
+        // Case 2: Dropped after provider exchange starts -> retains exclusive lease protection
+        // rather than letting a peer resubmit the potentially rotated refresh token.
+        let (fixture2, upstream2, gen2) = setup_killed_oauth_job_fixture().await?;
+        let lease_key2 = super::oauth_refresh_lease_meta_key(upstream2);
+        let now2 = cc_lb_clock::unix_secs(fixture2.clock.now());
+        let lease2 = super::try_acquire_oauth_refresh_lease(
+            fixture2.storage.as_ref(),
+            upstream2,
+            gen2,
+            now2,
+        )
+        .await?
+        .ok_or("lease 2 must succeed")?;
+        let (released_tx2, _released_rx2) = watch::channel(false);
+        let obs2 = Arc::new(DropObserveMetaStore {
+            inner: fixture2.storage.clone(),
+            idle_writes: AtomicUsize::new(0),
+            released: released_tx2,
+        });
+        let mut active2 = super::ActiveOAuthRefreshLease::start_with_interval(
+            obs2.clone(),
+            fixture2.clock.clone(),
+            CancellationToken::new(),
+            lease2.clone(),
+            gen2,
+            Duration::from_secs(60),
+        );
+        let lease_cancel2 = active2.cancel_token();
+        active2.mark_provider_exchange_started();
+        drop(active2);
+        tokio::time::timeout(Duration::from_secs(2), lease_cancel2.cancelled()).await?;
+        assert_eq!(obs2.idle_writes.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            fixture2
+                .storage
+                .get_meta_value(&lease_key2)
+                .await?
+                .as_deref(),
+            Some(lease2.token.as_str())
+        );
+        assert_eq!(
+            super::try_acquire_oauth_refresh_lease(
+                fixture2.storage.as_ref(),
+                upstream2,
+                gen2,
+                now2,
+            )
+            .await?,
+            None
+        );
+        super::release_oauth_refresh_lease(
+            fixture2.storage.as_ref(),
+            upstream2,
+            &lease2.token,
             gen2,
         )
         .await?;

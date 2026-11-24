@@ -334,96 +334,124 @@ impl SchedulerDispatch {
                 delay: Some(std::time::Duration::from_secs(30)),
             });
         };
-        let upstream_id = job.upstream_id;
-        let active_lease = ActiveOAuthRefreshLease::start(
-            self.storage.clone(),
-            self.clock.clone(),
-            self.cancel.clone(),
-            lease,
-            starting_generation,
-        );
-        let lease_cancel = active_lease.cancel_token();
-        let lease_slot = Arc::new(tokio::sync::Mutex::new(Some(active_lease)));
-        let lease_fenced_conflict = Arc::new(AtomicBool::new(false));
-        let committed_generation = Arc::new(AtomicU64::new(starting_generation));
-        let snapshot_superseded = Arc::new(AtomicBool::new(false));
-        let fenced_upstreams = FencedOAuthRefreshUpstreams {
-            storage: self.storage.clone(),
-            lease: Arc::clone(&lease_slot),
-            lease_fenced_conflict: Arc::clone(&lease_fenced_conflict),
-            committed_generation: Arc::clone(&committed_generation),
-        };
-        let job_for_check = job.clone();
-        let aead_for_check = Arc::clone(&self.aead);
-        let lease_cancel_for_refresh = lease_cancel.clone();
-        let committed_for_schedule = Arc::clone(&committed_generation);
-        let superseded_for_check = Arc::clone(&snapshot_superseded);
-        let outcome = OAuthRefreshJobHandler::new(fenced_upstreams, replica_id)
-            .handle(
-                job,
-                unix_secs(self.clock.now()),
-                move |upstream| async move {
-                    if upstream.oauth_token_generation != starting_generation
-                        || oauth_refresh_job_is_superseded(
-                            &job_for_check,
-                            &upstream,
-                            aead_for_check.as_ref(),
+        self.spawn_leased_oauth_refresh(job, lease, replica_id, starting_generation, traceparent)
+            .await
+            .map_err(|error| SchedulerError::Job(format!("oauth refresh task aborted: {error}")))?
+    }
+
+    fn spawn_leased_oauth_refresh(
+        &self,
+        job: OAuthRefreshJob,
+        lease: crate::refresh::OAuthRefreshLease,
+        replica_id: Uuid,
+        starting_generation: u64,
+        traceparent: Option<String>,
+    ) -> tokio::task::JoinHandle<SchedulerResult<JobOutcome>> {
+        let dispatch = self.clone();
+        tokio::spawn(async move {
+            let upstream_id = job.upstream_id;
+            let active_lease = ActiveOAuthRefreshLease::start(
+                dispatch.storage.clone(),
+                dispatch.clock.clone(),
+                dispatch.cancel.clone(),
+                lease,
+                starting_generation,
+            );
+            let lease_cancel = active_lease.cancel_token();
+            let lease_slot = Arc::new(tokio::sync::Mutex::new(Some(active_lease)));
+            let lease_fenced_conflict = Arc::new(AtomicBool::new(false));
+            let committed_generation = Arc::new(AtomicU64::new(starting_generation));
+            let snapshot_superseded = Arc::new(AtomicBool::new(false));
+            let fenced_upstreams = FencedOAuthRefreshUpstreams {
+                storage: dispatch.storage.clone(),
+                lease: Arc::clone(&lease_slot),
+                lease_fenced_conflict: Arc::clone(&lease_fenced_conflict),
+                committed_generation: Arc::clone(&committed_generation),
+            };
+            let job_for_check = job.clone();
+            let aead_for_check = Arc::clone(&dispatch.aead);
+            let lease_cancel_for_refresh = lease_cancel.clone();
+            let committed_for_schedule = Arc::clone(&committed_generation);
+            let superseded_for_check = Arc::clone(&snapshot_superseded);
+            let dispatch_for_refresh = dispatch.clone();
+            let lease_slot_for_refresh = Arc::clone(&lease_slot);
+            let outcome = OAuthRefreshJobHandler::new(fenced_upstreams, replica_id)
+                .handle(
+                    job,
+                    unix_secs(dispatch.clock.now()),
+                    move |upstream| {
+                        let dispatch = dispatch_for_refresh.clone();
+                        let lease_slot = Arc::clone(&lease_slot_for_refresh);
+                        let lease_cancel = lease_cancel_for_refresh.clone();
+                        async move {
+                            if upstream.oauth_token_generation != starting_generation
+                                || oauth_refresh_job_is_superseded(
+                                    &job_for_check,
+                                    &upstream,
+                                    aead_for_check.as_ref(),
+                                )
+                            {
+                                superseded_for_check.store(true, Ordering::SeqCst);
+                                return Ok(RefreshOutcome::NotRefreshable);
+                            }
+                            dispatch
+                                .refresh_upstream_with_cancel(
+                                    upstream,
+                                    &lease_cancel,
+                                    Some(&lease_slot),
+                                )
+                                .await
+                        }
+                    },
+                    |metadata_job| dispatch.enqueue_metadata_refresh(metadata_job),
+                    |upstream_id, expires_at_unix_secs| {
+                        let expected_generation = committed_for_schedule.load(Ordering::SeqCst);
+                        dispatch.push_next_oauth_refresh_task(
+                            upstream_id,
+                            expected_generation,
+                            expires_at_unix_secs,
                         )
-                    {
-                        superseded_for_check.store(true, Ordering::SeqCst);
-                        return Ok(RefreshOutcome::NotRefreshable);
-                    }
-                    self.refresh_upstream_with_cancel(upstream, &lease_cancel_for_refresh)
-                        .await
-                },
-                |metadata_job| self.enqueue_metadata_refresh(metadata_job),
-                |upstream_id, expires_at_unix_secs| {
-                    let expected_generation = committed_for_schedule.load(Ordering::SeqCst);
-                    self.push_next_oauth_refresh_task(
-                        upstream_id,
-                        expected_generation,
-                        expires_at_unix_secs,
-                    )
-                },
-            )
-            .await;
-        let observed_generation =
-            UpstreamStore::read_oauth_token_generation(self.storage.as_ref(), upstream_id)
-                .await
-                .ok()
-                .flatten();
-        let final_generation = observed_generation.unwrap_or(starting_generation);
-        let was_lost = if let Some(active) = lease_slot.lock().await.take() {
-            let lost = active.is_lost().await;
-            if let Err(error) = active.release(final_generation).await {
-                tracing::warn!(
-                    error = %error,
-                    upstream_id = %upstream_id,
-                    "failed to release scheduled oauth refresh lease",
-                );
+                    },
+                )
+                .await;
+            let observed_generation =
+                UpstreamStore::read_oauth_token_generation(dispatch.storage.as_ref(), upstream_id)
+                    .await
+                    .ok()
+                    .flatten();
+            let final_generation = observed_generation.unwrap_or(starting_generation);
+            let was_lost = if let Some(active) = lease_slot.lock().await.take() {
+                let lost = active.is_lost().await;
+                if let Err(error) = active.release(final_generation).await {
+                    tracing::warn!(
+                        error = %error,
+                        upstream_id = %upstream_id,
+                        "failed to release scheduled oauth refresh lease",
+                    );
+                }
+                lost
+            } else {
+                false
+            };
+            let generation_advanced =
+                observed_generation.is_some_and(|current| current > starting_generation);
+            if snapshot_superseded.load(Ordering::SeqCst)
+                || (matches!(outcome, Ok(JobOutcome::Retry { .. }) | Err(_))
+                    && (generation_advanced
+                        || was_lost
+                        || lease_fenced_conflict.load(Ordering::SeqCst)))
+            {
+                if observed_generation.is_none() || generation_advanced {
+                    return dispatch
+                        .reconcile_reloaded_and_skip(upstream_id, traceparent.as_deref())
+                        .await;
+                }
+                return Ok(JobOutcome::Retry {
+                    delay: Some(std::time::Duration::from_secs(30)),
+                });
             }
-            lost
-        } else {
-            false
-        };
-        let generation_advanced =
-            observed_generation.is_some_and(|current| current > starting_generation);
-        if snapshot_superseded.load(Ordering::SeqCst)
-            || (matches!(outcome, Ok(JobOutcome::Retry { .. }) | Err(_))
-                && (generation_advanced
-                    || was_lost
-                    || lease_fenced_conflict.load(Ordering::SeqCst)))
-        {
-            if observed_generation.is_none() || generation_advanced {
-                return self
-                    .reconcile_reloaded_and_skip(upstream_id, traceparent.as_deref())
-                    .await;
-            }
-            return Ok(JobOutcome::Retry {
-                delay: Some(std::time::Duration::from_secs(30)),
-            });
-        }
-        outcome
+            outcome
+        })
     }
 
     #[cfg(test)]
@@ -431,7 +459,7 @@ impl SchedulerDispatch {
         &self,
         upstream: UpstreamRecord,
     ) -> SchedulerResult<RefreshOutcome> {
-        self.refresh_upstream_with_cancel(upstream, &self.cancel)
+        self.refresh_upstream_with_cancel(upstream, &self.cancel, None)
             .await
     }
 
@@ -439,6 +467,7 @@ impl SchedulerDispatch {
         &self,
         upstream: UpstreamRecord,
         cancel: &CancellationToken,
+        lease_slot: Option<&tokio::sync::Mutex<Option<ActiveOAuthRefreshLease>>>,
     ) -> SchedulerResult<RefreshOutcome> {
         if refresh_requires_reconnect(upstream.last_apply_error.as_deref()) {
             return Ok(RefreshOutcome::NotRefreshable);
@@ -456,6 +485,11 @@ impl SchedulerDispatch {
             self.record_reconnect_required(&upstream, "refresh_token_expired")
                 .await?;
             return Ok(RefreshOutcome::NotRefreshable);
+        }
+        if let Some(lease_slot) = lease_slot
+            && let Some(active) = lease_slot.lock().await.as_mut()
+        {
+            active.mark_provider_exchange_started();
         }
         let response = match request_refresh(
             &self.http,
