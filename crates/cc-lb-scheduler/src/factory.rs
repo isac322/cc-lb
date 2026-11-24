@@ -189,6 +189,7 @@ async fn open_postgres(
     if let Some(cache_capacity) = storage_pool.effective_statement_cache_capacity() {
         connect_options = connect_options.statement_cache_capacity(cache_capacity);
     }
+    let acquire_timeout = Duration::from_secs(scheduler.separate_pool.acquire_timeout_secs);
     let direct_listener_url = storage_pool.effective_listener_url(url);
     let direct_connect_options = postgres_connect_options(
         direct_listener_url,
@@ -200,6 +201,7 @@ async fn open_postgres(
             &connect_options,
             direct_listener_url,
             &direct_connect_options,
+            acquire_timeout,
         )
         .await?;
     }
@@ -209,6 +211,7 @@ async fn open_postgres(
         direct_listener_url,
         &direct_connect_options,
         pgbouncer_tx_pooling,
+        acquire_timeout,
     )
     .await?;
 
@@ -223,9 +226,7 @@ async fn open_postgres(
     let mut builder = PgPoolOptions::new()
         .max_connections(max_connections)
         .min_connections(min_connections)
-        .acquire_timeout(Duration::from_secs(
-            scheduler.separate_pool.acquire_timeout_secs,
-        ))
+        .acquire_timeout(acquire_timeout)
         .idle_timeout(Duration::from_secs(
             scheduler.separate_pool.idle_timeout_secs,
         ));
@@ -256,7 +257,13 @@ async fn open_postgres(
         .await
         .map_err(|error| connection_error_with_host(url, error))?;
     if pgbouncer_tx_pooling {
-        ensure_pooled_hstore_visible(&pool, &direct_connect_options).await?;
+        ensure_pooled_hstore_visible(
+            &pool,
+            direct_listener_url,
+            &direct_connect_options,
+            acquire_timeout,
+        )
+        .await?;
     }
     let listener_pool = PgPoolOptions::new()
         .max_connections(2)
@@ -351,11 +358,29 @@ fn random_advisory_lock_key() -> i64 {
 }
 
 #[cfg(feature = "postgres")]
+async fn connect_direct_postgres_with_timeout(
+    url: &str,
+    options: &sqlx::postgres::PgConnectOptions,
+    connect_timeout: std::time::Duration,
+    context: &str,
+) -> Result<sqlx::PgConnection, SchedulerFactoryError> {
+    use sqlx::Connection as _;
+
+    tokio::time::timeout(connect_timeout, sqlx::PgConnection::connect_with(options))
+        .await
+        .map_err(|_| SchedulerFactoryError::ConnectionFailed {
+            message: format!("{}: {context} timed out", host_only(url)),
+        })?
+        .map_err(|error| connection_error_with_host(url, error))
+}
+
+#[cfg(feature = "postgres")]
 async fn verify_same_postgres_database(
     url: &str,
     primary_options: &sqlx::postgres::PgConnectOptions,
     listener_url: &str,
     direct_options: &sqlx::postgres::PgConnectOptions,
+    acquire_timeout: std::time::Duration,
 ) -> Result<(), SchedulerFactoryError> {
     use std::time::Duration;
 
@@ -364,27 +389,20 @@ async fn verify_same_postgres_database(
 
     const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-    let mut primary_conn = timeout(
-        PROBE_TIMEOUT,
-        sqlx::PgConnection::connect_with(primary_options),
+    let mut primary_conn = connect_direct_postgres_with_timeout(
+        url,
+        primary_options,
+        acquire_timeout,
+        "scheduler probe",
     )
-    .await
-    .map_err(|_| SchedulerFactoryError::ConnectionFailed {
-        message: format!("{}: scheduler probe timed out", host_only(url)),
-    })?
-    .map_err(|error| connection_error_with_host(url, error))?;
-    let mut direct_conn = timeout(
-        PROBE_TIMEOUT,
-        sqlx::PgConnection::connect_with(direct_options),
+    .await?;
+    let mut direct_conn = connect_direct_postgres_with_timeout(
+        listener_url,
+        direct_options,
+        acquire_timeout,
+        "direct listener probe",
     )
-    .await
-    .map_err(|_| SchedulerFactoryError::ConnectionFailed {
-        message: format!(
-            "{}: direct listener probe timed out",
-            host_only(listener_url)
-        ),
-    })?
-    .map_err(|error| connection_error_with_host(listener_url, error))?;
+    .await?;
 
     let primary_db: String = timeout(
         PROBE_TIMEOUT,
@@ -541,9 +559,36 @@ async fn install_hstore_extension(
 }
 
 #[cfg(feature = "postgres")]
+async fn install_hstore_for_pooled_connections(
+    conn: &mut sqlx::PgConnection,
+) -> Result<String, SchedulerFactoryError> {
+    let install_in_public: bool = sqlx::query_scalar(
+        "SELECT 'public' = ANY(current_schemas(false)) AND has_schema_privilege('public', 'CREATE')",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(migration_error)?;
+    if install_in_public {
+        sqlx::query("CREATE EXTENSION IF NOT EXISTS hstore SCHEMA public")
+            .execute(&mut *conn)
+            .await
+            .map_err(migration_error)?;
+        return find_hstore_schema(conn).await?.ok_or_else(|| {
+            SchedulerFactoryError::MigrationFailed {
+                message: "hstore extension was not found after CREATE EXTENSION IF NOT EXISTS hstore SCHEMA public"
+                    .to_owned(),
+            }
+        });
+    }
+    install_hstore_extension(conn).await
+}
+
+#[cfg(feature = "postgres")]
 async fn ensure_pooled_hstore_visible(
     pool: &sqlx::PgPool,
+    direct_listener_url: &str,
     direct_connect_options: &sqlx::postgres::PgConnectOptions,
+    acquire_timeout: std::time::Duration,
 ) -> Result<(), SchedulerFactoryError> {
     let hstore_visible: bool = sqlx::query_scalar("SELECT to_regtype('hstore') IS NOT NULL")
         .fetch_one(pool)
@@ -553,43 +598,34 @@ async fn ensure_pooled_hstore_visible(
         return Ok(());
     }
 
-    let pooled_schema: Option<String> = sqlx::query_scalar("SELECT current_schema()")
-        .fetch_one(pool)
-        .await
-        .map_err(migration_error)?;
-    if let Some(target_schema) = pooled_schema
-        .as_deref()
-        .filter(|schema| *schema != "cc_lb_scheduler")
-    {
-        let target_schema = target_schema.to_owned();
+    // Relocate legacy `cc_lb_scheduler.hstore` strictly to `public` (and only when
+    // `public` is on the pooled role's search_path) so running unpooled replicas using
+    // `cc_lb_scheduler, apalis, public` keep resolving `hstore` during rolling upgrades.
+    let public_in_search_path: bool =
+        sqlx::query_scalar("SELECT 'public' = ANY(current_schemas(false))")
+            .fetch_one(pool)
+            .await
+            .map_err(migration_error)?;
+    if public_in_search_path {
+        let direct_listener_url = direct_listener_url.to_owned();
         let direct_options = direct_connect_options.clone();
         tokio::spawn(async move {
-            use sqlx::Connection as _;
-
-            let mut conn = sqlx::PgConnection::connect_with(&direct_options)
-                .await
-                .map_err(migration_error)?;
+            let mut conn = connect_direct_postgres_with_timeout(
+                &direct_listener_url,
+                &direct_options,
+                acquire_timeout,
+                "scheduler setup connection",
+            )
+            .await?;
             sqlx::query("SELECT pg_advisory_lock($1)")
                 .bind(SCHEDULER_SETUP_LOCK_KEY)
                 .execute(&mut conn)
                 .await
                 .map_err(migration_error)?;
             let outcome: Result<(), SchedulerFactoryError> = async {
-                let ext_schema: Option<String> = sqlx::query_scalar(
-                    "SELECT n.nspname::text \
-                     FROM pg_extension e \
-                     JOIN pg_namespace n ON n.oid = e.extnamespace \
-                     WHERE e.extname = 'hstore'",
-                )
-                .fetch_optional(&mut conn)
-                .await
-                .map_err(migration_error)?;
+                let ext_schema = find_hstore_schema(&mut conn).await?;
                 if ext_schema.as_deref() == Some("cc_lb_scheduler") {
-                    let sql = format!(
-                        "ALTER EXTENSION hstore SET SCHEMA {}",
-                        quote_pg_ident(&target_schema)
-                    );
-                    sqlx::query(sqlx::AssertSqlSafe(sql))
+                    sqlx::query("ALTER EXTENSION hstore SET SCHEMA public")
                         .execute(&mut conn)
                         .await
                         .map_err(migration_error)?;
@@ -615,7 +651,7 @@ async fn ensure_pooled_hstore_visible(
         return Ok(());
     }
     Err(SchedulerFactoryError::MigrationFailed {
-        message: "PostgreSQL `hstore` type is not visible on transaction-pooled scheduler connections; relocate it with `ALTER EXTENSION hstore SET SCHEMA public;` (or append `cc_lb_scheduler` after the application schema on the role `search_path`)".to_owned(),
+        message: "PostgreSQL `hstore` type is not visible on transaction-pooled scheduler connections; include `public` in the pooled role's `search_path` and run `ALTER EXTENSION hstore SET SCHEMA public;` (or append `cc_lb_scheduler` after the application schema on the role `search_path`)".to_owned(),
     })
 }
 
@@ -624,15 +660,18 @@ async fn run_postgres_scheduler_setup(
     direct_listener_url: &str,
     connect_options: &sqlx::postgres::PgConnectOptions,
     pgbouncer_transaction_pooling: bool,
+    acquire_timeout: std::time::Duration,
 ) -> Result<String, SchedulerFactoryError> {
     let direct_listener_url = direct_listener_url.to_owned();
     let connect_options = connect_options.clone();
     tokio::spawn(async move {
-        use sqlx::Connection as _;
-
-        let mut conn = sqlx::PgConnection::connect_with(&connect_options)
-            .await
-            .map_err(|error| connection_error_with_host(&direct_listener_url, error))?;
+        let mut conn = connect_direct_postgres_with_timeout(
+            &direct_listener_url,
+            &connect_options,
+            acquire_timeout,
+            "scheduler setup connection",
+        )
+        .await?;
         sqlx::query("SELECT pg_advisory_lock($1)")
             .bind(SCHEDULER_SETUP_LOCK_KEY)
             .execute(&mut conn)
@@ -640,12 +679,12 @@ async fn run_postgres_scheduler_setup(
             .map_err(migration_error)?;
         let setup_result: Result<String, SchedulerFactoryError> = async {
             let hstore_schema = if pgbouncer_transaction_pooling {
-                // Install BEFORE switching search_path so PostgreSQL places hstore in the
-                // pooled role/database default schema (typically public), keeping it
-                // resolvable on transaction-pooled connections without SET search_path.
+                // Install BEFORE switching search_path, preferring `public` when writable
+                // on the pooled role's search_path so both pooled and unpooled peers can
+                // resolve unqualified `hstore`.
                 let schema = match find_hstore_schema(&mut conn).await? {
                     Some(schema) => schema,
-                    None => install_hstore_extension(&mut conn).await?,
+                    None => install_hstore_for_pooled_connections(&mut conn).await?,
                 };
                 sqlx::query("CREATE SCHEMA IF NOT EXISTS cc_lb_scheduler")
                     .execute(&mut conn)
@@ -836,4 +875,51 @@ fn host_only(url: &str) -> String {
         .ok()
         .and_then(|url| url.host_str().map(str::to_owned))
         .unwrap_or_else(|| "<unknown host>".to_owned())
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use cc_lb_clock::SystemClock;
+    use cc_lb_config::{PostgresPoolConfig, SchedulerConfig, StorageConfig};
+
+    use super::{SchedulerFactoryError, open_scheduler_storage};
+
+    #[tokio::test]
+    async fn open_postgres_bounds_stalled_direct_setup_connection_to_acquire_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local blackhole listener");
+        let addr = listener.local_addr().expect("listener address");
+        let accept_task = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("accept TCP connection");
+            // Keep the accepted socket open without sending a PostgreSQL startup reply.
+            tokio::time::sleep(Duration::from_secs(15)).await;
+        });
+
+        let mut scheduler = SchedulerConfig::default();
+        scheduler.separate_pool.acquire_timeout_secs = 1;
+        let storage = StorageConfig::Postgres {
+            url: format!("postgres://cclb:cclb@{addr}/cclb_test?sslmode=disable"),
+            pool: PostgresPoolConfig::default(),
+        };
+
+        let started = Instant::now();
+        let error = open_scheduler_storage(&storage, &scheduler, Arc::new(SystemClock))
+            .await
+            .expect_err("stalled PostgreSQL handshake must fail at acquire_timeout_secs");
+        let elapsed = started.elapsed();
+        accept_task.abort();
+
+        assert!(
+            matches!(error, SchedulerFactoryError::ConnectionFailed { .. }),
+            "expected ConnectionFailed on direct setup timeout, got {error:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "expected timeout near acquire_timeout_secs=1s, took {elapsed:?}"
+        );
+    }
 }

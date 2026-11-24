@@ -120,16 +120,35 @@ async fn pgbouncer_transaction_pooling_keeps_hstore_visible_for_adaptive_and_cro
             .await
             .context("cron TaskSink enqueue under pgbouncer_transaction_pooling")?;
 
-            // Simulated upgrade path: if an older setup installed hstore inside cc_lb_scheduler,
-            // reopening with pgbouncer_transaction_pooling relocates it into the pooled schema.
+            // Simulated rolling-upgrade path: if an older setup installed hstore inside
+            // cc_lb_scheduler, reopening with pgbouncer_transaction_pooling and a role
+            // search_path of `app, public` relocates hstore strictly to `public` (NOT `app`)
+            // so both pooled and running unpooled replicas (`cc_lb_scheduler, apalis, public`)
+            // keep resolving `hstore`.
+            sqlx::query("CREATE SCHEMA IF NOT EXISTS app")
+                .execute(pg_backend.pool())
+                .await
+                .context("create app schema")?;
             sqlx::query("ALTER EXTENSION hstore SET SCHEMA cc_lb_scheduler")
                 .execute(pg_backend.pool())
                 .await
                 .context("relocate hstore to cc_lb_scheduler to simulate legacy upgrade")?;
             pg_backend.pool().close().await;
 
+            let mut app_public_url = database_url.clone();
+            app_public_url
+                .query_pairs_mut()
+                .append_pair("options", "-c search_path=app,public");
+            let app_public_config = cc_lb_config::StorageConfig::Postgres {
+                url: app_public_url.to_string(),
+                pool: cc_lb_config::PostgresPoolConfig {
+                    listener_url: Some(db_url.clone()),
+                    pgbouncer_transaction_pooling: true,
+                    ..cc_lb_config::PostgresPoolConfig::default()
+                },
+            };
             let reopened = cc_lb_scheduler::factory::open_scheduler_storage(
-                &storage_config,
+                &app_public_config,
                 &SchedulerConfig::default(),
                 Arc::new(SystemClock),
             )
@@ -138,6 +157,18 @@ async fn pgbouncer_transaction_pooling_keeps_hstore_visible_for_adaptive_and_cro
             let SchedulerBackend::Postgres(ref reopened_pg) = reopened.backend else {
                 bail!("expected postgres scheduler backend");
             };
+            let relocated_schema: String = sqlx::query_scalar(
+                "SELECT n.nspname::text \
+                 FROM pg_extension e \
+                 JOIN pg_namespace n ON n.oid = e.extnamespace \
+                 WHERE e.extname = 'hstore'",
+            )
+            .fetch_one(reopened_pg.pool())
+            .await?;
+            ensure!(
+                relocated_schema == "public",
+                "rolling upgrade must relocate hstore to public, not app (got {relocated_schema})"
+            );
             let upstream_id_2 = Uuid::new_v4();
             reopened
                 .backend
@@ -149,7 +180,75 @@ async fn pgbouncer_transaction_pooling_keeps_hstore_visible_for_adaptive_and_cro
                 })
                 .await
                 .context("adaptive enqueue after hstore relocation")?;
+            // Simulated already-running unpooled peer session (`cc_lb_scheduler, apalis, public`)
+            // continues resolving `hstore` while PgBouncer replicas start up.
+            let unpooled_peer = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&db_url)
+                .await?;
+            sqlx::query("SET search_path = cc_lb_scheduler, apalis, public")
+                .execute(&mut *unpooled_peer.acquire().await?)
+                .await?;
+            sqlx::query_scalar::<_, bool>("SELECT to_regtype('hstore') IS NOT NULL")
+                .fetch_one(&unpooled_peer)
+                .await?
+                .then_some(())
+                .context("unpooled peer lost hstore visibility")?;
+            unpooled_peer.close().await;
             reopened_pg.pool().close().await;
+
+            // If a pooled role omits `public` (`search_path = app`) while hstore lives in
+            // `cc_lb_scheduler`, startup must fail WITHOUT moving hstore into `app` so running
+            // unpooled replicas are never broken.
+            let move_back_pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&db_url)
+                .await?;
+            sqlx::query("ALTER EXTENSION hstore SET SCHEMA cc_lb_scheduler")
+                .execute(&move_back_pool)
+                .await?;
+            move_back_pool.close().await;
+
+            let mut app_only_url = database_url.clone();
+            app_only_url
+                .query_pairs_mut()
+                .append_pair("options", "-c search_path=app");
+            let app_only_config = cc_lb_config::StorageConfig::Postgres {
+                url: app_only_url.to_string(),
+                pool: cc_lb_config::PostgresPoolConfig {
+                    listener_url: Some(db_url.clone()),
+                    pgbouncer_transaction_pooling: true,
+                    ..cc_lb_config::PostgresPoolConfig::default()
+                },
+            };
+            let app_only_err = cc_lb_scheduler::factory::open_scheduler_storage(
+                &app_only_config,
+                &SchedulerConfig::default(),
+                Arc::new(SystemClock),
+            )
+            .await
+            .expect_err("search_path=app without public/cc_lb_scheduler must reject instead of relocating");
+            ensure!(
+                matches!(
+                    app_only_err,
+                    cc_lb_scheduler::factory::SchedulerFactoryError::MigrationFailed { .. }
+                ),
+                "unexpected error for search_path=app: {app_only_err}"
+            );
+            let check_pool = PgPoolOptions::new().max_connections(1).connect(&db_url).await?;
+            let schema_after_reject: String = sqlx::query_scalar(
+                "SELECT n.nspname::text \
+                 FROM pg_extension e \
+                 JOIN pg_namespace n ON n.oid = e.extnamespace \
+                 WHERE e.extname = 'hstore'",
+            )
+            .fetch_one(&check_pool)
+            .await?;
+            check_pool.close().await;
+            ensure!(
+                schema_after_reject == "cc_lb_scheduler",
+                "rejected rollout must leave hstore in cc_lb_scheduler (got {schema_after_reject})"
+            );
             Ok(())
         })
         .catch_unwind(),

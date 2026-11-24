@@ -2039,6 +2039,18 @@ test('storage listener URL stays opaque and attaches replacement across validate
   );
 
   fireEvent.click(screen.getByRole('button', { name: 'Save to config file' }));
+  const reviewList = screen.getByTestId('config-review-list');
+  expect(within(reviewList).getByText('Dangerous changes')).toBeDefined();
+  expect(
+    within(reviewList).getByText('storage.pool.listener_url'),
+  ).toBeDefined();
+  expect(
+    within(reviewList).getByText(
+      /wrong listener URL breaks LISTEN\/NOTIFY sync/i,
+    ),
+  ).toBeDefined();
+  expect(reviewList.textContent).not.toContain('direct-pass');
+  expect(reviewList.textContent).toContain('Hidden (replacement)');
   fireEvent.click(screen.getByRole('button', { name: 'Overwrite file' }));
   expect(saveFileMutate).toHaveBeenLastCalledWith(
     {

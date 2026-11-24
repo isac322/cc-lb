@@ -899,12 +899,12 @@ fn storage_listener_url(value: &Value) -> Option<&str> {
 
 fn redact_storage_url(value: &mut Value) {
     if let Some(url) = storage_url_mut(value)
-        && url.is_string()
+        && !url.is_null()
     {
         *url = Value::String(STORAGE_URL_REDACTION_SENTINEL.to_owned());
     }
     if let Some(listener_url) = storage_listener_url_mut(value)
-        && listener_url.is_string()
+        && !listener_url.is_null()
     {
         *listener_url = Value::String(STORAGE_URL_REDACTION_SENTINEL.to_owned());
     }

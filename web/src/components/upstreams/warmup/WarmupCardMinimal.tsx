@@ -1,5 +1,5 @@
 import { ChevronRight, HelpCircle, History, Zap } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { windowLabel } from '../../../lib/api';
 import { getWindowColor } from '../../../lib/colors';
@@ -386,6 +386,25 @@ function WarmupCardMinimalInner({
   const [historyLane, setHistoryLane] = useState<WarmupLane | 'all'>('all');
   const [configOpen, setConfigOpen] = useState(false);
 
+  const isMountedRef = useRef(true);
+  const cooldownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (cooldownTimerRef.current !== null) {
+        clearTimeout(cooldownTimerRef.current);
+        cooldownTimerRef.current = null;
+      }
+      if (focusTimerRef.current !== null) {
+        clearTimeout(focusTimerRef.current);
+        focusTimerRef.current = null;
+      }
+    };
+  }, []);
+
   const [confirmFireOpen, setConfirmFireOpen] = useState(false);
   const [confirmClearPluginOpen, setConfirmClearPluginOpen] = useState(false);
   const unavailableFireLane =
@@ -541,6 +560,7 @@ function WarmupCardMinimalInner({
           fireWarmup.mutateAsync({ id: upstream.id, lane }),
         ),
       );
+      if (!isMountedRef.current) return;
       setConfirmFireOpen(false);
       const leases: { lane: FireTarget; heldBy: string }[] = [];
       const errors: { lane: FireTarget; reason: FireErrorReason }[] = [];
@@ -572,10 +592,20 @@ function WarmupCardMinimalInner({
       setErrorPanels(errors);
       if (firedAny) {
         setFireCooldown(true);
-        setTimeout(() => setFireCooldown(false), FIRE_NOW_COOLDOWN_MS);
+        if (cooldownTimerRef.current !== null) {
+          clearTimeout(cooldownTimerRef.current);
+        }
+        cooldownTimerRef.current = setTimeout(() => {
+          cooldownTimerRef.current = null;
+          if (isMountedRef.current) {
+            setFireCooldown(false);
+          }
+        }, FIRE_NOW_COOLDOWN_MS);
       }
     } finally {
-      setFiring(false);
+      if (isMountedRef.current) {
+        setFiring(false);
+      }
     }
   };
 
@@ -587,13 +617,16 @@ function WarmupCardMinimalInner({
   const handleConfirmFireOpenChange = (open: boolean) => {
     setConfirmFireOpen(open);
     if (!open) {
-      window.setTimeout(
-        () =>
-          document
-            .querySelector<HTMLButtonElement>('[data-testid="warmup-fire-now"]')
-            ?.focus(),
-        0,
-      );
+      if (focusTimerRef.current !== null) {
+        clearTimeout(focusTimerRef.current);
+      }
+      focusTimerRef.current = setTimeout(() => {
+        focusTimerRef.current = null;
+        if (!isMountedRef.current || typeof document === 'undefined') return;
+        document
+          .querySelector<HTMLButtonElement>('[data-testid="warmup-fire-now"]')
+          ?.focus();
+      }, 0);
     }
   };
 

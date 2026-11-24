@@ -1010,6 +1010,7 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
       sensitive: boolean;
       oldValue: unknown;
       newValue: unknown;
+      replacement?: boolean;
     }[] = model.leaves
       // Inactive-but-modified leaves are included: switching a union variant
       // deletes every path the old variant owned, and those removals must
@@ -1026,6 +1027,36 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
         oldValue: leaf.fileValue,
         newValue: leaf.editorValue,
       }));
+    for (const [path, replacementValue] of [
+      [OPAQUE_STORAGE_URL_PATH, storageUrlReplacement],
+      [OPAQUE_STORAGE_LISTENER_URL_PATH, storageListenerUrlReplacement],
+    ] as const) {
+      if (replacementValue === null) continue;
+      const leaf = model.leaves.find(
+        (candidate) => candidate.pathString === path,
+      );
+      const classification = classifyConfigLeaf(path);
+      const existingIndex = entries.findIndex(
+        (entry) => entry.pathString === path,
+      );
+      const entry = {
+        pathString: path,
+        categoryId: leaf?.categoryId ?? classification.categoryId,
+        dangerous: leaf?.dangerous ?? classification.dangerous,
+        dangerImpact: leaf?.dangerImpact ?? classification.dangerImpact,
+        sensitive: true,
+        oldValue: leaf
+          ? leaf.fileValue
+          : getConfigValue(editorData.file_config, path),
+        newValue: replacementValue,
+        replacement: true,
+      };
+      if (existingIndex >= 0) {
+        entries[existingIndex] = entry;
+      } else {
+        entries.push(entry);
+      }
+    }
     // Container-level diffs for the specialized editors are added directly,
     // but only when no item leaf under the container already describes the
     // change — otherwise the row would repeat what the item rows say.
@@ -1061,7 +1092,7 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
         (categoryOrder.get(right.categoryId) ?? 99);
       return order || left.pathString.localeCompare(right.pathString);
     });
-  }, [model, editorData]);
+  }, [model, editorData, storageUrlReplacement, storageListenerUrlReplacement]);
 
   const updateValue = (next: unknown) => {
     if (!isJsonObject(next)) return;
@@ -1625,7 +1656,9 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
                             {entry.pathString}
                           </span>
                           : {displayValue(entry.oldValue, entry.sensitive)} →{' '}
-                          {displayValue(entry.newValue, entry.sensitive)}
+                          {entry.replacement
+                            ? 'Hidden (replacement)'
+                            : displayValue(entry.newValue, entry.sensitive)}
                           {entry.dangerous && entry.dangerImpact ? (
                             <span className="block text-caption text-warn-text">
                               {entry.dangerImpact}

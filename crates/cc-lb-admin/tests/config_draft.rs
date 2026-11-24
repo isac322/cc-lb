@@ -102,6 +102,49 @@ async fn put_draft_stores_only_storage_url_sentinel() {
 }
 
 #[tokio::test]
+async fn put_draft_masks_malformed_non_string_storage_urls() {
+    let (dir, storage) = temp_storage().await;
+    let app = app_with_file(&dir, storage);
+    let secret = "postgres://replacement-user:malformed-object-password@localhost/db";
+    let listener_secret = "postgres://listener-user:malformed-array-password@direct-db/db";
+
+    let (status, _, saved, bytes) = authed_json(
+        app.clone(),
+        "PUT",
+        "/admin/v1/config/draft",
+        Some(put_body(
+            json!({
+                "storage": {
+                    "kind": "postgres",
+                    "url": { "raw": secret },
+                    "pool": { "listener_url": [listener_secret] }
+                }
+            }),
+            0,
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["revision"], 1);
+    let saved_body = String::from_utf8_lossy(&bytes);
+    assert!(!saved_body.contains(secret));
+    assert!(!saved_body.contains(listener_secret));
+
+    let (_, _, stored, bytes) = authed_json(app, "GET", "/admin/v1/config/editor", None).await;
+    assert_eq!(
+        stored["draft"]["storage"]["url"],
+        cc_lb_config::STORAGE_URL_REDACTION_SENTINEL
+    );
+    assert_eq!(
+        stored["draft"]["storage"]["pool"]["listener_url"],
+        cc_lb_config::STORAGE_URL_REDACTION_SENTINEL
+    );
+    let stored_body = String::from_utf8_lossy(&bytes);
+    assert!(!stored_body.contains(secret));
+    assert!(!stored_body.contains(listener_secret));
+}
+
+#[tokio::test]
 async fn stale_put_returns_current_revision_conflict() {
     let (dir, storage) = temp_storage().await;
     let app = app_with_file(&dir, storage);

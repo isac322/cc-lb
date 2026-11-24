@@ -992,4 +992,35 @@ describe('WarmupCardMinimal fire now lanes', () => {
       'Claude and GPT-OSS models: Warmup skipped',
     );
   });
+
+  test('unmounting after firing clears pending timers before teardown', async () => {
+    vi.useFakeTimers();
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { unmount } = render(<WarmupCardMinimal upstream={upstream} />);
+      await act(async () => {
+        screen.getByRole('button', { name: 'Fire now' }).click();
+      });
+      const dialog = screen.getByRole('alertdialog');
+      await act(async () => {
+        within(dialog).getByRole('button', { name: 'Fire now' }).click();
+      });
+
+      const clearsBeforeUnmount = clearTimeoutSpy.mock.calls.length;
+      unmount();
+      expect(clearTimeoutSpy.mock.calls.length).toBeGreaterThan(
+        clearsBeforeUnmount,
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      clearTimeoutSpy.mockRestore();
+      errorSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 });
