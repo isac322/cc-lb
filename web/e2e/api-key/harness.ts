@@ -462,7 +462,9 @@ export async function openApiKeyDialog(page: Page): Promise<Locator> {
   await openUpstreams(page);
   await page.getByRole('button', { name: 'Add upstream' }).first().click();
   const dialog = page.getByRole('dialog');
-  await dialog.getByRole('radio', { name: /Anthropic API key/ }).click();
+  await dialog.getByRole('button', { name: /^Anthropic\b/ }).click();
+  await dialog.getByRole('button', { name: 'Continue' }).click();
+  await dialog.getByRole('radio', { name: /API key/ }).click();
   await dialog.getByRole('button', { name: 'Continue' }).click();
   await expect(dialog.getByPlaceholder('sk-ant-…')).toBeFocused();
   return dialog;

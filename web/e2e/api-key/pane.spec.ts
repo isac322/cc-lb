@@ -58,7 +58,7 @@ function access(page: Page) {
 
 test.describe('key notices', () => {
   // UI-K-02 then UI-K-01: never checked, Re-check finds a revoked key. The
-  // fake is a custom base_url, so K1 names the endpoint, not Anthropic.
+  // fake is a custom base_url, so K2 and K1 name the endpoint, not Anthropic.
   test('K2 Re-check turns into K1 when the endpoint rejects the key', async ({
     page,
     fake,
@@ -71,7 +71,7 @@ test.describe('key notices', () => {
 
     const k2 = page.getByRole('status').filter({ hasText: 'Key not checked yet' });
     await expect(k2).toContainText(
-      'Re-check → see what this key can do at Anthropic.',
+      'Re-check → see what this key can do at your endpoint.',
     );
     await expect(access(page)).toContainText('Never checked');
     await expect(access(page).getByRole('button', { name: 'Re-check' })).toHaveCount(0);

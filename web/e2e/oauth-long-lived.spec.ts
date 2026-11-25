@@ -185,7 +185,7 @@ test.describe('OAuth long-lived credential display', () => {
 
     // The refresh token is stored but unusable, so its expiry row is hidden.
     const cardBody = page.getByTestId('oauth-status-card-body');
-    await expect(cardBody).toContainText('stored, unused');
+    await expect(cardBody).toContainText('Stored, unused');
     await expect(page.getByTestId('oauth-refresh-token-expiry')).toHaveCount(0);
 
     // No reconnect nudge while the access token is months out.
@@ -217,7 +217,7 @@ test.describe('OAuth long-lived credential display', () => {
     await expect(page.getByRole('alert')).toHaveCount(0);
 
     const cardBody = page.getByTestId('oauth-status-card-body');
-    await expect(cardBody).toContainText('stored, unused');
+    await expect(cardBody).toContainText('Stored, unused');
     await expect(page.getByTestId('oauth-refresh-token-expiry')).toHaveCount(0);
   });
 
@@ -277,7 +277,7 @@ test.describe('OAuth long-lived credential display', () => {
 
     const refreshExpiry = page.getByTestId('oauth-refresh-token-expiry');
     await expect(refreshExpiry).toBeVisible();
-    await expect(refreshExpiry).toContainText('expires');
+    await expect(refreshExpiry).toContainText(/expires/i);
   });
 
   test('Scenario: create dialog starts the OAuth flow without a credential-mode choice', async ({
@@ -292,9 +292,14 @@ test.describe('OAuth long-lived credential display', () => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto('/upstreams');
 
-    await page.getByRole('button', { name: 'New', exact: true }).click();
+    await page.getByRole('button', { name: 'Add upstream' }).first().click();
     const dialog = page.getByRole('dialog', { name: 'New upstream' });
     await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: /^Anthropic\b/ }).click();
+    await dialog.getByRole('button', { name: 'Continue' }).click();
+    await expect(
+      dialog.getByRole('radio', { name: /Subscription/ }),
+    ).toBeChecked();
     await dialog.getByRole('button', { name: 'Continue' }).click();
 
     // Choosing the Claude path posts an empty body to the draft-start endpoint
@@ -305,7 +310,7 @@ test.describe('OAuth long-lived credential display', () => {
       'href',
       'https://claude.ai/oauth/authorize?mock=1',
     );
-    expect(draftStartRequests).toEqual([{}]);
+    expect(draftStartRequests).toEqual([{ provider: 'anthropic' }]);
 
     // The code comes back on the paste step; the dialog never shows the raw
     // authorize URL or the state token.

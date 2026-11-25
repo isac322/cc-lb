@@ -21,6 +21,8 @@ function usageBucket(overrides: Partial<UsageBucket>): UsageBucket {
     virtual_cost_micros: 0,
     latency_ms_sum: 0,
     latency_count: 0,
+    pricing_completeness: 'priced',
+    priced_request_count: overrides.request_count ?? 0,
     ...overrides,
   };
 }
@@ -40,6 +42,8 @@ const summary: DashboardSummaryResponse = {
     error_rate: 0,
     virtual_cost_micros: 1_500_000,
     avg_latency_ms: 100,
+    pricing_completeness: 'priced',
+    priced_request_count: 12,
   },
   sparkline: {
     buckets: [
@@ -117,51 +121,51 @@ const emptyPrincipalUsage: DashboardUsageResponse = {
 };
 
 const FIRST_COST_DETAILS = [
-  'Input',
-  '$0.1000',
-  '7%',
-  'Output',
-  '$0.2000',
-  '13%',
+  'Cache read',
+  '$0.5000',
+  '33%',
   'Cache create 5m',
   '$0.3000',
   '20%',
   'Cache create 1h',
   '$0.4000',
   '27%',
-  'Cache read',
-  '$0.5000',
-  '33%',
+  'Input',
+  '$0.1000',
+  '7%',
+  'Output',
+  '$0.2000',
+  '13%',
   'Total',
   '$1.5000',
 ];
 
 const REFRESHED_COST_DETAILS = [
-  'Input',
-  '$0.2000',
-  '10%',
-  'Output',
-  '$0.3000',
-  '15%',
+  'Cache read',
+  '$0.6000',
+  '30%',
   'Cache create 5m',
   '$0.4000',
   '20%',
   'Cache create 1h',
   '$0.5000',
   '25%',
-  'Cache read',
-  '$0.6000',
-  '30%',
+  'Input',
+  '$0.2000',
+  '10%',
+  'Output',
+  '$0.3000',
+  '15%',
   'Total',
   '$2.0000',
 ];
 
-const COST_CATEGORIES = [
-  'input',
-  'output',
-  'cache_create_5m',
-  'cache_create_1h',
-  'cache_read',
+const COST_COLORS = [
+  'var(--color-series-cache-read)',
+  'var(--color-series-cache-create-5m)',
+  'var(--color-series-cache-create-1h)',
+  'var(--color-series-input)',
+  'var(--color-series-output)',
 ];
 
 type UsageFixtureResponse = {
@@ -214,18 +218,101 @@ async function installOverviewFixtures(
         uptime_secs: 1,
       });
     }
+    if (pathname === '/admin/v1/auth/session') {
+      return json(200, {
+        authority: 'e2e',
+        subject: 'e2e-operator',
+        kind: 'human',
+        provider_id: 'static',
+        email: null,
+        display_name: 'E2E Operator',
+        expires_at_unix_secs: null,
+        auth_mode: 'static_token',
+      });
+    }
     if (pathname === '/admin/v1/principals') {
       return json(200, {
         principals: [{ id: 'principal-alpha', name: 'Principal Alpha' }],
       });
     }
     if (pathname === '/admin/v1/upstreams') {
+      return json(200, {
+        upstreams: [
+          {
+            id: 'upstream-alpha',
+            name: 'Anthropic Alpha',
+            kind: 'anthropic_oauth',
+            enabled: true,
+            base_url: null,
+            warmup_enabled: false,
+            warmup_dialect_plugin: null,
+            spec_revision: 1,
+            status: {
+              last_apply_error: null,
+              last_apply_at_unix_secs: null,
+              last_warmup_at_unix_secs: null,
+            },
+          },
+        ],
+      });
+    }
+    if (pathname === '/admin/v1/upstreams/limit-resets') {
       return json(200, { upstreams: [] });
+    }
+    if (pathname === '/admin/v1/plugins/registry') {
+      return json(200, { entries: [] });
+    }
+    if (pathname === '/admin/v1/status') {
+      return json(200, {
+        version: 'test',
+        git_sha: 'test',
+        uptime_secs: 1,
+        build: { rust_version: 'mock', profile: 'debug', target: 'mock' },
+        generation: 1,
+        upstreams: [
+          {
+            id: 'upstream-alpha',
+            name: 'Anthropic Alpha',
+            status: 'active',
+            last_apply_at_unix_secs: null,
+            last_apply_error: null,
+          },
+        ],
+      });
+    }
+    if (pathname === '/admin/v1/subscription-quotas/latest') {
+      return json(200, {
+        max_staleness_secs: 300,
+        upstreams: [],
+      });
+    }
+    if (/^\/admin\/v1\/upstreams\/[^/]+\/oauth\/status$/.test(pathname)) {
+      return json(200, {
+        status: 'connected',
+        has_refresh_token: true,
+        expires_at_unix_secs: Math.floor(Date.now() / 1000) + 3600,
+      });
     }
     if (pathname === '/admin/v1/dashboard/summary') {
       return json(200, summary);
     }
     if (pathname === '/admin/v1/dashboard/usage') {
+      const groupBy = url.searchParams.get('group_by') ?? '';
+      const providers = url.searchParams.get('providers');
+      if (groupBy !== 'principal' || providers !== 'anthropic') {
+        if (options.holdFirstUsage && groupBy === 'principal') {
+          await firstUsageGate;
+        }
+        return json(200, {
+          range: url.searchParams.get('range') ?? '7d',
+          step: url.searchParams.get('step') ?? 'hour',
+          group_by: groupBy || 'upstream',
+          window_start_unix_secs: BUCKET_START,
+          window_end_unix_secs: BUCKET_START + 3_600,
+          observed: true,
+          series: [],
+        });
+      }
       usageUrls.push(request.url());
       usageRequestTimes.push(Date.now());
       const requestNumber = usageUrls.length;
@@ -288,11 +375,17 @@ async function readCostDetails(page: Page): Promise<string[]> {
     );
 }
 
-async function readCostCategories(page: Page): Promise<string[]> {
+function principalCostTrigger(page: Page) {
   return page
-    .getByTestId('top-principal-cost-segment')
+    .getByTestId('top-principal-row')
+    .getByRole('button', { name: /show breakdown$/ });
+}
+
+async function readCostSegmentColors(page: Page): Promise<string[]> {
+  return principalCostTrigger(page)
+    .locator('[data-cell-bar] span')
     .evaluateAll((nodes) =>
-      nodes.map((node) => (node as HTMLElement).dataset.category ?? ''),
+      nodes.map((node) => (node as HTMLElement).style.backgroundColor),
     );
 }
 
@@ -314,7 +407,7 @@ function expectTotalsProjection(usageUrls: readonly string[]) {
   for (const requestedUrl of usageUrls) {
     const url = new URL(requestedUrl);
     expect(url.pathname).toBe('/admin/v1/dashboard/usage');
-    expect(url.searchParams.get('range')).toBe('24h');
+    expect(url.searchParams.get('range')).toBe('7d');
     expect(url.searchParams.get('step')).toBe('hour');
     expect(url.searchParams.get('group_by')).toBe('principal');
     expect(url.searchParams.get('projection')).toBe('totals');
@@ -348,7 +441,9 @@ test('renders and refreshes principal total and component costs without reloadin
   // intended loading geometry instead of flashing its empty state.
   await expect(page.getByTestId('top-principal-skeleton-row')).toHaveCount(5);
   await expect(page.getByTestId('top-principal-row')).toHaveCount(0);
-  await expect(page.getByText('No usage data', { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByText('No usage in the last 7d', { exact: true }),
+  ).toHaveCount(0);
   await expect.poll(() => fixtures.usageUrls().length).toBe(1);
   fixtures.releaseFirstUsage();
 
@@ -357,15 +452,19 @@ test('renders and refreshes principal total and component costs without reloadin
   await expect(row).toContainText('Principal Alpha');
   await expect(row).toContainText('$1.50');
   await expect(page.getByTestId('top-principal-skeleton-row')).toHaveCount(0);
-  await expect(page.getByText('No usage data', { exact: true })).toHaveCount(0);
-  const costMeter = page.getByTestId('top-principal-cost-meter');
-  await expect(costMeter).toHaveAttribute('data-cost-components', 'complete');
-
-  const costTrigger = page.getByTestId('top-principal-cost-trigger');
+  await expect(
+    page.getByText('No usage in the last 7d', { exact: true }),
+  ).toHaveCount(0);
+  const costTrigger = principalCostTrigger(page);
+  await expect(costTrigger).toHaveAttribute(
+    'aria-label',
+    'Principal Alpha cost $1.5000, show breakdown',
+  );
   await costTrigger.focus();
+  await page.keyboard.press('Enter');
   await expect(page.getByTestId('top-principal-cost-details')).toBeVisible();
   await expect.poll(() => readCostDetails(page)).toEqual(FIRST_COST_DETAILS);
-  await expect.poll(() => readCostCategories(page)).toEqual(COST_CATEGORIES);
+  await expect.poll(() => readCostSegmentColors(page)).toEqual(COST_COLORS);
 
   // A marker on this Window distinguishes the 5-second query poll from a
   // document reload that merely happens to render the second fixture.
@@ -384,12 +483,17 @@ test('renders and refreshes principal total and component costs without reloadin
     timeout: POLL_UPDATE_TIMEOUT_MS,
   });
   await expect.poll(() => readCostDetails(page)).toEqual(REFRESHED_COST_DETAILS);
-  await expect.poll(() => readCostCategories(page)).toEqual(COST_CATEGORIES);
+  await expect.poll(() => readCostSegmentColors(page)).toEqual(COST_COLORS);
   await expect(row).not.toContainText('$1.50');
-  await expect(costMeter).toHaveAttribute('data-cost-components', 'complete');
+  await expect(costTrigger).toHaveAttribute(
+    'aria-label',
+    'Principal Alpha cost $2.0000, show breakdown',
+  );
 
   await expect(page.getByTestId('top-principal-skeleton-row')).toHaveCount(0);
-  await expect(page.getByText('No usage data', { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByText('No usage in the last 7d', { exact: true }),
+  ).toHaveCount(0);
   expect(
     await page.evaluate(
       () =>
@@ -420,7 +524,9 @@ test('renders the Top principals empty state for an empty totals response', asyn
 
   await page.goto('/');
   await expect(page.getByText('Top principals', { exact: true })).toBeVisible();
-  await expect(page.getByText('No usage data', { exact: true })).toBeVisible();
+  await expect(
+    page.getByText('No usage in the last 7d', { exact: true }),
+  ).toBeVisible();
   await expect(page.getByTestId('top-principal-skeleton-row')).toHaveCount(0);
   await expect(page.getByTestId('top-principal-row')).toHaveCount(0);
 
@@ -452,7 +558,9 @@ test('recovers the Top principals totals after an initial usage error', async ({
   const errorToast = page.locator('[data-sonner-toast][data-type="error"]');
   await expect(errorToast).toContainText('Principal totals unavailable');
   await expect(page.getByTestId('top-principal-row')).toHaveCount(0);
-  await expect(page.getByText('No usage data', { exact: true })).toBeVisible();
+  await expect(
+    page.getByText('No usage in the last 7d', { exact: true }),
+  ).toBeVisible();
   await expect.poll(() => [...adminResponseErrors]).toEqual([
     '500 /admin/v1/dashboard/usage',
     '500 /admin/v1/dashboard/usage',
@@ -474,17 +582,23 @@ test('recovers the Top principals totals after an initial usage error', async ({
   await expect(row).toBeVisible({ timeout: POLL_UPDATE_TIMEOUT_MS });
   await expect(row).toContainText('Principal Alpha');
   await expect(row).toContainText('$2.00');
-  await expect(page.getByText('No usage data', { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByText('No usage in the last 7d', { exact: true }),
+  ).toHaveCount(0);
   await expect(page.getByTestId('top-principal-skeleton-row')).toHaveCount(0);
 
-  const costMeter = page.getByTestId('top-principal-cost-meter');
-  await expect(costMeter).toHaveAttribute('data-cost-components', 'complete');
-  await page.getByTestId('top-principal-cost-trigger').focus();
+  const costTrigger = principalCostTrigger(page);
+  await expect(costTrigger).toHaveAttribute(
+    'aria-label',
+    'Principal Alpha cost $2.0000, show breakdown',
+  );
+  await costTrigger.focus();
+  await page.keyboard.press('Enter');
   await expect(page.getByTestId('top-principal-cost-details')).toBeVisible();
   await expect.poll(() => readCostDetails(page)).toEqual(
     REFRESHED_COST_DETAILS,
   );
-  await expect.poll(() => readCostCategories(page)).toEqual(COST_CATEGORIES);
+  await expect.poll(() => readCostSegmentColors(page)).toEqual(COST_COLORS);
 
   expect(
     await page.evaluate(

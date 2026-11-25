@@ -229,8 +229,13 @@ test.describe('OAuth pane', () => {
     );
     await openUpstreams(page);
 
-    await page.getByRole('button', { name: 'Add upstream' }).click();
+    await page.getByRole('button', { name: 'Add upstream' }).first().click();
     const dialog = page.getByRole('dialog', { name: 'New upstream' });
+    await dialog.getByRole('button', { name: /^Anthropic\b/ }).click();
+    await dialog.getByRole('button', { name: 'Continue' }).click();
+    await expect(
+      dialog.getByRole('radio', { name: /Subscription/ }),
+    ).toBeChecked();
     await dialog.getByRole('button', { name: 'Continue' }).click();
     await dialog.getByRole('button', { name: 'I already have a code' }).click();
     const code = dialog.getByRole('textbox', { name: 'Authorization code' });

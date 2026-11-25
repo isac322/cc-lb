@@ -123,11 +123,89 @@ async function installPrincipalFixtures(page: Page) {
     if (method === 'GET' && pathname === '/admin/health') {
       return json(200, HEALTH_RESPONSE);
     }
+    if (method === 'GET' && pathname === '/admin/v1/auth/session') {
+      return json(200, {
+        authority: 'e2e',
+        subject: 'e2e-operator',
+        kind: 'human',
+        provider_id: 'static',
+        email: null,
+        display_name: 'E2E Operator',
+        expires_at_unix_secs: null,
+        auth_mode: 'static_token',
+      });
+    }
     if (method === 'GET' && pathname === '/admin/v1/principals') {
       return json(200, { principals });
     }
     if (method === 'GET' && pathname === '/admin/v1/upstreams') {
+      return json(200, {
+        upstreams: [
+          {
+            id: 'upstream-keepalive-fixture',
+            name: 'anthropic-oauth-fixture',
+            kind: 'anthropic_oauth',
+            enabled: true,
+            base_url: null,
+            warmup_enabled: false,
+            warmup_dialect_plugin: null,
+            spec_revision: 1,
+            status: {
+              last_apply_error: null,
+              last_apply_at_unix_secs: null,
+              last_warmup_at_unix_secs: null,
+            },
+          },
+        ],
+      });
+    }
+    if (
+      method === 'GET' &&
+      /^\/admin\/v1\/upstreams\/[^/]+\/oauth\/status$/.test(pathname)
+    ) {
+      return json(200, {
+        upstream_id: 'upstream-keepalive-fixture',
+        kind: 'anthropic_oauth',
+        has_credentials: true,
+        status: 'active',
+        expires_at_unix_secs: 1_900_000_000,
+        refresh_token_present: true,
+        can_refresh: true,
+        scopes: ['user:inference'],
+      });
+    }
+    if (
+      method === 'GET' &&
+      /^\/admin\/v1\/principals\/[^/]+\/subscription-preference$/.test(pathname)
+    ) {
+      return json(200, {
+        prefer_subscription: false,
+        revision: 1,
+      });
+    }
+    if (method === 'GET' && pathname === '/admin/v1/events/stream') {
+      return route.fulfill({
+        status: 200,
+        headers: {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache',
+        },
+        body: ': connected\n\n',
+      });
+    }
+    if (method === 'GET' && pathname === '/admin/v1/upstreams/limit-resets') {
       return json(200, { upstreams: [] });
+    }
+    if (method === 'GET' && pathname === '/admin/v1/dashboard/usage') {
+      return json(200, {
+        range: url.searchParams.get('range') ?? '7d',
+        step: url.searchParams.get('step') ?? 'hour',
+        group_by: url.searchParams.get('group_by') ?? 'principal',
+        window_start_unix_secs: 1_799_395_200,
+        window_end_unix_secs: 1_800_000_000,
+        observed: true,
+        series: [],
+      });
     }
     if (method === 'GET' && pathname === '/admin/v1/plugins/registry') {
       return json(200, { entries: [] });
@@ -228,7 +306,9 @@ test.describe('pending admin actions', () => {
 
     expect(fixtures.keepaliveSessionGetCount()).toBe(0);
     await page.getByRole('button', { name: 'Sessions' }).click();
-    await expect(page.getByTestId('cache-keepalive-sessions-drawer')).toBeVisible();
+    await expect(
+      page.getByRole('dialog', { name: 'Cache keepalive sessions' }),
+    ).toBeVisible();
     await expect.poll(() => fixtures.keepaliveSessionGetCount()).toBe(1);
     expect(fixtures.unexpectedRequests).toEqual([]);
   });

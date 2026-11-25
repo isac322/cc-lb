@@ -156,5 +156,13 @@ test('All kinds includes history, streamed, and resumed renewals without changin
   await expect(page.getByLabel('View request history-renewal')).toHaveCount(0);
   await expect(page.getByLabel('View request stream-renewal')).toHaveCount(0);
   await expect(page.getByLabel('View request delta-renewal')).toHaveCount(0);
+  await expect(page).toHaveURL(/event_kind=messages/);
+
+  await page.getByRole('combobox', { name: 'Kind', exact: true }).click();
+  await page.getByRole('option', { name: 'All requests', exact: true }).click();
+  await expect(page.getByLabel('View request history-message')).toBeVisible();
+  await expect(page.getByLabel('View request history-renewal')).toHaveCount(0);
+  await expect(page.getByLabel('View request stream-renewal')).toHaveCount(0);
+  await expect(page.getByLabel('View request delta-renewal')).toHaveCount(0);
   await expect(page).not.toHaveURL(/event_kind=/);
 });

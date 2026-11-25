@@ -144,7 +144,11 @@ test('OAU-01: the default path is still Sign in with Claude, custom endpoint inc
   await page.getByRole('button', { name: 'Add upstream' }).first().click();
   const dialog = page.getByRole('dialog');
   await expect(
-    dialog.getByRole('radio', { name: /Claude subscription/ }),
+    dialog.getByRole('button', { name: /^Anthropic\b/ }),
+  ).toHaveAttribute('aria-pressed', 'true');
+  await dialog.getByRole('button', { name: 'Continue' }).click();
+  await expect(
+    dialog.getByRole('radio', { name: /Subscription/ }),
   ).toBeChecked();
   await dialog.getByRole('button', { name: 'Continue' }).click();
 
