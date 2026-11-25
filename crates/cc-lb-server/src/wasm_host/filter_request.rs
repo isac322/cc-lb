@@ -267,7 +267,8 @@ pub(super) fn is_stripped_downstream_header(name: &str, cookie_redaction: bool) 
             | "x-openai-actor-authorization"
             | "host"
             | "proxy-authorization"
-    ) {
+    ) || cc_lb_engine::is_ingress_proxy_header_name(lower.as_str())
+    {
         return true;
     }
     cookie_redaction && lower == "cookie"
@@ -296,6 +297,23 @@ mod security_tests {
         ] {
             assert!(is_stripped_downstream_header(name, false), "{name}");
         }
+    }
+
+    #[test]
+    fn strips_ingress_proxy_and_cdn_headers_without_cookie_redaction() {
+        for name in [
+            "cf-access-jwt-assertion",
+            "cf-connecting-ip",
+            "CF-Ray",
+            "cdn-loop",
+            "x-forwarded-for",
+            "x-envoy-external-address",
+        ] {
+            assert!(is_stripped_downstream_header(name, false), "{name}");
+        }
+        assert!(is_stripped_downstream_header("cookie", true));
+        assert!(!is_stripped_downstream_header("cookie", false));
+        assert!(!is_stripped_downstream_header("originator", false));
     }
 
     #[test]

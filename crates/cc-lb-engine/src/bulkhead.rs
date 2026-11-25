@@ -513,10 +513,12 @@ where
     Ok(Response::from_parts(parts, Body::new(body)))
 }
 
-fn copy_headers(source: HeaderMap, target: Option<&mut HeaderMap>) {
+fn copy_headers(mut source: HeaderMap, target: Option<&mut HeaderMap>) {
     let Some(target) = target else {
         return;
     };
+
+    crate::hop_by_hop::strip_ingress_proxy_headers(&mut source);
 
     // The ordinary Host header is derived from the request URI by the HTTP/1
     // client and replaced by `:authority` on HTTP/2; forwarding the

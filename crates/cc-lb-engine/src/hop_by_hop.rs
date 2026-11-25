@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 
-use http::header::CONNECTION;
-use http::{HeaderMap, HeaderName, Request, Response};
+use http::header::{CONNECTION, COOKIE};
+use http::{HeaderMap, HeaderName, HeaderValue, Request, Response};
 use tower::{Layer, Service};
 
 type StripFuture<T> = Pin<Box<DynStripFuture<T>>>;
@@ -112,4 +112,216 @@ fn connection_listed_headers(headers: &HeaderMap) -> HashSet<HeaderName> {
 
 fn is_hop_by_hop(name: &HeaderName, connection_names: &HashSet<HeaderName>) -> bool {
     HOP_BY_HOP_HEADERS.contains(name) || connection_names.contains(name)
+}
+
+fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
+/// Returns `true` when `name` is an ingress reverse-proxy, CDN, or tunnel
+/// header that must not be forwarded upstream to LLM providers.
+pub fn is_ingress_proxy_header_name(name: &str) -> bool {
+    starts_with_ignore_ascii_case(name, "cf-")
+        || starts_with_ignore_ascii_case(name, "x-forwarded-")
+        || starts_with_ignore_ascii_case(name, "x-envoy-")
+        || name.eq_ignore_ascii_case("cdn-loop")
+        || name.eq_ignore_ascii_case("forwarded")
+        || name.eq_ignore_ascii_case("x-real-ip")
+        || name.eq_ignore_ascii_case("true-client-ip")
+}
+
+/// Typed [`HeaderName`] wrapper for [`is_ingress_proxy_header_name`].
+pub fn is_ingress_proxy_header(name: &HeaderName) -> bool {
+    is_ingress_proxy_header_name(name.as_str())
+}
+
+fn is_ingress_auth_cookie(crumb: &str) -> bool {
+    let cookie_name = crumb.split_once('=').map_or(crumb, |(name, _)| name).trim();
+    cookie_name.eq_ignore_ascii_case("CF_Authorization")
+        || cookie_name.eq_ignore_ascii_case("CF_AppSession")
+}
+
+/// Removes ingress proxy/CDN/tunnel headers (such as Cloudflare and Envoy
+/// forwarding headers) and Cloudflare Access session cookies (`CF_Authorization`,
+/// `CF_AppSession`) from downstream-derived headers after authentication.
+pub fn strip_ingress_proxy_headers(headers: &mut HeaderMap) {
+    let mut removal_targets = Vec::new();
+    for (name, _) in headers.iter() {
+        if is_ingress_proxy_header(name) {
+            removal_targets.push(name.clone());
+        }
+    }
+    for name in removal_targets {
+        headers.remove(name);
+    }
+
+    if !headers.contains_key(COOKIE) {
+        return;
+    }
+
+    let mut kept_cookies = Vec::new();
+    for value in headers.get_all(COOKIE) {
+        let Ok(raw) = value.to_str() else {
+            kept_cookies.push(value.clone());
+            continue;
+        };
+        let mut kept_crumbs = Vec::new();
+        let mut removed_any = false;
+        for part in raw.split(';') {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if is_ingress_auth_cookie(trimmed) {
+                removed_any = true;
+            } else {
+                kept_crumbs.push(trimmed);
+            }
+        }
+        if !removed_any {
+            kept_cookies.push(value.clone());
+        } else if !kept_crumbs.is_empty()
+            && let Ok(cleaned) = HeaderValue::from_str(&kept_crumbs.join("; "))
+        {
+            kept_cookies.push(cleaned);
+        }
+    }
+    headers.remove(COOKIE);
+    for cookie in kept_cookies {
+        headers.append(COOKIE, cookie);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_ingress_proxy_headers_removes_cdn_and_proxy_headers_only() {
+        let mut headers = HeaderMap::new();
+        for (name, val) in [
+            ("cf-connecting-ip", "203.0.113.10"),
+            ("CF-Connecting-IPv6", "2001:db8::1"),
+            ("cf-ray", "1234567890abcdef-ICN"),
+            ("cf-visitor", r#"{"scheme":"https"}"#),
+            ("cf-ipcountry", "KR"),
+            ("cf-warp-tag-id", "warp-tag"),
+            ("cf-ew-via", "15"),
+            ("cf-access-jwt-assertion", "jwt.payload.sig"),
+            ("cf-access-authenticated-user-email", "user@example.com"),
+            ("cf-access-client-id", "client-id"),
+            ("cf-access-client-secret", "client-secret"),
+            ("cdn-loop", "cloudflare; loops=1"),
+            ("forwarded", "for=203.0.113.10;proto=https"),
+            ("x-forwarded-for", "203.0.113.10"),
+            ("X-Forwarded-Host", "cc-lb-proxy.example.com"),
+            ("x-forwarded-proto", "https"),
+            ("x-real-ip", "203.0.113.10"),
+            ("true-client-ip", "203.0.113.10"),
+            ("x-envoy-external-address", "203.0.113.10"),
+            ("X-Envoy-Upstream-Service-Time", "4"),
+            ("user-agent", "codex-tui/1.0"),
+            ("originator", "codex_cli_rs"),
+            ("anthropic-version", "2023-06-01"),
+            ("anthropic-beta", "prompt-caching-2024-07-31"),
+            ("openai-organization", "org-123"),
+            ("openai-project", "proj-456"),
+            ("session_id", "sess-789"),
+            ("x-client-request-id", "req-abc"),
+            ("x-organization-uuid", "org-uuid"),
+            ("x-trusted-device-token", "device-tok"),
+            ("accept", "application/json"),
+            ("content-type", "application/json"),
+            ("traceparent", "00-1234-5678-01"),
+        ] {
+            headers.insert(
+                HeaderName::from_lowercase(name.to_ascii_lowercase().as_bytes()).unwrap(),
+                HeaderValue::from_static(val),
+            );
+        }
+
+        strip_ingress_proxy_headers(&mut headers);
+
+        for removed in [
+            "cf-connecting-ip",
+            "cf-connecting-ipv6",
+            "cf-ray",
+            "cf-visitor",
+            "cf-ipcountry",
+            "cf-warp-tag-id",
+            "cf-ew-via",
+            "cf-access-jwt-assertion",
+            "cf-access-authenticated-user-email",
+            "cf-access-client-id",
+            "cf-access-client-secret",
+            "cdn-loop",
+            "forwarded",
+            "x-forwarded-for",
+            "x-forwarded-host",
+            "x-forwarded-proto",
+            "x-real-ip",
+            "true-client-ip",
+            "x-envoy-external-address",
+            "x-envoy-upstream-service-time",
+        ] {
+            assert!(
+                !headers.contains_key(removed),
+                "{removed} should be stripped"
+            );
+        }
+        for preserved in [
+            "user-agent",
+            "originator",
+            "anthropic-version",
+            "anthropic-beta",
+            "openai-organization",
+            "openai-project",
+            "session_id",
+            "x-client-request-id",
+            "x-organization-uuid",
+            "x-trusted-device-token",
+            "accept",
+            "content-type",
+            "traceparent",
+        ] {
+            assert!(
+                headers.contains_key(preserved),
+                "{preserved} should be preserved"
+            );
+        }
+    }
+
+    #[test]
+    fn strip_ingress_proxy_headers_sanitizes_cf_cookies_and_preserves_others() {
+        let mut solo = HeaderMap::new();
+        solo.insert(
+            COOKIE,
+            HeaderValue::from_static("CF_Authorization=jwt.tok.sig"),
+        );
+        strip_ingress_proxy_headers(&mut solo);
+        assert!(!solo.contains_key(COOKIE));
+
+        let mut app_session_only = HeaderMap::new();
+        app_session_only.insert(COOKIE, HeaderValue::from_static("CF_AppSession=sess123"));
+        strip_ingress_proxy_headers(&mut app_session_only);
+        assert!(!app_session_only.contains_key(COOKIE));
+
+        let mut mixed = HeaderMap::new();
+        mixed.append(
+            COOKIE,
+            HeaderValue::from_static("theme=dark; CF_Authorization=secret; foo=bar"),
+        );
+        mixed.append(COOKIE, HeaderValue::from_static("cf_appsession=abc"));
+        mixed.append(COOKIE, HeaderValue::from_static("stay=1"));
+        strip_ingress_proxy_headers(&mut mixed);
+        let remaining: Vec<&str> = mixed
+            .get_all(COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(remaining, vec!["theme=dark; foo=bar", "stay=1"]);
+    }
 }
