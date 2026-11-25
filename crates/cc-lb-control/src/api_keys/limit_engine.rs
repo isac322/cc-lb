@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{
     Arc, Weak,
     atomic::{AtomicU32, Ordering},
@@ -7,9 +7,9 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use cc_lb_storage_api::{
-    ApiKeyConcurrencyHold, ApiKeyConcurrencyHoldStore, ApiKeyUsage, ApiKeyUsageBucketDelta,
-    ApiKeyUsageBucketKey, ApiKeyUsageBucketQuery, ApiKeyUsageFlush, ApiKeyUsageFlushResult,
-    BackendKind, KeyStatus as StoredKeyStatus, Storage, StorageError, StoredApiKeyRecord,
+    ApiKeyConcurrencyHoldStore, ApiKeyUsage, ApiKeyUsageBucketDelta, ApiKeyUsageBucketKey,
+    ApiKeyUsageBucketQuery, ApiKeyUsageFlush, ApiKeyUsageFlushResult, BackendKind,
+    KeyStatus as StoredKeyStatus, MAX_LIMIT_WINDOW_SECS, Storage, StorageError, StoredApiKeyRecord,
 };
 use parking_lot::{Mutex, RwLock};
 use uuid::Uuid;
@@ -32,7 +32,7 @@ pub type ReservationId = String;
 type RollingKey = (String, LimitKind, u64);
 const API_KEY_USAGE_WRITER_LEASE_SECS: u64 = 30;
 const API_KEY_USAGE_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
-const API_KEY_USAGE_REFRESH_BATCH_SIZE: usize = 100;
+const API_KEY_USAGE_REFRESH_BATCH_SIZE: usize = 250;
 const API_KEY_USAGE_COLD_ALLOWANCE_DIVISOR: i64 = 10;
 const API_KEY_USAGE_OUTAGE_CEILING_SECS: u64 = 300;
 const API_KEY_USAGE_RETENTION_MARGIN_SECS: u64 = 3_600;
@@ -76,16 +76,25 @@ struct DurableApiKeyUsage {
     key_limits: RwLock<KeyLimitRegistry>,
     refreshed_at: RwLock<HashMap<String, u64>>,
     refresh_cursor: AtomicU32,
+    cold_hydrations: Mutex<HashMap<String, tokio::sync::watch::Receiver<bool>>>,
 }
 
 #[derive(Default)]
 struct KeyLimitRegistry {
     by_key: HashMap<String, Vec<Limit>>,
     sorted_key_ids: Vec<String>,
+    last_seen: HashMap<String, u64>,
+    cold_keys: VecDeque<String>,
+    cold_set: HashSet<String>,
 }
 
 impl KeyLimitRegistry {
+    #[cfg(test)]
     fn record(&mut self, key_id: String, limits: Vec<Limit>) {
+        self.record_at(key_id, limits, 0, true);
+    }
+
+    fn record_at(&mut self, key_id: String, limits: Vec<Limit>, now_sec: u64, is_cold: bool) {
         if !self.by_key.contains_key(&key_id) {
             let index = self
                 .sorted_key_ids
@@ -93,7 +102,56 @@ impl KeyLimitRegistry {
                 .unwrap_or_else(|index| index);
             self.sorted_key_ids.insert(index, key_id.clone());
         }
-        self.by_key.insert(key_id, limits);
+        self.by_key.insert(key_id.clone(), limits);
+        if now_sec > 0 {
+            self.last_seen.insert(key_id.clone(), now_sec);
+        }
+        if is_cold && self.cold_set.insert(key_id.clone()) {
+            self.cold_keys.push_back(key_id);
+        }
+    }
+
+    fn mark_hydrated(&mut self, key_id: &str) {
+        self.cold_set.remove(key_id);
+    }
+
+    fn evict_idle(&mut self, now_sec: u64) -> Vec<String> {
+        let expired: Vec<String> = self
+            .last_seen
+            .iter()
+            .filter_map(|(key_id, seen)| {
+                if *seen == 0 {
+                    return None;
+                }
+                let max_window = self
+                    .by_key
+                    .get(key_id)
+                    .and_then(|limits| {
+                        limits
+                            .iter()
+                            .filter(|limit| limit.kind != LimitKind::Concurrent)
+                            .map(|limit| limit.window_secs)
+                            .max()
+                    })
+                    .unwrap_or(3_600)
+                    .max(3_600);
+                (now_sec.saturating_sub(*seen) > max_window).then(|| key_id.clone())
+            })
+            .collect();
+        if expired.is_empty() {
+            return expired;
+        }
+        let expired_set: HashSet<&str> = expired.iter().map(String::as_str).collect();
+        for key_id in &expired {
+            self.by_key.remove(key_id);
+            self.last_seen.remove(key_id);
+            self.cold_set.remove(key_id);
+        }
+        self.sorted_key_ids
+            .retain(|key_id| !expired_set.contains(key_id.as_str()));
+        self.cold_keys
+            .retain(|key_id| !expired_set.contains(key_id.as_str()));
+        expired
     }
 }
 
@@ -139,8 +197,16 @@ impl DurableApiKeyUsage {
         bound_pending_usage(&mut pending, now_sec);
     }
 
+    #[cfg(test)]
     fn record_key_limits(&self, key_id: String, limits: Vec<Limit>) {
-        self.key_limits.write().record(key_id, limits);
+        self.record_key_limits_at(key_id, limits, 0);
+    }
+
+    fn record_key_limits_at(&self, key_id: String, limits: Vec<Limit>, now_sec: u64) {
+        let is_cold = self.refreshed_at.read().get(&key_id).is_none();
+        self.key_limits
+            .write()
+            .record_at(key_id, limits, now_sec, is_cold);
     }
 }
 
@@ -209,7 +275,9 @@ impl Reservation {
 struct ReservationRecord {
     key_id: String,
     reserved: Vec<ReservedAmount>,
-    /// One request's admitted estimate, independent of its per-window holds.
+    /// One request's admitted estimates, independent of its per-window holds.
+    admitted_input_estimate: i64,
+    admitted_output_estimate: i64,
     admitted_cost_estimate_micros: Option<i64>,
     durable_bucket_widths: Vec<u64>,
     /// Held until refund/reconcile removes the record, or an explicit response
@@ -247,6 +315,7 @@ pub enum RejectReason {
     },
     CostRateLimit,
     ConcurrentRateLimit,
+    ConcurrentLimitUnavailable,
     CostUnavailable,
     UnsupportedLimitWindow {
         window_secs: u64,
@@ -382,6 +451,7 @@ impl LimitEngine {
             key_limits: RwLock::new(KeyLimitRegistry::default()),
             refreshed_at: RwLock::new(HashMap::new()),
             refresh_cursor: AtomicU32::new(0),
+            cold_hydrations: Mutex::new(HashMap::new()),
         });
         *self.inner.durable_usage.write() = Some(state.clone());
 
@@ -429,7 +499,7 @@ impl LimitEngine {
     }
 
     pub const fn durable_usage_retention_secs() -> u64 {
-        604_800 + API_KEY_USAGE_RETENTION_MARGIN_SECS
+        MAX_LIMIT_WINDOW_SECS + API_KEY_USAGE_RETENTION_MARGIN_SECS
     }
 
     pub const fn durable_usage_writer_inactive_after_secs() -> u64 {
@@ -454,6 +524,185 @@ impl LimitEngine {
         max_input_estimate: i64,
         cost_estimate_micros: Option<i64>,
     ) -> Result<Reservation, RejectReason> {
+        let plan = self.prepare_reservation_plan(
+            view,
+            record,
+            principal_id,
+            model,
+            max_tokens,
+            max_input_estimate,
+            cost_estimate_micros,
+        )?;
+        let caps = self.compute_admission_caps(
+            plan.durable_usage.as_ref(),
+            &plan.key_id,
+            &plan.planned_rolling,
+            plan.now_sec,
+        );
+        self.precheck_rolling_limits(&plan.key_id, &plan.planned_rolling, &caps, plan.now_sec)?;
+
+        let mut concurrent_guards = Vec::with_capacity(plan.concurrent_caps.len());
+        for cap in &plan.concurrent_caps {
+            let slot = match plan.durable_usage.as_ref() {
+                Some(state) if state.backend_kind == BackendKind::Postgres => {
+                    match self.try_durable_concurrent_hold(state, &plan.key_id, *cap) {
+                        Ok(hold) => ConcurrentSlot::Durable(hold),
+                        Err(DurableHoldError::OverCap) => {
+                            drop(concurrent_guards);
+                            return Err(RejectReason::ConcurrentRateLimit);
+                        }
+                        Err(DurableHoldError::Unavailable) => {
+                            drop(concurrent_guards);
+                            return Err(RejectReason::ConcurrentLimitUnavailable);
+                        }
+                    }
+                }
+                _ => match self.inner.concurrent_mgr.try_acquire(&plan.key_id, *cap) {
+                    Ok(guard) => ConcurrentSlot::Local(guard),
+                    Err(_) => {
+                        drop(concurrent_guards);
+                        return Err(RejectReason::ConcurrentRateLimit);
+                    }
+                },
+            };
+            concurrent_guards.push(slot);
+        }
+
+        let reservation = match self.commit_reservation_atomic(
+            &plan.key_id,
+            &plan.planned_rolling,
+            &caps,
+            concurrent_guards,
+            plan.estimated_input_tokens,
+            plan.estimated_output_tokens,
+            cost_estimate_micros,
+            plan.durable_bucket_widths,
+            plan.now_sec,
+        ) {
+            Ok(reservation) => reservation,
+            Err((reason, guards)) => {
+                drop(guards);
+                return Err(reason);
+            }
+        };
+        self.inner.effective_limits.write().insert(
+            (plan.key_id, principal_id.to_owned()),
+            plan.effective_limits,
+        );
+        Ok(reservation)
+    }
+
+    /// Asynchronous admission path used by request handlers.
+    ///
+    /// Performs singleflight remote usage hydration for cold keys before
+    /// computing admission caps and runs Postgres concurrency holds directly
+    /// on the runtime without `block_in_place`. Fails closed on Postgres hold
+    /// errors.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reserve_async(
+        self: &Arc<Self>,
+        view: &PrincipalView,
+        record: &StoredApiKeyRecord,
+        principal_id: &str,
+        model: &str,
+        max_tokens: Option<i64>,
+        max_input_estimate: i64,
+        cost_estimate_micros: Option<i64>,
+    ) -> Result<Reservation, RejectReason> {
+        let plan = self.prepare_reservation_plan(
+            view,
+            record,
+            principal_id,
+            model,
+            max_tokens,
+            max_input_estimate,
+            cost_estimate_micros,
+        )?;
+        if let Some(state) = plan.durable_usage.as_ref()
+            && !plan.planned_rolling.is_empty()
+        {
+            hydrate_cold_key_usage(
+                self,
+                state,
+                &plan.key_id,
+                &plan.effective_limits,
+                plan.now_sec,
+            )
+            .await;
+        }
+        let caps = self.compute_admission_caps(
+            plan.durable_usage.as_ref(),
+            &plan.key_id,
+            &plan.planned_rolling,
+            plan.now_sec,
+        );
+        self.precheck_rolling_limits(&plan.key_id, &plan.planned_rolling, &caps, plan.now_sec)?;
+
+        let mut concurrent_guards = Vec::with_capacity(plan.concurrent_caps.len());
+        for cap in &plan.concurrent_caps {
+            let slot = match plan.durable_usage.as_ref() {
+                Some(state) if state.backend_kind == BackendKind::Postgres => {
+                    match self
+                        .try_durable_concurrent_hold_async(state, &plan.key_id, *cap)
+                        .await
+                    {
+                        Ok(hold) => ConcurrentSlot::Durable(hold),
+                        Err(DurableHoldError::OverCap) => {
+                            drop(concurrent_guards);
+                            return Err(RejectReason::ConcurrentRateLimit);
+                        }
+                        Err(DurableHoldError::Unavailable) => {
+                            drop(concurrent_guards);
+                            return Err(RejectReason::ConcurrentLimitUnavailable);
+                        }
+                    }
+                }
+                _ => match self.inner.concurrent_mgr.try_acquire(&plan.key_id, *cap) {
+                    Ok(guard) => ConcurrentSlot::Local(guard),
+                    Err(_) => {
+                        drop(concurrent_guards);
+                        return Err(RejectReason::ConcurrentRateLimit);
+                    }
+                },
+            };
+            concurrent_guards.push(slot);
+        }
+
+        let reservation = match self.commit_reservation_atomic(
+            &plan.key_id,
+            &plan.planned_rolling,
+            &caps,
+            concurrent_guards,
+            plan.estimated_input_tokens,
+            plan.estimated_output_tokens,
+            cost_estimate_micros,
+            plan.durable_bucket_widths,
+            plan.now_sec,
+        ) {
+            Ok(reservation) => reservation,
+            Err((reason, guards)) => {
+                drop(guards);
+                return Err(reason);
+            }
+        };
+        self.inner.effective_limits.write().insert(
+            (plan.key_id, principal_id.to_owned()),
+            plan.effective_limits,
+        );
+        Ok(reservation)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_reservation_plan(
+        &self,
+        view: &PrincipalView,
+        record: &StoredApiKeyRecord,
+        principal_id: &str,
+        model: &str,
+        max_tokens: Option<i64>,
+        max_input_estimate: i64,
+        cost_estimate_micros: Option<i64>,
+    ) -> Result<ReservationPlan, RejectReason> {
         let now_sec = unix_secs(self.inner.clock.now());
         let key_id = key_id_for(record);
 
@@ -500,8 +749,9 @@ impl LimitEngine {
             }
             durable_bucket_widths.sort_unstable();
             durable_bucket_widths.dedup();
-            state.record_key_limits(key_id.clone(), effective_limits.clone());
+            state.record_key_limits_at(key_id.clone(), effective_limits.clone(), now_sec);
         }
+
         // Check configured capacity before transient usage or concurrency can
         // mask a request that cannot fit even an empty window.
         for limit in &effective_limits {
@@ -539,143 +789,152 @@ impl LimitEngine {
                 });
             }
         }
-        let mut reserved = Vec::new();
-        let mut concurrent_guards = Vec::new();
 
+        let mut planned_rolling = Vec::new();
+        let mut concurrent_caps = Vec::new();
         for limit in &effective_limits {
-            let window_sec = limit.window_secs;
-            let admission_cap = self.admission_cap(&key_id, limit, now_sec);
             match limit.kind {
-                LimitKind::Requests => {
-                    let amount = 1;
-                    if self.current_total(&key_id, limit.kind, window_sec, now_sec) + amount
-                        > admission_cap
-                    {
-                        return Err(RejectReason::RequestsRateLimit);
-                    }
-                    reserved.push(ReservedAmount {
-                        kind: limit.kind,
-                        window_sec,
-                        amount,
-                    });
-                }
+                LimitKind::Requests => planned_rolling.push((*limit, 1)),
                 LimitKind::OutputTokens => {
-                    let amount = max_tokens.unwrap_or(0);
-                    if self.current_total(&key_id, limit.kind, window_sec, now_sec) + amount
-                        > admission_cap
-                    {
-                        return Err(RejectReason::TokenRateLimit { kind: limit.kind });
-                    }
-                    reserved.push(ReservedAmount {
-                        kind: limit.kind,
-                        window_sec,
-                        amount,
-                    });
+                    planned_rolling.push((*limit, max_tokens.unwrap_or(0)));
                 }
-                LimitKind::InputTokens => {
-                    if self.current_total(&key_id, limit.kind, window_sec, now_sec)
-                        + max_input_estimate
-                        > admission_cap
-                    {
-                        return Err(RejectReason::TokenRateLimit { kind: limit.kind });
-                    }
-                    reserved.push(ReservedAmount {
-                        kind: limit.kind,
-                        window_sec,
-                        amount: max_input_estimate,
-                    });
-                }
+                LimitKind::InputTokens => planned_rolling.push((*limit, max_input_estimate)),
                 LimitKind::TotalTokens => {
-                    let amount = max_input_estimate.saturating_add(max_tokens.unwrap_or(0));
-                    if self.current_total(&key_id, limit.kind, window_sec, now_sec) + amount
-                        > admission_cap
-                    {
-                        return Err(RejectReason::TokenRateLimit { kind: limit.kind });
-                    }
-                    reserved.push(ReservedAmount {
-                        kind: limit.kind,
-                        window_sec,
-                        amount,
-                    });
+                    planned_rolling.push((
+                        *limit,
+                        max_input_estimate.saturating_add(max_tokens.unwrap_or(0)),
+                    ));
                 }
                 LimitKind::CostUsd => {
                     let Some(amount) = cost_estimate_micros else {
                         return Err(RejectReason::CostUnavailable);
                     };
-                    if self.current_total(&key_id, limit.kind, window_sec, now_sec) + amount
-                        > admission_cap
-                    {
-                        return Err(RejectReason::CostRateLimit);
-                    }
-                    reserved.push(ReservedAmount {
-                        kind: limit.kind,
-                        window_sec,
-                        amount,
-                    });
+                    planned_rolling.push((*limit, amount));
                 }
                 LimitKind::Concurrent => {
-                    let cap = limit.cap_micros as u32;
-                    let slot = match durable_usage.as_ref() {
-                        Some(state) if state.backend_kind == BackendKind::Postgres => {
-                            match self.try_durable_concurrent_hold(state, &key_id, cap, now_sec) {
-                                Ok(hold) => ConcurrentSlot::Durable(hold),
-                                Err(DurableHoldError::OverCap) => {
-                                    return Err(RejectReason::ConcurrentRateLimit);
-                                }
-                                Err(DurableHoldError::Unavailable) => {
-                                    // Storage unreachable or no multi-thread
-                                    // runtime: keep admitting on the local
-                                    // counter, matching the durable-usage
-                                    // fail-open policy.
-                                    ConcurrentSlot::Local(
-                                        self.inner
-                                            .concurrent_mgr
-                                            .try_acquire(&key_id, cap)
-                                            .map_err(|_| RejectReason::ConcurrentRateLimit)?,
-                                    )
-                                }
-                            }
-                        }
-                        _ => ConcurrentSlot::Local(
-                            self.inner
-                                .concurrent_mgr
-                                .try_acquire(&key_id, cap)
-                                .map_err(|_| RejectReason::ConcurrentRateLimit)?,
-                        ),
-                    };
-                    concurrent_guards.push(slot);
+                    concurrent_caps
+                        .push(u32::try_from(limit.cap_micros.max(0)).unwrap_or(u32::MAX));
                 }
             }
         }
 
-        for amount in &reserved {
-            self.record_amount(
-                &key_id,
-                amount.kind,
-                amount.window_sec,
-                amount.amount,
-                now_sec,
-            );
-        }
-        self.inner.effective_limits.write().insert(
-            (key_id.clone(), principal_id.to_owned()),
-            effective_limits.clone(),
-        );
+        Ok(ReservationPlan {
+            key_id,
+            effective_limits,
+            durable_usage,
+            durable_bucket_widths,
+            planned_rolling,
+            concurrent_caps,
+            estimated_input_tokens: max_input_estimate.max(0),
+            estimated_output_tokens: max_tokens.unwrap_or(0).max(0),
+            now_sec,
+        })
+    }
 
+    fn compute_admission_caps(
+        &self,
+        durable_usage: Option<&Arc<DurableApiKeyUsage>>,
+        key_id: &str,
+        planned_rolling: &[(Limit, i64)],
+        now_sec: u64,
+    ) -> Vec<i64> {
+        planned_rolling
+            .iter()
+            .map(|(limit, _)| self.admission_cap_with_state(durable_usage, key_id, limit, now_sec))
+            .collect()
+    }
+
+    fn precheck_rolling_limits(
+        &self,
+        key_id: &str,
+        planned_rolling: &[(Limit, i64)],
+        caps: &[i64],
+        now_sec: u64,
+    ) -> Result<(), RejectReason> {
+        if planned_rolling.is_empty() {
+            return Ok(());
+        }
+        let rolling = self.inner.rolling.read();
+        let remote = self.inner.remote_rolling.read();
+        for ((limit, amount), cap) in planned_rolling.iter().zip(caps.iter()) {
+            let key = (key_id.to_owned(), limit.kind, limit.window_secs);
+            let local = rolling.get(&key).map_or(0, |c| c.total_at(now_sec));
+            let remote_total = remote.get(&key).map_or(0, |c| c.total_at(now_sec));
+            if local.saturating_add(remote_total).saturating_add(*amount) > *cap {
+                return Err(reject_reason_for_limit_kind(limit.kind));
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_reservation_atomic(
+        self: &Arc<Self>,
+        key_id: &str,
+        planned_rolling: &[(Limit, i64)],
+        caps: &[i64],
+        concurrent_guards: Vec<ConcurrentSlot>,
+        admitted_input_estimate: i64,
+        admitted_output_estimate: i64,
+        cost_estimate_micros: Option<i64>,
+        durable_bucket_widths: Vec<u64>,
+        now_sec: u64,
+    ) -> Result<Reservation, (RejectReason, Vec<ConcurrentSlot>)> {
+        let mut reserved = Vec::with_capacity(planned_rolling.len());
         let id = Uuid::now_v7().to_string();
         let now = Instant::now();
-        self.inner.reservations.lock().insert(
-            id.clone(),
-            ReservationRecord {
-                key_id: key_id.clone(),
-                reserved,
-                admitted_cost_estimate_micros: cost_estimate_micros,
-                durable_bucket_widths,
-                concurrent_guards,
-                created_at: now,
-                last_activity_at: now,
-            },
-        );
+        {
+            let mut reservations = self.inner.reservations.lock();
+            {
+                let mut rolling = self.inner.rolling.write();
+                {
+                    let remote = self.inner.remote_rolling.read();
+                    for ((limit, amount), cap) in planned_rolling.iter().zip(caps.iter()) {
+                        let key = (key_id.to_owned(), limit.kind, limit.window_secs);
+                        let local = rolling.get(&key).map_or(0, |c| c.total_at(now_sec));
+                        let remote_total = remote.get(&key).map_or(0, |c| c.total_at(now_sec));
+                        if local.saturating_add(remote_total).saturating_add(*amount) > *cap {
+                            drop(remote);
+                            drop(rolling);
+                            drop(reservations);
+                            return Err((
+                                reject_reason_for_limit_kind(limit.kind),
+                                concurrent_guards,
+                            ));
+                        }
+                    }
+                }
+                for (limit, amount) in planned_rolling {
+                    record_amount_locked(
+                        &mut rolling,
+                        key_id,
+                        limit.kind,
+                        limit.window_secs,
+                        *amount,
+                        now_sec,
+                    );
+                    reserved.push(ReservedAmount {
+                        kind: limit.kind,
+                        window_sec: limit.window_secs,
+                        amount: *amount,
+                    });
+                }
+            }
+            reservations.insert(
+                id.clone(),
+                ReservationRecord {
+                    key_id: key_id.to_owned(),
+                    reserved,
+                    admitted_input_estimate,
+                    admitted_output_estimate,
+                    admitted_cost_estimate_micros: cost_estimate_micros,
+                    durable_bucket_widths,
+                    concurrent_guards,
+                    created_at: now,
+                    last_activity_at: now,
+                },
+            );
+        }
 
         Ok(Reservation {
             engine: Arc::downgrade(&self.inner),
@@ -684,31 +943,31 @@ impl LimitEngine {
         })
     }
 
-    /// Acquire a cluster-wide concurrency slot on Postgres (issue 807).
-    ///
-    /// Inserts a hold row, counts live holds for the key, and deletes the row
-    /// again when the count exceeds `cap`. Runs the storage calls through
-    /// [`block_on_storage`] because `reserve` is synchronous.
+    /// Acquire a cluster-wide concurrency slot on Postgres synchronously via
+    /// [`block_on_storage`]. Fails closed on storage or runtime unavailability.
     fn try_durable_concurrent_hold(
         &self,
         state: &Arc<DurableApiKeyUsage>,
         key_id: &str,
         cap: u32,
-        now_sec: u64,
     ) -> Result<DurableConcurrencyHold, DurableHoldError> {
         let storage = Arc::clone(&state.storage);
         let writer_epoch = *state.writer_epoch.read();
         let hold_id = Uuid::now_v7();
-        let hold = ApiKeyConcurrencyHold {
-            hold_id,
-            key_id: key_id.to_owned(),
-            writer_epoch,
-            acquired_at_unix_secs: now_sec,
-        };
         let key_id_owned = key_id.to_owned();
         let Some(outcome) = block_on_storage({
             let storage = Arc::clone(&storage);
-            async move { try_acquire_hold(storage.as_ref(), &hold, cap, now_sec).await }
+            let key_id_for_query = key_id_owned.clone();
+            async move {
+                try_acquire_hold_atomic(
+                    storage.as_ref(),
+                    hold_id,
+                    &key_id_for_query,
+                    writer_epoch,
+                    cap,
+                )
+                .await
+            }
         }) else {
             return Err(DurableHoldError::Unavailable);
         };
@@ -717,9 +976,38 @@ impl LimitEngine {
             Ok(false) => Err(DurableHoldError::OverCap),
             Err(error) => {
                 tracing::warn!(%error, %key_id_owned, "durable API-key concurrency hold failed");
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    let cleanup_storage = Arc::clone(&storage);
+                    let cleanup_key_id = key_id_owned;
+                    handle.spawn(async move {
+                        if let Err(cleanup_err) = cleanup_storage
+                            .delete_uncertain_api_key_concurrency_hold(hold_id, &cleanup_key_id)
+                            .await
+                        {
+                            tracing::warn!(%cleanup_err, %hold_id, %cleanup_key_id, "failed to clean up uncertain durable concurrency hold");
+                        }
+                    });
+                }
                 Err(DurableHoldError::Unavailable)
             }
         }
+    }
+
+    /// Acquire a cluster-wide concurrency slot on Postgres asynchronously.
+    /// Fails closed on storage unavailability or caller cancellation.
+    async fn try_durable_concurrent_hold_async(
+        &self,
+        state: &Arc<DurableApiKeyUsage>,
+        key_id: &str,
+        cap: u32,
+    ) -> Result<DurableConcurrencyHold, DurableHoldError> {
+        let writer_epoch = *state.writer_epoch.read();
+        let hold_id = acquire_durable_hold_raw(&state.storage, writer_epoch, key_id, cap).await?;
+        Ok(DurableConcurrencyHold::new(
+            Arc::clone(&state.storage),
+            hold_id,
+            key_id.to_owned(),
+        ))
     }
 
     pub fn reconcile(
@@ -780,34 +1068,78 @@ impl LimitEngine {
         actual_output: u64,
         actual_cost_micros: Option<i64>,
     ) -> bool {
-        let Some(record) = self.inner.reservations.lock().remove(id) else {
-            return false;
+        let durable_usage = self.inner.durable_usage.read().clone();
+        let concurrent_guards = {
+            let mut reservations = self.inner.reservations.lock();
+            let Some(mut record) = reservations.remove(id) else {
+                return false;
+            };
+            let concurrent_guards = std::mem::take(&mut record.concurrent_guards);
+            let now_sec = unix_secs(self.inner.clock.now());
+            let cost_liability_micros = actual_cost_micros.or(record.admitted_cost_estimate_micros);
+            if let Some(state) = durable_usage.as_ref() {
+                state.record(
+                    &record.key_id,
+                    &record.durable_bucket_widths,
+                    ApiKeyUsage {
+                        requests: 1,
+                        input_tokens: u64_to_i64_saturating(actual_input),
+                        output_tokens: u64_to_i64_saturating(actual_output),
+                        ..Default::default()
+                    },
+                    cost_liability_micros,
+                    now_sec,
+                );
+            }
+            {
+                let mut rolling = self.inner.rolling.write();
+                refund_difference_locked(
+                    &mut rolling,
+                    &record.key_id,
+                    &record.reserved,
+                    actual_input,
+                    actual_output,
+                    cost_liability_micros,
+                    now_sec,
+                );
+            }
+            concurrent_guards
         };
-        let now_sec = unix_secs(self.inner.clock.now());
-        let cost_liability_micros = actual_cost_micros.or(record.admitted_cost_estimate_micros);
-        refund_difference(
-            &self.inner,
-            &record.key_id,
-            &record.reserved,
-            actual_input,
-            actual_output,
-            cost_liability_micros,
-            now_sec,
-        );
-        if let Some(state) = self.inner.durable_usage.read().as_ref() {
-            state.record(
-                &record.key_id,
-                &record.durable_bucket_widths,
-                ApiKeyUsage {
-                    requests: 1,
-                    input_tokens: u64_to_i64_saturating(actual_input),
-                    output_tokens: u64_to_i64_saturating(actual_output),
-                    ..Default::default()
-                },
-                cost_liability_micros,
-                now_sec,
-            );
-        }
+        drop(concurrent_guards);
+        true
+    }
+
+    /// Commit a reservation without altering its already-recorded rolling
+    /// usage (e.g. an HTTP stream terminated after content began without a
+    /// usage event). Releases concurrency guards and records durable usage.
+    pub fn commit_reserved_by_id(&self, id: &str) -> bool {
+        let durable_usage = self.inner.durable_usage.read().clone();
+        let concurrent_guards = {
+            let mut reservations = self.inner.reservations.lock();
+            let Some(mut record) = reservations.remove(id) else {
+                return false;
+            };
+            let concurrent_guards = std::mem::take(&mut record.concurrent_guards);
+            let now_sec = unix_secs(self.inner.clock.now());
+            if let Some(state) = durable_usage.as_ref()
+                && !record.durable_bucket_widths.is_empty()
+            {
+                state.record(
+                    &record.key_id,
+                    &record.durable_bucket_widths,
+                    ApiKeyUsage {
+                        requests: 1,
+                        input_tokens: record.admitted_input_estimate,
+                        output_tokens: record.admitted_output_estimate,
+                        cost_usd_micros: 0,
+                    },
+                    record.admitted_cost_estimate_micros,
+                    now_sec,
+                );
+            }
+            concurrent_guards
+        };
+        drop(concurrent_guards);
         true
     }
 
@@ -817,24 +1149,49 @@ impl LimitEngine {
     /// request will never reconcile (e.g. client hang-up before response).
     /// Returns `true` if the reservation was found and refunded.
     pub fn refund_by_id(&self, id: &str) -> bool {
-        let Some(record) = self.inner.reservations.lock().remove(id) else {
-            return false;
+        let concurrent_guards = {
+            let mut reservations = self.inner.reservations.lock();
+            let Some(mut record) = reservations.remove(id) else {
+                return false;
+            };
+            let concurrent_guards = std::mem::take(&mut record.concurrent_guards);
+            let now_sec = unix_secs(self.inner.clock.now());
+            {
+                let mut rolling = self.inner.rolling.write();
+                for amount in &record.reserved {
+                    record_amount_locked(
+                        &mut rolling,
+                        &record.key_id,
+                        amount.kind,
+                        amount.window_sec,
+                        -amount.amount,
+                        now_sec,
+                    );
+                }
+            }
+            concurrent_guards
         };
-        self.refund_record(record);
+        drop(concurrent_guards);
         true
     }
 
-    fn refund_record(&self, record: ReservationRecord) {
+    fn refund_record(&self, mut record: ReservationRecord) {
+        let concurrent_guards = std::mem::take(&mut record.concurrent_guards);
         let now_sec = unix_secs(self.inner.clock.now());
-        for amount in &record.reserved {
-            self.inner.record_amount(
-                &record.key_id,
-                amount.kind,
-                amount.window_sec,
-                -amount.amount,
-                now_sec,
-            );
+        {
+            let mut rolling = self.inner.rolling.write();
+            for amount in &record.reserved {
+                record_amount_locked(
+                    &mut rolling,
+                    &record.key_id,
+                    amount.kind,
+                    amount.window_sec,
+                    -amount.amount,
+                    now_sec,
+                );
+            }
         }
+        drop(concurrent_guards);
     }
 
     /// Format the local request/token windows for a provider's response.
@@ -946,8 +1303,20 @@ impl LimitEngine {
 }
 
 impl LimitEngine {
+    #[allow(dead_code)]
     fn admission_cap(&self, key_id: &str, limit: &Limit, now_sec: u64) -> i64 {
-        let Some(state) = self.inner.durable_usage.read().clone() else {
+        let durable_usage = self.inner.durable_usage.read().clone();
+        self.admission_cap_with_state(durable_usage.as_ref(), key_id, limit, now_sec)
+    }
+
+    fn admission_cap_with_state(
+        &self,
+        durable_usage: Option<&Arc<DurableApiKeyUsage>>,
+        key_id: &str,
+        limit: &Limit,
+        now_sec: u64,
+    ) -> i64 {
+        let Some(state) = durable_usage else {
             return limit.cap_micros;
         };
         let refreshed_at = state.refreshed_at.read().get(key_id).copied();
@@ -964,6 +1333,7 @@ impl LimitEngine {
             .max(1)
     }
 
+    #[cfg(test)]
     fn current_total(&self, key_id: &str, kind: LimitKind, window_sec: u64, now_sec: u64) -> i64 {
         let key = (key_id.to_owned(), kind, window_sec);
         let local = self
@@ -1018,6 +1388,7 @@ impl LimitEngine {
         )
     }
 
+    #[cfg(test)]
     fn record_amount(
         &self,
         key_id: &str,
@@ -1032,6 +1403,7 @@ impl LimitEngine {
 }
 
 impl LimitEngineInner {
+    #[cfg(test)]
     fn record_amount(
         &self,
         key_id: &str,
@@ -1041,11 +1413,45 @@ impl LimitEngineInner {
         now_sec: u64,
     ) {
         let mut rolling = self.rolling.write();
-        rolling
-            .entry((key_id.to_owned(), kind, window_sec))
-            .or_insert_with(|| RingCounter::new(window_sec))
-            .record(now_sec, delta);
+        record_amount_locked(&mut rolling, key_id, kind, window_sec, delta, now_sec);
     }
+}
+
+struct ReservationPlan {
+    key_id: String,
+    effective_limits: Vec<Limit>,
+    durable_usage: Option<Arc<DurableApiKeyUsage>>,
+    durable_bucket_widths: Vec<u64>,
+    planned_rolling: Vec<(Limit, i64)>,
+    concurrent_caps: Vec<u32>,
+    estimated_input_tokens: i64,
+    estimated_output_tokens: i64,
+    now_sec: u64,
+}
+
+fn reject_reason_for_limit_kind(kind: LimitKind) -> RejectReason {
+    match kind {
+        LimitKind::Requests => RejectReason::RequestsRateLimit,
+        LimitKind::InputTokens | LimitKind::OutputTokens | LimitKind::TotalTokens => {
+            RejectReason::TokenRateLimit { kind }
+        }
+        LimitKind::CostUsd => RejectReason::CostRateLimit,
+        LimitKind::Concurrent => RejectReason::ConcurrentRateLimit,
+    }
+}
+
+fn record_amount_locked(
+    rolling: &mut HashMap<RollingKey, RingCounter>,
+    key_id: &str,
+    kind: LimitKind,
+    window_sec: u64,
+    delta: i64,
+    now_sec: u64,
+) {
+    rolling
+        .entry((key_id.to_owned(), kind, window_sec))
+        .or_insert_with(|| RingCounter::new(window_sec))
+        .record(now_sec, delta);
 }
 
 fn add_usage(aggregate: &mut ApiKeyUsage, usage: ApiKeyUsage) {
@@ -1062,7 +1468,7 @@ fn bucket_retention_secs(bucket_width_secs: u64) -> u64 {
         1 => 60,
         60 => 3_600,
         300 => 18_000,
-        3_600 => 604_800,
+        3_600 => MAX_LIMIT_WINDOW_SECS,
         _ => 0,
     }
 }
@@ -1193,33 +1599,125 @@ async fn maintain_durable_concurrency_holds(
     }
 }
 
+struct PendingDurableHoldGuard<S: ApiKeyConcurrencyHoldStore + ?Sized + 'static> {
+    storage: Arc<S>,
+    hold_id: Uuid,
+    key_id: String,
+    acquire_task: Option<tokio::task::JoinHandle<Result<bool, StorageError>>>,
+    armed: bool,
+}
+
+impl<S: ApiKeyConcurrencyHoldStore + ?Sized + 'static> Drop for PendingDurableHoldGuard<S> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let storage = Arc::clone(&self.storage);
+        let hold_id = self.hold_id;
+        let key_id = std::mem::take(&mut self.key_id);
+        let acquire_task = self.acquire_task.take();
+        handle.spawn(async move {
+            if let Some(task) = acquire_task
+                && let Ok(Ok(false)) = task.await
+            {
+                return;
+            }
+            if let Err(error) = storage
+                .delete_uncertain_api_key_concurrency_hold(hold_id, &key_id)
+                .await
+            {
+                tracing::warn!(%error, %hold_id, %key_id, "failed to clean up uncertain durable concurrency hold");
+            }
+        });
+    }
+}
+
+async fn acquire_durable_hold_raw<S: ApiKeyConcurrencyHoldStore + ?Sized + 'static>(
+    storage: &Arc<S>,
+    writer_epoch: Uuid,
+    key_id: &str,
+    cap: u32,
+) -> Result<Uuid, DurableHoldError> {
+    let hold_id = Uuid::now_v7();
+    let storage_for_task = Arc::clone(storage);
+    let key_id_for_task = key_id.to_owned();
+    let acquire_task = tokio::spawn(async move {
+        try_acquire_hold_atomic(
+            storage_for_task.as_ref(),
+            hold_id,
+            &key_id_for_task,
+            writer_epoch,
+            cap,
+        )
+        .await
+    });
+    let mut guard = PendingDurableHoldGuard {
+        storage: Arc::clone(storage),
+        hold_id,
+        key_id: key_id.to_owned(),
+        acquire_task: Some(acquire_task),
+        armed: true,
+    };
+    let join_outcome = match guard.acquire_task.as_mut() {
+        Some(task) => task.await,
+        None => unreachable!("acquire_task initialized as Some"),
+    };
+    guard.acquire_task = None;
+    match join_outcome {
+        Ok(Ok(true)) => {
+            guard.armed = false;
+            Ok(hold_id)
+        }
+        Ok(Ok(false)) => {
+            guard.armed = false;
+            Err(DurableHoldError::OverCap)
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, %key_id, "durable API-key concurrency hold failed");
+            Err(DurableHoldError::Unavailable)
+        }
+        Err(join_error) => {
+            tracing::warn!(%join_error, %key_id, "durable API-key concurrency hold task failed");
+            Err(DurableHoldError::Unavailable)
+        }
+    }
+}
+
 /// Insert-then-count admission for `api_key_concurrency_holds_v1`.
 ///
 /// Returns `Ok(true)` when the hold is admitted, `Ok(false)` when the live
 /// hold count exceeds `cap` (the inserted row is deleted again), or `Err` on
 /// storage failure. Holds older than `max_age` are excluded from the count as
 /// crash leftovers.
-async fn try_acquire_hold(
+async fn try_acquire_hold_atomic(
     store: &(impl ApiKeyConcurrencyHoldStore + ?Sized),
-    hold: &ApiKeyConcurrencyHold,
+    hold_id: Uuid,
+    key_id: &str,
+    writer_epoch: Uuid,
     cap: u32,
-    now_sec: u64,
 ) -> Result<bool, StorageError> {
-    store.insert_api_key_concurrency_hold(hold).await?;
-    let count = store
-        .count_api_key_concurrency_holds(
-            &hold.key_id,
-            now_sec,
+    store
+        .try_acquire_api_key_concurrency_hold(
+            hold_id,
+            key_id,
+            writer_epoch,
+            cap,
             API_KEY_CONCURRENCY_HOLD_MAX_AGE_SECS,
         )
-        .await?;
-    if count > u64::from(cap) {
-        if let Err(error) = store.delete_api_key_concurrency_hold(hold.hold_id).await {
-            tracing::warn!(%error, hold_id = %hold.hold_id, "failed to roll back over-cap concurrency hold");
-        }
-        return Ok(false);
-    }
-    Ok(true)
+        .await
+}
+
+#[cfg(test)]
+async fn try_acquire_hold(
+    store: &(impl ApiKeyConcurrencyHoldStore + ?Sized),
+    hold: &cc_lb_storage_api::ApiKeyConcurrencyHold,
+    cap: u32,
+    _now_sec: u64,
+) -> Result<bool, StorageError> {
+    try_acquire_hold_atomic(store, hold.hold_id, &hold.key_id, hold.writer_epoch, cap).await
 }
 
 fn durable_bucket_width(window_secs: u64) -> Option<u64> {
@@ -1227,7 +1725,7 @@ fn durable_bucket_width(window_secs: u64) -> Option<u64> {
         0..=60 => Some(1),
         61..=3_600 => Some(60),
         3_601..=18_000 => Some(300),
-        18_001..=604_800 => Some(3_600),
+        18_001..=MAX_LIMIT_WINDOW_SECS => Some(3_600),
         _ => None,
     }
 }
@@ -1331,8 +1829,9 @@ async fn handoff_durable_writer(
         .await?;
     *state.writer_epoch.write() = writer_epoch;
     if let Some(in_flight) = state.in_flight.lock().as_mut() {
+        // Keep `flush_id` stable across writer-epoch rotation so a retry of a
+        // previously committed flush is deduplicated by `api_key_usage_flushes_v1`.
         in_flight.writer_epoch = writer_epoch;
-        in_flight.flush_id = Uuid::now_v7();
         in_flight.lease_until_unix_secs = now_sec.saturating_add(API_KEY_USAGE_WRITER_LEASE_SECS);
     }
     state.refreshed_at.write().clear();
@@ -1347,16 +1846,21 @@ fn rebuild_local_usage_after_handoff(
     state: &Arc<DurableApiKeyUsage>,
     now_sec: u64,
 ) {
-    let mut unflushed = state
-        .pending
-        .lock()
+    // Global lock order: reservations -> in_flight -> pending -> key_limits -> rolling.
+    let reservations_guard = engine.inner.reservations.lock();
+    let in_flight_guard = state.in_flight.lock();
+    let pending_guard = state.pending.lock();
+    let limits = state.key_limits.read();
+    let mut rolling = engine.inner.rolling.write();
+
+    let mut unflushed = pending_guard
         .iter()
         .map(|(key, usage)| ApiKeyUsageBucketDelta {
             key: key.clone(),
             usage: *usage,
         })
         .collect::<Vec<_>>();
-    if let Some(in_flight) = state.in_flight.lock().as_ref() {
+    if let Some(in_flight) = in_flight_guard.as_ref() {
         unflushed.extend(in_flight.deltas.iter().cloned());
     }
     unflushed.sort_unstable_by(|left, right| {
@@ -1366,19 +1870,12 @@ fn rebuild_local_usage_after_handoff(
             .then_with(|| left.key.bucket_width_secs.cmp(&right.key.bucket_width_secs))
             .then_with(|| left.key.key_id.cmp(&right.key.key_id))
     });
-    let reservations = engine
-        .inner
-        .reservations
-        .lock()
+    let reservations = reservations_guard
         .values()
         .map(|record| (record.key_id.clone(), record.reserved.clone()))
         .collect::<Vec<_>>();
-    let limits = state.key_limits.read();
-    engine
-        .inner
-        .rolling
-        .write()
-        .retain(|(key_id, _, _), _| !limits.by_key.contains_key(key_id));
+
+    rolling.retain(|(key_id, _, _), _| !limits.by_key.contains_key(key_id));
     for delta in unflushed {
         let Some(key_limits) = limits.by_key.get(&delta.key.key_id) else {
             continue;
@@ -1393,7 +1890,8 @@ fn rebuild_local_usage_after_handoff(
             }
             let amount = durable_usage_amount(delta.usage, limit.kind);
             if amount != 0 {
-                engine.inner.record_amount(
+                record_amount_locked(
+                    &mut rolling,
                     &delta.key.key_id,
                     limit.kind,
                     limit.window_secs,
@@ -1408,7 +1906,8 @@ fn rebuild_local_usage_after_handoff(
             continue;
         }
         for amount in reserved {
-            engine.inner.record_amount(
+            record_amount_locked(
+                &mut rolling,
                 &key_id,
                 amount.kind,
                 amount.window_sec,
@@ -1417,66 +1916,66 @@ fn rebuild_local_usage_after_handoff(
             );
         }
     }
-    drop(limits);
 }
 
-async fn refresh_remote_api_key_usage(
-    engine: &Arc<LimitEngine>,
-    state: &Arc<DurableApiKeyUsage>,
-    now_sec: u64,
-) -> Result<(), StorageError> {
-    let (batch, limits) = {
-        let registry = state.key_limits.read();
-        if registry.sorted_key_ids.is_empty() {
-            return Ok(());
+fn collect_key_refresh_batch(
+    registry: &mut KeyLimitRegistry,
+    cursor: &AtomicU32,
+) -> (Vec<String>, HashMap<String, Vec<Limit>>) {
+    let total_keys = registry.sorted_key_ids.len();
+    let target = API_KEY_USAGE_REFRESH_BATCH_SIZE.min(total_keys);
+    let mut batch = Vec::with_capacity(target);
+    let mut batch_set = HashSet::with_capacity(target);
+
+    while batch.len() < target {
+        let Some(cold_key) = registry.cold_keys.pop_front() else {
+            break;
+        };
+        registry.cold_set.remove(&cold_key);
+        if registry.by_key.contains_key(&cold_key) && batch_set.insert(cold_key.clone()) {
+            batch.push(cold_key);
         }
-        let start = (state
-            .refresh_cursor
-            .fetch_add(API_KEY_USAGE_REFRESH_BATCH_SIZE as u32, Ordering::AcqRel)
-            as usize)
-            % registry.sorted_key_ids.len();
-        let batch = registry
+    }
+
+    let remaining = target.saturating_sub(batch.len());
+    if remaining > 0 && total_keys > 0 {
+        let start = (cursor.fetch_add(remaining as u32, Ordering::AcqRel) as usize) % total_keys;
+        for key_id in registry
             .sorted_key_ids
             .iter()
             .cycle()
             .skip(start)
-            .take(API_KEY_USAGE_REFRESH_BATCH_SIZE.min(registry.sorted_key_ids.len()))
-            .cloned()
-            .collect::<Vec<_>>();
-        let limits = batch
-            .iter()
-            .filter_map(|key_id| {
-                registry
-                    .by_key
-                    .get(key_id)
-                    .cloned()
-                    .map(|limits| (key_id.clone(), limits))
-            })
-            .collect::<HashMap<_, _>>();
-        (batch, limits)
-    };
-    let max_window = limits
-        .values()
-        .flatten()
-        .filter(|limit| limit.kind != LimitKind::Concurrent)
-        .map(|limit| limit.window_secs)
-        .max()
-        .unwrap_or(0);
-    if max_window == 0 {
-        return Ok(());
+            .take(total_keys)
+        {
+            if batch.len() >= target {
+                break;
+            }
+            if batch_set.insert(key_id.clone()) {
+                batch.push(key_id.clone());
+            }
+        }
     }
-    let exclude_writer_epoch = *state.writer_epoch.read();
-    let buckets = state
-        .storage
-        .query_api_key_usage_buckets(&ApiKeyUsageBucketQuery {
-            key_ids: batch.clone(),
-            since_unix_secs: now_sec.saturating_sub(max_window),
-            until_unix_secs: now_sec,
-            exclude_writer_epoch,
+
+    let limits = batch
+        .iter()
+        .filter_map(|key_id| {
+            registry
+                .by_key
+                .get(key_id)
+                .cloned()
+                .map(|limits| (key_id.clone(), limits))
         })
-        .await?;
+        .collect::<HashMap<_, _>>();
+    (batch, limits)
+}
+
+fn build_remote_replacement(
+    key_ids: &[String],
+    limits: &HashMap<String, Vec<Limit>>,
+    buckets: &[cc_lb_storage_api::ApiKeyUsageBucket],
+) -> HashMap<RollingKey, RingCounter> {
     let mut replacement = HashMap::<RollingKey, RingCounter>::new();
-    for key_id in &batch {
+    for key_id in key_ids {
         let Some(key_limits) = limits.get(key_id) else {
             continue;
         };
@@ -1505,14 +2004,175 @@ async fn refresh_remote_api_key_usage(
             replacement.insert((key_id.clone(), limit.kind, limit.window_secs), counter);
         }
     }
-    let batch_keys = batch
+    replacement
+}
+
+struct ColdHydrationGuard {
+    state: Arc<DurableApiKeyUsage>,
+    key_id: String,
+    tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl Drop for ColdHydrationGuard {
+    fn drop(&mut self) {
+        self.state.cold_hydrations.lock().remove(&self.key_id);
+        let _ = self.tx.send(true);
+    }
+}
+
+fn is_key_fresh(state: &DurableApiKeyUsage, key_id: &str, limits: &[Limit], now_sec: u64) -> bool {
+    let registered_keys = state.key_limits.read().sorted_key_ids.len().max(1);
+    let Some(refreshed_at) = state.refreshed_at.read().get(key_id).copied() else {
+        return false;
+    };
+    limits
         .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>();
-    let mut remote = engine.inner.remote_rolling.write();
-    remote.retain(|(key_id, _, _), _| !batch_keys.contains(key_id));
-    remote.extend(replacement);
-    drop(remote);
+        .filter(|limit| limit.kind != LimitKind::Concurrent)
+        .all(|limit| {
+            let max_staleness =
+                api_key_usage_max_staleness_secs(limit.window_secs, registered_keys);
+            now_sec.saturating_sub(refreshed_at) <= max_staleness
+        })
+}
+
+async fn hydrate_cold_key_usage(
+    engine: &Arc<LimitEngine>,
+    state: &Arc<DurableApiKeyUsage>,
+    key_id: &str,
+    limits: &[Limit],
+    now_sec: u64,
+) {
+    let max_window = limits
+        .iter()
+        .filter(|limit| limit.kind != LimitKind::Concurrent)
+        .map(|limit| limit.window_secs)
+        .max()
+        .unwrap_or(0);
+    if max_window == 0 || is_key_fresh(state, key_id, limits, now_sec) {
+        return;
+    }
+
+    enum HydrationRole {
+        Leader(ColdHydrationGuard),
+        Follower(tokio::sync::watch::Receiver<bool>),
+    }
+    let role = {
+        let mut hydrations = state.cold_hydrations.lock();
+        if let Some(rx) = hydrations.get(key_id).cloned() {
+            HydrationRole::Follower(rx)
+        } else {
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            hydrations.insert(key_id.to_owned(), rx);
+            HydrationRole::Leader(ColdHydrationGuard {
+                state: Arc::clone(state),
+                key_id: key_id.to_owned(),
+                tx,
+            })
+        }
+    };
+    let leader_guard = match role {
+        HydrationRole::Follower(mut rx) => {
+            let _ = tokio::time::timeout(Duration::from_secs(2), rx.wait_for(|done| *done)).await;
+            return;
+        }
+        HydrationRole::Leader(guard) => guard,
+    };
+    if is_key_fresh(state, key_id, limits, now_sec) {
+        drop(leader_guard);
+        return;
+    }
+
+    let exclude_writer_epoch = *state.writer_epoch.read();
+    let buckets = match state
+        .storage
+        .query_api_key_usage_buckets(&ApiKeyUsageBucketQuery {
+            key_ids: vec![key_id.to_owned()],
+            since_unix_secs: now_sec.saturating_sub(max_window),
+            until_unix_secs: now_sec,
+            exclude_writer_epoch,
+        })
+        .await
+    {
+        Ok(buckets) => buckets,
+        Err(error) => {
+            tracing::warn!(%error, %key_id, "on-demand cold API-key usage hydration failed; using cold allowance");
+            drop(leader_guard);
+            return;
+        }
+    };
+    let single_key = vec![key_id.to_owned()];
+    let single_limits = HashMap::from([(key_id.to_owned(), limits.to_vec())]);
+    let replacement = build_remote_replacement(&single_key, &single_limits, &buckets);
+    {
+        let mut remote = engine.inner.remote_rolling.write();
+        remote.retain(|(existing_key, _, _), _| existing_key != key_id);
+        remote.extend(replacement);
+    }
+    state
+        .refreshed_at
+        .write()
+        .insert(key_id.to_owned(), now_sec);
+    state.key_limits.write().mark_hydrated(key_id);
+    drop(leader_guard);
+}
+
+async fn refresh_remote_api_key_usage(
+    engine: &Arc<LimitEngine>,
+    state: &Arc<DurableApiKeyUsage>,
+    now_sec: u64,
+) -> Result<(), StorageError> {
+    let (evicted, batch, limits) = {
+        let mut registry = state.key_limits.write();
+        let evicted = registry.evict_idle(now_sec);
+        if registry.sorted_key_ids.is_empty() {
+            (evicted, Vec::new(), HashMap::new())
+        } else {
+            let (batch, limits) = collect_key_refresh_batch(&mut registry, &state.refresh_cursor);
+            (evicted, batch, limits)
+        }
+    };
+    if !evicted.is_empty() {
+        let evicted_set: HashSet<&str> = evicted.iter().map(String::as_str).collect();
+        engine
+            .inner
+            .remote_rolling
+            .write()
+            .retain(|(key_id, _, _), _| !evicted_set.contains(key_id.as_str()));
+        let mut refreshed_at = state.refreshed_at.write();
+        for key_id in &evicted {
+            refreshed_at.remove(key_id);
+        }
+    }
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let max_window = limits
+        .values()
+        .flatten()
+        .filter(|limit| limit.kind != LimitKind::Concurrent)
+        .map(|limit| limit.window_secs)
+        .max()
+        .unwrap_or(0);
+    if max_window == 0 {
+        return Ok(());
+    }
+    let exclude_writer_epoch = *state.writer_epoch.read();
+    let buckets = state
+        .storage
+        .query_api_key_usage_buckets(&ApiKeyUsageBucketQuery {
+            key_ids: batch.clone(),
+            since_unix_secs: now_sec.saturating_sub(max_window),
+            until_unix_secs: now_sec,
+            exclude_writer_epoch,
+        })
+        .await?;
+    let replacement = build_remote_replacement(&batch, &limits, &buckets);
+    let batch_keys = batch.iter().cloned().collect::<HashSet<_>>();
+    {
+        let mut remote = engine.inner.remote_rolling.write();
+        remote.retain(|(key_id, _, _), _| !batch_keys.contains(key_id));
+        remote.extend(replacement);
+    }
     let mut refreshed_at = state.refreshed_at.write();
     for key_id in batch {
         refreshed_at.insert(key_id, now_sec);
@@ -1531,24 +2191,34 @@ impl Drop for Reservation {
         let Some(engine) = self.engine.upgrade() else {
             return;
         };
-        let Some(record) = engine.reservations.lock().remove(&self.id) else {
-            return;
+        let concurrent_guards = {
+            let mut reservations = engine.reservations.lock();
+            let Some(mut record) = reservations.remove(&self.id) else {
+                return;
+            };
+            let concurrent_guards = std::mem::take(&mut record.concurrent_guards);
+            let now_sec = unix_secs(engine.clock.now());
+            {
+                let mut rolling = engine.rolling.write();
+                for amount in &record.reserved {
+                    record_amount_locked(
+                        &mut rolling,
+                        &record.key_id,
+                        amount.kind,
+                        amount.window_sec,
+                        -amount.amount,
+                        now_sec,
+                    );
+                }
+            }
+            concurrent_guards
         };
-        let now_sec = unix_secs(engine.clock.now());
-        for amount in &record.reserved {
-            engine.record_amount(
-                &record.key_id,
-                amount.kind,
-                amount.window_sec,
-                -amount.amount,
-                now_sec,
-            );
-        }
+        drop(concurrent_guards);
     }
 }
 
-fn refund_difference(
-    engine: &LimitEngineInner,
+fn refund_difference_locked(
+    rolling: &mut HashMap<RollingKey, RingCounter>,
     key_id: &str,
     reserved: &[ReservedAmount],
     actual_input: u64,
@@ -1570,7 +2240,14 @@ fn refund_difference(
         };
         let delta = actual.saturating_sub(amount.amount);
         if delta != 0 {
-            engine.record_amount(key_id, amount.kind, amount.window_sec, delta, now_sec);
+            record_amount_locked(
+                rolling,
+                key_id,
+                amount.kind,
+                amount.window_sec,
+                delta,
+                now_sec,
+            );
         }
     }
 }
@@ -1710,7 +2387,7 @@ mod tests {
     use cc_lb_clock::Clock;
     use std::collections::HashMap;
 
-    use cc_lb_storage_api::MetaStore;
+    use cc_lb_storage_api::{ApiKeyConcurrencyHold, MetaStore};
 
     use super::*;
 
@@ -2792,7 +3469,8 @@ mod tests {
     #[test]
     fn max_staleness_covers_two_refresh_cycles_and_remains_bounded() {
         assert_eq!(api_key_usage_max_staleness_secs(60, 1), 6);
-        assert_eq!(api_key_usage_max_staleness_secs(60, 601), 14);
+        assert_eq!(api_key_usage_max_staleness_secs(60, 601), 6);
+        assert_eq!(api_key_usage_max_staleness_secs(60, 1_501), 14);
 
         assert_eq!(api_key_usage_max_staleness_secs(60, 100_000), 300);
     }
@@ -3394,6 +4072,22 @@ mod tests {
     #[derive(Default)]
     struct FakeConcurrencyHoldStore {
         holds: Mutex<HashMap<Uuid, ApiKeyConcurrencyHold>>,
+        now_secs: std::sync::atomic::AtomicU64,
+    }
+
+    impl FakeConcurrencyHoldStore {
+        fn set_now(&self, now_secs: u64) {
+            self.now_secs.store(now_secs, Ordering::Relaxed);
+        }
+
+        fn current_now(&self) -> u64 {
+            let configured = self.now_secs.load(Ordering::Relaxed);
+            if configured == 0 {
+                unix_secs(std::time::SystemTime::now())
+            } else {
+                configured
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -3453,6 +4147,36 @@ mod tests {
             }
             Ok(updated)
         }
+
+        async fn try_acquire_api_key_concurrency_hold(
+            &self,
+            hold_id: Uuid,
+            key_id: &str,
+            writer_epoch: Uuid,
+            cap: u32,
+            max_age_secs: u64,
+        ) -> Result<bool, StorageError> {
+            let now_unix_secs = self.current_now();
+            let cutoff = now_unix_secs.saturating_sub(max_age_secs);
+            let mut holds = self.holds.lock();
+            let live = holds
+                .values()
+                .filter(|hold| hold.key_id == key_id && hold.acquired_at_unix_secs > cutoff)
+                .count() as u64;
+            if live >= u64::from(cap) {
+                return Ok(false);
+            }
+            holds.insert(
+                hold_id,
+                ApiKeyConcurrencyHold {
+                    hold_id,
+                    key_id: key_id.to_owned(),
+                    writer_epoch,
+                    acquired_at_unix_secs: now_unix_secs,
+                },
+            );
+            Ok(true)
+        }
     }
 
     fn hold_for(key_id: &str, writer_epoch: Uuid, acquired_at: u64) -> ApiKeyConcurrencyHold {
@@ -3470,6 +4194,7 @@ mod tests {
     async fn concurrent_holds_enforce_cap_across_writer_epochs() {
         let store = FakeConcurrencyHoldStore::default();
         let now_sec = 1_800_000_000_u64;
+        store.set_now(now_sec);
         let writer_a = Uuid::now_v7();
         let writer_b = Uuid::now_v7();
 
@@ -3497,6 +4222,7 @@ mod tests {
         // Crash leftover: a hold older than the writer-lease window no longer
         // counts, so a new writer can take the slot.
         let stale = now_sec + API_KEY_CONCURRENCY_HOLD_MAX_AGE_SECS + 1;
+        store.set_now(stale);
         let hold_c = hold_for("key-a", writer_b, stale);
         assert!(
             try_acquire_hold(&store, &hold_c, 1, stale)
@@ -3616,6 +4342,8 @@ mod tests {
             ReservationRecord {
                 key_id: "key-long".to_owned(),
                 reserved: Vec::new(),
+                admitted_input_estimate: 0,
+                admitted_output_estimate: 0,
                 admitted_cost_estimate_micros: None,
                 durable_bucket_widths: Vec::new(),
                 concurrent_guards: vec![ConcurrentSlot::Durable(DurableConcurrencyHold::new(
@@ -3711,5 +4439,763 @@ mod tests {
             engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
             0,
         );
+    }
+
+    struct FailingConcurrencyHoldStore;
+
+    #[async_trait::async_trait]
+    impl ApiKeyConcurrencyHoldStore for FailingConcurrencyHoldStore {
+        async fn insert_api_key_concurrency_hold(
+            &self,
+            _hold: &ApiKeyConcurrencyHold,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::Unavailable {
+                message: "postgres down".to_owned(),
+            })
+        }
+
+        async fn delete_api_key_concurrency_hold(
+            &self,
+            _hold_id: Uuid,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::Unavailable {
+                message: "postgres down".to_owned(),
+            })
+        }
+
+        async fn count_api_key_concurrency_holds(
+            &self,
+            _key_id: &str,
+            _now_unix_secs: u64,
+            _max_age_secs: u64,
+        ) -> Result<u64, StorageError> {
+            Err(StorageError::Unavailable {
+                message: "postgres down".to_owned(),
+            })
+        }
+
+        async fn delete_expired_api_key_concurrency_holds(
+            &self,
+            _now_unix_secs: u64,
+            _max_age_secs: u64,
+        ) -> Result<u64, StorageError> {
+            Err(StorageError::Unavailable {
+                message: "postgres down".to_owned(),
+            })
+        }
+
+        async fn refresh_api_key_concurrency_holds(
+            &self,
+            _hold_ids: &[Uuid],
+            _now_unix_secs: u64,
+        ) -> Result<u64, StorageError> {
+            Err(StorageError::Unavailable {
+                message: "postgres down".to_owned(),
+            })
+        }
+
+        async fn try_acquire_api_key_concurrency_hold(
+            &self,
+            _hold_id: Uuid,
+            _key_id: &str,
+            _writer_epoch: Uuid,
+            _cap: u32,
+            _max_age_secs: u64,
+        ) -> Result<bool, StorageError> {
+            Err(StorageError::Unavailable {
+                message: "postgres down".to_owned(),
+            })
+        }
+    }
+
+    #[test]
+    fn atomic_rolling_reservation_prevents_concurrent_over_admission() {
+        let engine = LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000)),
+        );
+        let view = PrincipalView::for_tests(
+            "principal-atomic",
+            true,
+            vec!["claude-3-opus".to_owned()],
+            vec![
+                Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 5,
+                },
+                Limit {
+                    kind: LimitKind::OutputTokens,
+                    window_secs: 60,
+                    cap_micros: 500,
+                },
+            ],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            key_hash_b64: "atomic-key".to_owned(),
+            ..StoredApiKeyRecord::default()
+        };
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let mut results = Vec::new();
+        std::thread::scope(|scope| {
+            let handles = (0..16)
+                .map(|_| {
+                    let engine = Arc::clone(&engine);
+                    let view = &view;
+                    let record = &record;
+                    let barrier = Arc::clone(&barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let res = engine.reserve(
+                            view,
+                            record,
+                            "principal-atomic",
+                            "claude-3-opus",
+                            Some(100),
+                            0,
+                            None,
+                        );
+                        if let Ok(reservation) = &res {
+                            let _ = reservation.id().len();
+                        }
+                        res
+                    })
+                })
+                .collect::<Vec<_>>();
+            for handle in handles {
+                results.push(handle.join().expect("thread join"));
+            }
+        });
+        let admitted: Vec<_> = results.into_iter().filter_map(Result::ok).collect();
+        assert_eq!(admitted.len(), 5, "exact cap must be admitted under race");
+        let now_sec = unix_secs(engine.inner.clock.now());
+        assert_eq!(
+            engine.current_total("atomic-key", LimitKind::Requests, 60, now_sec),
+            5
+        );
+        assert_eq!(
+            engine.current_total("atomic-key", LimitKind::OutputTokens, 60, now_sec),
+            500
+        );
+        drop(admitted);
+    }
+
+    #[tokio::test]
+    async fn reserve_async_hydrates_cold_key_with_singleflight_and_uses_full_cap() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database_url = format!(
+            "sqlite://{}",
+            directory.path().join("cold-hydrate.sqlite").display()
+        );
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let storage_impl = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+            .await
+            .expect("open sqlite");
+        storage_impl.initialize().await.expect("migrate sqlite");
+        let storage: Arc<dyn Storage> = Arc::new(storage_impl);
+        let view = PrincipalView::for_tests(
+            "principal-cold",
+            true,
+            vec!["claude-3-opus".to_owned()],
+            vec![Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 20,
+            }],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            key_hash_b64: "cold-hydrate-key".to_owned(),
+            ..StoredApiKeyRecord::default()
+        };
+
+        // Pre-populate 15 durable requests from another writer epoch.
+        let writer_a = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
+        let handle_a = writer_a
+            .start_durable_usage_sync(storage.clone())
+            .await
+            .expect("start writer A");
+        for _ in 0..15 {
+            let res = writer_a
+                .reserve_async(
+                    &view,
+                    &record,
+                    "principal-cold",
+                    "claude-3-opus",
+                    Some(0),
+                    0,
+                    None,
+                )
+                .await
+                .expect("seed usage");
+            complete_reserved_request(&writer_a, res);
+        }
+        handle_a.shutdown().await;
+
+        // Fresh engine starts cold for `cold-hydrate-key`; cold allowance cap/10
+        // would only be 2, whereas singleflight hydration loads 15 remote
+        // requests and unlocks the true remaining capacity of 5 (20 - 15).
+        let engine_b = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
+        let handle_b = engine_b
+            .start_durable_usage_sync(storage.clone())
+            .await
+            .expect("start engine B");
+
+        let (r1, r2, r3, r4) = tokio::join!(
+            engine_b.reserve_async(
+                &view,
+                &record,
+                "principal-cold",
+                "claude-3-opus",
+                Some(0),
+                0,
+                None
+            ),
+            engine_b.reserve_async(
+                &view,
+                &record,
+                "principal-cold",
+                "claude-3-opus",
+                Some(0),
+                0,
+                None
+            ),
+            engine_b.reserve_async(
+                &view,
+                &record,
+                "principal-cold",
+                "claude-3-opus",
+                Some(0),
+                0,
+                None
+            ),
+            engine_b.reserve_async(
+                &view,
+                &record,
+                "principal-cold",
+                "claude-3-opus",
+                Some(0),
+                0,
+                None
+            ),
+        );
+        let held = [r1, r2, r3, r4]
+            .into_iter()
+            .map(|r| r.expect("hydrated full cap must admit 4 concurrent requests"))
+            .collect::<Vec<_>>();
+        let fifth = engine_b
+            .reserve_async(
+                &view,
+                &record,
+                "principal-cold",
+                "claude-3-opus",
+                Some(0),
+                0,
+                None,
+            )
+            .await
+            .expect("5th request fills 20/20 cap");
+        let sixth = engine_b
+            .reserve_async(
+                &view,
+                &record,
+                "principal-cold",
+                "claude-3-opus",
+                Some(0),
+                0,
+                None,
+            )
+            .await;
+        assert_eq!(sixth.err(), Some(RejectReason::RequestsRateLimit));
+
+        drop(fifth);
+        drop(held);
+        handle_b.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn durable_concurrent_hold_fails_closed_when_postgres_store_unavailable() {
+        let store = FailingConcurrencyHoldStore;
+        let err = try_acquire_hold_atomic(&store, Uuid::now_v7(), "key-pg", Uuid::now_v7(), 1)
+            .await
+            .expect_err("failing hold store must return error");
+        assert!(matches!(err, StorageError::Unavailable { .. }));
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database_url = format!(
+            "sqlite://{}",
+            directory.path().join("fail-closed-conc.sqlite").display()
+        );
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let storage_impl = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+            .await
+            .expect("open sqlite");
+        storage_impl.initialize().await.expect("migrate sqlite");
+        let concurrency = Arc::new(KeyConcurrencyManager::new());
+        let engine = LimitEngine::new(concurrency.clone(), clock);
+        *engine.inner.durable_usage.write() = Some(Arc::new(DurableApiKeyUsage {
+            storage: Arc::new(storage_impl),
+            backend_kind: BackendKind::Postgres,
+            writer_epoch: RwLock::new(Uuid::now_v7()),
+            pending: Mutex::new(HashMap::new()),
+            in_flight: Mutex::new(None),
+            key_limits: RwLock::new(KeyLimitRegistry::default()),
+            refreshed_at: RwLock::new(HashMap::new()),
+            refresh_cursor: AtomicU32::new(0),
+            cold_hydrations: Mutex::new(HashMap::new()),
+        }));
+
+        let view = PrincipalView::for_tests(
+            "principal-pg",
+            true,
+            vec!["claude-3-opus".to_owned()],
+            vec![Limit {
+                kind: LimitKind::Concurrent,
+                window_secs: 0,
+                cap_micros: 1,
+            }],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            key_hash_b64: "pg-conc-key".to_owned(),
+            ..StoredApiKeyRecord::default()
+        };
+        let err = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-pg",
+                "claude-3-opus",
+                Some(0),
+                0,
+                None,
+            )
+            .err()
+            .expect("unavailable durable concurrency backend must fail closed");
+        assert_eq!(err, RejectReason::ConcurrentLimitUnavailable);
+        assert_eq!(
+            concurrency.current("pg-conc-key"),
+            0,
+            "local fallback must not be used when Postgres durable holds are unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_preserves_flush_id_across_epoch_rotation() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database_url = format!(
+            "sqlite://{}",
+            directory.path().join("handoff-flush-id.sqlite").display()
+        );
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let storage_impl = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+            .await
+            .expect("open sqlite");
+        storage_impl.initialize().await.expect("migrate sqlite");
+        let storage: Arc<dyn Storage> = Arc::new(storage_impl);
+        let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
+        let handle = engine
+            .start_durable_usage_sync(storage.clone())
+            .await
+            .expect("start durable usage");
+        let state = engine
+            .inner
+            .durable_usage
+            .read()
+            .clone()
+            .expect("durable state");
+        let old_epoch = *state.writer_epoch.read();
+        // Deterministically stop the background sync loop before mutating `in_flight`
+        // and manually driving `handoff_durable_writer` / `flush_durable_api_key_usage`.
+        handle.shutdown().await;
+        let now_sec = unix_secs(clock.now());
+        let flush_id = Uuid::now_v7();
+        let deltas = vec![ApiKeyUsageBucketDelta {
+            key: ApiKeyUsageBucketKey {
+                key_id: "handoff-key".to_owned(),
+                bucket_width_secs: 60,
+                bucket_start_unix_secs: now_sec - (now_sec % 60),
+            },
+            usage: ApiKeyUsage {
+                requests: 3,
+                input_tokens: 30,
+                output_tokens: 60,
+                cost_usd_micros: 90,
+            },
+        }];
+
+        // Apply the batch to storage as if the response was lost in flight, then
+        // keep the identical batch in `state.in_flight` while expiring the lease.
+        let applied = storage
+            .flush_api_key_usage(&ApiKeyUsageFlush {
+                writer_epoch: old_epoch,
+                flush_id,
+                lease_until_unix_secs: now_sec + 30,
+                deltas: deltas.clone(),
+            })
+            .await
+            .expect("seed flush");
+        assert_eq!(applied, ApiKeyUsageFlushResult::Applied);
+
+        clock.advance_secs(60);
+        *state.in_flight.lock() = Some(ApiKeyUsageFlush {
+            writer_epoch: old_epoch,
+            flush_id,
+            lease_until_unix_secs: now_sec + 30,
+            deltas,
+        });
+
+        // `flush_durable_api_key_usage` sees `AlreadyApplied` or if `LeaseLost`
+        // rotated epoch, `handoff_durable_writer` preserves `flush_id`.
+        handoff_durable_writer(&engine, &state, unix_secs(clock.now()))
+            .await
+            .expect("handoff preserves flush_id");
+        {
+            let in_flight = state.in_flight.lock();
+            let current = in_flight.as_ref().expect("in_flight retained");
+            assert_eq!(current.flush_id, flush_id, "flush_id must survive handoff");
+            assert_ne!(current.writer_epoch, old_epoch, "writer_epoch rotates");
+        }
+
+        flush_durable_api_key_usage(&engine, &state, unix_secs(clock.now()))
+            .await
+            .expect("retry deduplicates against rotated epoch");
+        assert!(state.in_flight.lock().is_none());
+
+        let buckets = storage
+            .query_api_key_usage_buckets(&ApiKeyUsageBucketQuery {
+                key_ids: vec!["handoff-key".to_owned()],
+                since_unix_secs: now_sec - 120,
+                until_unix_secs: unix_secs(clock.now()) + 120,
+                exclude_writer_epoch: Uuid::now_v7(),
+            })
+            .await
+            .expect("query buckets");
+        assert_eq!(buckets.iter().map(|b| b.usage.requests).sum::<i64>(), 3);
+    }
+
+    #[tokio::test]
+    async fn commit_reserved_by_id_keeps_rolling_and_durable_usage_and_releases_concurrency() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database_url = format!(
+            "sqlite://{}",
+            directory.path().join("commit-reserved.sqlite").display()
+        );
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let storage_impl = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+            .await
+            .expect("open sqlite");
+        storage_impl.initialize().await.expect("migrate sqlite");
+        let storage: Arc<dyn Storage> = Arc::new(storage_impl);
+        let concurrency = Arc::new(KeyConcurrencyManager::new());
+        let engine = LimitEngine::new(concurrency.clone(), clock.clone());
+        let handle = engine
+            .start_durable_usage_sync(storage.clone())
+            .await
+            .expect("start durable usage");
+
+        let view = PrincipalView::for_tests(
+            "principal-commit",
+            true,
+            vec!["claude-3-opus".to_owned()],
+            vec![
+                Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 10,
+                },
+                Limit {
+                    kind: LimitKind::InputTokens,
+                    window_secs: 60,
+                    cap_micros: 1_000,
+                },
+                Limit {
+                    kind: LimitKind::OutputTokens,
+                    window_secs: 60,
+                    cap_micros: 1_000,
+                },
+                Limit {
+                    kind: LimitKind::CostUsd,
+                    window_secs: 60,
+                    cap_micros: 1_000,
+                },
+                Limit {
+                    kind: LimitKind::Concurrent,
+                    window_secs: 0,
+                    cap_micros: 1,
+                },
+            ],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            key_hash_b64: "commit-key".to_owned(),
+            ..StoredApiKeyRecord::default()
+        };
+        let now_sec = unix_secs(clock.now());
+        let res = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-commit",
+                "claude-3-opus",
+                Some(100),
+                50,
+                Some(200),
+            )
+            .await
+            .expect("reserve");
+        let res_id = res.id().to_owned();
+        assert_eq!(concurrency.current("commit-key"), 1);
+        res.forget();
+
+        assert!(engine.commit_reserved_by_id(&res_id));
+        assert!(!engine.commit_reserved_by_id(&res_id));
+        assert_eq!(concurrency.current("commit-key"), 0);
+        assert_eq!(
+            engine.current_total("commit-key", LimitKind::Requests, 60, now_sec),
+            1
+        );
+        assert_eq!(
+            engine.current_total("commit-key", LimitKind::InputTokens, 60, now_sec),
+            50
+        );
+        assert_eq!(
+            engine.current_total("commit-key", LimitKind::OutputTokens, 60, now_sec),
+            100
+        );
+        assert_eq!(
+            engine.current_total("commit-key", LimitKind::CostUsd, 60, now_sec),
+            200
+        );
+
+        handle.shutdown().await;
+        let buckets = storage
+            .query_api_key_usage_buckets(&ApiKeyUsageBucketQuery {
+                key_ids: vec!["commit-key".to_owned()],
+                since_unix_secs: now_sec - 60,
+                until_unix_secs: now_sec + 60,
+                exclude_writer_epoch: Uuid::now_v7(),
+            })
+            .await
+            .expect("query buckets");
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].usage.requests, 1);
+        assert_eq!(buckets[0].usage.input_tokens, 50);
+        assert_eq!(buckets[0].usage.output_tokens, 100);
+        assert_eq!(buckets[0].usage.cost_usd_micros, 200);
+    }
+
+    #[tokio::test]
+    async fn commit_reserved_by_id_records_admitted_estimates_for_total_tokens_only_key() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database_url = format!(
+            "sqlite://{}",
+            directory.path().join("commit-total-only.sqlite").display()
+        );
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let storage_impl = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+            .await
+            .expect("open sqlite");
+        storage_impl.initialize().await.expect("migrate sqlite");
+        let storage: Arc<dyn Storage> = Arc::new(storage_impl);
+        let concurrency = Arc::new(KeyConcurrencyManager::new());
+        let engine = LimitEngine::new(concurrency, clock.clone());
+        let handle = engine
+            .start_durable_usage_sync(storage.clone())
+            .await
+            .expect("start durable usage");
+
+        let view = PrincipalView::for_tests(
+            "principal-total-only",
+            true,
+            vec!["claude-3-opus".to_owned()],
+            vec![Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 1_000,
+            }],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            key_hash_b64: "total-only-key".to_owned(),
+            ..StoredApiKeyRecord::default()
+        };
+        let now_sec = unix_secs(clock.now());
+        let res = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-total-only",
+                "claude-3-opus",
+                Some(120),
+                45,
+                None,
+            )
+            .await
+            .expect("reserve");
+        let res_id = res.id().to_owned();
+        res.forget();
+
+        assert!(engine.commit_reserved_by_id(&res_id));
+        handle.shutdown().await;
+
+        let buckets = storage
+            .query_api_key_usage_buckets(&ApiKeyUsageBucketQuery {
+                key_ids: vec!["total-only-key".to_owned()],
+                since_unix_secs: now_sec - 60,
+                until_unix_secs: now_sec + 60,
+                exclude_writer_epoch: Uuid::now_v7(),
+            })
+            .await
+            .expect("query buckets");
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].usage.input_tokens, 45);
+        assert_eq!(buckets[0].usage.output_tokens, 120);
+    }
+
+    #[tokio::test]
+    async fn acquire_durable_hold_raw_cleans_up_committed_hold_on_drop_and_uncertain_error() {
+        enum Mode {
+            BlockThenCommit {
+                entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+                release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+            },
+            CommitThenErr,
+        }
+
+        struct RaceHoldStore {
+            mode: Mode,
+            committed: Mutex<Vec<Uuid>>,
+            deleted: Mutex<Vec<Uuid>>,
+            deleted_notify: tokio::sync::Notify,
+        }
+
+        #[async_trait::async_trait]
+        impl ApiKeyConcurrencyHoldStore for RaceHoldStore {
+            async fn insert_api_key_concurrency_hold(
+                &self,
+                _hold: &cc_lb_storage_api::ApiKeyConcurrencyHold,
+            ) -> Result<(), StorageError> {
+                Ok(())
+            }
+
+            async fn delete_api_key_concurrency_hold(
+                &self,
+                hold_id: Uuid,
+            ) -> Result<(), StorageError> {
+                self.deleted.lock().push(hold_id);
+                self.committed.lock().retain(|id| *id != hold_id);
+                self.deleted_notify.notify_waiters();
+                Ok(())
+            }
+
+            async fn count_api_key_concurrency_holds(
+                &self,
+                _key_id: &str,
+                _now_unix_secs: u64,
+                _max_age_secs: u64,
+            ) -> Result<u64, StorageError> {
+                Ok(0)
+            }
+
+            async fn delete_expired_api_key_concurrency_holds(
+                &self,
+                _now_unix_secs: u64,
+                _max_age_secs: u64,
+            ) -> Result<u64, StorageError> {
+                Ok(0)
+            }
+
+            async fn refresh_api_key_concurrency_holds(
+                &self,
+                _hold_ids: &[Uuid],
+                _now_unix_secs: u64,
+            ) -> Result<u64, StorageError> {
+                Ok(0)
+            }
+
+            async fn try_acquire_api_key_concurrency_hold(
+                &self,
+                hold_id: Uuid,
+                _key_id: &str,
+                _writer_epoch: Uuid,
+                _cap: u32,
+                _max_age_secs: u64,
+            ) -> Result<bool, StorageError> {
+                match &self.mode {
+                    Mode::BlockThenCommit { entered, release } => {
+                        let tx = entered.lock().take();
+                        if let Some(tx) = tx {
+                            let _ = tx.send(());
+                        }
+                        let rx = release.lock().take();
+                        if let Some(rx) = rx {
+                            let _ = rx.await;
+                        }
+                        self.committed.lock().push(hold_id);
+                        Ok(true)
+                    }
+                    Mode::CommitThenErr => {
+                        self.committed.lock().push(hold_id);
+                        Err(StorageError::Unavailable {
+                            message: "connection reset after commit".to_owned(),
+                        })
+                    }
+                }
+            }
+        }
+
+        // Case 1: Caller future cancelled/dropped mid-flight still awaits commit and deletes hold.
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let store1 = Arc::new(RaceHoldStore {
+            mode: Mode::BlockThenCommit {
+                entered: Mutex::new(Some(entered_tx)),
+                release: Mutex::new(Some(release_rx)),
+            },
+            committed: Mutex::new(Vec::new()),
+            deleted: Mutex::new(Vec::new()),
+            deleted_notify: tokio::sync::Notify::new(),
+        });
+        let epoch = Uuid::now_v7();
+        {
+            let mut fut = Box::pin(acquire_durable_hold_raw(&store1, epoch, "k-cancel", 1));
+            let notified = entered_rx;
+            tokio::select! {
+                _ = &mut fut => panic!("hold attempt was blocked behind release_rx"),
+                res = notified => res.expect("acquire started"),
+            }
+            drop(fut);
+        }
+        let _ = release_tx.send(());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while store1.deleted.lock().is_empty() {
+                store1.deleted_notify.notified().await;
+            }
+        })
+        .await
+        .expect("cancelled acquire deletes committed hold");
+        assert!(store1.committed.lock().is_empty());
+
+        // Case 2: Uncertain storage error after server-side commit triggers cleanup deletion.
+        let store2 = Arc::new(RaceHoldStore {
+            mode: Mode::CommitThenErr,
+            committed: Mutex::new(Vec::new()),
+            deleted: Mutex::new(Vec::new()),
+            deleted_notify: tokio::sync::Notify::new(),
+        });
+        assert!(matches!(
+            acquire_durable_hold_raw(&store2, epoch, "k-err", 1).await,
+            Err(DurableHoldError::Unavailable)
+        ));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while store2.deleted.lock().is_empty() {
+                store2.deleted_notify.notified().await;
+            }
+        })
+        .await
+        .expect("uncertain error deletes committed hold");
+        assert!(store2.committed.lock().is_empty());
     }
 }

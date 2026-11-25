@@ -22,8 +22,9 @@ use cc_lb_storage_conformance::{
         pool_quota_history_store, price_catalog, principal_store, prompt_cache_observation_store,
         request_event_list, storage_roundtrips, storage_roundtrips_cache_split,
         storage_roundtrips_latency_stages, storage_roundtrips_upstream_diagnostics,
-        upstream_api_key_store, upstream_rate_limit_store, upstream_subscription_metadata_store,
-        upstream_subscription_quota_store, usage_rollup_principal_costs, warmup_attempts_store,
+        thread_sticky_subagent_store, upstream_api_key_store, upstream_rate_limit_store,
+        upstream_subscription_metadata_store, upstream_subscription_quota_store,
+        usage_rollup_principal_costs, warmup_attempts_store,
     },
 };
 use cc_lb_storage_postgres::PostgresStorage;
@@ -78,14 +79,14 @@ impl ConformanceBackend for PostgresConformanceBackend {
         {
             sqlx::raw_sql(
                 "TRUNCATE TABLE \
-                 api_key_concurrency_holds_v1, audit_log_v1, cache_keepalive_decisions, \
+                 api_key_concurrency_holds_v1, api_key_usage_flushes_v1, audit_log_v1, cache_keepalive_decisions, \
                  anthropic_compatibility_kv_v1, cache_keepalive_evidence, cache_keepalive_sessions, \
                  cache_keepalive_turns, config_draft_v1, config_history_v1, \
                  metadata_tier_mapping_override_v1, oauth_pkce_flows_v1, organization_metadata_v1, \
                  overview_excluded_error_rollups_v1, pool_subscription_quota_history_v1, \
                  pool_subscription_quota_history_v2, \
                  price_catalog_snapshots_v1, principals_v1, prompt_cache_observations, \
-                 provider_native_cache_observations, request_events_v1, \
+                 provider_native_cache_observations, request_events_v1, thread_sticky_subagent_v1, \
                  upstream_plan_tier_history_v1, upstream_rate_limit_state_v1, \
                  upstream_subscription_metadata_v1, upstream_subscription_quota_checkpoints_v1, \
                  upstream_subscription_quota_latest_v1, usage_rollup_checkpoints_v1, \
@@ -544,6 +545,14 @@ fn upstream_rate_limit_empty_list_for_unknown_id_postgres() {
     run_postgres_scenario(
         "upstream_rate_limit_empty_list_for_unknown_id",
         upstream_rate_limit_store::empty_list_for_unknown_id,
+    );
+}
+
+#[test]
+fn thread_sticky_subagent_store_postgres() {
+    run_postgres_scenario(
+        "thread_sticky_subagent_store",
+        thread_sticky_subagent_store::run_all,
     );
 }
 

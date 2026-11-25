@@ -10,14 +10,18 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cc_lb_control::api_keys::principal_view::{
-    DialectCache, PrincipalView, ProviderFilterChains, RouterPipelineCache,
+    DialectCache, PrincipalView, ProviderFilterChains, RouterPipelineCache, ShapePluginCache,
 };
 use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, RequestEventBus};
-use cc_lb_domain::{Principal, Provider, TerminalStrategy, UpstreamCandidate};
+use cc_lb_domain::{Principal, Provider, TerminalStrategy, Upstream, UpstreamCandidate};
 use cc_lb_engine::realtime_websocket::{RealtimeWebSocketKind, RealtimeWebSocketTarget};
 use cc_lb_engine::{Lifecycle, LifecycleConfig};
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
+};
+use http::header::RETRY_AFTER;
 use http::{HeaderValue, StatusCode};
 use parking_lot::Mutex as ParkingMutex;
 use tracing::{Event, Level, Subscriber};
@@ -169,8 +173,8 @@ async fn request_model_reaches_filters_without_prompt_cache_shadow()
 }
 
 #[tokio::test]
-async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn trap_and_runtime_errors_fail_closed_and_skip_subsequent_stages()
+-> Result<(), Box<dyn std::error::Error>> {
     for error_kind in [FilterErrorKind::Trap, FilterErrorKind::Runtime] {
         let upstream_id = default_upstream_id();
         let error_filter_calls = Arc::new(Mutex::new(Vec::new()));
@@ -200,16 +204,120 @@ async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn
         let response = lifecycle.handle(request, &auth).await?;
         let (status, _headers, _body) = collect_body(response).await;
 
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 0);
         assert_eq!(
             error_filter_calls.lock().unwrap().as_slice(),
             &[vec![upstream_id]]
         );
-        assert_eq!(
-            keep_filter_calls.lock().unwrap().as_slice(),
-            &[vec![upstream_id]]
+        assert!(
+            keep_filter_calls.lock().unwrap().is_empty(),
+            "downstream filter stages must not run after a filter failure"
         );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn pool_saturated_filter_returns_503_with_retry_after()
+-> Result<(), Box<dyn std::error::Error>> {
+    let upstream_id = default_upstream_id();
+    let error_filter_calls = Arc::new(Mutex::new(Vec::new()));
+    let state = TestState::default();
+    let filters: Vec<Arc<dyn FilterPlugin>> = vec![Arc::new(ErrorFilter {
+        name: FilterErrorKind::PoolSaturated.stage_name(),
+        calls: error_filter_calls.clone(),
+        error_kind: FilterErrorKind::PoolSaturated,
+    })];
+    let lifecycle = lifecycle_with_pipeline(filters, state.clone());
+
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle.handle(request, &auth).await?;
+    let (status, headers, _body) = collect_body(response).await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        headers.get(RETRY_AFTER).and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+    assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        error_filter_calls.lock().unwrap().as_slice(),
+        &[vec![upstream_id]]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_filter_output_fails_closed_with_502_before_dispatch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let state = TestState::default();
+    let keep_filter_calls = Arc::new(Mutex::new(Vec::new()));
+    let filters: Vec<Arc<dyn FilterPlugin>> = vec![
+        Arc::new(BogusOutputFilter),
+        Arc::new(RecordingFilter {
+            name: "after-invalid",
+            calls: keep_filter_calls.clone(),
+            kept_upstream_ids: vec![default_upstream_id()],
+        }),
+    ];
+    let lifecycle = lifecycle_with_pipeline(filters, state.clone());
+
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle.handle(request, &auth).await?;
+    let (status, _headers, _body) = collect_body(response).await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 0);
+    assert!(keep_filter_calls.lock().unwrap().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn shape_failure_and_pool_saturation_fail_closed_before_dispatch()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (dialect, expected_status, expect_retry_after) in [
+        (
+            Arc::new(FailDialect::Unsupported) as Arc<dyn UpstreamDialect>,
+            StatusCode::BAD_GATEWAY,
+            None,
+        ),
+        (
+            Arc::new(FailDialect::PoolSaturated) as Arc<dyn UpstreamDialect>,
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some("1"),
+        ),
+    ] {
+        let state = TestState::default();
+        let lifecycle = lifecycle_with_dialect(dialect, state.clone());
+        let request = messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        ));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("test request authenticates");
+        let response = lifecycle.handle(request, &auth).await?;
+        let (status, headers, _body) = collect_body(response).await;
+
+        assert_eq!(status, expected_status);
+        assert_eq!(
+            headers.get(RETRY_AFTER).and_then(|v| v.to_str().ok()),
+            expect_retry_after
+        );
+        assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 0);
     }
     Ok(())
 }
@@ -687,6 +795,9 @@ impl FilterPlugin for ErrorFilter {
             FilterErrorKind::Runtime => Err(FilterError::Runtime {
                 reason: "runtime fixture".to_owned(),
             }),
+            FilterErrorKind::PoolSaturated => Err(FilterError::PoolSaturated {
+                reason: "instance pool saturated".to_owned(),
+            }),
         }
     }
 
@@ -703,6 +814,7 @@ impl FilterPlugin for ErrorFilter {
 enum FilterErrorKind {
     Trap,
     Runtime,
+    PoolSaturated,
 }
 
 impl FilterErrorKind {
@@ -710,6 +822,89 @@ impl FilterErrorKind {
         match self {
             Self::Trap => "trap-filter",
             Self::Runtime => "runtime-filter",
+            Self::PoolSaturated => "pool-saturated-filter",
         }
     }
+}
+
+struct BogusOutputFilter;
+
+impl FilterPlugin for BogusOutputFilter {
+    fn filter(
+        &self,
+        _ctx: &cc_lb_routing::RoutingContext,
+        _principal: &Principal,
+        _candidates: &[UpstreamCandidate],
+    ) -> Result<FilterOutput, FilterError> {
+        Ok(FilterOutput {
+            kept_upstream_ids: vec![Uuid::new_v4()],
+            reason: "bogus".to_owned(),
+            per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
+        })
+    }
+
+    fn plugin_id(&self) -> Uuid {
+        Uuid::nil()
+    }
+
+    fn plugin_name(&self) -> &str {
+        "bogus-output-filter"
+    }
+}
+
+enum FailDialect {
+    Unsupported,
+    PoolSaturated,
+}
+
+impl UpstreamDialect for FailDialect {
+    fn shape(
+        &self,
+        _context: &DialectShapeContext,
+        _upstream: &Upstream,
+        _principal: &Principal,
+        _builder: &mut ShapedRequestBuilder,
+    ) -> Result<ShapedRequest, DialectError> {
+        match self {
+            Self::Unsupported => Err(DialectError::UnsupportedRequest {
+                reason: "shape fixture failure".to_owned(),
+            }),
+            Self::PoolSaturated => Err(DialectError::PoolSaturated {
+                reason: "store pool saturated".to_owned(),
+            }),
+        }
+    }
+}
+
+fn lifecycle_with_dialect(dialect: Arc<dyn UpstreamDialect>, state: TestState) -> Lifecycle {
+    let mut chains = HashMap::new();
+    chains.insert(
+        "principal-test".to_owned(),
+        (None, DialectCache::Explicit(ShapePluginCache { dialect })),
+    );
+    let principal_view = Arc::new(PrincipalView::for_tests(
+        "principal-test",
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
+        chains,
+    ));
+    let authn = TestAuthn::with_principal_view(state.clone(), principal_view.clone());
+    let dispatcher = Arc::new(MockDispatch {
+        state,
+        mode: DispatchMode::Statuses(Arc::new(Mutex::new(vec![StatusCode::OK].into()))),
+    });
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(principal_view)
+        .upstream_records(vec![test_upstream_record()])
+        .build();
+    Lifecycle::new_with_dynamic_view(
+        authn.authn.clone(),
+        Arc::new(DynamicViewHolder::new(view)),
+        dispatcher,
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
 }

@@ -10,5 +10,8 @@ pub mod live_tail;
 pub mod replica;
 pub mod runtime_utils;
 pub mod storage_factory;
+pub mod wasmtime_builder;
 
-pub use runtime_utils::{await_or_abort, resolve_data_dir};
+pub use runtime_utils::{
+    await_or_abort, is_container_environment, resolve_data_dir, warn_if_container_loopback_bind,
+};

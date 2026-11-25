@@ -183,6 +183,12 @@ impl ResponseAccountingGuard {
             reservation.forget();
         }
     }
+
+    pub fn handoff_after_response(self) {
+        if let Some(reservation) = self.reservation {
+            reservation.handoff_after_response();
+        }
+    }
 }
 
 #[cfg(test)]

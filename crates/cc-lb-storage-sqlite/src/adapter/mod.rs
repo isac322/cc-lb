@@ -25,6 +25,7 @@ mod request_event_list_row;
 mod request_event_list_sql;
 mod request_event_row;
 pub mod request_events;
+pub mod thread_sticky_subagent;
 pub mod upstream_affinity;
 pub mod upstream_api_key;
 pub mod upstream_rate_limit;

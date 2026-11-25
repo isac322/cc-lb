@@ -30,6 +30,11 @@ pub enum FilterError {
         /// Redacted trap error reason.
         reason: String,
     },
+    /// Wasmtime store/instance pool is temporarily saturated.
+    PoolSaturated {
+        /// Bounded saturation resource description.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for FilterError {
@@ -37,6 +42,7 @@ impl std::fmt::Display for FilterError {
         match self {
             Self::Runtime { reason } => write!(f, "filter runtime error: {reason}"),
             Self::Trap { reason } => write!(f, "filter trap error: {reason}"),
+            Self::PoolSaturated { reason } => write!(f, "filter runtime saturated: {reason}"),
         }
     }
 }

@@ -26,7 +26,7 @@ pub use audit_payload::AuditPayload;
 pub use audit_writer::{AuditDropped, AuditEntry, AuditWriterSink, spawn_audit_writer};
 pub use dynamic_view::{
     ApplyStatus, DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamRateLimitCache,
-    UpstreamStatusEntry, UpstreamStatusSnapshot,
+    UpstreamReadinessSummary, UpstreamStatusEntry, UpstreamStatusSnapshot,
 };
 pub use event_bus::{
     DEFAULT_LIFECYCLE_BROADCAST_CAPACITY, InMemoryBus, LifecycleDispatcherHandle, RequestEventBus,

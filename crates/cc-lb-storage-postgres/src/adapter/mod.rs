@@ -1,7 +1,7 @@
 use std::sync::{Arc, atomic::AtomicBool};
 
 use cc_lb_clock::ClockHandle;
-use cc_lb_storage_api::{ChangeEvent, StorageError, StorageResult};
+use cc_lb_storage_api::{ChangeEvent, NotifierConnectionState, StorageError, StorageResult};
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::PgPool;
 
@@ -28,6 +28,7 @@ mod request_event_list_row;
 mod request_event_list_sql;
 pub mod request_events;
 pub mod retry;
+pub mod thread_sticky_subagent;
 pub mod upstream_affinity;
 pub mod upstream_api_key;
 pub mod upstream_rate_limit;
@@ -46,6 +47,7 @@ pub struct PostgresStorage {
     pub(crate) clock: ClockHandle,
     pub(crate) change_tx: tokio::sync::broadcast::Sender<ChangeEvent>,
     pub(crate) notifier_running: Arc<AtomicBool>,
+    pub(crate) notifier_connection_state: Arc<NotifierConnectionState>,
 }
 
 impl PostgresStorage {
@@ -60,6 +62,7 @@ impl PostgresStorage {
             clock,
             change_tx: notifier::change_sender(),
             notifier_running: Arc::new(AtomicBool::new(false)),
+            notifier_connection_state: Arc::new(NotifierConnectionState::new_disconnected()),
         }
     }
 

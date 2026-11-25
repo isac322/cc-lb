@@ -2721,7 +2721,18 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
 async fn semantic_client_close_reconciles_limits_and_preterminal_cancel_refunds() -> TestResult {
     use cc_lb_storage_api::principal::{Limit, LimitKind};
 
-    for completed in [false, true] {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Scenario {
+        PreUsagePing,
+        PreTerminalAfterStart,
+        Completed,
+    }
+
+    for scenario in [
+        Scenario::PreUsagePing,
+        Scenario::PreTerminalAfterStart,
+        Scenario::Completed,
+    ] {
         let test_bus = TestLifecycleBus::new();
         let mut events = test_bus.bus.subscribe_lifecycle();
         let reconcile_rx = test_bus.bus.attach_lifecycle_limit_reconcile(64);
@@ -2731,10 +2742,12 @@ async fn semantic_client_close_reconciles_limits_and_preterminal_cancel_refunds(
             reconcile_rx,
             engine.clone(),
         );
-        let upstream = if completed {
-            Bytes::from(format!("{START}{DELTA}{STOP}"))
-        } else {
-            Bytes::from_static(START.as_bytes())
+        let upstream = match scenario {
+            Scenario::PreUsagePing => {
+                Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n")
+            }
+            Scenario::PreTerminalAfterStart => Bytes::from_static(START.as_bytes()),
+            Scenario::Completed => Bytes::from(format!("{START}{DELTA}{STOP}")),
         };
         let lifecycle = lifecycle_with_options(
             None,
@@ -2792,7 +2805,7 @@ async fn semantic_client_close_reconciles_limits_and_preterminal_cancel_refunds(
             .expect("upstream frame carries data");
         assert_eq!(
             String::from_utf8_lossy(&frame).contains("message_stop"),
-            completed
+            scenario == Scenario::Completed
         );
         drop(body);
         let (reason, client_status) = tokio::time::timeout(Duration::from_secs(3), async {
@@ -2809,10 +2822,15 @@ async fn semantic_client_close_reconciles_limits_and_preterminal_cancel_refunds(
         })
         .await?;
         reconcile.shutdown().await;
-        assert_eq!(client_status, if completed { 200 } else { 499 });
+        let expected_status = if scenario == Scenario::Completed {
+            200
+        } else {
+            499
+        };
+        assert_eq!(client_status, expected_status);
         assert_eq!(
             reason,
-            if completed {
+            if scenario == Scenario::Completed {
                 TerminationReason::Success
             } else {
                 TerminationReason::ErrorCode("client_closed_request".to_owned())
@@ -2826,13 +2844,18 @@ async fn semantic_client_close_reconciles_limits_and_preterminal_cancel_refunds(
                 .and_then(|(_, value)| value.parse().ok())
                 .expect("remaining limit header")
         };
+        let (expected_requests_remaining, expected_tokens_remaining) = match scenario {
+            Scenario::PreUsagePing => (10, 1_000_000),
+            Scenario::PreTerminalAfterStart => (9, 999_987),
+            Scenario::Completed => (9, 999_980),
+        };
         assert_eq!(
             remaining("anthropic-ratelimit-requests-remaining"),
-            if completed { 9 } else { 10 }
+            expected_requests_remaining
         );
         assert_eq!(
             remaining("anthropic-ratelimit-tokens-remaining"),
-            if completed { 999_980 } else { 1_000_000 }
+            expected_tokens_remaining
         );
         assert_eq!(concurrency.current("key-test"), 0);
     }

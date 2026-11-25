@@ -94,7 +94,8 @@ pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop}
 #[cfg(not(loom))]
 pub use lifecycle::{
     AuthLimitSubject, Body, DispatchError, Lifecycle, LifecycleConfig, LimitCostEstimator,
-    LimitSubjectProvider, ProxyError, RequestKind, UpstreamDispatch, build_candidates,
+    LimitSubjectProvider, ProxyError, RequestKind, ThreadStickySubagentLatch, UpstreamDispatch,
+    build_candidates,
 };
 #[cfg(not(loom))]
 pub use provider_capability::is_unscoped_gemini_http_route;

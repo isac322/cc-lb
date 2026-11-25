@@ -18,6 +18,8 @@ pub(super) fn build_worker_instance(
     let engine = cell.instance_pre.module().engine();
     let mut store = Store::new(engine, HostState::new(cell.memory_max_pages));
     store.limiter(|state| state.limits());
+    store.set_epoch_deadline(cell.store_budget.epoch_deadline_ticks());
+    store.epoch_deadline_trap();
 
     let instance: Instance = cell.instance_pre.instantiate(&mut store).map_err(|e| {
         if e.downcast_ref::<wasmtime::PoolConcurrencyLimitError>()

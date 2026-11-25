@@ -30,6 +30,7 @@ pub struct WasmtimeUpstreamDialect {
     realtime_frame_transform: Option<WasmtimeRealtimeFrameTransformHook>,
     native_request: Option<Arc<dyn UpstreamDialect>>,
     upstream_identity: Option<UpstreamIdentity>,
+    claims: Arc<[(String, Vec<u8>)]>,
 }
 
 impl WasmtimeUpstreamDialect {
@@ -39,6 +40,7 @@ impl WasmtimeUpstreamDialect {
                 dispatch: Arc::clone(&dispatch),
                 wire_version: dispatch.response_wire_version(),
                 identity: None,
+                claims: Arc::from([]),
             })
         } else {
             None
@@ -48,6 +50,7 @@ impl WasmtimeUpstreamDialect {
                 dispatch: Arc::clone(&dispatch),
                 wire_version: dispatch.sse_wire_version(),
                 identity: None,
+                claims: Arc::from([]),
             })
         } else {
             None
@@ -57,6 +60,7 @@ impl WasmtimeUpstreamDialect {
                 dispatch: Arc::clone(&dispatch),
                 wire_version: dispatch.realtime_frame_wire_version(),
                 identity: None,
+                claims: Arc::from([]),
             })
         } else {
             None
@@ -68,7 +72,23 @@ impl WasmtimeUpstreamDialect {
             realtime_frame_transform,
             native_request: None,
             upstream_identity: None,
+            claims: Arc::from([]),
         }
+    }
+
+    #[must_use]
+    pub fn with_claims(mut self, claims: Arc<[(String, Vec<u8>)]>) -> Self {
+        if let Some(hook) = self.response_transform.as_mut() {
+            hook.claims = Arc::clone(&claims);
+        }
+        if let Some(hook) = self.sse_event_transform.as_mut() {
+            hook.claims = Arc::clone(&claims);
+        }
+        if let Some(hook) = self.realtime_frame_transform.as_mut() {
+            hook.claims = Arc::clone(&claims);
+        }
+        self.claims = claims;
+        self
     }
 
     /// Compose a response-only plugin with the selected upstream's native request dialect.
@@ -159,6 +179,7 @@ impl UpstreamDialect for WasmtimeUpstreamDialect {
                     context,
                     upstream,
                     principal,
+                    &self.claims,
                     identity,
                     self.dispatch.cookie_redaction(),
                     |in_bytes| self.call_shape_output(in_bytes, builder, upstream),
@@ -318,6 +339,7 @@ struct WasmtimeResponseTransformHook {
     dispatch: Arc<WasmPluginWireDispatch>,
     wire_version: Option<WireVersion>,
     identity: Option<UpstreamIdentity>,
+    claims: Arc<[(String, Vec<u8>)]>,
 }
 impl ResponseTransformHook for WasmtimeResponseTransformHook {
     fn transform_response(
@@ -331,7 +353,7 @@ impl ResponseTransformHook for WasmtimeResponseTransformHook {
                         "V2 response transform missing upstream identity".to_owned(),
                     ));
                 };
-                host_to_wire_transform_response_v2(&request, identity)
+                host_to_wire_transform_response_v2(&request, identity, &self.claims)
             }
             Some(WireVersion::V3) => {
                 return Err(response_runtime_error(
@@ -363,6 +385,7 @@ struct WasmtimeSseEventTransformHook {
     dispatch: Arc<WasmPluginWireDispatch>,
     wire_version: Option<WireVersion>,
     identity: Option<UpstreamIdentity>,
+    claims: Arc<[(String, Vec<u8>)]>,
 }
 
 impl SseEventTransformHook for WasmtimeSseEventTransformHook {
@@ -377,7 +400,7 @@ impl SseEventTransformHook for WasmtimeSseEventTransformHook {
                         "V2 SSE transform missing upstream identity".to_owned(),
                     ));
                 };
-                host_to_wire_transform_sse_event_v2(&request, identity)
+                host_to_wire_transform_sse_event_v2(&request, identity, &self.claims)
             }
             Some(WireVersion::V3) => {
                 return Err(response_runtime_error(
@@ -408,6 +431,7 @@ struct WasmtimeRealtimeFrameTransformHook {
     dispatch: Arc<WasmPluginWireDispatch>,
     wire_version: Option<WireVersion>,
     identity: Option<UpstreamIdentity>,
+    claims: Arc<[(String, Vec<u8>)]>,
 }
 
 impl RealtimeFrameTransformHook for WasmtimeRealtimeFrameTransformHook {
@@ -425,7 +449,7 @@ impl RealtimeFrameTransformHook for WasmtimeRealtimeFrameTransformHook {
                 "realtime frame transform requires wire version 2".to_owned(),
             ));
         }
-        let input = host_to_wire_transform_realtime_frame_v2(&request, identity)
+        let input = host_to_wire_transform_realtime_frame_v2(&request, identity, &self.claims)
             .map_err(|e| response_runtime_error(format!("rkyv encode realtime frame: {e}")))?;
         let output = self
             .dispatch
@@ -439,10 +463,21 @@ impl RealtimeFrameTransformHook for WasmtimeRealtimeFrameTransformHook {
     }
 }
 
+fn claim_refs<'a>(claims: &'a [(String, Vec<u8>)]) -> Vec<v2::ClaimRef<'a>> {
+    claims
+        .iter()
+        .map(|(key, value)| v2::ClaimRef {
+            key: key.as_str(),
+            value: value.as_slice(),
+        })
+        .collect()
+}
+
 fn with_wire_shape_request_v2<R>(
     context: &DialectShapeContext,
     upstream: &Upstream,
     principal: &Principal,
+    claims: &[(String, Vec<u8>)],
     identity: &UpstreamIdentity,
     cookie_redaction: bool,
     with_bytes: impl for<'a> FnOnce(&'a [u8]) -> R,
@@ -505,6 +540,7 @@ fn with_wire_shape_request_v2<R>(
     let query_ref = scrubbed_query
         .as_deref()
         .map(|value| v2::OptionalStrRef { value });
+    let claim_refs = claim_refs(claims);
     let request = v2::ShapeRequestRef {
         request_id: context.request_id.as_str(),
         method: context.method.as_str(),
@@ -515,7 +551,7 @@ fn with_wire_shape_request_v2<R>(
         principal: v2::PrincipalRef {
             id: principal.id.as_str(),
             kind: principal_kind_str,
-            claims: &[],
+            claims: &claim_refs,
         },
         upstream: upstream_ref,
         upstream_identity: identity_ref,
@@ -659,6 +695,9 @@ fn runtime_error_to_dialect(err: WasmtimeRuntimeError) -> DialectError {
         WasmtimeRuntimeError::GuestTrap { phase, source } => DialectError::UnsupportedRequest {
             reason: format!("{phase}: {source}"),
         },
+        WasmtimeRuntimeError::PoolSaturated { .. } => DialectError::PoolSaturated {
+            reason: err.to_string(),
+        },
         other => DialectError::UnsupportedRequest {
             reason: other.to_string(),
         },
@@ -701,6 +740,7 @@ fn v2_upstream_ref(upstream: &Upstream) -> v2::UpstreamRef<'_> {
 fn host_to_wire_transform_response_v2(
     request: &TransformResponseRequest,
     identity: &UpstreamIdentity,
+    claims: &[(String, Vec<u8>)],
 ) -> Result<AlignedVec<16>, RkyvError> {
     let headers = request
         .response_headers
@@ -710,12 +750,13 @@ fn host_to_wire_transform_response_v2(
             value: value.as_bytes(),
         })
         .collect::<Vec<_>>();
+    let claim_refs = claim_refs(claims);
     let wire = v2::TransformResponseRequestRef {
         request_id: request.request_id.as_str(),
         principal: v2::PrincipalRef {
             id: request.principal.id.as_str(),
             kind: principal_kind_to_wire(&request.principal),
-            claims: &[],
+            claims: &claim_refs,
         },
         upstream: v2_upstream_ref(&request.upstream),
         upstream_identity: v2_identity_ref(identity),
@@ -732,6 +773,7 @@ fn host_to_wire_transform_response_v2(
 fn host_to_wire_transform_sse_event_v2(
     request: &TransformSseEventRequest,
     identity: &UpstreamIdentity,
+    claims: &[(String, Vec<u8>)],
 ) -> Result<AlignedVec<16>, RkyvError> {
     let headers = request
         .response_headers
@@ -741,12 +783,13 @@ fn host_to_wire_transform_sse_event_v2(
             value: value.as_bytes(),
         })
         .collect::<Vec<_>>();
+    let claim_refs = claim_refs(claims);
     let wire = v2::TransformSseEventRequestRef {
         request_id: request.request_id.as_str(),
         principal: v2::PrincipalRef {
             id: request.principal.id.as_str(),
             kind: principal_kind_to_wire(&request.principal),
-            claims: &[],
+            claims: &claim_refs,
         },
         upstream: v2_upstream_ref(&request.upstream),
         upstream_identity: v2_identity_ref(identity),
@@ -765,13 +808,15 @@ fn host_to_wire_transform_sse_event_v2(
 fn host_to_wire_transform_realtime_frame_v2(
     request: &TransformRealtimeFrameRequest,
     identity: &UpstreamIdentity,
+    claims: &[(String, Vec<u8>)],
 ) -> Result<AlignedVec<16>, RkyvError> {
+    let claim_refs = claim_refs(claims);
     let wire = v2::TransformRealtimeFrameRequestRef {
         request_id: request.request_id.as_str(),
         principal: v2::PrincipalRef {
             id: request.principal.id.as_str(),
             kind: principal_kind_to_wire(&request.principal),
-            claims: &[],
+            claims: &claim_refs,
         },
         upstream: v2_upstream_ref(&request.upstream),
         upstream_identity: v2_identity_ref(identity),
@@ -1001,6 +1046,7 @@ mod tests {
             &context,
             &Upstream::GeminiDirect { base_url: None },
             &principal(),
+            &[],
             &identity,
             false,
             |bytes| {
@@ -1151,6 +1197,7 @@ mod tests {
                         payload: payload.clone(),
                     },
                     &identity,
+                    &[],
                 )
                 .expect("realtime frame request serializes");
                 let archived =

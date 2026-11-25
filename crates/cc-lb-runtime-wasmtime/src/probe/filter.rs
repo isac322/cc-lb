@@ -17,7 +17,7 @@ use crate::cache::call_hook_export_scoped;
 use crate::cell::PluginCell;
 use crate::error::WasmtimeRuntimeError;
 
-use super::{probe_failed, sample_body, sample_model, sample_path};
+use super::{map_probe_call_error, probe_failed, sample_body, sample_model, sample_path};
 
 pub(super) fn probe_filter_v3(
     cell: &Arc<PluginCell>,
@@ -38,7 +38,7 @@ pub(super) fn probe_filter_v3(
         export,
         <[u8]>::to_vec,
     )
-    .map_err(|error| probe_failed(HookKind::Filter, error.to_string()))?;
+    .map_err(|error| map_probe_call_error(HookKind::Filter, error))?;
     let mut aligned = AlignedVec::<16>::with_capacity(output.len());
     aligned.extend_from_slice(&output);
     rkyv::access::<ArchivedFilterResponseV2, RkyvError>(&aligned).map_err(|error| {

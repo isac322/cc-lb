@@ -17,8 +17,9 @@ use cc_lb_storage_conformance::{
         pool_quota_history_store, price_catalog, principal_store, prompt_cache_observation_store,
         request_event_list, storage_roundtrips, storage_roundtrips_cache_split,
         storage_roundtrips_latency_stages, storage_roundtrips_upstream_diagnostics,
-        upstream_api_key_store, upstream_rate_limit_store, upstream_subscription_metadata_store,
-        upstream_subscription_quota_store, usage_rollup_principal_costs, warmup_attempts_store,
+        thread_sticky_subagent_store, upstream_api_key_store, upstream_rate_limit_store,
+        upstream_subscription_metadata_store, upstream_subscription_quota_store,
+        usage_rollup_principal_costs, warmup_attempts_store,
     },
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite, open_sqlite_existing};
@@ -832,6 +833,14 @@ upstream_api_key_store_sqlite_test!(
     upstream_api_key_conc_access_write_releases_poll_claim_sqlite,
     conc_access_write_releases_poll_claim
 );
+
+#[test]
+fn thread_sticky_subagent_store_sqlite() {
+    run_sqlite_scenario(
+        "thread_sticky_subagent_store",
+        thread_sticky_subagent_store::run_all,
+    );
+}
 
 fn run_sqlite_scenario<F, Fut>(name: &str, scenario: F)
 where

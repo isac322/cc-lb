@@ -10,6 +10,7 @@ use super::serialize_with_input_scratch;
 pub(super) struct FilterWireRequest<'a> {
     pub ctx: &'a RoutingContext,
     pub principal: &'a Principal,
+    pub claims: &'a [(String, Vec<u8>)],
     pub candidates: &'a [UpstreamCandidate],
     pub cookie_redaction: bool,
 }
@@ -20,6 +21,14 @@ impl FilterWireRequest<'_> {
         with_bytes: impl for<'a> FnOnce(&'a [u8]) -> R,
     ) -> Result<R, RkyvError> {
         let principal_kind = principal_kind_to_wire(self.principal);
+        let claim_refs: Vec<v3::ClaimRef<'_>> = self
+            .claims
+            .iter()
+            .map(|(key, value)| v3::ClaimRef {
+                key: key.as_str(),
+                value: value.as_slice(),
+            })
+            .collect();
         let candidate_ids: Vec<String> = self
             .candidates
             .iter()
@@ -42,7 +51,7 @@ impl FilterWireRequest<'_> {
         let principal = v3::PrincipalRef {
             id: self.principal.id.as_str(),
             kind: principal_kind,
-            claims: &[],
+            claims: &claim_refs,
         };
         let quota_refs: Vec<Vec<v2::SubscriptionQuotaSampleRef<'_>>> = self
             .candidates
@@ -327,6 +336,7 @@ mod security_tests {
         FilterWireRequest {
             ctx: &context,
             principal: &principal,
+            claims: &[],
             candidates: &[],
             cookie_redaction: false,
         }
@@ -392,6 +402,7 @@ mod security_tests {
             FilterWireRequest {
                 ctx: &context,
                 principal: &principal,
+                claims: &[],
                 candidates: &[],
                 cookie_redaction: false,
             }

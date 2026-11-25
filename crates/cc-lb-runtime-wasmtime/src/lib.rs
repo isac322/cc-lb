@@ -12,6 +12,7 @@ mod cache;
 mod cell;
 mod compiled_cache;
 mod engine;
+mod epoch;
 mod error;
 mod inspect;
 mod metrics;
@@ -34,6 +35,7 @@ pub use wire_dispatch::WasmPluginWireDispatch;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use budget::StoreBudget;
 use compiled_cache::process_wide_compiled_module_cache;
@@ -46,17 +48,33 @@ pub struct WasmtimeRuntime {
     linker: Arc<Linker<HostState>>,
     config: Arc<HotEngineConfig>,
     store_budget: Arc<StoreBudget>,
+    epoch_deadline_ticks: u64,
     slots: RwLock<HashMap<RuntimeSlotKey, Arc<LoadedPluginSlot>>>,
 }
 
 impl WasmtimeRuntime {
+    pub const DEFAULT_EXECUTION_TIMEOUT: Duration =
+        Duration::from_millis(epoch::DEFAULT_EXECUTION_TIMEOUT_MS);
+
     pub fn new(config: HotEngineConfig) -> Result<Self, WasmtimeRuntimeError> {
+        Self::new_with_execution_timeout(config, Self::DEFAULT_EXECUTION_TIMEOUT)
+    }
+
+    pub fn new_with_execution_timeout(
+        config: HotEngineConfig,
+        execution_timeout: Duration,
+    ) -> Result<Self, WasmtimeRuntimeError> {
         let engine = build_hot_engine(&config)?;
         let linker = Linker::new(&engine);
+        let epoch_deadline_ticks = epoch::ticks_for_timeout(execution_timeout);
         Ok(Self {
             engine: Arc::new(engine),
             linker: Arc::new(linker),
-            store_budget: Arc::new(StoreBudget::new(config.pool_total_core_instances)),
+            store_budget: Arc::new(StoreBudget::with_epoch_deadline_ticks(
+                config.pool_total_core_instances,
+                epoch_deadline_ticks,
+            )),
+            epoch_deadline_ticks,
             config: Arc::new(config),
             slots: RwLock::new(HashMap::new()),
         })
@@ -89,8 +107,13 @@ impl WasmtimeRuntime {
         &self,
         wasm_bytes: &[u8],
     ) -> Result<ModuleInspection, WasmtimeRuntimeError> {
-        let (_, inspection) =
-            module::admit_wasm_agnostic(&self.engine, &self.linker, wasm_bytes, &self.config)?;
+        let (_, inspection) = module::admit_wasm_agnostic_with_deadline(
+            &self.engine,
+            &self.linker,
+            wasm_bytes,
+            &self.config,
+            self.epoch_deadline_ticks,
+        )?;
         Ok(inspection)
     }
 
@@ -155,8 +178,14 @@ impl WasmtimeRuntime {
 
         let name: String = name.into();
         let plugin_name: Arc<str> = Arc::from(name);
-        let (instance_pre, inspection) =
-            module::admit_wasm(&self.engine, &self.linker, kind, wasm_bytes, &self.config)?;
+        let (instance_pre, inspection) = module::admit_wasm_with_deadline(
+            &self.engine,
+            &self.linker,
+            kind,
+            wasm_bytes,
+            &self.config,
+            self.epoch_deadline_ticks,
+        )?;
         let new_cell = PluginCell {
             instance_pre,
             metadata: inspection.metadata,

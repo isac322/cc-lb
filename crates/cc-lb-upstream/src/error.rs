@@ -16,6 +16,12 @@ pub enum DialectError {
         #[from]
         source: url::ParseError,
     },
+    /// Wasmtime store/instance pool is temporarily saturated.
+    #[error("plugin runtime saturated: {reason}")]
+    PoolSaturated {
+        /// Bounded saturation resource description.
+        reason: String,
+    },
 }
 
 /// Signing failures returned by [`crate::Signer`] and [`crate::SignerFactory`].

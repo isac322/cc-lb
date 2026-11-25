@@ -26,16 +26,30 @@ The focused crate READMEs are also useful while building plugins:
 ## Runtime model
 
 The host loads each plugin under a single wasmtime engine configured
-with `signals_based_traps` and request-path timeout/backpressure
-controls rather than Wasmtime instruction metering. Local execution
-defaults to on-demand allocation; each hook call gets a fresh `Store`
-with `StoreLimits` derived from `runtime.wasmtime.memory_max_pages`,
-and the runtime holds a process-wide store budget derived from
-`pool_total_core_instances` so on-demand execution cannot instantiate
-unbounded concurrent stores. Operators that need Wasmtime's pooling
-allocator can opt in with `[runtime.wasmtime] allocation_strategy =
-"pooling"` and tune the reservation/guard/pool totals in the same
-   section.
+with `signals_based_traps`, Wasmtime epoch interruption, and request-path
+timeout/backpressure controls. Every hook call (including upload-time
+admission probes and hot-path dispatch) enforces a per-call timeout
+configured by `[runtime.wasmtime] execution_timeout_ms` (default `1000`
+ms, valid range `10..=30000` ms; deadline is `ceil(timeout_ms / 10) + 1`
+10 ms ticks, yielding `ceil(timeout_ms / 10) * 10` to `+10 ms` nominal
+preemption depending on ticker phase plus OS scheduling delay) to preempt
+runaway or infinite-loop guests. Local execution defaults to on-demand allocation; each hook call
+gets a fresh `Store` with `StoreLimits` derived from
+`runtime.wasmtime.memory_max_pages`, and the runtime holds a
+process-wide store budget derived from `pool_total_core_instances` so
+on-demand execution cannot instantiate unbounded concurrent stores.
+Operators that need Wasmtime's pooling allocator can opt in with
+`[runtime.wasmtime] allocation_strategy = "pooling"` and tune the
+reservation/guard/pool totals in the same section.
+
+By default, `runtime.wasmtime.shape_origin_policy` is
+`"selected_upstream_origin"`, which rejects any shaped URL whose origin
+differs from the selected upstream's `base_url` unless the operator
+explicitly opts into `"unrestricted"`. Both router filter and request
+shaping paths fail closed: plugin traps, epoch timeouts, runtime errors,
+or invalid filter outputs return HTTP `502` without dispatching upstream
+or falling back to raw passthrough, and Wasmtime store/instance pool
+saturation returns HTTP `503` with `Retry-After: 1`.
 
 ## Quick Start
 
@@ -210,9 +224,12 @@ also declare `shape_envelope_gemini` with `provider = "gemini"` and `wire = 2`.
 The host invokes this optional export after native Code Assist wrapping and
 before credentials are applied. It may replace the envelope body or headers, but
 never the host; missing export means no envelope call.
-Principal claims are currently empty on this wire boundary because the
-authenticated principal record does not expose a cheap claims projection;
-plugins must not infer claims from the principal id or credential headers.
+Principal claims (`principal.claims`) carry a deterministic key-value projection
+of the plugin chain entry's JSON `config` object (UTF-8 bytes for scalar string,
+number, boolean, and null values, and canonical sorted-key JSON bytes for arrays
+and nested objects; keys sorted lexicographically). Non-object configs project as
+empty. Plugins still must not infer identity claims from the principal id or
+credential headers.
 
 Each provider/hook combination is optional. Omit unsupported hooks instead of
 writing placeholder no-ops. Without a request hook, the host uses the selected
@@ -227,8 +244,12 @@ OpenAI SSE-event hook also receives each upstream WebSocket frame as an SSE
 event whose `data` is the frame JSON and whose event name is the frame's
 `type`; `Unchanged`, `Replace`, and `Drop` map to unchanged, replacement, and
 dropped WebSocket frames. Buffered-response transforms do not apply to frames.
-Shape failures fall back to the raw frame as they do for HTTP. SSE transform
-failures emit a WebSocket error event and terminate that turn.
+Both router filter and `response.create` shape failures fail closed: plugin
+traps, epoch timeouts, runtime errors, or invalid outputs emit a WebSocket
+error event (`503` `overloaded_error` on pool saturation, `502` `api_error`
+otherwise) and terminate that turn without forwarding the raw unshaped frame.
+SSE transform failures also emit a WebSocket error event and terminate that
+turn.
 
 ### Realtime and Live frame transforms
 

@@ -13,6 +13,7 @@ use cc_lb_storage_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginChainConflictReason, PluginChainEntry,
     PluginChainEntryInput, PluginMetadata, PluginSlotKind, PrincipalStore, Storage, StorageError,
     WasmRegistryEntry, WasmRegistryReference, WasmRegistryReferenceFingerprint, sparse_order,
+    validate_plugin_chain_config,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -489,12 +490,16 @@ async fn insert_chain(
         Ok(order) => order,
         Err(response) => return *response,
     };
+    let config = body.config.unwrap_or_else(|| json!({}));
+    if let Err(err) = validate_plugin_chain_config(&config) {
+        return storage_error(err);
+    }
     let input = PluginChainEntryInput {
         principal_id,
         slot,
         order,
         wasm_registry_id: body.wasm_registry_id,
-        config: body.config.unwrap_or_else(|| json!({})),
+        config,
     };
     match storage.insert_chain_entry(input).await {
         Ok(entry) => {

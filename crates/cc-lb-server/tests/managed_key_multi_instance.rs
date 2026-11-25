@@ -56,8 +56,9 @@ static REBIND_COMPLETIONS: LazyLock<tokio::sync::broadcast::Sender<()>> = LazyLo
     tx
 });
 
-const REBIND_TERMINAL_MESSAGES: [&str; 3] = [
+const REBIND_TERMINAL_MESSAGES: [&str; 4] = [
     "dynamic view rebound after runtime change notification",
+    "managed key cache invalidated after runtime change notification",
     "notify-triggered view rejected: newer generation already resident",
     "dynamic view rebind failed after runtime change notification",
 ];

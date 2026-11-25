@@ -281,6 +281,27 @@ impl Lifecycle {
                 for error in filtered.internal_errors.drain(..) {
                     observer.record_internal_error(error);
                 }
+                if let Some(failure) = filtered.failure.as_ref() {
+                    observer.record_internal_error(failure.internal_error());
+                }
+            }
+            if let Some(failure) = filtered.failure {
+                let (status, error_type) = if failure.is_pool_saturated() {
+                    (503, "overloaded_error")
+                } else {
+                    (502, "api_error")
+                };
+                let mut error =
+                    WebSocketError::new(status, error_type, failure.message().to_owned());
+                if failure.is_pool_saturated() {
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        http::header::RETRY_AFTER,
+                        http::HeaderValue::from_static("1"),
+                    );
+                    error = error.with_provider_headers(&headers);
+                }
+                return Err(error);
             }
             if let Some(target) = sideband_upstream_id {
                 filtered.candidates.retain(|candidate| {

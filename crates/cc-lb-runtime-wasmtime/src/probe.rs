@@ -28,6 +28,7 @@ pub(crate) fn probe_hook_dispatch(
     provider: ProviderFamily,
     metadata: &PluginMetadata,
     memory_max_pages: u32,
+    epoch_deadline_ticks: u64,
 ) -> Result<(), WasmtimeRuntimeError> {
     let export = hook.qualified_export_name(provider);
     let hook_key = export.strip_prefix("cc_lb_").unwrap_or(export);
@@ -45,7 +46,10 @@ pub(crate) fn probe_hook_dispatch(
         instance_pre,
         metadata: metadata.clone(),
         memory_max_pages,
-        store_budget: Arc::new(StoreBudget::new(1)),
+        store_budget: Arc::new(StoreBudget::with_epoch_deadline_ticks(
+            1,
+            epoch_deadline_ticks,
+        )),
         plugin_name: Arc::from(metadata.name.as_str()),
         content_hash: [0; 32],
     });
@@ -83,6 +87,17 @@ fn probe_failed(hook: HookKind, reason: String) -> WasmtimeRuntimeError {
     WasmtimeRuntimeError::ProbeFailed {
         hook: hook.as_str(),
         reason,
+    }
+}
+
+pub(super) fn map_probe_call_error(
+    hook: HookKind,
+    error: WasmtimeRuntimeError,
+) -> WasmtimeRuntimeError {
+    if error.is_pool_saturated() || error.is_epoch_interrupt() {
+        error
+    } else {
+        probe_failed(hook, error.to_string())
     }
 }
 

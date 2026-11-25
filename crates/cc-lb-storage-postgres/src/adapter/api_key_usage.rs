@@ -17,6 +17,7 @@ use crate::{
 };
 
 const RETIRED_WRITER_EPOCH: Uuid = Uuid::nil();
+const MAX_FLUSH_MARKER_PRUNE_BATCHES: usize = 256;
 
 #[async_trait]
 impl ApiKeyUsageBucketStore for PostgresStorage {
@@ -35,28 +36,56 @@ impl ApiKeyUsageBucketStore for PostgresStorage {
         &self,
         flush: &ApiKeyUsageFlush,
     ) -> StorageResult<ApiKeyUsageFlushResult> {
+        let now = unix_secs(self.clock.now());
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        if !flush.deltas.is_empty() {
+            let already_recorded =
+                sqlx::query("SELECT 1 FROM api_key_usage_flushes_v1 WHERE flush_id = $1 LIMIT 1")
+                    .bind(flush.flush_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(map_sqlx_error)?
+                    .is_some();
+            if already_recorded {
+                tx.rollback().await.map_err(map_sqlx_error)?;
+                return Ok(ApiKeyUsageFlushResult::AlreadyApplied);
+            }
+        }
+
         let row = sqlx::query("SELECT lease_until_unix_secs, last_flush_id FROM api_key_usage_writers_v1 WHERE writer_epoch = $1 FOR UPDATE")
             .bind(flush.writer_epoch).fetch_optional(&mut *tx).await.map_err(map_sqlx_error)?;
         let Some(row) = row else {
             tx.rollback().await.map_err(map_sqlx_error)?;
             return Ok(ApiKeyUsageFlushResult::LeaseLost);
         };
-        let lease_until = i64_to_u64(
-            row.try_get("lease_until_unix_secs")
-                .map_err(map_sqlx_error)?,
-            "API-key usage writer lease",
-        )?;
-        if lease_until < unix_secs(self.clock.now()) {
-            tx.rollback().await.map_err(map_sqlx_error)?;
-            return Ok(ApiKeyUsageFlushResult::LeaseLost);
-        }
         let last_flush_id: Option<Uuid> = row.try_get("last_flush_id").map_err(map_sqlx_error)?;
         if last_flush_id == Some(flush.flush_id) {
             tx.rollback().await.map_err(map_sqlx_error)?;
             return Ok(ApiKeyUsageFlushResult::AlreadyApplied);
         }
+        let lease_until = i64_to_u64(
+            row.try_get("lease_until_unix_secs")
+                .map_err(map_sqlx_error)?,
+            "API-key usage writer lease",
+        )?;
+        if lease_until < now {
+            tx.rollback().await.map_err(map_sqlx_error)?;
+            return Ok(ApiKeyUsageFlushResult::LeaseLost);
+        }
         if !flush.deltas.is_empty() {
+            let claimed = sqlx::query(
+                "INSERT INTO api_key_usage_flushes_v1 (flush_id, applied_at_unix_secs) VALUES ($1, $2) ON CONFLICT(flush_id) DO NOTHING RETURNING flush_id",
+            )
+            .bind(flush.flush_id)
+            .bind(u64_to_i64(now, "API-key usage flush timestamp")?)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?
+            .is_some();
+            if !claimed {
+                tx.rollback().await.map_err(map_sqlx_error)?;
+                return Ok(ApiKeyUsageFlushResult::AlreadyApplied);
+            }
             let mut has_duplicate_key = false;
             let mut seen_keys = HashSet::with_capacity(flush.deltas.len());
             let mut prepared = Vec::with_capacity(flush.deltas.len());
@@ -227,10 +256,43 @@ impl ApiKeyUsageBucketStore for PostgresStorage {
             .bind(u64_to_i64(retain_since, "API-key usage retention cutoff")?)
             .bind(i64::try_from(batch_size).unwrap_or(i64::MAX)).execute(&mut *tx).await.map_err(map_sqlx_error)?.rows_affected();
         tx.commit().await.map_err(map_sqlx_error)?;
+        let marker_chunk_size = batch_size.max(1);
+        for _ in 0..MAX_FLUSH_MARKER_PRUNE_BATCHES {
+            let removed = self
+                .prune_expired_api_key_usage_flush_markers(retain_for_secs, marker_chunk_size)
+                .await?;
+            if removed < u64::try_from(marker_chunk_size).unwrap_or(u64::MAX) {
+                break;
+            }
+        }
         Ok(ApiKeyUsageCompactionRun {
             folded_rows: stale.len() as u64,
             pruned_rows: pruned,
         })
+    }
+
+    async fn prune_expired_api_key_usage_flush_markers(
+        &self,
+        retain_for_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        if batch_size == 0 {
+            return Ok(0);
+        }
+        let now = unix_secs(self.clock.now());
+        let retain_since = now.saturating_sub(retain_for_secs);
+        let retain_since_i64 = u64_to_i64(retain_since, "API-key usage retention cutoff")?;
+        let limit_i64 = i64::try_from(batch_size).unwrap_or(i64::MAX);
+        let removed = sqlx::query(
+            "DELETE FROM api_key_usage_flushes_v1 WHERE ctid IN (SELECT ctid FROM api_key_usage_flushes_v1 WHERE applied_at_unix_secs <= $1 ORDER BY applied_at_unix_secs LIMIT $2 FOR UPDATE SKIP LOCKED)",
+        )
+        .bind(retain_since_i64)
+        .bind(limit_i64)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+        Ok(removed)
     }
 }
 
@@ -260,6 +322,32 @@ impl ApiKeyConcurrencyHoldStore for PostgresStorage {
         Ok(())
     }
 
+    async fn delete_uncertain_api_key_concurrency_hold(
+        &self,
+        hold_id: Uuid,
+        key_id: &str,
+    ) -> StorageResult<()> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        // Force READ COMMITTED so taking the advisory lock does not freeze an
+        // earlier REPEATABLE READ snapshot if the session/role defaults stricter.
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(key_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        sqlx::query("DELETE FROM api_key_concurrency_holds_v1 WHERE hold_id = $1")
+            .bind(hold_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
     async fn count_api_key_concurrency_holds(
         &self,
         key_id: &str,
@@ -281,17 +369,14 @@ impl ApiKeyConcurrencyHoldStore for PostgresStorage {
 
     async fn delete_expired_api_key_concurrency_holds(
         &self,
-        now_unix_secs: u64,
+        _now_unix_secs: u64,
         max_age_secs: u64,
     ) -> StorageResult<u64> {
-        let cutoff = now_unix_secs.saturating_sub(max_age_secs);
+        let max_age = i64::try_from(max_age_secs).unwrap_or(i64::MAX);
         let deleted = sqlx::query(
-            "DELETE FROM api_key_concurrency_holds_v1 WHERE acquired_at_unix_secs <= $1",
+            "DELETE FROM api_key_concurrency_holds_v1 WHERE acquired_at_unix_secs <= (EXTRACT(EPOCH FROM NOW())::BIGINT - $1)",
         )
-        .bind(u64_to_i64(
-            cutoff,
-            "API-key concurrency hold expiry cutoff",
-        )?)
+        .bind(max_age)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?
@@ -302,24 +387,70 @@ impl ApiKeyConcurrencyHoldStore for PostgresStorage {
     async fn refresh_api_key_concurrency_holds(
         &self,
         hold_ids: &[Uuid],
-        now_unix_secs: u64,
+        _now_unix_secs: u64,
     ) -> StorageResult<u64> {
         if hold_ids.is_empty() {
             return Ok(0);
         }
         let rows_affected = sqlx::query(
-            "UPDATE api_key_concurrency_holds_v1 SET acquired_at_unix_secs = $1 WHERE hold_id = ANY($2::uuid[])",
+            "UPDATE api_key_concurrency_holds_v1 SET acquired_at_unix_secs = EXTRACT(EPOCH FROM NOW())::BIGINT WHERE hold_id = ANY($1::uuid[])",
         )
-        .bind(u64_to_i64(
-            now_unix_secs,
-            "API-key concurrency hold refreshed_at",
-        )?)
         .bind(hold_ids)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?
         .rows_affected();
         Ok(rows_affected)
+    }
+
+    async fn try_acquire_api_key_concurrency_hold(
+        &self,
+        hold_id: Uuid,
+        key_id: &str,
+        writer_epoch: Uuid,
+        cap: u32,
+        max_age_secs: u64,
+    ) -> StorageResult<bool> {
+        if cap == 0 {
+            return Ok(false);
+        }
+        let max_age = i64::try_from(max_age_secs).unwrap_or(i64::MAX);
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        // Force READ COMMITTED so taking the advisory lock does not freeze an
+        // earlier REPEATABLE READ snapshot if the session/role defaults stricter.
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(key_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        let row = sqlx::query(
+            "SELECT COUNT(*)::BIGINT AS live FROM api_key_concurrency_holds_v1 WHERE key_id = $1 AND acquired_at_unix_secs > (EXTRACT(EPOCH FROM NOW())::BIGINT - $2)",
+        )
+        .bind(key_id)
+        .bind(max_age)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        let live = row.try_get::<i64, _>("live").map_err(map_sqlx_error)?;
+        if live >= i64::from(cap) {
+            tx.rollback().await.map_err(map_sqlx_error)?;
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO api_key_concurrency_holds_v1 (hold_id, key_id, writer_epoch, acquired_at_unix_secs) VALUES ($1, $2, $3, EXTRACT(EPOCH FROM NOW())::BIGINT) ON CONFLICT(hold_id) DO NOTHING",
+        )
+        .bind(hold_id)
+        .bind(key_id)
+        .bind(writer_epoch)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(true)
     }
 }
 

@@ -4,19 +4,31 @@ use std::time::Duration;
 
 use cc_lb_aead::AeadService;
 use cc_lb_clock::ClockHandle;
-use cc_lb_control::DynamicViewHolder;
+use cc_lb_control::{DynamicViewHolder, PromptCacheObservationSinkLike, UpstreamRateLimitCache};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{PluginSlotKind, StorageResult, UpstreamRecord, upstream::UpstreamKind};
+use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed};
 
-use crate::dynamic_view_builder::{Stores, build_dynamic_view, list_upstreams};
+use crate::dynamic_view_builder::{
+    DynamicViewPluginScope, Stores, build_dynamic_view_with_scope_and_rate_limit_cache,
+    list_upstreams,
+};
 use crate::revision_hash::compute_revision_hash;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
-use cc_lb_control::PromptCacheObservationSinkLike;
 
 const RECONNECT_REQUIRED_SEED: u64 = 0x7265_636f_6e6e_6563;
+pub(crate) const TRANSIENT_PLUGIN_RETRY_MAX_ATTEMPTS: u32 = 5;
+const TRANSIENT_PLUGIN_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
+const TRANSIENT_PLUGIN_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Default)]
+struct TransientPluginRetryState {
+    revision_hash: Option<u64>,
+    attempts: u32,
+}
 
 pub struct Reconciler {
     pub stores: Arc<Stores>,
@@ -30,9 +42,12 @@ pub struct Reconciler {
     pub prompt_cache_grace_margin_secs: u64,
     pub prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
     pub subscription_quota_routing_max_staleness_secs: u64,
+    pub upstream_rate_limit_cache: Arc<RwLock<UpstreamRateLimitCache>>,
     pub clock: ClockHandle,
     pub gemini_config: Option<cc_lb_config::GeminiOAuthConfig>,
     pub antigravity_config: Option<cc_lb_config::AntigravityOAuthConfig>,
+    pub plugin_scope: DynamicViewPluginScope,
+    transient_plugin_retry: Mutex<TransientPluginRetryState>,
 }
 
 impl Reconciler {
@@ -53,6 +68,7 @@ impl Reconciler {
         gemini_config: Option<cc_lb_config::GeminiOAuthConfig>,
         antigravity_config: Option<cc_lb_config::AntigravityOAuthConfig>,
     ) -> Self {
+        let upstream_rate_limit_cache = Arc::clone(&holder.load().upstream_rate_limit_cache);
         Self {
             stores,
             holder,
@@ -65,10 +81,65 @@ impl Reconciler {
             prompt_cache_grace_margin_secs,
             prompt_cache_observation_sink,
             subscription_quota_routing_max_staleness_secs,
+            upstream_rate_limit_cache,
             clock,
             gemini_config,
             antigravity_config,
+            plugin_scope: DynamicViewPluginScope::All,
+            transient_plugin_retry: Mutex::new(TransientPluginRetryState::default()),
         }
+    }
+
+    pub fn with_plugin_scope(mut self, plugin_scope: DynamicViewPluginScope) -> Self {
+        self.plugin_scope = plugin_scope;
+        self
+    }
+
+    fn clear_transient_plugin_retry(&self) {
+        let mut state = self.transient_plugin_retry.lock();
+        state.revision_hash = None;
+        state.attempts = 0;
+    }
+
+    fn transient_retry_attempts_for(&self, hash: u64) -> Option<u32> {
+        let mut state = self.transient_plugin_retry.lock();
+        if state.revision_hash != Some(hash) {
+            state.revision_hash = Some(hash);
+            state.attempts = 0;
+        }
+        (state.attempts < TRANSIENT_PLUGIN_RETRY_MAX_ATTEMPTS).then_some(state.attempts)
+    }
+
+    fn record_transient_retry_attempt(&self, hash: u64) {
+        let mut state = self.transient_plugin_retry.lock();
+        if state.revision_hash != Some(hash) {
+            state.revision_hash = Some(hash);
+            state.attempts = 1;
+        } else {
+            state.attempts = state.attempts.saturating_add(1);
+        }
+    }
+
+    fn seed_transient_retry_for(&self, hash: u64) {
+        let mut state = self.transient_plugin_retry.lock();
+        state.revision_hash = Some(hash);
+        state.attempts = 0;
+    }
+
+    fn next_transient_retry_delay(&self) -> Option<Duration> {
+        let current = self.holder.load();
+        if !current.has_retryable_plugin_failure() {
+            self.clear_transient_plugin_retry();
+            return None;
+        }
+        let hash = current.upstream_status_snapshot.revision_hash;
+        let attempts = self.transient_retry_attempts_for(hash)?;
+        let shift = attempts.min(5);
+        Some(
+            TRANSIENT_PLUGIN_RETRY_INITIAL_DELAY
+                .saturating_mul(1u32 << shift)
+                .min(TRANSIENT_PLUGIN_RETRY_MAX_DELAY),
+        )
     }
 
     pub async fn run(self: Arc<Self>) {
@@ -76,8 +147,26 @@ impl Reconciler {
         interval.tick().await;
 
         loop {
+            if let Some(retry_delay) = self.next_transient_retry_delay() {
+                tokio::select! {
+                    _ = self.cancel.cancelled() => return,
+                    _ = tokio::time::sleep(retry_delay) => {}
+                    _ = interval.tick() => {}
+                }
+
+                let result = tokio::select! {
+                    _ = self.cancel.cancelled() => return,
+                    result = self.reconcile_fast_retry_once() => result,
+                };
+                if let Err(error) = result {
+                    tracing::warn!(error = %error, "dynamic reconciliation transient retry failed");
+                }
+                continue;
+            }
+
             tokio::select! {
                 _ = self.cancel.cancelled() => return,
+                _ = self.holder.wait_for_retryable_plugin_failure() => continue,
                 _ = interval.tick() => {}
             }
 
@@ -99,11 +188,31 @@ impl Reconciler {
     }
 
     pub async fn reconcile_once(&self) -> StorageResult<()> {
+        self.reconcile_once_inner(false).await
+    }
+
+    pub(crate) async fn reconcile_fast_retry_once(&self) -> StorageResult<()> {
+        self.reconcile_once_inner(true).await
+    }
+
+    async fn reconcile_once_inner(&self, is_fast_retry: bool) -> StorageResult<()> {
         self.hydrate_subscription_quota_cache().await;
 
-        // Lock-free fast path: an unchanged signature needs no rebuild.
-        let hash = collect_revision_hash(&self.stores).await?;
-        if hash == self.holder.load().upstream_status_snapshot.revision_hash {
+        // Lock-free fast path: an unchanged signature needs no rebuild unless
+        // a transient plugin admission failure requires recovery. Ordinary periodic
+        // reconciliation continues retrying even after the fast retry budget
+        // expires so temporary saturation eventually heals once capacity returns.
+        let hash = collect_revision_hash_for_scope(&self.stores, self.plugin_scope).await?;
+        let resident = self.holder.load();
+        let hash_changed = hash != resident.upstream_status_snapshot.revision_hash;
+        if !resident.has_retryable_plugin_failure() {
+            self.clear_transient_plugin_retry();
+        }
+        let retry_transient = !hash_changed
+            && resident.has_retryable_plugin_failure()
+            && (!is_fast_retry || self.transient_retry_attempts_for(hash).is_some());
+        if !hash_changed && !retry_transient {
+            self.hydrate_upstream_rate_limit_cache().await;
             metrics::counter!("cclb_reconcile_total", "outcome" => "unchanged").increment(1);
             return Ok(());
         }
@@ -115,14 +224,29 @@ impl Reconciler {
         // sample.
         let _rebuild_guard = self.holder.lock_rebuild().await;
         let current = self.holder.load();
-        let hash = collect_revision_hash(&self.stores).await?;
-        if hash == current.upstream_status_snapshot.revision_hash {
+        let hash = collect_revision_hash_for_scope(&self.stores, self.plugin_scope).await?;
+        let hash_changed = hash != current.upstream_status_snapshot.revision_hash;
+        if !current.has_retryable_plugin_failure() {
+            self.clear_transient_plugin_retry();
+        }
+        let retry_transient = !hash_changed
+            && current.has_retryable_plugin_failure()
+            && (!is_fast_retry || self.transient_retry_attempts_for(hash).is_some());
+        if !hash_changed && !retry_transient {
+            drop(current);
+            drop(_rebuild_guard);
+            self.hydrate_upstream_rate_limit_cache().await;
             metrics::counter!("cclb_reconcile_total", "outcome" => "unchanged").increment(1);
             return Ok(());
         }
+        if hash_changed {
+            self.clear_transient_plugin_retry();
+        } else if is_fast_retry && retry_transient {
+            self.record_transient_retry_attempt(hash);
+        }
         let generation = current.generation;
         drop(current);
-        match build_dynamic_view(
+        match build_dynamic_view_with_scope_and_rate_limit_cache(
             &self.stores,
             self.gemini_config.as_ref(),
             self.antigravity_config.as_ref(),
@@ -136,15 +260,24 @@ impl Reconciler {
             self.prompt_cache_observation_sink.clone(),
             self.subscription_quota_routing_max_staleness_secs,
             self.clock.clone(),
+            Arc::clone(&self.upstream_rate_limit_cache),
+            self.plugin_scope,
         )
         .await
         {
             Ok(view) => {
+                let retryable = view.has_retryable_plugin_failure();
+                let rebuilt_hash = view.upstream_status_snapshot.revision_hash;
                 // Defensive CAS: under the rebuild lock every live
                 // publisher builds from the resident generation, so a
                 // rejection only follows saturation or an out-of-protocol
                 // publication.
                 if self.holder.try_store_if_newer(view) {
+                    if !retryable {
+                        self.clear_transient_plugin_retry();
+                    } else if hash_changed {
+                        self.seed_transient_retry_for(rebuilt_hash);
+                    }
                     metrics::counter!("cclb_reconcile_total", "outcome" => "changed").increment(1);
                 } else {
                     metrics::counter!("cclb_reconcile_total", "outcome" => "stale").increment(1);
@@ -186,6 +319,35 @@ impl Reconciler {
             tracing::warn!(%error, "periodic subscription quota cache hydrate failed");
         }
     }
+
+    /// Periodic backstop for `upstream_rate_limit_cache` when NOTIFY delivery
+    /// lags or drops on an idle proxy replica. Hydrates monotonically per slot.
+    async fn hydrate_upstream_rate_limit_cache(&self) {
+        let upstream_ids = self
+            .holder
+            .load()
+            .upstreams_snapshot()
+            .iter()
+            .map(|upstream| upstream.id)
+            .collect::<Vec<Uuid>>();
+        if upstream_ids.is_empty() {
+            return;
+        }
+        match self
+            .stores
+            .upstream_rate_limits
+            .list_for_upstream_ids(&upstream_ids)
+            .await
+        {
+            Ok(records) => {
+                let mut cache = self.upstream_rate_limit_cache.write();
+                cache.merge_records(records);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "periodic upstream rate limit cache hydrate failed");
+            }
+        }
+    }
 }
 
 /// Hashes the current storage state; `reconcile_once` compares this with the
@@ -196,7 +358,15 @@ impl Reconciler {
 /// reconcile rebuilds. The material also folds the monotonic OAuth token
 /// generation, so a reconnect that clears the marker again cannot return the
 /// hash to a sample taken before the captured failure.
+#[cfg(test)]
 pub(crate) async fn collect_revision_hash(stores: &Stores) -> StorageResult<u64> {
+    collect_revision_hash_for_scope(stores, DynamicViewPluginScope::All).await
+}
+
+pub(crate) async fn collect_revision_hash_for_scope(
+    stores: &Stores,
+    plugin_scope: DynamicViewPluginScope,
+) -> StorageResult<u64> {
     let upstreams = list_upstreams(stores)
         .await?
         .iter()
@@ -229,19 +399,24 @@ pub(crate) async fn collect_revision_hash(stores: &Stores) -> StorageResult<u64>
             break;
         }
         offset += page.len();
-        let page_ids = page
-            .iter()
-            .map(|principal| principal.id)
-            .collect::<Vec<_>>();
-        let page_chains = stores
-            .plugin_registry
-            .list_chains_for_principals(&page_ids, &[PluginSlotKind::Router, PluginSlotKind::Shape])
-            .await?;
-        chains.extend(
-            page_chains
-                .into_iter()
-                .map(|entry| (entry.id, entry.revision)),
-        );
+        if plugin_scope == DynamicViewPluginScope::All {
+            let page_ids = page
+                .iter()
+                .map(|principal| principal.id)
+                .collect::<Vec<_>>();
+            let page_chains = stores
+                .plugin_registry
+                .list_chains_for_principals(
+                    &page_ids,
+                    &[PluginSlotKind::Router, PluginSlotKind::Shape],
+                )
+                .await?;
+            chains.extend(
+                page_chains
+                    .into_iter()
+                    .map(|entry| (entry.id, entry.revision)),
+            );
+        }
         principals.extend(
             page.into_iter()
                 .map(|principal| (principal.id, principal.revision)),

@@ -40,7 +40,8 @@ use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 use crate::dynamic_view_builder::{
-    Stores as DynamicStores, VertexState, build_dynamic_view, ensure_wasm_cache_dirs,
+    DynamicViewPluginScope, Stores as DynamicStores, VertexState, build_dynamic_view_with_scope,
+    ensure_wasm_cache_dirs,
 };
 use crate::notify_listener::{NotifyListener, NotifyListenerParams};
 use crate::preflight;
@@ -261,8 +262,10 @@ pub(super) async fn serve_runtime(
     } = shutdown;
     server_state.wait_for_ready().await;
     let proxy_listener = TcpListener::bind(proxy_addr).await?;
+    cc_lb_runtime_sync::warn_if_container_loopback_bind("proxy", proxy_addr);
     let admin_handle = if let Some((admin_router, admin_addr)) = admin {
         let admin_listener = TcpListener::bind(admin_addr).await?;
+        cc_lb_runtime_sync::warn_if_container_loopback_bind("admin", admin_addr);
         let (admin_stop_tx, admin_shutdown) = watch::channel(false);
         let admin_task = tokio::spawn(async move {
             axum::serve(admin_listener, admin_router)
@@ -551,7 +554,21 @@ pub(super) async fn build_runtime_with_storage_core(
     let server_state = Arc::new(ServerStateHandle::new_starting());
     let metrics_hook: Arc<dyn cc_lb_observability::EngineMetricsHook> =
         Arc::new(cc_lb_observability::MetricsCrateHook);
-    let key_store = Arc::new(KeyStore::new(managed_store));
+    let key_store = match &config.storage {
+        cc_lb_config::StorageConfig::Postgres { .. } => {
+            if let Some(conn_state) = storage.connection_state() {
+                Arc::new(KeyStore::new(managed_store).with_positive_cache(conn_state))
+            } else {
+                Arc::new(KeyStore::new(managed_store))
+            }
+        }
+        cc_lb_config::StorageConfig::Sqlite { .. } => {
+            Arc::new(KeyStore::new(managed_store).with_positive_cache(Arc::new(
+                cc_lb_storage_api::NotifierConnectionState::new_always_connected(),
+            )))
+        }
+    };
+    let thread_sticky_subagent_latch = Arc::new(cc_lb_engine::ThreadStickySubagentLatch::new());
     let price_catalog = cc_lb_pricing::global_catalog().clone();
     let (price_catalog_install_cancel, price_catalog_install_task) =
         spawn_price_catalog_local_installer(
@@ -559,7 +576,8 @@ pub(super) async fn build_runtime_with_storage_core(
             storage.clone(),
             price_catalog.clone(),
             clock.clone(),
-        );
+        )
+        .await;
     let (sink, audit_writer_task) = spawn_audit_writer(storage.clone(), 1024);
     let audit_sink = Arc::new(sink);
     let (upstream_rate_limit_sink, upstream_rate_limit_receiver) =
@@ -590,25 +608,9 @@ pub(super) async fn build_runtime_with_storage_core(
         }),
         clock.clone(),
     ));
-    let mut hot_engine_cfg = hot_engine_config_from_config(&config);
-    hot_engine_cfg.shape_origin_policy = match config.runtime.wasmtime.shape_origin_policy {
-        cc_lb_config::ShapeOriginPolicy::Unrestricted => {
-            cc_lb_runtime_wasmtime::policy::ShapeOriginPolicy::Unrestricted
-        }
-        cc_lb_config::ShapeOriginPolicy::SelectedUpstreamOrigin => {
-            cc_lb_runtime_wasmtime::policy::ShapeOriginPolicy::SelectedUpstreamOrigin
-        }
-    };
-    let bounds = &config.runtime.wasmtime.wire_bounds;
-    hot_engine_cfg.wire_bounds = cc_lb_runtime_wasmtime::policy::PluginWireBounds {
-        output_body_bytes: bounds.output_body_bytes,
-        max_headers: bounds.max_headers,
-        max_header_value_bytes: bounds.max_header_value_bytes,
-        reason_bytes: bounds.reason_bytes,
-    };
-    hot_engine_cfg.cookie_redaction = config.runtime.wasmtime.cookie_redaction;
     let runtime =
-        Arc::new(WasmtimeRuntime::new(hot_engine_cfg).map_err(BuildError::WasmtimeRuntimeInit)?);
+        cc_lb_runtime_sync::wasmtime_builder::build_wasmtime_runtime(&config.runtime.wasmtime)
+            .map_err(BuildError::WasmtimeRuntimeInit)?;
     let (wasmtime_pool_metrics_cancel, wasmtime_pool_metrics_task) =
         spawn_wasmtime_pool_metrics_publisher(runtime.clone());
     let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
@@ -744,7 +746,12 @@ pub(super) async fn build_runtime_with_storage_core(
         lazy_refresher_concrete.as_ref().map(|refresher| {
             refresher.clone() as Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>
         });
-    let initial_view = build_dynamic_view(
+    let plugin_scope = if role == ProxyRole::WorkerOnly {
+        DynamicViewPluginScope::WarmupOnly
+    } else {
+        DynamicViewPluginScope::All
+    };
+    let initial_view = build_dynamic_view_with_scope(
         &stores,
         config.oauth.gemini.as_ref(),
         config.oauth.antigravity.as_ref(),
@@ -758,30 +765,36 @@ pub(super) async fn build_runtime_with_storage_core(
         prompt_cache_observation_sink.clone(),
         config.subscription_quota.routing_max_staleness_secs,
         clock.clone(),
+        plugin_scope,
     )
     .await?;
     let dynamic_view_holder = Arc::new(DynamicViewHolder::new(initial_view.clone()));
     let notify_cancel = CancellationToken::new();
     let notifier: Arc<dyn RuntimeChangeNotifier> = storage_for_dynamic.clone();
-    let notify_listener = Arc::new(NotifyListener::new(NotifyListenerParams {
-        notifier: Arc::clone(&notifier),
-        cancel: notify_cancel.clone(),
-        holder: Arc::clone(&dynamic_view_holder),
-        stores: Arc::clone(&stores),
-        runtime: Arc::clone(&runtime),
-        aead: aead.clone(),
-        data_dir: data_dir.clone(),
-        lazy_refresher: lazy_refresher.clone(),
-        subscription_quota_cache: subscription_quota_cache.clone(),
-        prompt_cache_grace_margin_secs,
-        prompt_cache_observation_sink: prompt_cache_observation_sink.clone(),
-        subscription_quota_routing_max_staleness_secs: config
-            .subscription_quota
-            .routing_max_staleness_secs,
-        clock: clock.clone(),
-        gemini_config: config.oauth.gemini.clone(),
-        antigravity_config: config.oauth.antigravity.clone(),
-    }));
+    let notify_listener = Arc::new(
+        NotifyListener::new(NotifyListenerParams {
+            notifier: Arc::clone(&notifier),
+            cancel: notify_cancel.clone(),
+            holder: Arc::clone(&dynamic_view_holder),
+            stores: Arc::clone(&stores),
+            runtime: Arc::clone(&runtime),
+            aead: aead.clone(),
+            data_dir: data_dir.clone(),
+            lazy_refresher: lazy_refresher.clone(),
+            subscription_quota_cache: subscription_quota_cache.clone(),
+            prompt_cache_grace_margin_secs,
+            prompt_cache_observation_sink: prompt_cache_observation_sink.clone(),
+            subscription_quota_routing_max_staleness_secs: config
+                .subscription_quota
+                .routing_max_staleness_secs,
+            key_store: Some(Arc::clone(&key_store)),
+            thread_sticky_subagent_latch: Some(Arc::clone(&thread_sticky_subagent_latch)),
+            clock: clock.clone(),
+            gemini_config: config.oauth.gemini.clone(),
+            antigravity_config: config.oauth.antigravity.clone(),
+        })
+        .with_plugin_scope(plugin_scope),
+    );
     let initial_notify_rx = notify_listener.try_subscribe_once().await;
     let notifier_task = {
         let notifier = Arc::clone(&notifier);
@@ -1073,6 +1086,11 @@ pub(super) async fn build_runtime_with_storage_core(
     lifecycle = lifecycle.with_upstream_affinity_store(
         storage.clone() as Arc<dyn cc_lb_storage_api::UpstreamAffinityStore>
     );
+    lifecycle = lifecycle
+        .with_thread_sticky_subagent_latch(thread_sticky_subagent_latch)
+        .with_thread_sticky_subagent_store(
+            storage.clone() as Arc<dyn cc_lb_storage_api::ThreadStickySubagentStore>
+        );
     lifecycle = lifecycle.with_cache_keepalive_enqueuer(cache_keepalive_enqueuer);
     lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), builtin_authn.clone());
     lifecycle = lifecycle.with_limit_cost_estimator(Arc::new(PricingLimitCostEstimator {
@@ -1318,6 +1336,7 @@ pub(super) async fn build_runtime_with_storage_core(
         clock: clock.clone(),
         gemini_config: config.oauth.gemini.clone(),
         antigravity_config: config.oauth.antigravity.clone(),
+        plugin_scope,
     });
     spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
     let state = ProxyState {
@@ -1433,37 +1452,13 @@ pub(super) fn spawn_wasmtime_pool_metrics_publisher(
     (cancel, task)
 }
 
+#[cfg(test)]
 pub(super) fn hot_engine_config_from_config(
     config: &Config,
 ) -> cc_lb_runtime_wasmtime::HotEngineConfig {
-    let defaults = cc_lb_runtime_wasmtime::HotEngineConfig::default();
-    let wasmtime = &config.runtime.wasmtime;
-    cc_lb_runtime_wasmtime::HotEngineConfig {
-        allocation_strategy: match wasmtime.allocation_strategy {
-            cc_lb_config::WasmtimeAllocationStrategy::OnDemand => {
-                cc_lb_runtime_wasmtime::HotEngineAllocationStrategy::OnDemand
-            }
-            cc_lb_config::WasmtimeAllocationStrategy::Pooling => {
-                cc_lb_runtime_wasmtime::HotEngineAllocationStrategy::Pooling
-            }
-        },
-        memory_max_pages: wasmtime
-            .memory_max_pages
-            .unwrap_or(defaults.memory_max_pages),
-        memory_reservation_bytes: wasmtime
-            .memory_reservation_bytes
-            .unwrap_or(defaults.memory_reservation_bytes),
-        memory_guard_bytes: wasmtime
-            .memory_guard_bytes
-            .unwrap_or(defaults.memory_guard_bytes),
-        pool_total_memories: wasmtime
-            .pool_total_memories
-            .unwrap_or(defaults.pool_total_memories),
-        pool_total_core_instances: wasmtime
-            .pool_total_core_instances
-            .unwrap_or(defaults.pool_total_core_instances),
-        ..defaults
-    }
+    cc_lb_runtime_sync::wasmtime_builder::hot_engine_config_from_wasmtime_config(
+        &config.runtime.wasmtime,
+    )
 }
 
 pub(super) struct ServerMetadataRefreshEnqueue {
@@ -1512,25 +1507,29 @@ pub(super) struct ReconcilerParams {
     pub(super) clock: ClockHandle,
     pub(super) gemini_config: Option<cc_lb_config::GeminiOAuthConfig>,
     pub(super) antigravity_config: Option<cc_lb_config::AntigravityOAuthConfig>,
+    pub(super) plugin_scope: DynamicViewPluginScope,
 }
 
 pub(super) fn spawn_reconciler(params: ReconcilerParams) {
-    let reconciler = Arc::new(Reconciler::new(
-        params.stores,
-        params.holder,
-        params.runtime,
-        params.aead,
-        params.lazy_refresher,
-        params.cancel,
-        params.data_dir,
-        params.subscription_quota_cache,
-        params.prompt_cache_grace_margin_secs,
-        params.prompt_cache_observation_sink,
-        params.subscription_quota_routing_max_staleness_secs,
-        params.clock,
-        params.gemini_config,
-        params.antigravity_config,
-    ));
+    let reconciler = Arc::new(
+        Reconciler::new(
+            params.stores,
+            params.holder,
+            params.runtime,
+            params.aead,
+            params.lazy_refresher,
+            params.cancel,
+            params.data_dir,
+            params.subscription_quota_cache,
+            params.prompt_cache_grace_margin_secs,
+            params.prompt_cache_observation_sink,
+            params.subscription_quota_routing_max_staleness_secs,
+            params.clock,
+            params.gemini_config,
+            params.antigravity_config,
+        )
+        .with_plugin_scope(params.plugin_scope),
+    );
     tokio::spawn(reconciler.run());
 }
 
@@ -1606,23 +1605,32 @@ pub(super) struct ProxyState {
     pub(super) websocket_bulkhead_config: BulkheadRuntimeConfig,
 }
 
-pub(super) fn spawn_price_catalog_local_installer(
+pub(super) async fn spawn_price_catalog_local_installer(
     config: &Config,
     storage: Arc<dyn Storage>,
     price_catalog: Arc<cc_lb_pricing::PriceCatalog>,
     clock: ClockHandle,
 ) -> (CancellationToken, JoinHandle<()>) {
-    install_default_fallback_if_uninitialized(&price_catalog, &*clock);
-
     let cfg = &config.price_catalog;
     let storage_cache: Arc<dyn cc_lb_storage_api::PriceCatalogCache> = storage;
     let loader = cc_lb_pricing::LiteLlmLoader::new(
-        price_catalog,
+        price_catalog.clone(),
         storage_cache,
         cfg.url.clone(),
         cfg.cache_path.clone(),
         clock.clone(),
     );
+    if tokio::time::timeout(
+        Duration::from_secs(5),
+        run_price_catalog_local_install(&loader),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!("timed out waiting for initial LiteLLM price catalog local install");
+    }
+    install_default_fallback_if_uninitialized(&price_catalog, &*clock);
+
     tracing::info!(
         local_install_interval_secs = PRICE_CATALOG_LOCAL_INSTALL_INTERVAL.as_secs(),
         cache_path = %cfg.cache_path.display(),
@@ -1631,9 +1639,12 @@ pub(super) fn spawn_price_catalog_local_installer(
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
     let task = tokio::spawn(async move {
-        run_price_catalog_local_install(&loader).await;
         let mut interval = tokio::time::interval(PRICE_CATALOG_LOCAL_INSTALL_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tokio::select! {
+            _ = task_cancel.cancelled() => return,
+            _ = interval.tick() => {}
+        }
         loop {
             tokio::select! {
                 _ = task_cancel.cancelled() => return,

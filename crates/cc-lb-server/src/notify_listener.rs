@@ -6,16 +6,18 @@ use std::time::{Duration, Instant};
 use backon::{BackoffBuilder as _, ExponentialBuilder};
 use cc_lb_aead::AeadService;
 use cc_lb_clock::ClockHandle;
-use cc_lb_control::DynamicViewHolder;
-use cc_lb_control::PromptCacheObservationSinkLike;
+use cc_lb_control::api_keys::key_store::KeyStore;
+use cc_lb_control::{DynamicViewHolder, PromptCacheObservationSinkLike, UpstreamRateLimitCache};
+use cc_lb_engine::ThreadStickySubagentLatch;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{ChangeChannel, ChangeEvent, RuntimeChangeNotifier};
+use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::dynamic_view_builder::{self, Stores};
+use crate::dynamic_view_builder::{self, DynamicViewPluginScope, Stores};
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
 pub struct NotifyListener {
@@ -31,9 +33,13 @@ pub struct NotifyListener {
     prompt_cache_grace_margin_secs: u64,
     prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
     subscription_quota_routing_max_staleness_secs: u64,
+    upstream_rate_limit_cache: Arc<RwLock<UpstreamRateLimitCache>>,
+    key_store: Option<Arc<KeyStore>>,
+    thread_sticky_subagent_latch: Option<Arc<ThreadStickySubagentLatch>>,
     clock: ClockHandle,
     gemini_config: Option<cc_lb_config::GeminiOAuthConfig>,
     antigravity_config: Option<cc_lb_config::AntigravityOAuthConfig>,
+    plugin_scope: DynamicViewPluginScope,
 }
 
 pub struct NotifyListenerParams {
@@ -49,6 +55,8 @@ pub struct NotifyListenerParams {
     pub prompt_cache_grace_margin_secs: u64,
     pub prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
     pub subscription_quota_routing_max_staleness_secs: u64,
+    pub key_store: Option<Arc<KeyStore>>,
+    pub thread_sticky_subagent_latch: Option<Arc<ThreadStickySubagentLatch>>,
     pub clock: ClockHandle,
     pub gemini_config: Option<cc_lb_config::GeminiOAuthConfig>,
     pub antigravity_config: Option<cc_lb_config::AntigravityOAuthConfig>,
@@ -56,6 +64,7 @@ pub struct NotifyListenerParams {
 
 impl NotifyListener {
     pub fn new(params: NotifyListenerParams) -> Self {
+        let upstream_rate_limit_cache = Arc::clone(&params.holder.load().upstream_rate_limit_cache);
         Self {
             notifier: params.notifier,
             cancel: params.cancel,
@@ -70,9 +79,27 @@ impl NotifyListener {
             prompt_cache_observation_sink: params.prompt_cache_observation_sink,
             subscription_quota_routing_max_staleness_secs: params
                 .subscription_quota_routing_max_staleness_secs,
+            upstream_rate_limit_cache,
+            key_store: params.key_store,
+            thread_sticky_subagent_latch: params.thread_sticky_subagent_latch,
             gemini_config: params.gemini_config,
             antigravity_config: params.antigravity_config,
             clock: params.clock,
+            plugin_scope: DynamicViewPluginScope::All,
+        }
+    }
+
+    pub fn with_plugin_scope(mut self, plugin_scope: DynamicViewPluginScope) -> Self {
+        self.plugin_scope = plugin_scope;
+        self
+    }
+
+    fn accepts_rebind_channel(&self, channel: ChangeChannel) -> bool {
+        match self.plugin_scope {
+            DynamicViewPluginScope::All => is_rebind_channel(channel),
+            DynamicViewPluginScope::WarmupOnly => {
+                is_rebind_channel(channel) && channel != ChangeChannel::PluginChain
+            }
         }
     }
 
@@ -123,19 +150,90 @@ impl NotifyListener {
                 _ = self.cancel.cancelled() => break,
                 event = rx.recv() => {
                     match event {
-                        Ok(event) if is_rebind_channel(event.channel) => self.debounce_and_rebuild(&mut rx).await,
+                        Ok(event) if is_immediate_cache_channel(event.channel) => {
+                            self.handle_immediate_cache_event(&event);
+                        }
+                        Ok(event) if self.accepts_rebind_channel(event.channel) => {
+                            if event.channel == ChangeChannel::Principal {
+                                self.invalidate_all_caches_on_reset();
+                            }
+                            self.debounce_and_rebuild(&mut rx).await;
+                        }
                         Ok(event) if is_hydrate_channel(event.channel) => {
                             self.debounce_and_hydrate(&mut rx, event).await
                         }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             tracing::warn!(skipped, "runtime change listener lagged; rebuilding from latest storage state");
+                            self.invalidate_all_caches_on_reset();
                             self.debounce_and_rebuild(&mut rx).await;
                         }
-                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Closed) => {
+                            self.invalidate_all_caches_on_reset();
+                            break;
+                        }
                     }
                 }
             }
+        }
+    }
+
+    fn invalidate_all_caches_on_reset(&self) {
+        if let Some(key_store) = &self.key_store {
+            key_store.invalidate_all();
+        }
+        if let Some(latch) = &self.thread_sticky_subagent_latch {
+            latch.clear_negative_entries();
+        }
+    }
+
+    fn handle_immediate_cache_event(&self, event: &ChangeEvent) {
+        match event.channel {
+            ChangeChannel::ManagedKey => {
+                if let Some(key_store) = &self.key_store {
+                    let payload = event.payload.trim();
+                    if payload.is_empty() {
+                        key_store.invalidate_all();
+                    } else if let Some((principal_id, key_id)) = payload.split_once('\t') {
+                        key_store.invalidate_key(principal_id, key_id);
+                    } else {
+                        key_store.invalidate_principal(payload);
+                    }
+                }
+                tracing::info!(
+                    payload = %event.payload,
+                    "managed key cache invalidated after runtime change notification"
+                );
+            }
+            ChangeChannel::ThreadStickySubagent => {
+                if let Some(latch) = &self.thread_sticky_subagent_latch {
+                    let payload = event.payload.trim();
+                    let mut parts = payload.split('\t');
+                    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                        (
+                            Some(principal_id),
+                            Some(observed_session_id),
+                            Some(expires_str),
+                            None,
+                        ) if !principal_id.is_empty() && !observed_session_id.is_empty() => {
+                            if let Ok(expires_at) = expires_str.parse::<u64>() {
+                                latch.seed_local(principal_id, observed_session_id, expires_at);
+                            } else {
+                                latch.invalidate_local(principal_id, observed_session_id);
+                            }
+                        }
+                        (Some(principal_id), Some(observed_session_id), None, None)
+                            if !principal_id.is_empty() && !observed_session_id.is_empty() =>
+                        {
+                            latch.invalidate_local(principal_id, observed_session_id);
+                        }
+                        _ => {
+                            latch.clear_negative_entries();
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -169,12 +267,12 @@ impl NotifyListener {
     }
 
     async fn debounce_and_rebuild(&self, rx: &mut broadcast::Receiver<ChangeEvent>) {
-        drain_pending_rebind_events(rx);
+        self.drain_pending_rebind_events(rx);
         tokio::select! {
             _ = self.cancel.cancelled() => return,
             _ = sleep(Duration::from_millis(250)) => {}
         }
-        drain_pending_rebind_events(rx);
+        self.drain_pending_rebind_events(rx);
 
         if self.cancel.is_cancelled() {
             return;
@@ -190,7 +288,7 @@ impl NotifyListener {
         };
         let current_generation = self.holder.load().generation;
         let started = Instant::now();
-        match dynamic_view_builder::build_dynamic_view(
+        match dynamic_view_builder::build_dynamic_view_with_scope_and_rate_limit_cache(
             &self.stores,
             self.gemini_config.as_ref(),
             self.antigravity_config.as_ref(),
@@ -204,6 +302,8 @@ impl NotifyListener {
             self.prompt_cache_observation_sink.clone(),
             self.subscription_quota_routing_max_staleness_secs,
             self.clock.clone(),
+            Arc::clone(&self.upstream_rate_limit_cache),
+            self.plugin_scope,
         )
         .await
         {
@@ -256,17 +356,18 @@ impl NotifyListener {
     ) {
         let mut pending: HashMap<ChangeChannel, HydrateScope> = HashMap::new();
         let mut saw_rebind = false;
-        collect_pending_event(&first, &mut pending, &mut saw_rebind);
+        collect_pending_event_for_scope(&first, &mut pending, &mut saw_rebind, self.plugin_scope);
         tokio::select! {
             _ = self.cancel.cancelled() => return,
             _ = sleep(Duration::from_millis(250)) => {}
         }
-        drain_pending_events(rx, &mut pending, &mut saw_rebind);
+        self.drain_pending_events(rx, &mut pending, &mut saw_rebind);
 
         if self.cancel.is_cancelled() {
             return;
         }
         if saw_rebind {
+            self.invalidate_all_caches_on_reset();
             self.debounce_and_rebuild(rx).await;
             return;
         }
@@ -290,8 +391,7 @@ impl NotifyListener {
                     .await
                 {
                     Ok(records) => {
-                        let view = self.holder.load();
-                        let mut cache = view.upstream_rate_limit_cache.write();
+                        let mut cache = self.upstream_rate_limit_cache.write();
                         for record in records {
                             cache.upsert_record(record);
                         }
@@ -326,19 +426,66 @@ impl NotifyListener {
             HydrateScope::Ids(ids) => ids.iter().copied().collect(),
         }
     }
-}
 
-fn drain_pending_rebind_events(rx: &mut broadcast::Receiver<ChangeEvent>) {
-    loop {
-        match rx.try_recv() {
-            Ok(event) if is_rebind_channel(event.channel) => {}
-            Ok(_) => {}
-            Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
-            Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed) => {
-                break;
+    fn drain_pending_rebind_events(&self, rx: &mut broadcast::Receiver<ChangeEvent>) {
+        loop {
+            match rx.try_recv() {
+                Ok(event) if is_immediate_cache_channel(event.channel) => {
+                    self.handle_immediate_cache_event(&event);
+                }
+                Ok(event) if self.accepts_rebind_channel(event.channel) => {
+                    if event.channel == ChangeChannel::Principal {
+                        self.invalidate_all_caches_on_reset();
+                    }
+                }
+                Ok(_) => {}
+                Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                    self.invalidate_all_caches_on_reset();
+                    continue;
+                }
+                Err(
+                    broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed,
+                ) => {
+                    break;
+                }
             }
         }
     }
+
+    fn drain_pending_events(
+        &self,
+        rx: &mut broadcast::Receiver<ChangeEvent>,
+        pending: &mut HashMap<ChangeChannel, HydrateScope>,
+        saw_rebind: &mut bool,
+    ) {
+        loop {
+            match rx.try_recv() {
+                Ok(event) if is_immediate_cache_channel(event.channel) => {
+                    self.handle_immediate_cache_event(&event);
+                }
+                Ok(event) => {
+                    collect_pending_event_for_scope(&event, pending, saw_rebind, self.plugin_scope)
+                }
+                // Missed events may include rebinds; rebuild to stay safe.
+                Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                    *saw_rebind = true;
+                    self.invalidate_all_caches_on_reset();
+                }
+                Err(
+                    broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed,
+                ) => {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn is_immediate_cache_channel(channel: ChangeChannel) -> bool {
+    matches!(
+        channel,
+        ChangeChannel::ManagedKey | ChangeChannel::ThreadStickySubagent
+    )
 }
 
 fn is_rebind_channel(channel: ChangeChannel) -> bool {
@@ -371,13 +518,18 @@ impl HydrateScope {
     }
 }
 
-fn collect_pending_event(
+fn collect_pending_event_for_scope(
     event: &ChangeEvent,
     pending: &mut HashMap<ChangeChannel, HydrateScope>,
     saw_rebind: &mut bool,
+    plugin_scope: DynamicViewPluginScope,
 ) {
     if is_rebind_channel(event.channel) {
-        *saw_rebind = true;
+        if plugin_scope == DynamicViewPluginScope::All
+            || event.channel != ChangeChannel::PluginChain
+        {
+            *saw_rebind = true;
+        }
         return;
     }
     if !is_hydrate_channel(event.channel) {
@@ -388,23 +540,6 @@ fn collect_pending_event(
         .entry(event.channel)
         .or_insert_with(|| HydrateScope::Ids(HashSet::new()))
         .merge(upstream_id);
-}
-
-fn drain_pending_events(
-    rx: &mut broadcast::Receiver<ChangeEvent>,
-    pending: &mut HashMap<ChangeChannel, HydrateScope>,
-    saw_rebind: &mut bool,
-) {
-    loop {
-        match rx.try_recv() {
-            Ok(event) => collect_pending_event(&event, pending, saw_rebind),
-            // Missed events may include rebinds; rebuild to stay safe.
-            Err(broadcast::error::TryRecvError::Lagged(_)) => *saw_rebind = true,
-            Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed) => {
-                break;
-            }
-        }
-    }
 }
 
 fn is_hydrate_channel(channel: ChangeChannel) -> bool {

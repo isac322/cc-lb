@@ -41,8 +41,13 @@ fn build_candidates_populates_observations_from_dynamic_view_cache() {
         88,
         1235,
     ));
-    // Candidates stamp the cache-wide refresh time, not a per-record time.
-    rate_limits.updated_at_unix_secs = 1236;
+    // Stale record for `upstream_id` must be ignored monotonically.
+    rate_limits.upsert_record(observation_record(
+        upstream_id,
+        StoredRateLimitKind::Requests,
+        11,
+        1200,
+    ));
     let cache = Arc::new(RwLock::new(rate_limits));
     let view = test_view(
         vec![principal("principal", Vec::new())],
@@ -59,11 +64,25 @@ fn build_candidates_populates_observations_from_dynamic_view_cache() {
         &cc_lb_clock::SystemClock,
     );
 
-    let candidate = candidates
+    let first = candidates
         .iter()
         .find(|candidate| candidate.upstream_id == upstream_id)
-        .expect("candidate exists");
-    assert_eq!(candidate.observed_at_unix_secs, 1236);
+        .expect("first candidate exists");
+    let second = candidates
+        .iter()
+        .find(|candidate| candidate.upstream_id == other_upstream_id)
+        .expect("second candidate exists");
+    assert_eq!(first.observed_at_unix_secs, 1234);
+    assert_eq!(second.observed_at_unix_secs, 1235);
+    assert!(
+        view.upstream_rate_limit_cache
+            .read()
+            .snapshots
+            .get(&upstream_id)
+            .expect("snapshots")
+            .iter()
+            .any(|obs| obs.kind == RateLimitKind::Requests && obs.remaining == Some(77))
+    );
 }
 
 #[tokio::test]

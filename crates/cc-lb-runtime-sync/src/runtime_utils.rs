@@ -1,5 +1,6 @@
 use std::fs;
 use std::io;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -40,5 +41,22 @@ pub async fn await_or_abort<T>(mut task: JoinHandle<T>, timeout: Duration) {
     if tokio::time::timeout(timeout, &mut task).await.is_err() {
         task.abort();
         let _ = task.await;
+    }
+}
+
+/// Returns `true` when running inside a standard OCI/Docker/Podman container.
+pub fn is_container_environment() -> bool {
+    Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists()
+}
+
+/// Logs an actionable startup warning when a listener binds to loopback inside
+/// a container, where published container ports cannot reach `127.0.0.1`.
+pub fn warn_if_container_loopback_bind(listener: &str, addr: SocketAddr) {
+    if is_container_environment() && addr.ip().is_loopback() {
+        tracing::warn!(
+            listener,
+            %addr,
+            "listener is bound to loopback inside a container; published ports will be unreachable from outside the container unless configured (for example CC_LB_LISTENER__PROXY_ADDR=0.0.0.0:8080 or CC_LB_LISTENER__ADMIN_ADDR=0.0.0.0:9090)",
+        );
     }
 }

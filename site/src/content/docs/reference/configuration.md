@@ -177,3 +177,17 @@ transcription = "disabled"
 The alternatives are `coerce`/`reject` for `store_true`, `service_tier`, and `web_search_preview`; `drop`/`reject` for `sampling`, `logprobs`, `prompt_cache_in_memory`, `max_tool_calls`, `background`, and `chat_seed_penalties`; `emulate`/`drop`/`reject` for `truncation_auto` and `chat_stop`; `drop_echo`/`drop`/`reject` for `metadata`; `drop_tool`/`reject` for `hosted_tools`; `emulate`/`reject` for `compact` and `chat_n`; and `enabled`/`disabled` for `transcription`. Transcription is disabled by default because the upstream retains submitted audio for 30 days.
 
 The separate `[openai_public_api]` section sets the realtime public API origin. `realtime_origin` defaults to `https://api.openai.com/` and is restart-only; cc-lb appends `/v1/realtime…` paths to it.
+
+## Wasmtime plugin runtime
+
+Configure WebAssembly plugin execution limits and URL origin policy under `[runtime.wasmtime]`:
+
+```toml
+[runtime.wasmtime]
+execution_timeout_ms = 1000
+shape_origin_policy = "selected_upstream_origin"
+```
+
+- `execution_timeout_ms` sets the per-call Wasmtime epoch preemption timeout in milliseconds (default `1000`, valid range `10..=30000`) for both admission probes and proxy-path hook calls. The 10ms epoch ticker sets a deadline of `ceil(execution_timeout_ms / 10) + 1` ticks to account for 10ms rounding and the partial initial tick (for example, `11ms` yields 3 ticks), so nominal preemption occurs between `(ceil(execution_timeout_ms / 10)) * 10ms` and `(ceil(execution_timeout_ms / 10) + 1) * 10ms` depending on ticker phase (e.g. `20–30ms` for `11ms`), plus OS ticker scheduling delay.
+- `shape_origin_policy` defaults to `"selected_upstream_origin"`, rejecting any shaped URL whose origin differs from the selected upstream's `base_url`; set `"unrestricted"` only when shape plugins must redirect requests cross-origin.
+- Router filter and request-shaping stages fail closed: Wasmtime store/instance pool saturation returns HTTP `503` with `Retry-After: 1`, and plugin traps, timeouts, runtime errors, or invalid filter outputs return HTTP `502` without dispatching upstream or falling back to raw passthrough.

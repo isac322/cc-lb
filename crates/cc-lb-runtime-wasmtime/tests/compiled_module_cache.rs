@@ -126,3 +126,51 @@ fn recompile_after_evict_reuses_cached_artifact_instead_of_recompiling() {
          must hit the compiled-module cache, not recompile",
     );
 }
+
+#[test]
+fn parallel_compilation_does_not_block_cache_hits_or_unrelated_keys() {
+    let Some(wasm) = cache_aware_wasm() else {
+        return;
+    };
+    let rt = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
+
+    // Pre-warm key K0.
+    let key_k0 = RuntimeSlotKey::global("cache-parallel-k0", RuntimeSlotRole::Filter);
+    let _ = rt
+        .register_filter(key_k0.clone(), "cache-aware-wasmtime", &wasm)
+        .expect("prewarm K0");
+
+    // Mutate custom section on wasm so K1 and K2 get distinct content hashes.
+    let mut wasm_k1 = wasm.clone();
+    wasm_k1.extend_from_slice(&[0x00, 0x03, 0x01, b'x', b'1']);
+    let mut wasm_k2 = wasm;
+    wasm_k2.extend_from_slice(&[0x00, 0x03, 0x01, b'x', b'2']);
+
+    let entered_k1 = Arc::new(std::sync::Barrier::new(2));
+    let release_k1 = Arc::new(std::sync::Barrier::new(2));
+    let entered_clone = Arc::clone(&entered_k1);
+    let release_clone = Arc::clone(&release_k1);
+    let rt_k1 = Arc::clone(&rt);
+    let rt2 = Arc::new(WasmtimeRuntime::with_defaults().expect("engine2"));
+    let h = std::thread::spawn(move || {
+        entered_clone.wait();
+        let res = rt_k1.register_filter(
+            RuntimeSlotKey::global("cache-parallel-k1", RuntimeSlotRole::Filter),
+            "k1",
+            &wasm_k1,
+        );
+        release_clone.wait();
+        res
+    });
+    entered_k1.wait();
+    // Unrelated runtime / key K2 compiles & K0 hits without deadlock while K1 compiles.
+    let _ = rt2
+        .register_filter(
+            RuntimeSlotKey::global("cache-parallel-k2", RuntimeSlotRole::Filter),
+            "k2",
+            &wasm_k2,
+        )
+        .expect("K2 compiles");
+    release_k1.wait();
+    h.join().expect("thread join").expect("K1 compiles");
+}

@@ -1,9 +1,11 @@
 use sha2::{Digest, Sha256};
 
 use super::*;
+use cc_lb_storage_api::{DEFAULT_THREAD_STICKY_SUBAGENT_TTL_SECS, ThreadStickySubagentStore};
 
 pub(super) const THREAD_STICKY_SUBAGENT_SHARD_COUNT: usize = 16;
 pub(super) const MAX_THREAD_STICKY_SUBAGENTS_PER_SHARD: usize = 512;
+const NEGATIVE_LATCH_TTL_SECS: u64 = 60;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct ThreadStickySubagentKey {
@@ -11,17 +13,34 @@ pub(super) struct ThreadStickySubagentKey {
     pub(super) observed_session_id: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StickyLatchState {
+    Latched,
+    NotLatched,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StickyLatchEntry {
+    state: StickyLatchState,
+    expires_at_unix_secs: u64,
+    sequence: u64,
+}
+
 #[derive(Clone)]
-pub(super) struct ThreadStickySubagentLatch {
+pub struct ThreadStickySubagentLatch {
     pub(super) next_sequence: Arc<AtomicU64>,
-    pub(super) shards:
-        Arc<[Mutex<HashMap<ThreadStickySubagentKey, u64>>; THREAD_STICKY_SUBAGENT_SHARD_COUNT]>,
+    pub(super) seed_epoch: Arc<AtomicU64>,
+    shards: Arc<
+        [Mutex<HashMap<ThreadStickySubagentKey, StickyLatchEntry>>;
+            THREAD_STICKY_SUBAGENT_SHARD_COUNT],
+    >,
 }
 
 impl ThreadStickySubagentLatch {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             next_sequence: Arc::new(AtomicU64::new(0)),
+            seed_epoch: Arc::new(AtomicU64::new(0)),
             shards: Arc::new(std::array::from_fn(|_| Mutex::new(HashMap::new()))),
         }
     }
@@ -32,27 +51,155 @@ impl ThreadStickySubagentLatch {
         (hasher.finish() as usize) % THREAD_STICKY_SUBAGENT_SHARD_COUNT
     }
 
+    pub fn seed_local(
+        &self,
+        principal_id: &str,
+        observed_session_id: &str,
+        expires_at_unix_secs: u64,
+    ) {
+        self.seed_epoch.fetch_add(1, Ordering::AcqRel);
+        let key = ThreadStickySubagentKey {
+            principal_id: principal_id.to_owned(),
+            observed_session_id: observed_session_id.to_owned(),
+        };
+        let shard = &self.shards[Self::shard_index(&key)];
+        let mut shard = shard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let next_expires = match shard.get(&key) {
+            Some(existing) if existing.state == StickyLatchState::Latched => {
+                existing.expires_at_unix_secs.max(expires_at_unix_secs)
+            }
+            _ => expires_at_unix_secs,
+        };
+        if !shard.contains_key(&key) && shard.len() >= MAX_THREAD_STICKY_SUBAGENTS_PER_SHARD {
+            evict_oldest(&mut shard);
+        }
+        shard.insert(
+            key,
+            StickyLatchEntry {
+                state: StickyLatchState::Latched,
+                expires_at_unix_secs: next_expires,
+                sequence,
+            },
+        );
+    }
+
+    pub fn invalidate_local(&self, principal_id: &str, observed_session_id: &str) {
+        self.seed_epoch.fetch_add(1, Ordering::AcqRel);
+        let key = ThreadStickySubagentKey {
+            principal_id: principal_id.to_owned(),
+            observed_session_id: observed_session_id.to_owned(),
+        };
+        let shard = &self.shards[Self::shard_index(&key)];
+        let mut shard = shard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        shard.remove(&key);
+    }
+
+    pub fn clear_negative_entries(&self) {
+        self.seed_epoch.fetch_add(1, Ordering::AcqRel);
+        for shard in self.shards.iter() {
+            let mut shard = shard
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            shard.retain(|_, entry| entry.state == StickyLatchState::Latched);
+        }
+    }
+
+    pub(super) fn seed_epoch(&self) -> u64 {
+        self.seed_epoch.load(Ordering::Acquire)
+    }
+
+    pub(super) fn check_local(
+        &self,
+        key: &ThreadStickySubagentKey,
+        now_unix_secs: u64,
+    ) -> Option<bool> {
+        let shard = &self.shards[Self::shard_index(key)];
+        let mut shard = shard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match shard.get(key).copied() {
+            Some(entry) if entry.expires_at_unix_secs > now_unix_secs => {
+                Some(entry.state == StickyLatchState::Latched)
+            }
+            Some(_) => {
+                shard.remove(key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    pub(super) fn record_negative_local(
+        &self,
+        key: ThreadStickySubagentKey,
+        expires_at_unix_secs: u64,
+        now_unix_secs: u64,
+    ) {
+        let shard = &self.shards[Self::shard_index(&key)];
+        let mut shard = shard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(existing) = shard.get(&key)
+            && existing.state == StickyLatchState::Latched
+            && existing.expires_at_unix_secs > now_unix_secs
+        {
+            return;
+        }
+        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        if !shard.contains_key(&key) && shard.len() >= MAX_THREAD_STICKY_SUBAGENTS_PER_SHARD {
+            evict_oldest(&mut shard);
+        }
+        shard.insert(
+            key,
+            StickyLatchEntry {
+                state: StickyLatchState::NotLatched,
+                expires_at_unix_secs,
+                sequence,
+            },
+        );
+    }
+
+    #[cfg(test)]
     pub(super) fn observe(&self, key: ThreadStickySubagentKey, seed: bool) -> bool {
         let shard = &self.shards[Self::shard_index(&key)];
         let mut shard = shard
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if seed {
+            self.seed_epoch.fetch_add(1, Ordering::AcqRel);
             let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed) + 1;
-            if !shard.contains_key(&key)
-                && shard.len() >= MAX_THREAD_STICKY_SUBAGENTS_PER_SHARD
-                && let Some(oldest_key) = shard
-                    .iter()
-                    .min_by_key(|(_, sequence)| **sequence)
-                    .map(|(key, _)| key.clone())
-            {
-                shard.remove(&oldest_key);
+            if !shard.contains_key(&key) && shard.len() >= MAX_THREAD_STICKY_SUBAGENTS_PER_SHARD {
+                evict_oldest(&mut shard);
             }
-            shard.insert(key, sequence);
+            shard.insert(
+                key,
+                StickyLatchEntry {
+                    state: StickyLatchState::Latched,
+                    expires_at_unix_secs: u64::MAX,
+                    sequence,
+                },
+            );
             true
         } else {
-            shard.contains_key(&key)
+            shard
+                .get(&key)
+                .is_some_and(|entry| entry.state == StickyLatchState::Latched)
         }
+    }
+}
+
+fn evict_oldest(shard: &mut HashMap<ThreadStickySubagentKey, StickyLatchEntry>) {
+    if let Some(oldest_key) = shard
+        .iter()
+        .min_by_key(|(_, entry)| entry.sequence)
+        .map(|(key, _)| key.clone())
+    {
+        shard.remove(&oldest_key);
     }
 }
 
@@ -62,6 +209,7 @@ impl Default for ThreadStickySubagentLatch {
     }
 }
 
+#[cfg(test)]
 pub(super) fn apply_thread_sticky_subagent_latch(
     latch: &ThreadStickySubagentLatch,
     principal_id: &str,
@@ -96,6 +244,102 @@ pub(super) fn apply_thread_sticky_subagent_latch(
         && latch.observe(key, false)
     {
         metadata.request_kind = Some("subagent".to_owned());
+    }
+}
+
+pub(super) async fn apply_thread_sticky_subagent_latch_async(
+    latch: &ThreadStickySubagentLatch,
+    store: Option<&dyn ThreadStickySubagentStore>,
+    clock: &dyn cc_lb_clock::Clock,
+    principal_id: &str,
+    value: Option<&Value>,
+    metadata: &mut RequestCacheMetadata,
+) {
+    if metadata.claude_agent_id.is_some() || metadata.explicit_request_class.is_some() {
+        return;
+    }
+    let Some(observed_session_id) = metadata
+        .observed_session_id
+        .as_deref()
+        .or(metadata.thread_id.as_deref())
+    else {
+        return;
+    };
+    let now_unix_secs = unix_secs(clock.now());
+    if metadata.request_kind.as_deref() == Some("subagent")
+        && value.is_some_and(|value| {
+            is_thread_sticky_subagent_seed(
+                value,
+                Some(observed_session_id),
+                metadata.parent_session_id.as_deref(),
+            )
+        })
+    {
+        latch.seed_local(
+            principal_id,
+            observed_session_id,
+            now_unix_secs.saturating_add(DEFAULT_THREAD_STICKY_SUBAGENT_TTL_SECS),
+        );
+        if let Some(store) = store
+            && let Err(error) = store
+                .seed_thread_sticky_subagent(
+                    principal_id,
+                    observed_session_id,
+                    now_unix_secs,
+                    DEFAULT_THREAD_STICKY_SUBAGENT_TTL_SECS,
+                )
+                .await
+        {
+            tracing::warn!(
+                %error,
+                principal_id,
+                observed_session_id,
+                "failed to persist thread sticky subagent seed"
+            );
+        }
+    } else if matches!(metadata.request_kind.as_deref(), Some("main" | "unknown")) {
+        let key = ThreadStickySubagentKey {
+            principal_id: principal_id.to_owned(),
+            observed_session_id: observed_session_id.to_owned(),
+        };
+        match latch.check_local(&key, now_unix_secs) {
+            Some(true) => {
+                metadata.request_kind = Some("subagent".to_owned());
+            }
+            Some(false) => {}
+            None => {
+                let Some(store) = store else {
+                    return;
+                };
+                let seed_epoch = latch.seed_epoch();
+                match store
+                    .is_thread_sticky_subagent(principal_id, observed_session_id, now_unix_secs)
+                    .await
+                {
+                    Ok(Some(expires_at_unix_secs)) => {
+                        latch.seed_local(principal_id, observed_session_id, expires_at_unix_secs);
+                        metadata.request_kind = Some("subagent".to_owned());
+                    }
+                    Ok(None) => {
+                        if latch.seed_epoch() == seed_epoch {
+                            latch.record_negative_local(
+                                key,
+                                now_unix_secs.saturating_add(NEGATIVE_LATCH_TTL_SECS),
+                                now_unix_secs,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            principal_id,
+                            observed_session_id,
+                            "failed to query thread sticky subagent store"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 pub(super) const HERMES_PRODUCT_TAG: &str = "product=hermes-agent";

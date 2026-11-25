@@ -7,14 +7,24 @@ use crate::error::WasmtimeRuntimeError;
 pub struct StoreBudget {
     limit: u32,
     in_flight: AtomicU32,
+    epoch_deadline_ticks: u64,
 }
 
 impl StoreBudget {
     pub fn new(limit: u32) -> Self {
+        Self::with_epoch_deadline_ticks(limit, crate::epoch::DEFAULT_EPOCH_DEADLINE_TICKS)
+    }
+
+    pub(crate) fn with_epoch_deadline_ticks(limit: u32, epoch_deadline_ticks: u64) -> Self {
         Self {
             limit,
             in_flight: AtomicU32::new(0),
+            epoch_deadline_ticks: epoch_deadline_ticks.max(1),
         }
+    }
+
+    pub(crate) fn epoch_deadline_ticks(&self) -> u64 {
+        self.epoch_deadline_ticks
     }
 
     pub fn try_acquire(self: &Arc<Self>) -> Result<StorePermit, WasmtimeRuntimeError> {

@@ -21,6 +21,7 @@ pub mod runtime_change_notifier;
 pub mod sparse_order;
 mod storage_types_common;
 mod storage_types_keys;
+pub mod thread_sticky_subagent;
 pub mod traits;
 pub mod upstream;
 pub mod upstream_affinity;
@@ -57,6 +58,7 @@ pub use request_event_projections::*;
 pub use runtime_change_notifier::*;
 pub use storage_types_common::*;
 pub use storage_types_keys::*;
+pub use thread_sticky_subagent::*;
 pub use traits::UsageTokenIntervalStore;
 pub use traits::{
     ApiKeyConcurrencyHoldStore, ApiKeyUsageBucketStore, AuditStore, CacheKeepaliveProjectionStore,
@@ -71,7 +73,7 @@ pub use upstream_subscription_metadata::*;
 pub use upstream_subscription_quota::*;
 pub use upstream_subscription_quota_checkpoint::*;
 pub use uuid::Uuid as UpstreamRecordId;
-pub use validation::validate_identifier;
+pub use validation::{MAX_LIMIT_WINDOW_SECS, validate_identifier, validate_limits};
 pub use warmup_attempts::*;
 
 pub use cc_lb_domain::PrincipalKindLite;

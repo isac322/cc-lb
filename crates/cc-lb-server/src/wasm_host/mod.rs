@@ -3,9 +3,17 @@ mod filter_request;
 mod scratch;
 pub mod shape;
 
+use std::sync::Arc;
+
 pub use filter::WasmtimeFilterPlugin;
 pub(super) use scratch::{access_archived_scoped_or_copy, serialize_with_input_scratch};
 pub use shape::WasmtimeUpstreamDialect;
+
+/// Deterministically projects a `PluginChainEntry.config` JSON object into
+/// bounded `principal.claims` bytes for WASM filter and shape hooks.
+pub fn project_config_claims(config: &serde_json::Value) -> Arc<[(String, Vec<u8>)]> {
+    cc_lb_storage_api::plugin_registry::project_plugin_config_claims_bounded(config).into()
+}
 
 #[cfg(test)]
 mod tests {
@@ -261,5 +269,106 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("exceeds wire_bounds.output_body_bytes"));
+    }
+
+    #[test]
+    fn project_config_claims_encodes_scalars_and_canonical_sorted_json() {
+        let config = serde_json::json!({
+            "name": "alice",
+            "count": 42,
+            "flag": true,
+            "off": false,
+            "nothing": null,
+            "nested": {"z": 1, "a": 2},
+            "arr": [1, {"b": 2, "a": 1}]
+        });
+        let claims = super::project_config_claims(&config);
+        let map: std::collections::HashMap<&str, &[u8]> = claims
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+            .collect();
+        assert_eq!(map.get("name"), Some(&b"alice".as_slice()));
+        assert_eq!(map.get("count"), Some(&b"42".as_slice()));
+        assert_eq!(map.get("flag"), Some(&b"true".as_slice()));
+        assert_eq!(map.get("off"), Some(&b"false".as_slice()));
+        assert_eq!(map.get("nothing"), Some(&b"null".as_slice()));
+        assert_eq!(map.get("nested"), Some(&br#"{"a":2,"z":1}"#.as_slice()));
+        assert_eq!(map.get("arr"), Some(&br#"[1,{"a":1,"b":2}]"#.as_slice()));
+        assert!(super::project_config_claims(&serde_json::json!("not-an-object")).is_empty());
+    }
+
+    #[test]
+    fn project_config_claims_enforces_count_key_value_and_total_bounds() {
+        use cc_lb_storage_api::plugin_registry::{
+            MAX_PLUGIN_CHAIN_CLAIM_KEY_BYTES, MAX_PLUGIN_CHAIN_CLAIM_VALUE_BYTES,
+            MAX_PLUGIN_CHAIN_CONFIG_CLAIMS, MAX_PLUGIN_CHAIN_CONFIG_TOTAL_BYTES,
+        };
+
+        let mut too_many = serde_json::Map::new();
+        for idx in 0..(MAX_PLUGIN_CHAIN_CONFIG_CLAIMS + 10) {
+            too_many.insert(format!("k{idx:03}"), serde_json::json!("v"));
+        }
+        let capped_count = super::project_config_claims(&serde_json::Value::Object(too_many));
+        assert_eq!(capped_count.len(), MAX_PLUGIN_CHAIN_CONFIG_CLAIMS);
+
+        let oversized_key = "k".repeat(MAX_PLUGIN_CHAIN_CLAIM_KEY_BYTES + 1);
+        let oversized_val = "v".repeat(MAX_PLUGIN_CHAIN_CLAIM_VALUE_BYTES + 1);
+        let skipped = super::project_config_claims(&serde_json::json!({
+            oversized_key: "ok",
+            "big_val": oversized_val,
+            "keep": "yes",
+        }));
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].0, "keep");
+
+        let mut over_total = serde_json::Map::new();
+        let chunk = "x".repeat(MAX_PLUGIN_CHAIN_CLAIM_VALUE_BYTES - 10);
+        for idx in 0..4 {
+            over_total.insert(format!("chunk_{idx}"), serde_json::json!(chunk));
+        }
+        let capped_total = super::project_config_claims(&serde_json::Value::Object(over_total));
+        let total_bytes: usize = capped_total.iter().map(|(k, v)| k.len() + v.len()).sum();
+        assert!(total_bytes <= MAX_PLUGIN_CHAIN_CONFIG_TOTAL_BYTES);
+        assert_eq!(capped_total.len(), 2);
+    }
+
+    #[test]
+    fn filter_wire_request_encodes_principal_claims() {
+        let ctx = fixture_routing_context();
+        let principal = fixture_principal();
+        let candidates = fixture_candidates();
+        let claims = super::project_config_claims(&serde_json::json!({
+            "tier": "gold",
+            "rules": {"b": 2, "a": 1}
+        }));
+        super::filter_request::FilterWireRequest {
+            ctx: &ctx,
+            principal: &principal,
+            claims: &claims,
+            candidates: &candidates,
+            cookie_redaction: false,
+        }
+        .encode(|bytes| {
+            let archived =
+                rkyv::access::<cc_lb_plugin_wire::v3::ArchivedFilterRequest, RkyvError>(bytes)
+                    .expect("archived filter request");
+            let decoded: cc_lb_plugin_wire::v3::FilterRequest =
+                rkyv::deserialize::<cc_lb_plugin_wire::v3::FilterRequest, RkyvError>(archived)
+                    .expect("deserialize filter request");
+            assert_eq!(decoded.principal.claims.len(), 2);
+            assert!(
+                decoded
+                    .principal
+                    .claims
+                    .iter()
+                    .any(|c| { c.key.as_ref() == "tier" && c.value.as_ref() == b"gold" })
+            );
+            assert!(
+                decoded.principal.claims.iter().any(|c| {
+                    c.key.as_ref() == "rules" && c.value.as_ref() == br#"{"a":1,"b":2}"#
+                })
+            );
+        })
+        .expect("encode filter wire request with claims");
     }
 }

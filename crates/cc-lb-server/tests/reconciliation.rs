@@ -363,6 +363,76 @@ async fn reconciler_rebuilds_after_registry_entry_update() {
 }
 
 #[tokio::test]
+async fn warmup_only_reconciler_ignores_principal_plugin_chain_changes() {
+    let (dir, storage) = storage_fixture().await;
+    let principal = create_principal(&storage, "principal-warmup-only").await;
+    create_upstream(&storage, "upstream-warmup-only").await;
+    let registry_entry = seed_registry(&storage, 34, "plugin-warmup-only").await;
+    let stores = stores(storage.clone());
+    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
+    let (gemini_config, antigravity_config) = catalog_configs();
+    let initial_view = cc_lb_server::dynamic_view_builder::build_dynamic_view_with_scope(
+        &stores,
+        Some(&gemini_config),
+        Some(&antigravity_config),
+        Arc::new(AeadService::from_master_key([25; 32])),
+        None,
+        0,
+        &runtime,
+        dir.path(),
+        Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        30,
+        Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
+        1800,
+        Arc::new(cc_lb_clock::SystemClock),
+        cc_lb_server::dynamic_view_builder::DynamicViewPluginScope::WarmupOnly,
+    )
+    .await
+    .expect("initial warmup-only view");
+    let holder = Arc::new(DynamicViewHolder::new(initial_view));
+    let generation = holder.load().generation;
+
+    storage
+        .insert_chain_entry(cc_lb_storage_api::PluginChainEntryInput {
+            principal_id: principal.id,
+            slot: cc_lb_storage_api::PluginSlotKind::Router,
+            order: 1000,
+            wasm_registry_id: registry_entry.id,
+            config: serde_json::json!({}),
+        })
+        .await
+        .expect("insert router chain entry");
+
+    let cancel = CancellationToken::new();
+    let reconciler = Arc::new(
+        Reconciler::new(
+            stores,
+            holder.clone(),
+            runtime,
+            Arc::new(AeadService::from_master_key([25; 32])),
+            None,
+            cancel,
+            dir.path().to_path_buf(),
+            Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+            30,
+            Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
+            1800,
+            Arc::new(cc_lb_clock::SystemClock),
+            Some(gemini_config),
+            Some(antigravity_config),
+        )
+        .with_plugin_scope(cc_lb_server::dynamic_view_builder::DynamicViewPluginScope::WarmupOnly),
+    );
+    reconciler.reconcile_once().await.expect("reconcile tick");
+
+    assert_eq!(
+        holder.load().generation,
+        generation,
+        "WarmupOnly reconciler must not rebuild when only principal plugin chains change"
+    );
+}
+
+#[tokio::test]
 async fn revision_hash_changes_when_oauth_becomes_reconnect_required() {
     let (dir, storage) = storage_fixture().await;
     create_principal(&storage, "principal-reconnect").await;

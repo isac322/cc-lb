@@ -10,7 +10,7 @@ use cc_lb_control::{
     ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamRateLimitCache, UpstreamStatusEntry,
     UpstreamStatusSnapshot,
 };
-use cc_lb_domain::{BUILTIN_SUBSCRIPTION_PREFERENCE_ID, Provider, RateLimitObservation, Upstream};
+use cc_lb_domain::{BUILTIN_SUBSCRIPTION_PREFERENCE_ID, Provider, Upstream};
 use cc_lb_oauth_protocol::refresh_requires_reconnect;
 use cc_lb_quota::plan_capacity::{
     PRO_CAPACITY_RATIO, PlanInfo, PlanTierClassification, TierKey, classify_plan_tier,
@@ -39,10 +39,10 @@ use cc_lb_storage_api::{
     AnthropicCompatibilityKvStore, AuditStore, MetadataTierMappingOverrideRecord,
     OrganizationMetadataStore, PlanTierRatioRecord, PlanTierStore, PluginChainEntry,
     PluginRegistryStore, PluginSlotKind, PrincipalRecord, PrincipalStore,
-    PromptCacheObservationStore, RateLimitKind, StorageError, StorageResult, TierResolutionSource,
-    UpstreamPlanTierRecord, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
-    UpstreamRecord, UpstreamStatusUpdate, UpstreamStore, UpstreamSubscriptionMetadataStore,
-    UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
+    PromptCacheObservationStore, StorageError, StorageResult, TierResolutionSource,
+    UpstreamPlanTierRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStatusUpdate,
+    UpstreamStore, UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore,
+    WasmRegistryEntry,
 };
 use cc_lb_upstream::{
     RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
@@ -51,11 +51,12 @@ use cc_lb_upstream::{
 use http::HeaderValue;
 use parking_lot::RwLock;
 use secrecy::ExposeSecret;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::PluginManifest;
-use crate::reconcile::collect_revision_hash;
+use crate::reconcile::collect_revision_hash_for_scope;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 use cc_lb_control::PromptCacheObservationSinkLike;
 
@@ -75,6 +76,8 @@ pub struct SharedSignerState {
     pub(crate) anthropic_forced_generations: cc_lb_signer_anthropic_oauth::ForcedRefreshGenerations,
     pub(crate) subscription_signer_states:
         Arc<RwLock<HashMap<Uuid, Arc<RwLock<SubscriptionSignerState>>>>>,
+    pub(crate) anthropic_oauth_states:
+        Arc<RwLock<HashMap<Uuid, cc_lb_signer_anthropic_oauth::SharedAnthropicOAuthState>>>,
 }
 
 impl Default for SharedSignerState {
@@ -90,6 +93,7 @@ impl SharedSignerState {
             anthropic_forced_generations:
                 cc_lb_signer_anthropic_oauth::new_forced_refresh_generations(),
             subscription_signer_states: Arc::new(RwLock::new(HashMap::new())),
+            anthropic_oauth_states: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -138,41 +142,128 @@ pub enum RebindError {
     PluginRuntime(#[from] cc_lb_runtime_wasmtime::WasmtimeRuntimeError),
 }
 
+/// Controls which Wasmtime plugin chains a runtime instance compiles and retains.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DynamicViewPluginScope {
+    /// Proxy processes compile and retain principal router/shape chains plus warmup dialect slots.
+    #[default]
+    All,
+    /// Dedicated scheduler/worker processes skip principal router/shape compilation
+    /// and retain only warmup dialect slots.
+    WarmupOnly,
+}
+
 async fn register_filter_slot(
     runtime: &Arc<WasmtimeRuntime>,
     slot_key: &cc_lb_runtime_wasmtime::RuntimeSlotKey,
     manifest: &PluginManifest,
+    wasm: &[u8],
 ) -> Result<
     Arc<cc_lb_runtime_wasmtime::LoadedPluginSlot>,
     cc_lb_runtime_wasmtime::WasmtimeRuntimeError,
 > {
-    let wasm = read_wasm_for_manifest(manifest).await?;
-    runtime.register_filter(slot_key.clone(), manifest.name.clone(), &wasm)
+    runtime.register_filter(slot_key.clone(), manifest.name.clone(), wasm)
 }
 
 async fn register_shape_slot(
     runtime: &Arc<WasmtimeRuntime>,
     slot_key: &cc_lb_runtime_wasmtime::RuntimeSlotKey,
     manifest: &PluginManifest,
+    wasm: &[u8],
 ) -> Result<
     Arc<cc_lb_runtime_wasmtime::LoadedPluginSlot>,
     cc_lb_runtime_wasmtime::WasmtimeRuntimeError,
 > {
-    let wasm = read_wasm_for_manifest(manifest).await?;
-    runtime.register_shape(slot_key.clone(), manifest.name.clone(), &wasm)
+    runtime.register_shape(slot_key.clone(), manifest.name.clone(), wasm)
 }
 
-async fn read_wasm_for_manifest(
-    manifest: &PluginManifest,
-) -> Result<Vec<u8>, cc_lb_runtime_wasmtime::WasmtimeRuntimeError> {
-    tokio::fs::read(&manifest.artifact).await.map_err(|source| {
-        cc_lb_runtime_wasmtime::WasmtimeRuntimeError::ModuleRejected {
-            reason: format!(
-                "failed to read plugin wasm at `{}`: {source}",
-                manifest.artifact
+fn verify_wasm_sha256(bytes: &[u8], expected_sha256: [u8; 32]) -> io::Result<()> {
+    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    if digest != expected_sha256 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "wasm sha256 mismatch: expected {}, got {}",
+                crate::revision_hash::hex_sha256(&expected_sha256),
+                crate::revision_hash::hex_sha256(&digest),
             ),
+        ));
+    }
+    Ok(())
+}
+
+/// Materializes a plugin `.wasm` file, verifies its on-disk SHA-256 against
+/// `expected_sha256`, and self-heals from storage if the disk cache was
+/// corrupted. Returns `(cache_path, verified_bytes)`.
+pub(crate) async fn read_verified_wasm(
+    stores: &Stores,
+    data_dir: &Path,
+    expected_sha256: [u8; 32],
+) -> Result<(PathBuf, Vec<u8>), RebindError> {
+    let wasm_path = materialize_wasm(stores, data_dir, expected_sha256).await?;
+    let bytes = tokio::fs::read(&wasm_path).await?;
+    if verify_wasm_sha256(&bytes, expected_sha256).is_ok() {
+        return Ok((wasm_path, bytes));
+    }
+    tracing::warn!(
+        path = %wasm_path.display(),
+        expected_sha256 = %crate::revision_hash::hex_sha256(&expected_sha256),
+        "cached wasm file failed sha256 verification; deleting and re-fetching from storage",
+    );
+    let _ = tokio::fs::remove_file(&wasm_path).await;
+    let db_bytes = stores
+        .plugin_registry
+        .get_blob_bytes(expected_sha256)
+        .await?
+        .ok_or_else(|| {
+            RebindError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "wasm blob {} not found in storage",
+                    crate::revision_hash::hex_sha256(&expected_sha256),
+                ),
+            ))
+        })?;
+    verify_wasm_sha256(&db_bytes, expected_sha256).map_err(RebindError::Io)?;
+    let rewritten = ensure_wasm_cached(data_dir, expected_sha256, || Ok(Some(db_bytes.clone())))
+        .map_err(RebindError::Io)?;
+    Ok((rewritten, db_bytes))
+}
+
+/// Removes `.wasm` files from the local cache directory whose SHA-256 hex stem
+/// is no longer in `active_shas`.
+pub(crate) fn sweep_stale_wasm_disk_cache(data_dir: &Path, active_shas: &HashSet<[u8; 32]>) {
+    let cache_dir = data_dir.join("plugins").join("wasm").join("cache");
+    let Ok(entries) = fs::read_dir(&cache_dir) else {
+        return;
+    };
+    let active_stems: HashSet<String> = active_shas
+        .iter()
+        .map(crate::revision_hash::hex_sha256)
+        .collect();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.file_name().is_some_and(|name| name == ".tmp") {
+            continue;
         }
-    })
+        if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("wasm") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !active_stems.contains(stem) {
+            match fs::remove_file(&path) {
+                Ok(()) => tracing::info!(path = %path.display(), "swept stale wasm cache file"),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "failed to remove stale wasm cache file",
+                ),
+            }
+        }
+    }
 }
 
 pub fn ensure_wasm_cache_dirs(data_dir: &Path) -> io::Result<()> {
@@ -249,11 +340,122 @@ pub async fn build_dynamic_view(
     subscription_quota_routing_max_staleness_secs: u64,
     clock: cc_lb_clock::ClockHandle,
 ) -> Result<Arc<DynamicView>, RebindError> {
+    build_dynamic_view_with_scope(
+        stores,
+        gemini_config,
+        antigravity_config,
+        aead,
+        lazy_refresher,
+        current_generation,
+        runtime,
+        data_dir,
+        subscription_quota_cache,
+        prompt_cache_grace_margin_secs,
+        prompt_cache_observation_sink,
+        subscription_quota_routing_max_staleness_secs,
+        clock,
+        DynamicViewPluginScope::All,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn build_dynamic_view_with_scope(
+    stores: &Stores,
+    gemini_config: Option<&cc_lb_config::GeminiOAuthConfig>,
+    antigravity_config: Option<&cc_lb_config::AntigravityOAuthConfig>,
+    aead: Arc<AeadService>,
+    lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
+    current_generation: u64,
+    runtime: &Arc<WasmtimeRuntime>,
+    data_dir: &Path,
+    subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+    prompt_cache_grace_margin_secs: u64,
+    prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
+    subscription_quota_routing_max_staleness_secs: u64,
+    clock: cc_lb_clock::ClockHandle,
+    plugin_scope: DynamicViewPluginScope,
+) -> Result<Arc<DynamicView>, RebindError> {
+    build_dynamic_view_with_scope_and_rate_limit_cache(
+        stores,
+        gemini_config,
+        antigravity_config,
+        aead,
+        lazy_refresher,
+        current_generation,
+        runtime,
+        data_dir,
+        subscription_quota_cache,
+        prompt_cache_grace_margin_secs,
+        prompt_cache_observation_sink,
+        subscription_quota_routing_max_staleness_secs,
+        clock,
+        Arc::new(RwLock::new(UpstreamRateLimitCache::default())),
+        plugin_scope,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn build_dynamic_view_with_rate_limit_cache(
+    stores: &Stores,
+    gemini_config: Option<&cc_lb_config::GeminiOAuthConfig>,
+    antigravity_config: Option<&cc_lb_config::AntigravityOAuthConfig>,
+    aead: Arc<AeadService>,
+    lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
+    current_generation: u64,
+    runtime: &Arc<WasmtimeRuntime>,
+    data_dir: &Path,
+    subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+    prompt_cache_grace_margin_secs: u64,
+    prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
+    subscription_quota_routing_max_staleness_secs: u64,
+    clock: cc_lb_clock::ClockHandle,
+    upstream_rate_limit_cache: Arc<RwLock<UpstreamRateLimitCache>>,
+) -> Result<Arc<DynamicView>, RebindError> {
+    build_dynamic_view_with_scope_and_rate_limit_cache(
+        stores,
+        gemini_config,
+        antigravity_config,
+        aead,
+        lazy_refresher,
+        current_generation,
+        runtime,
+        data_dir,
+        subscription_quota_cache,
+        prompt_cache_grace_margin_secs,
+        prompt_cache_observation_sink,
+        subscription_quota_routing_max_staleness_secs,
+        clock,
+        upstream_rate_limit_cache,
+        DynamicViewPluginScope::All,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn build_dynamic_view_with_scope_and_rate_limit_cache(
+    stores: &Stores,
+    gemini_config: Option<&cc_lb_config::GeminiOAuthConfig>,
+    antigravity_config: Option<&cc_lb_config::AntigravityOAuthConfig>,
+    aead: Arc<AeadService>,
+    lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
+    current_generation: u64,
+    runtime: &Arc<WasmtimeRuntime>,
+    data_dir: &Path,
+    subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+    prompt_cache_grace_margin_secs: u64,
+    prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
+    subscription_quota_routing_max_staleness_secs: u64,
+    clock: cc_lb_clock::ClockHandle,
+    upstream_rate_limit_cache: Arc<RwLock<UpstreamRateLimitCache>>,
+    plugin_scope: DynamicViewPluginScope,
+) -> Result<Arc<DynamicView>, RebindError> {
     // Collect the change signature before any content read. A mutation that
     // commits while this build is reading contents then changes the stored
     // signature after this early sample, so a later reconcile detects the
     // drift instead of trusting a signature newer than the contents.
-    let revision_hash = collect_revision_hash(stores).await?;
+    let revision_hash = collect_revision_hash_for_scope(stores, plugin_scope).await?;
     let upstreams = list_upstreams(stores).await?;
     let all_upstream_ids = upstreams
         .iter()
@@ -273,24 +475,26 @@ pub async fn build_dynamic_view(
         .upstream_rate_limits
         .list_for_upstream_ids(&all_upstream_ids)
         .await?;
-    let upstream_rate_limit_cache = Arc::new(RwLock::new(UpstreamRateLimitCache {
-        snapshots: group_rate_limit_observations(upstream_rate_limit_records),
-        updated_at_unix_secs: unix_secs(clock.now()),
-    }));
+    {
+        let mut cache = upstream_rate_limit_cache.write();
+        cache.hydrate_from_records(upstream_rate_limit_records, &all_upstream_ids);
+    }
     let principals = list_principals(stores).await?;
-    let (principal_chains, registered_slot_keys) = build_principal_chains(
-        stores,
-        runtime,
-        data_dir,
-        &principals,
-        &upstreams,
-        &aead,
-        &clock,
-    )
-    .await?;
+    let (principal_chains, registered_slot_keys, active_shas, has_retryable_plugin_failure) =
+        build_principal_chains_with_scope(
+            stores,
+            runtime,
+            data_dir,
+            &principals,
+            &upstreams,
+            &aead,
+            &clock,
+            plugin_scope,
+        )
+        .await?;
     // RFC-0001 gap-analysis #1: sweep any runtime slot whose key is
     // no longer referenced by the freshly-built view. Must run AFTER
-    // build_principal_chains succeeds so we don't tear down slots the
+    // build_principal_chains_with_scope succeeds so we don't tear down slots the
     // still-active view is dispatching against; already-cloned
     // `Arc<PluginSlotKind>` handles keep the evicted cells alive for the
     // duration of any in-flight call (see `WasmtimeRuntime::retain_slots`
@@ -301,6 +505,9 @@ pub async fn build_dynamic_view(
             evicted_count = evicted.len(),
             "reconcile swept orphan plugin slots",
         );
+    }
+    if plugin_scope == DynamicViewPluginScope::All {
+        sweep_stale_wasm_disk_cache(data_dir, &active_shas);
     }
     let principal_view = Arc::new(PrincipalView::from_db(&principals, principal_chains));
     let now = unix_secs(clock.now());
@@ -316,7 +523,7 @@ pub async fn build_dynamic_view(
     let signer_factory = Arc::new(DbCompositeSignerFactory::new_with_vertex_state(
         upstreams.clone(),
         stores.upstreams.clone(),
-        aead,
+        aead.clone(),
         lazy_refresher,
         clock.clone(),
         (
@@ -330,6 +537,8 @@ pub async fn build_dynamic_view(
         applied_at_unix_secs: unix_secs(clock.now()),
         revision_hash,
     });
+    let readiness_summary =
+        crate::app::proxy_router::compute_upstream_readiness_summary(&upstreams, &snapshot, &aead);
 
     let plan_info_by_upstream = load_plan_info_by_upstream(stores).await?;
     let now_unix_millis = i64::try_from(unix_millis(clock.now())).unwrap_or(i64::MAX);
@@ -338,6 +547,7 @@ pub async fn build_dynamic_view(
         .signer_factory(signer_factory)
         .principal_view(principal_view)
         .upstream_status_snapshot(snapshot)
+        .readiness_summary(readiness_summary)
         .upstream_rate_limit_cache(upstream_rate_limit_cache)
         .subscription_quota_cache(subscription_quota_cache)
         .subscription_quota_routing_max_staleness_secs(
@@ -347,40 +557,9 @@ pub async fn build_dynamic_view(
         .upstream_records(upstreams.clone())
         .prompt_cache_observation_store(stores.prompt_cache_observations.clone())
         .prompt_cache_grace_margin_secs(prompt_cache_grace_margin_secs)
-        .prompt_cache_observation_sink(prompt_cache_observation_sink);
+        .prompt_cache_observation_sink(prompt_cache_observation_sink)
+        .has_retryable_plugin_failure(has_retryable_plugin_failure);
     Ok(builder.build())
-}
-
-fn group_rate_limit_observations(
-    records: Vec<UpstreamRateLimitObservationRecord>,
-) -> HashMap<Uuid, Vec<RateLimitObservation>> {
-    let mut snapshots: HashMap<Uuid, Vec<RateLimitObservation>> = HashMap::new();
-    for record in records {
-        snapshots
-            .entry(record.upstream_id)
-            .or_default()
-            .push(rate_limit_observation(record));
-    }
-    snapshots
-}
-
-fn rate_limit_observation(record: UpstreamRateLimitObservationRecord) -> RateLimitObservation {
-    RateLimitObservation {
-        kind: rate_limit_kind(record.kind),
-        window: record.window,
-        limit: record.limit,
-        remaining: record.remaining,
-        reset: record.reset,
-    }
-}
-
-fn rate_limit_kind(kind: RateLimitKind) -> cc_lb_domain::RateLimitKind {
-    match kind {
-        RateLimitKind::Requests => cc_lb_domain::RateLimitKind::Requests,
-        RateLimitKind::Tokens => cc_lb_domain::RateLimitKind::Tokens,
-        RateLimitKind::InputTokens => cc_lb_domain::RateLimitKind::InputTokens,
-        RateLimitKind::OutputTokens => cc_lb_domain::RateLimitKind::OutputTokens,
-    }
 }
 
 async fn load_plan_info_by_upstream(stores: &Stores) -> StorageResult<HashMap<Uuid, PlanInfo>> {
@@ -631,6 +810,7 @@ fn registry_entry_unsupported_slot(
     !registry_entry.is_builtin && !registry_entry.supported_slots.contains(&slot)
 }
 
+#[cfg(test)]
 async fn build_principal_chains(
     stores: &Stores,
     runtime: &Arc<WasmtimeRuntime>,
@@ -646,157 +826,218 @@ async fn build_principal_chains(
     ),
     RebindError,
 > {
+    let (chains, slot_keys, _, _) = build_principal_chains_with_scope(
+        stores,
+        runtime,
+        data_dir,
+        principals,
+        upstreams,
+        aead,
+        clock,
+        DynamicViewPluginScope::All,
+    )
+    .await?;
+    Ok((chains, slot_keys))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_principal_chains_with_scope(
+    stores: &Stores,
+    runtime: &Arc<WasmtimeRuntime>,
+    data_dir: &Path,
+    principals: &[PrincipalRecord],
+    upstreams: &[UpstreamRecord],
+    aead: &AeadService,
+    clock: &cc_lb_clock::ClockHandle,
+    plugin_scope: DynamicViewPluginScope,
+) -> Result<
+    (
+        HashMap<String, PrincipalRoutingArtifacts>,
+        HashSet<cc_lb_runtime_wasmtime::RuntimeSlotKey>,
+        HashSet<[u8; 32]>,
+        bool,
+    ),
+    RebindError,
+> {
     let registry = list_registry_by_id(stores).await?;
-    let principal_ids = principals
-        .iter()
-        .map(|principal| principal.id)
-        .collect::<Vec<_>>();
-    let slots = [PluginSlotKind::Router, PluginSlotKind::Shape];
-    let mut chain_entries: HashMap<(Uuid, PluginSlotKind), Vec<PluginChainEntry>> = stores
-        .plugin_registry
-        .list_chains_for_principals(&principal_ids, &slots)
-        .await?
-        .into_iter()
-        .fold(HashMap::new(), |mut entries, entry| {
-            entries
-                .entry((entry.principal_id, entry.slot))
-                .or_insert_with(Vec::new)
-                .push(entry);
-            entries
-        });
-    // Identity is bound only for records used by a plugin, once per
-    // reconciliation rather than once per principal or request.
+    let active_shas: HashSet<[u8; 32]> = registry
+        .values()
+        .filter(|entry| !entry.is_builtin)
+        .map(|entry| entry.sha256)
+        .collect();
     let mut upstream_identities = HashMap::new();
     let mut chains = HashMap::new();
     let mut registered_slot_keys: HashSet<cc_lb_runtime_wasmtime::RuntimeSlotKey> = HashSet::new();
-    for principal in principals {
-        let allowed_upstreams: Vec<&UpstreamRecord> = upstreams
+    let mut has_retryable_plugin_failure = false;
+
+    if plugin_scope == DynamicViewPluginScope::All {
+        let principal_ids = principals
             .iter()
-            .filter(|upstream| {
-                upstream.enabled
-                    && upstream.deleted_at_unix_secs.is_none()
-                    && (principal.allowed_upstreams.is_empty()
-                        || principal.allowed_upstreams.contains(&upstream.id))
-            })
-            .collect();
-        let providers: Vec<Provider> = [Provider::Anthropic, Provider::Openai, Provider::Gemini]
+            .map(|principal| principal.id)
+            .collect::<Vec<_>>();
+        let slots = [PluginSlotKind::Router, PluginSlotKind::Shape];
+        let mut chain_entries: HashMap<(Uuid, PluginSlotKind), Vec<PluginChainEntry>> = stores
+            .plugin_registry
+            .list_chains_for_principals(&principal_ids, &slots)
+            .await?
             .into_iter()
-            .filter(|provider| {
-                allowed_upstreams
-                    .iter()
-                    .any(|record| record.kind.provider() == *provider)
-            })
-            .collect();
-        let router_entries =
-            take_chain_entries(&mut chain_entries, principal.id, PluginSlotKind::Router);
-        let shape_entries =
-            take_chain_entries(&mut chain_entries, principal.id, PluginSlotKind::Shape);
+            .fold(HashMap::new(), |mut entries, entry| {
+                entries
+                    .entry((entry.principal_id, entry.slot))
+                    .or_insert_with(Vec::new)
+                    .push(entry);
+                entries
+            });
+        // Identity is bound only for records used by a plugin, once per
+        // reconciliation rather than once per principal or request.
+        for principal in principals {
+            let allowed_upstreams: Vec<&UpstreamRecord> = upstreams
+                .iter()
+                .filter(|upstream| {
+                    upstream.enabled
+                        && upstream.deleted_at_unix_secs.is_none()
+                        && (principal.allowed_upstreams.is_empty()
+                            || principal.allowed_upstreams.contains(&upstream.id))
+                })
+                .collect();
+            let providers: Vec<Provider> =
+                [Provider::Anthropic, Provider::Openai, Provider::Gemini]
+                    .into_iter()
+                    .filter(|provider| {
+                        allowed_upstreams
+                            .iter()
+                            .any(|record| record.kind.provider() == *provider)
+                    })
+                    .collect();
+            let router_entries =
+                take_chain_entries(&mut chain_entries, principal.id, PluginSlotKind::Router);
+            let shape_entries =
+                take_chain_entries(&mut chain_entries, principal.id, PluginSlotKind::Shape);
 
-        let router = build_router_pipeline(
-            RouterPipelineBuildContext {
-                stores,
-                runtime,
-                data_dir,
-                registry: &registry,
-                clock,
-            },
-            principal,
-            router_entries,
-            &mut registered_slot_keys,
-            &providers,
-        )
-        .await?;
+            let router = build_router_pipeline(
+                RouterPipelineBuildContext {
+                    stores,
+                    runtime,
+                    data_dir,
+                    registry: &registry,
+                    clock,
+                },
+                principal,
+                router_entries,
+                &mut registered_slot_keys,
+                &providers,
+                &mut has_retryable_plugin_failure,
+            )
+            .await?;
 
-        let dialect = if let Some(entry) = shape_entries.into_iter().next() {
-            let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
-            })?;
-            if registry_entry_unsupported_slot(registry_entry, PluginSlotKind::Shape) {
-                tracing::warn!(
-                    target: "cc_lb_server::drift",
-                    principal = %principal.name,
-                    plugin = registry_entry.name.as_str(),
-                    chain_entry_id = %entry.id,
-                    wasm_registry_id = %registry_entry.id,
-                    requested_slot = PluginSlotKind::Shape.as_str(),
-                    supported_slots = ?registry_entry.supported_slots,
-                    "skipping shape chain entry: registry entry does not support requested slot",
-                );
-                DialectCache::Inherit
-            } else {
-                let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
-                let manifest = PluginManifest {
-                    name: registry_entry.name.clone(),
-                    artifact: wasm_path.to_string_lossy().into_owned(),
-                };
-                let slot_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
-                    principal.name.clone(),
-                    manifest.name.clone(),
-                    cc_lb_runtime_wasmtime::RuntimeSlotRole::Shape,
-                );
-                registered_slot_keys.insert(slot_key.clone());
-                match register_shape_slot(runtime, &slot_key, &manifest).await {
-                    Ok(slot) => {
-                        let dispatch =
-                            WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
-                        let mut dialects = HashMap::new();
-                        for provider in &providers {
-                            let Some(selected) = dispatch.for_provider(wire_provider(*provider))
-                            else {
-                                continue;
-                            };
-                            let selected = Arc::new(selected);
-                            for record in allowed_upstreams
-                                .iter()
-                                .filter(|record| record.kind.provider() == *provider)
-                            {
-                                let identity =
-                                    upstream_identities.entry(record.id).or_insert_with(|| {
-                                        let tokens = if record.kind == UpstreamKind::GeminiOauth {
-                                            record.oauth_credentials.as_ref().and_then(
-                                                |credentials| {
-                                                    credentials
-                                                        .decrypt(aead, record.id.as_bytes())
-                                                        .ok()
-                                                },
-                                            )
-                                        } else {
-                                            None
-                                        };
-                                        upstream_identity(record, tokens.as_ref())
-                                    });
-                                let mut dialect =
-                                    WasmtimeUpstreamDialect::new(Arc::clone(&selected))
-                                        .with_upstream_identity(identity.clone());
-                                if selected.shape_wire_version().is_none() {
-                                    dialect = dialect.with_native_request(
-                                        cc_lb_engine::lifecycle::native_route_dialect(record),
-                                    );
+            let dialect = if let Some(entry) = shape_entries.into_iter().next() {
+                let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
+                })?;
+                if registry_entry_unsupported_slot(registry_entry, PluginSlotKind::Shape) {
+                    tracing::warn!(
+                        target: "cc_lb_server::drift",
+                        principal = %principal.name,
+                        plugin = registry_entry.name.as_str(),
+                        chain_entry_id = %entry.id,
+                        wasm_registry_id = %registry_entry.id,
+                        requested_slot = PluginSlotKind::Shape.as_str(),
+                        supported_slots = ?registry_entry.supported_slots,
+                        "skipping shape chain entry: registry entry does not support requested slot",
+                    );
+                    DialectCache::Inherit
+                } else {
+                    let (wasm_path, wasm_bytes) =
+                        read_verified_wasm(stores, data_dir, registry_entry.sha256).await?;
+                    let manifest = PluginManifest {
+                        name: registry_entry.name.clone(),
+                        artifact: wasm_path.to_string_lossy().into_owned(),
+                    };
+                    let slot_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
+                        principal.name.clone(),
+                        manifest.name.clone(),
+                        cc_lb_runtime_wasmtime::RuntimeSlotRole::Shape,
+                    );
+                    registered_slot_keys.insert(slot_key.clone());
+                    match register_shape_slot(runtime, &slot_key, &manifest, &wasm_bytes).await {
+                        Ok(slot) => {
+                            let dispatch =
+                                WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
+                            let mut dialects = HashMap::new();
+                            for provider in &providers {
+                                let Some(selected) =
+                                    dispatch.for_provider(wire_provider(*provider))
+                                else {
+                                    continue;
+                                };
+                                let selected = Arc::new(selected);
+                                for record in allowed_upstreams
+                                    .iter()
+                                    .filter(|record| record.kind.provider() == *provider)
+                                {
+                                    let identity =
+                                        upstream_identities.entry(record.id).or_insert_with(|| {
+                                            let tokens = if record.kind == UpstreamKind::GeminiOauth
+                                            {
+                                                record.oauth_credentials.as_ref().and_then(
+                                                    |credentials| {
+                                                        credentials
+                                                            .decrypt(aead, record.id.as_bytes())
+                                                            .ok()
+                                                    },
+                                                )
+                                            } else {
+                                                None
+                                            };
+                                            upstream_identity(record, tokens.as_ref())
+                                        });
+                                    let mut dialect =
+                                        WasmtimeUpstreamDialect::new(Arc::clone(&selected))
+                                            .with_upstream_identity(identity.clone())
+                                            .with_claims(crate::wasm_host::project_config_claims(
+                                                &entry.config,
+                                            ));
+                                    if selected.shape_wire_version().is_none() {
+                                        dialect = dialect.with_native_request(
+                                            cc_lb_engine::lifecycle::native_route_dialect(record),
+                                        );
+                                    }
+                                    let dialect: Arc<dyn cc_lb_upstream::UpstreamDialect> =
+                                        Arc::new(dialect);
+                                    dialects.insert(record.id, dialect);
                                 }
-                                let dialect: Arc<dyn cc_lb_upstream::UpstreamDialect> =
-                                    Arc::new(dialect);
-                                dialects.insert(record.id, dialect);
+                            }
+                            DialectCache::PerUpstream(dialects)
+                        }
+                        Err(error) => {
+                            let retryable = error.is_pool_saturated() || error.is_epoch_interrupt();
+                            has_retryable_plugin_failure |= retryable;
+                            let affected_providers =
+                                declared_shape_providers(registry_entry, &wasm_bytes);
+                            let message = format!("shape plugin instantiation failed: {error}");
+                            tracing::error!(
+                                principal = %principal.name,
+                                plugin = %manifest.name,
+                                artifact = %manifest.artifact,
+                                chain_entry_id = %entry.id,
+                                affected_providers = ?affected_providers,
+                                retryable,
+                                %error,
+                                "shape chain entry failed to instantiate; affected provider requests will fail closed",
+                            );
+                            DialectCache::InstantiationFailed {
+                                reason: message,
+                                providers: affected_providers,
                             }
                         }
-                        DialectCache::PerUpstream(dialects)
-                    }
-                    Err(error) => {
-                        tracing::error!(
-                            principal = %principal.name,
-                            plugin = %manifest.name,
-                            chain_entry_id = %entry.id,
-                            %error,
-                            "skipping shape chain entry: instantiation failed; principal falls back to route dialect",
-                        );
-                        DialectCache::Inherit
                     }
                 }
-            }
-        } else {
-            DialectCache::Inherit
-        };
+            } else {
+                DialectCache::Inherit
+            };
 
-        chains.insert(principal.name.clone(), (router, dialect));
+            chains.insert(principal.name.clone(), (router, dialect));
+        }
     }
     for upstream in upstreams {
         if !upstream.enabled || upstream.deleted_at_unix_secs.is_some() {
@@ -815,7 +1056,12 @@ async fn build_principal_chains(
             ));
         }
     }
-    Ok((chains, registered_slot_keys))
+    Ok((
+        chains,
+        registered_slot_keys,
+        active_shas,
+        has_retryable_plugin_failure,
+    ))
 }
 
 /// Copies stored upstream identity without decrypting or inferring metadata.
@@ -844,6 +1090,57 @@ fn wire_provider(provider: Provider) -> cc_lb_plugin_wire::schema::ProviderFamil
         Provider::Openai => cc_lb_plugin_wire::schema::ProviderFamily::Openai,
         Provider::Gemini => cc_lb_plugin_wire::schema::ProviderFamily::Gemini,
     }
+}
+
+fn domain_provider(family: cc_lb_plugin_wire::schema::ProviderFamily) -> Provider {
+    match family {
+        cc_lb_plugin_wire::schema::ProviderFamily::Anthropic => Provider::Anthropic,
+        cc_lb_plugin_wire::schema::ProviderFamily::Openai => Provider::Openai,
+        cc_lb_plugin_wire::schema::ProviderFamily::Gemini => Provider::Gemini,
+    }
+}
+
+fn shape_providers_from_hook_metadata<'a>(
+    hooks: impl IntoIterator<Item = (&'a String, &'a cc_lb_plugin_wire::metadata::HookMetadata)>,
+) -> Vec<Provider> {
+    use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily};
+
+    let mut providers = Vec::with_capacity(3);
+    for (hook_name, meta) in hooks {
+        let Some((hook, family)) = HookKind::parse_entrypoint(hook_name) else {
+            continue;
+        };
+        let is_active_shape_hook = match hook {
+            HookKind::Shape => true,
+            HookKind::ShapeEnvelopeGemini => family == ProviderFamily::Gemini,
+            HookKind::TransformResponse
+            | HookKind::TransformSseEvent
+            | HookKind::TransformRealtimeFrame => !meta.mode.is_noop(),
+            HookKind::Filter => false,
+        };
+        if is_active_shape_hook {
+            let provider = domain_provider(family);
+            if !providers.contains(&provider) {
+                providers.push(provider);
+            }
+        }
+    }
+    providers
+}
+
+fn declared_shape_providers(
+    registry_entry: &WasmRegistryEntry,
+    wasm_bytes: &[u8],
+) -> Vec<Provider> {
+    if !registry_entry.hook_metadata.is_empty() {
+        return shape_providers_from_hook_metadata(&registry_entry.hook_metadata);
+    }
+    if let Ok(inspection) =
+        cc_lb_runtime_wasmtime::inspect_wasm(cc_lb_runtime_wasmtime::HookKind::Shape, wasm_bytes)
+    {
+        return shape_providers_from_hook_metadata(&inspection.metadata.hooks);
+    }
+    vec![Provider::Anthropic, Provider::Openai, Provider::Gemini]
 }
 
 fn take_chain_entries(
@@ -897,15 +1194,19 @@ async fn manifest_for_chain_entry(
     data_dir: &Path,
     registry: &HashMap<Uuid, cc_lb_storage_api::WasmRegistryEntry>,
     entry: &cc_lb_storage_api::PluginChainEntry,
-) -> Result<PluginManifest, RebindError> {
+) -> Result<(PluginManifest, Vec<u8>), RebindError> {
     let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
     })?;
-    let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
-    Ok(PluginManifest {
-        name: registry_entry.name.clone(),
-        artifact: wasm_path.to_string_lossy().into_owned(),
-    })
+    let (wasm_path, wasm_bytes) =
+        read_verified_wasm(stores, data_dir, registry_entry.sha256).await?;
+    Ok((
+        PluginManifest {
+            name: registry_entry.name.clone(),
+            artifact: wasm_path.to_string_lossy().into_owned(),
+        },
+        wasm_bytes,
+    ))
 }
 
 struct RouterPipelineBuildContext<'a> {
@@ -922,6 +1223,7 @@ async fn build_router_pipeline(
     mut router_entries: Vec<cc_lb_storage_api::PluginChainEntry>,
     registered_slot_keys: &mut HashSet<cc_lb_runtime_wasmtime::RuntimeSlotKey>,
     providers: &[Provider],
+    has_retryable_plugin_failure: &mut bool,
 ) -> Result<Option<Arc<RouterPipelineCache>>, RebindError> {
     let RouterPipelineBuildContext {
         stores,
@@ -981,34 +1283,36 @@ async fn build_router_pipeline(
             }
             continue;
         }
-        let manifest = match manifest_for_chain_entry(stores, data_dir, registry, &entry).await {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                tracing::error!(
-                    principal = %principal.name,
-                    chain_entry_id = %entry.id,
-                    %error,
-                    "router chain entry failed to materialize; principal fails closed",
-                );
-                return Ok(Some(Arc::new(RouterPipelineCache {
-                    user_filters: Vec::new(),
-                    terminal: principal.router_terminal_strategy.clone(),
-                    instantiation_error: Some(Arc::<str>::from(format!(
-                        "router pipeline instantiation failed: {error}"
-                    ))),
-                    provider_filters: None,
-                })));
-            }
-        };
+        let (manifest, wasm_bytes) =
+            match manifest_for_chain_entry(stores, data_dir, registry, &entry).await {
+                Ok(pair) => pair,
+                Err(error) => {
+                    tracing::error!(
+                        principal = %principal.name,
+                        chain_entry_id = %entry.id,
+                        %error,
+                        "router chain entry failed to materialize; principal fails closed",
+                    );
+                    return Ok(Some(Arc::new(RouterPipelineCache {
+                        user_filters: Vec::new(),
+                        terminal: principal.router_terminal_strategy.clone(),
+                        instantiation_error: Some(Arc::<str>::from(format!(
+                            "router pipeline instantiation failed: {error}"
+                        ))),
+                        provider_filters: None,
+                    })));
+                }
+            };
         let slot_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
             principal.name.clone(),
             manifest.name.clone(),
             cc_lb_runtime_wasmtime::RuntimeSlotRole::Filter,
         );
         registered_slot_keys.insert(slot_key.clone());
-        match register_filter_slot(runtime, &slot_key, &manifest).await {
+        match register_filter_slot(runtime, &slot_key, &manifest, &wasm_bytes).await {
             Ok(slot) => {
                 let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
+                let claims = crate::wasm_host::project_config_claims(&entry.config);
                 for provider in providers {
                     if let Some(filter) = WasmtimeFilterPlugin::for_provider(
                         &dispatch,
@@ -1016,15 +1320,21 @@ async fn build_router_pipeline(
                         entry.id,
                         manifest.name.clone(),
                     ) {
-                        provider_filters.get_mut(*provider).push(Arc::new(filter));
+                        provider_filters
+                            .get_mut(*provider)
+                            .push(Arc::new(filter.with_claims(Arc::clone(&claims))));
                     }
                 }
             }
             Err(error) => {
+                let retryable = error.is_pool_saturated() || error.is_epoch_interrupt();
+                *has_retryable_plugin_failure |= retryable;
                 tracing::error!(
                     principal = %principal.name,
                     plugin = %manifest.name,
+                    artifact = %manifest.artifact,
                     chain_entry_id = %entry.id,
+                    retryable,
                     %error,
                     "router filter chain entry instantiation failed; principal fails closed",
                 );
@@ -1214,23 +1524,30 @@ fn build_vertex_sources(
         .collect()
 }
 
-#[derive(Clone)]
-struct DbCompositeSignerFactory {
+struct DbCompositeSignerFactoryInner {
     upstreams: Vec<UpstreamRecord>,
+    upstreams_by_name: HashMap<String, usize>,
+    prebuilt_static_signers: HashMap<Uuid, Arc<dyn Signer>>,
     upstream_store: Arc<dyn UpstreamStore>,
     aead: Arc<AeadService>,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     refresh_locks: cc_lb_signer_anthropic_oauth::RefreshLocks,
     anthropic_forced_generations: cc_lb_signer_anthropic_oauth::ForcedRefreshGenerations,
     subscription_signer_states: Arc<RwLock<HashMap<Uuid, Arc<RwLock<SubscriptionSignerState>>>>>,
-    router_chosen_upstream_name: Option<String>,
+    anthropic_oauth_states:
+        Arc<RwLock<HashMap<Uuid, cc_lb_signer_anthropic_oauth::SharedAnthropicOAuthState>>>,
     clock: cc_lb_clock::ClockHandle,
     gemini_config: Arc<cc_lb_config::GeminiOAuthConfig>,
     antigravity_config: Arc<cc_lb_config::AntigravityOAuthConfig>,
     token_registry: Arc<TokenRegistry>,
-    token_transport: Arc<dyn TokenTransport>,
     vertex_sources: Arc<HashMap<Uuid, Arc<TokenSource>>>,
     vertex_status_sink: Arc<VertexStatusSink>,
+}
+
+#[derive(Clone)]
+struct DbCompositeSignerFactory {
+    inner: Arc<DbCompositeSignerFactoryInner>,
+    router_chosen_upstream_name: Option<String>,
 }
 
 impl DbCompositeSignerFactory {
@@ -1270,96 +1587,362 @@ impl DbCompositeSignerFactory {
         ),
         (vertex_state, vertex_sources): (Arc<VertexState>, Arc<HashMap<Uuid, Arc<TokenSource>>>),
     ) -> Self {
+        let gemini_config = Arc::new(oauth_configs.0);
+        let antigravity_config = Arc::new(oauth_configs.1);
+        let shared = &vertex_state.shared_signer_state;
+        let mut upstreams_by_name = HashMap::with_capacity(upstreams.len());
+        let mut prebuilt_static_signers = HashMap::new();
+        for (idx, record) in upstreams.iter().enumerate() {
+            upstreams_by_name.entry(record.name.clone()).or_insert(idx);
+            match record.kind {
+                UpstreamKind::AnthropicApiKey
+                | UpstreamKind::OpenaiApiKey
+                | UpstreamKind::GeminiApiKey
+                | UpstreamKind::VertexApiKey
+                | UpstreamKind::VertexCredential => {
+                    if let Ok(signer) = build_static_signer_for_record(
+                        record,
+                        &aead,
+                        &vertex_sources,
+                        &vertex_state.token_registry,
+                        &vertex_state.status_sink,
+                    ) {
+                        prebuilt_static_signers.insert(record.id, signer);
+                    }
+                }
+                UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth => {
+                    if let Some(encrypted) = record.oauth_credentials.as_ref()
+                        && let Ok(tokens) = encrypted.decrypt(&aead, record.id.as_bytes())
+                        && let Ok(signer) = build_subscription_signer_with_policy(
+                            record,
+                            &tokens,
+                            clock.clone(),
+                            Some(&gemini_config),
+                            Some(&antigravity_config),
+                            true,
+                        )
+                    {
+                        if !tokens.never_refresh && lazy_refresher.is_some() {
+                            let _ = reconcile_subscription_signer_state(
+                                &shared.subscription_signer_states,
+                                record,
+                                &tokens,
+                                signer,
+                                &clock,
+                                &gemini_config,
+                                &antigravity_config,
+                            );
+                        } else if tokens.never_refresh {
+                            prebuilt_static_signers.insert(
+                                record.id,
+                                Arc::new(PersistedAccessOnlySubscriptionSigner {
+                                    signer,
+                                    store: upstream_store.clone(),
+                                    upstream_id: record.id,
+                                    oauth_token_generation: record.oauth_token_generation,
+                                }),
+                            );
+                        } else {
+                            prebuilt_static_signers.insert(record.id, signer);
+                        }
+                    }
+                }
+                UpstreamKind::AnthropicOauth => {
+                    if let Some(encrypted) = record.oauth_credentials.as_ref()
+                        && let Ok(tokens) = encrypted.decrypt(&aead, record.id.as_bytes())
+                    {
+                        let requires_reconnect =
+                            refresh_requires_reconnect(record.last_apply_error.as_deref());
+                        let deleted = record.deleted_at_unix_secs.is_some();
+                        let existing = shared
+                            .anthropic_oauth_states
+                            .read()
+                            .get(&record.id)
+                            .cloned();
+                        if let Some(state) = existing {
+                            let mut guard = state
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let prev_rev = guard.spec_revision;
+                            guard.enabled = record.enabled;
+                            guard.deleted = deleted;
+                            guard.spec_revision = record.revision;
+                            if record.oauth_token_generation > guard.oauth_token_generation {
+                                guard.access_token = secrecy::SecretString::new(
+                                    tokens.access_token.into_boxed_str(),
+                                );
+                                guard.expires_at_unix_secs = tokens.expires_at_unix_secs;
+                                guard.never_refresh = tokens.never_refresh;
+                                guard.oauth_token_generation = record.oauth_token_generation;
+                                guard.requires_reconnect = requires_reconnect;
+                            } else if record.oauth_token_generation == guard.oauth_token_generation
+                                && (requires_reconnect || record.revision > prev_rev)
+                            {
+                                guard.requires_reconnect = requires_reconnect;
+                            }
+                        } else {
+                            let mut states = shared.anthropic_oauth_states.write();
+                            states.entry(record.id).or_insert_with(|| {
+                                Arc::new(std::sync::RwLock::new(
+                                    cc_lb_signer_anthropic_oauth::AnthropicOAuthCachedState {
+                                        upstream_id: record.id,
+                                        access_token: secrecy::SecretString::new(
+                                            tokens.access_token.into_boxed_str(),
+                                        ),
+                                        expires_at_unix_secs: tokens.expires_at_unix_secs,
+                                        never_refresh: tokens.never_refresh,
+                                        oauth_token_generation: record.oauth_token_generation,
+                                        spec_revision: record.revision,
+                                        enabled: record.enabled,
+                                        deleted,
+                                        requires_reconnect,
+                                    },
+                                ))
+                            });
+                        }
+                    } else {
+                        shared.anthropic_oauth_states.write().remove(&record.id);
+                    }
+                }
+            }
+        }
         Self {
-            upstreams,
-            upstream_store,
-            aead,
-            lazy_refresher,
-            refresh_locks: vertex_state.shared_signer_state.refresh_locks.clone(),
-            anthropic_forced_generations: vertex_state
-                .shared_signer_state
-                .anthropic_forced_generations
-                .clone(),
-            subscription_signer_states: vertex_state
-                .shared_signer_state
-                .subscription_signer_states
-                .clone(),
+            inner: Arc::new(DbCompositeSignerFactoryInner {
+                upstreams,
+                upstreams_by_name,
+                prebuilt_static_signers,
+                upstream_store,
+                aead,
+                lazy_refresher,
+                refresh_locks: shared.refresh_locks.clone(),
+                anthropic_forced_generations: shared.anthropic_forced_generations.clone(),
+                subscription_signer_states: shared.subscription_signer_states.clone(),
+                anthropic_oauth_states: shared.anthropic_oauth_states.clone(),
+                clock,
+                gemini_config,
+                antigravity_config,
+                token_registry: vertex_state.token_registry.clone(),
+                vertex_sources,
+                vertex_status_sink: vertex_state.status_sink.clone(),
+            }),
             router_chosen_upstream_name: None,
-            clock,
-            gemini_config: Arc::new(oauth_configs.0),
-            antigravity_config: Arc::new(oauth_configs.1),
-            token_registry: vertex_state.token_registry.clone(),
-            token_transport: vertex_state.token_transport.clone(),
-            vertex_sources,
-            vertex_status_sink: vertex_state.status_sink.clone(),
         }
     }
 
     fn with_router_choice_state(&self, router_chosen_upstream_name: String) -> Self {
         Self {
-            upstreams: self.upstreams.clone(),
-            upstream_store: self.upstream_store.clone(),
-            aead: self.aead.clone(),
-            lazy_refresher: self.lazy_refresher.clone(),
-            refresh_locks: self.refresh_locks.clone(),
-            anthropic_forced_generations: self.anthropic_forced_generations.clone(),
-            subscription_signer_states: self.subscription_signer_states.clone(),
+            inner: Arc::clone(&self.inner),
             router_chosen_upstream_name: Some(router_chosen_upstream_name),
-            clock: self.clock.clone(),
-            gemini_config: self.gemini_config.clone(),
-            antigravity_config: self.antigravity_config.clone(),
-            token_registry: self.token_registry.clone(),
-            token_transport: self.token_transport.clone(),
-            vertex_sources: self.vertex_sources.clone(),
-            vertex_status_sink: self.vertex_status_sink.clone(),
         }
     }
-    fn reconcile_subscription_signer_state(
+    fn lookup_record(&self, upstream: &Upstream) -> Option<&UpstreamRecord> {
+        let name = self.router_chosen_upstream_name.as_deref()?;
+        if let Some(&idx) = self.inner.upstreams_by_name.get(name)
+            && let Some(candidate) = self.inner.upstreams.get(idx)
+            && upstream_matches(candidate, upstream)
+        {
+            return Some(candidate);
+        }
+        self.inner
+            .upstreams
+            .iter()
+            .find(|candidate| self.record_matches(candidate, upstream))
+    }
+
+    #[cfg(test)]
+    fn insert_or_reconcile_subscription_signer_state(
         &self,
-        shared: &Arc<RwLock<SubscriptionSignerState>>,
         record: &UpstreamRecord,
         tokens: &cc_lb_aead::OAuthTokenBundle,
         signer: Arc<dyn Signer>,
-    ) -> Result<(), SignerError> {
-        let mut guard = shared.write();
-        let token_is_newer = record.oauth_token_generation > guard.oauth_token_generation;
-        let target_is_newer = record.revision > guard.spec_revision
-            || (record.revision == guard.spec_revision && record.base_url != guard.base_url);
-        if record.revision < guard.spec_revision {
-            if token_is_newer {
-                let mut monotonic_record = record.clone();
-                monotonic_record.revision = guard.spec_revision;
-                monotonic_record.base_url = guard.base_url.clone();
-                guard.signer = build_subscription_signer_with_policy(
-                    &monotonic_record,
-                    tokens,
-                    self.clock.clone(),
-                    Some(&self.gemini_config),
-                    Some(&self.antigravity_config),
-                    true,
-                )?;
-                let previous = std::mem::replace(
-                    &mut guard.access_token,
-                    secrecy::SecretString::new(tokens.access_token.clone().into_boxed_str()),
-                );
-                if previous.expose_secret() != tokens.access_token.as_str()
-                    && !guard
-                        .historical_access_tokens
-                        .iter()
-                        .any(|item| item.expose_secret() == previous.expose_secret())
-                {
-                    guard.historical_access_tokens.push(previous);
+    ) -> Result<Arc<RwLock<SubscriptionSignerState>>, SignerError> {
+        insert_or_reconcile_subscription_signer_state(
+            &self.inner.subscription_signer_states,
+            record,
+            tokens,
+            signer,
+            &self.inner.clock,
+            &self.inner.gemini_config,
+            &self.inner.antigravity_config,
+        )
+    }
+}
+impl cc_lb_engine::ApiKeyAwareSignerFactory for DbCompositeSignerFactory {
+    fn with_router_choice(&self, router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {
+        // The downstream caller's key is deliberately not forwarded upstream.
+        Arc::new(self.with_router_choice_state(router_chosen_upstream_name))
+    }
+}
+
+fn build_static_signer_for_record(
+    record: &UpstreamRecord,
+    aead: &AeadService,
+    vertex_sources: &HashMap<Uuid, Arc<TokenSource>>,
+    token_registry: &TokenRegistry,
+    vertex_status_sink: &VertexStatusSink,
+) -> Result<Arc<dyn Signer>, SignerError> {
+    match record.kind {
+        UpstreamKind::AnthropicApiKey => {
+            let api_key = resolve_api_key(aead, record).map_err(|reason| {
+                SignerError::MissingCredentials {
+                    reason: match reason {
+                        ApiKeyResolutionError::Missing => {
+                            "anthropic api-key upstream has no stored credential".to_owned()
+                        }
+                        ApiKeyResolutionError::NotDecryptable => "anthropic api-key upstream credential could not be decrypted; re-set api_key_value for this upstream".to_owned(),
+                        ApiKeyResolutionError::NotUtf8 => {
+                            "anthropic api-key upstream credential is not valid utf-8".to_owned()
+                        }
+                        ApiKeyResolutionError::InvalidHeaderValue => "anthropic api-key upstream credential is not a valid header value; re-set api_key_value for this upstream".to_owned(),
+                        ApiKeyResolutionError::LegacyEncoding => "anthropic api-key upstream credential uses a retired encoding; re-set api_key_value for this upstream".to_owned(),
+                    },
                 }
-                guard.expires_at_unix_secs = tokens.expires_at_unix_secs;
-                guard.forced_refresh_generation = None;
-                guard.oauth_token_generation = record.oauth_token_generation;
-                guard.oauth_profile = tokens.oauth_profile;
-                guard.project_id = tokens.project_id.clone();
-                guard.account_id = tokens.account_id.clone();
-                guard.never_refresh = tokens.never_refresh;
+            })?;
+            Ok(Arc::new(
+                cc_lb_signer_anthropic_key::AnthropicKeySigner::new(
+                    api_key.as_str(),
+                    record.workspace_id.as_deref(),
+                )?,
+            ))
+        }
+        UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey => {
+            let api_key = resolve_api_key(aead, record).map_err(|reason| {
+                let provider = match record.kind {
+                    UpstreamKind::OpenaiApiKey => "openai",
+                    UpstreamKind::GeminiApiKey => "gemini",
+                    _ => unreachable!("provider arm restricts upstream kind"),
+                };
+                SignerError::MissingCredentials {
+                    reason: match reason {
+                        ApiKeyResolutionError::Missing => {
+                            format!("{provider} api-key upstream has no stored credential")
+                        }
+                        ApiKeyResolutionError::NotDecryptable => {
+                            format!("{provider} api-key upstream credential could not be decrypted; re-set api_key_value for this upstream")
+                        }
+                        ApiKeyResolutionError::NotUtf8 => {
+                            format!("{provider} api-key upstream credential is not valid utf-8")
+                        }
+                        ApiKeyResolutionError::InvalidHeaderValue => {
+                            format!("{provider} api-key upstream credential is not a valid header value; re-set api_key_value for this upstream")
+                        }
+                        ApiKeyResolutionError::LegacyEncoding => {
+                            format!("{provider} api-key upstream credential uses a retired encoding; re-set api_key_value for this upstream")
+                        }
+                    },
+                }
+            })?;
+            let kind = match record.kind {
+                UpstreamKind::OpenaiApiKey => cc_lb_signer_anthropic_key::ProviderKeyKind::Openai,
+                UpstreamKind::GeminiApiKey => cc_lb_signer_anthropic_key::ProviderKeyKind::Gemini,
+                _ => unreachable!("provider arm restricts upstream kind"),
+            };
+            Ok(Arc::new(
+                cc_lb_signer_anthropic_key::ProviderKeySigner::new(kind, api_key.as_str())?,
+            ))
+        }
+        UpstreamKind::VertexApiKey => {
+            let api_key =
+                resolve_api_key(aead, record).map_err(|error| SignerError::MissingCredentials {
+                    reason: format!("vertex api-key credential unavailable: {error:?}"),
+                })?;
+            let header = HeaderValue::from_str(api_key.as_str()).map_err(|_| {
+                SignerError::MissingCredentials {
+                    reason: "vertex api-key credential is not a valid header".to_owned(),
+                }
+            })?;
+            let cfg = record
+                .vertex
+                .clone()
+                .ok_or_else(|| SignerError::MissingCredentials {
+                    reason: "vertex api-key upstream missing Vertex configuration".to_owned(),
+                })?;
+            Ok(Arc::new(VertexSigner::new(
+                &record.id.to_string(),
+                record.kind,
+                cfg,
+                record.base_url.clone(),
+                record.vertex_quota_project_id.clone(),
+                VertexCredentialSource::ApiKey(header),
+            )))
+        }
+        UpstreamKind::VertexCredential => {
+            if cc_lb_domain::vertex::vertex_credential_requires_replacement(
+                record.last_apply_error.as_deref(),
+            ) {
+                return Err(SignerError::MissingCredentials {
+                    reason: "vertex credential requires replacement".to_owned(),
+                });
             }
-        } else if token_is_newer {
-            guard.signer = signer;
+            let ciphertext = record.api_key_ciphertext.as_deref().ok_or_else(|| {
+                SignerError::MissingCredentials {
+                    reason: "vertex credential upstream has no stored credential".to_owned(),
+                }
+            })?;
+            // Installed views keep a strong source reference. The weak
+            // registry is only consulted as a cross-view reuse path; no
+            // decryption or credential parsing occurs on request builds.
+            let source = vertex_sources
+                .get(&record.id)
+                .cloned()
+                .or_else(|| token_registry.get(&record.id.to_string(), ciphertext))
+                .ok_or_else(|| SignerError::MissingCredentials {
+                    reason: "vertex credential source unavailable".to_owned(),
+                })?;
+            let source: Arc<dyn BearerSource> = Arc::new(source);
+            let source = ReportingBearerSource::new(
+                source,
+                vertex_status_sink.clone(),
+                record.id,
+                record.revision,
+            );
+            let cfg = record
+                .vertex
+                .clone()
+                .ok_or_else(|| SignerError::MissingCredentials {
+                    reason: "vertex credential upstream missing Vertex configuration".to_owned(),
+                })?;
+            Ok(Arc::new(VertexSigner::new(
+                &record.id.to_string(),
+                record.kind,
+                cfg,
+                record.base_url.clone(),
+                record.vertex_quota_project_id.clone(),
+                VertexCredentialSource::Bearer(source),
+            )))
+        }
+        UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth | UpstreamKind::AnthropicOauth => {
+            unreachable!("static signer builder called for oauth upstream")
+        }
+    }
+}
+
+fn reconcile_existing_subscription_signer_state(
+    shared: &Arc<RwLock<SubscriptionSignerState>>,
+    record: &UpstreamRecord,
+    tokens: &cc_lb_aead::OAuthTokenBundle,
+    signer: Arc<dyn Signer>,
+    clock: &cc_lb_clock::ClockHandle,
+    gemini_config: &cc_lb_config::GeminiOAuthConfig,
+    antigravity_config: &cc_lb_config::AntigravityOAuthConfig,
+) -> Result<(), SignerError> {
+    let mut guard = shared.write();
+    let token_is_newer = record.oauth_token_generation > guard.oauth_token_generation;
+    let target_is_newer = record.revision > guard.spec_revision
+        || (record.revision == guard.spec_revision && record.base_url != guard.base_url);
+    if record.revision < guard.spec_revision {
+        if token_is_newer {
+            let mut monotonic_record = record.clone();
+            monotonic_record.revision = guard.spec_revision;
+            monotonic_record.base_url = guard.base_url.clone();
+            guard.signer = build_subscription_signer_with_policy(
+                &monotonic_record,
+                tokens,
+                clock.clone(),
+                Some(gemini_config),
+                Some(antigravity_config),
+                true,
+            )?;
             let previous = std::mem::replace(
                 &mut guard.access_token,
                 secrecy::SecretString::new(tokens.access_token.clone().into_boxed_str()),
@@ -1375,198 +1958,235 @@ impl DbCompositeSignerFactory {
             guard.expires_at_unix_secs = tokens.expires_at_unix_secs;
             guard.forced_refresh_generation = None;
             guard.oauth_token_generation = record.oauth_token_generation;
-            guard.spec_revision = record.revision;
-            guard.base_url = record.base_url.clone();
             guard.oauth_profile = tokens.oauth_profile;
             guard.project_id = tokens.project_id.clone();
             guard.account_id = tokens.account_id.clone();
             guard.never_refresh = tokens.never_refresh;
-        } else if target_is_newer {
-            if record.oauth_token_generation == guard.oauth_token_generation {
-                guard.signer = signer;
-            } else {
-                let newer_tokens = cc_lb_aead::OAuthTokenBundle {
-                    oauth_profile: guard.oauth_profile,
-                    access_token: guard.access_token.expose_secret().to_owned(),
-                    refresh_token: String::new(),
-                    expires_at_unix_secs: guard.expires_at_unix_secs,
-                    refresh_token_expires_at_unix_secs: None,
-                    account_id: guard.account_id.clone(),
-                    project_id: guard.project_id.clone(),
-                    scopes: Vec::new(),
-                    never_refresh: guard.never_refresh,
-                };
-                guard.signer = build_subscription_signer_with_policy(
-                    record,
-                    &newer_tokens,
-                    self.clock.clone(),
-                    Some(&self.gemini_config),
-                    Some(&self.antigravity_config),
-                    true,
-                )?;
-            }
-            guard.spec_revision = record.revision;
-            guard.base_url = record.base_url.clone();
         }
-        Ok(())
+    } else if token_is_newer {
+        guard.signer = signer;
+        let previous = std::mem::replace(
+            &mut guard.access_token,
+            secrecy::SecretString::new(tokens.access_token.clone().into_boxed_str()),
+        );
+        if previous.expose_secret() != tokens.access_token.as_str()
+            && !guard
+                .historical_access_tokens
+                .iter()
+                .any(|item| item.expose_secret() == previous.expose_secret())
+        {
+            guard.historical_access_tokens.push(previous);
+        }
+        guard.expires_at_unix_secs = tokens.expires_at_unix_secs;
+        guard.forced_refresh_generation = None;
+        guard.oauth_token_generation = record.oauth_token_generation;
+        guard.spec_revision = record.revision;
+        guard.base_url = record.base_url.clone();
+        guard.oauth_profile = tokens.oauth_profile;
+        guard.project_id = tokens.project_id.clone();
+        guard.account_id = tokens.account_id.clone();
+        guard.never_refresh = tokens.never_refresh;
+    } else if target_is_newer {
+        if record.oauth_token_generation == guard.oauth_token_generation {
+            guard.signer = signer;
+        } else {
+            let newer_tokens = cc_lb_aead::OAuthTokenBundle {
+                oauth_profile: guard.oauth_profile,
+                access_token: guard.access_token.expose_secret().to_owned(),
+                refresh_token: String::new(),
+                expires_at_unix_secs: guard.expires_at_unix_secs,
+                refresh_token_expires_at_unix_secs: None,
+                account_id: guard.account_id.clone(),
+                project_id: guard.project_id.clone(),
+                scopes: Vec::new(),
+                never_refresh: guard.never_refresh,
+            };
+            guard.signer = build_subscription_signer_with_policy(
+                record,
+                &newer_tokens,
+                clock.clone(),
+                Some(gemini_config),
+                Some(antigravity_config),
+                true,
+            )?;
+        }
+        guard.spec_revision = record.revision;
+        guard.base_url = record.base_url.clone();
     }
+    Ok(())
+}
 
-    fn insert_or_reconcile_subscription_signer_state(
-        &self,
-        record: &UpstreamRecord,
-        tokens: &cc_lb_aead::OAuthTokenBundle,
-        signer: Arc<dyn Signer>,
-    ) -> Result<Arc<RwLock<SubscriptionSignerState>>, SignerError> {
-        let mut states = self.subscription_signer_states.write();
-        match states.entry(record.id) {
-            Entry::Vacant(entry) => Ok(entry
-                .insert(Arc::new(RwLock::new(SubscriptionSignerState {
-                    signer,
-                    access_token: secrecy::SecretString::new(
-                        tokens.access_token.clone().into_boxed_str(),
-                    ),
-                    historical_access_tokens: Vec::new(),
-                    expires_at_unix_secs: tokens.expires_at_unix_secs,
-                    forced_refresh_generation: None,
-                    oauth_token_generation: record.oauth_token_generation,
-                    spec_revision: record.revision,
-                    base_url: record.base_url.clone(),
-                    oauth_profile: tokens.oauth_profile,
-                    project_id: tokens.project_id.clone(),
-                    account_id: tokens.account_id.clone(),
-                    never_refresh: tokens.never_refresh,
-                })))
-                .clone()),
-            Entry::Occupied(entry) => {
-                let shared = entry.get().clone();
-                drop(states);
-                self.reconcile_subscription_signer_state(&shared, record, tokens, signer)?;
-                Ok(shared)
-            }
+fn insert_or_reconcile_subscription_signer_state(
+    subscription_signer_states: &RwLock<HashMap<Uuid, Arc<RwLock<SubscriptionSignerState>>>>,
+    record: &UpstreamRecord,
+    tokens: &cc_lb_aead::OAuthTokenBundle,
+    signer: Arc<dyn Signer>,
+    clock: &cc_lb_clock::ClockHandle,
+    gemini_config: &cc_lb_config::GeminiOAuthConfig,
+    antigravity_config: &cc_lb_config::AntigravityOAuthConfig,
+) -> Result<Arc<RwLock<SubscriptionSignerState>>, SignerError> {
+    let mut states = subscription_signer_states.write();
+    match states.entry(record.id) {
+        Entry::Vacant(entry) => Ok(entry
+            .insert(Arc::new(RwLock::new(SubscriptionSignerState {
+                signer,
+                access_token: secrecy::SecretString::new(
+                    tokens.access_token.clone().into_boxed_str(),
+                ),
+                historical_access_tokens: Vec::new(),
+                expires_at_unix_secs: tokens.expires_at_unix_secs,
+                forced_refresh_generation: None,
+                oauth_token_generation: record.oauth_token_generation,
+                spec_revision: record.revision,
+                base_url: record.base_url.clone(),
+                oauth_profile: tokens.oauth_profile,
+                project_id: tokens.project_id.clone(),
+                account_id: tokens.account_id.clone(),
+                never_refresh: tokens.never_refresh,
+            })))
+            .clone()),
+        Entry::Occupied(entry) => {
+            let shared = entry.get().clone();
+            drop(states);
+            reconcile_existing_subscription_signer_state(
+                &shared,
+                record,
+                tokens,
+                signer,
+                clock,
+                gemini_config,
+                antigravity_config,
+            )?;
+            Ok(shared)
         }
     }
 }
-impl cc_lb_engine::ApiKeyAwareSignerFactory for DbCompositeSignerFactory {
-    fn with_router_choice(&self, router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {
-        // The downstream caller's key is deliberately not forwarded upstream.
-        Arc::new(self.with_router_choice_state(router_chosen_upstream_name))
+
+fn reconcile_subscription_signer_state(
+    subscription_signer_states: &RwLock<HashMap<Uuid, Arc<RwLock<SubscriptionSignerState>>>>,
+    record: &UpstreamRecord,
+    tokens: &cc_lb_aead::OAuthTokenBundle,
+    signer: Arc<dyn Signer>,
+    clock: &cc_lb_clock::ClockHandle,
+    gemini_config: &cc_lb_config::GeminiOAuthConfig,
+    antigravity_config: &cc_lb_config::AntigravityOAuthConfig,
+) -> Result<Arc<RwLock<SubscriptionSignerState>>, SignerError> {
+    let existing = subscription_signer_states.read().get(&record.id).cloned();
+    if let Some(shared) = existing {
+        reconcile_existing_subscription_signer_state(
+            &shared,
+            record,
+            tokens,
+            signer,
+            clock,
+            gemini_config,
+            antigravity_config,
+        )?;
+        Ok(shared)
+    } else {
+        insert_or_reconcile_subscription_signer_state(
+            subscription_signer_states,
+            record,
+            tokens,
+            signer,
+            clock,
+            gemini_config,
+            antigravity_config,
+        )
     }
 }
 
 #[async_trait]
 impl SignerFactory for DbCompositeSignerFactory {
     async fn build(&self, upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
-        let record = self
-            .upstreams
-            .iter()
-            .find(|candidate| self.record_matches(candidate, upstream))
-            .ok_or_else(|| SignerError::MissingCredentials {
-                reason: "upstream not present in dynamic signer view".to_owned(),
-            })?;
+        let record =
+            self.lookup_record(upstream)
+                .ok_or_else(|| SignerError::MissingCredentials {
+                    reason: "upstream not present in dynamic signer view".to_owned(),
+                })?;
+        if let Some(prebuilt) = self.inner.prebuilt_static_signers.get(&record.id) {
+            return Ok(Arc::clone(prebuilt));
+        }
         match record.kind {
-            UpstreamKind::AnthropicApiKey => {
-                let api_key = resolve_api_key(&self.aead, record).map_err(|reason| {
-                    SignerError::MissingCredentials {
-                        reason: match reason {
-                            ApiKeyResolutionError::Missing => {
-                                "anthropic api-key upstream has no stored credential".to_owned()
-                            }
-                            ApiKeyResolutionError::NotDecryptable => "anthropic api-key upstream credential could not be decrypted; re-set api_key_value for this upstream".to_owned(),
-                            ApiKeyResolutionError::NotUtf8 => {
-                                "anthropic api-key upstream credential is not valid utf-8"
-                                    .to_owned()
-                            }
-                            ApiKeyResolutionError::InvalidHeaderValue => "anthropic api-key upstream credential is not a valid header value; re-set api_key_value for this upstream".to_owned(),
-                            ApiKeyResolutionError::LegacyEncoding => "anthropic api-key upstream credential uses a retired encoding; re-set api_key_value for this upstream".to_owned(),
-                        },
-                    }
-                })?;
-                cc_lb_signer_anthropic_key::AnthropicKeySignerFactory::new(
-                    api_key.as_str(),
-                    record.workspace_id.as_deref(),
-                )?
-                .build(upstream)
-                .await
-            }
-            UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey => {
-                let api_key = resolve_api_key(&self.aead, record).map_err(|reason| {
-                    let provider = match record.kind {
-                        UpstreamKind::OpenaiApiKey => "openai",
-                        UpstreamKind::GeminiApiKey => "gemini",
-                        _ => unreachable!("provider arm restricts upstream kind"),
-                    };
-                    SignerError::MissingCredentials {
-                        reason: match reason {
-                            ApiKeyResolutionError::Missing => {
-                                format!("{provider} api-key upstream has no stored credential")
-                            }
-                            ApiKeyResolutionError::NotDecryptable => {
-                                format!("{provider} api-key upstream credential could not be decrypted; re-set api_key_value for this upstream")
-                            }
-                            ApiKeyResolutionError::NotUtf8 => {
-                                format!("{provider} api-key upstream credential is not valid utf-8")
-                            }
-                            ApiKeyResolutionError::InvalidHeaderValue => {
-                                format!("{provider} api-key upstream credential is not a valid header value; re-set api_key_value for this upstream")
-                            }
-                            ApiKeyResolutionError::LegacyEncoding => {
-                                format!("{provider} api-key upstream credential uses a retired encoding; re-set api_key_value for this upstream")
-                            }
-                        },
-                    }
-                })?;
-                let kind = match record.kind {
-                    UpstreamKind::OpenaiApiKey => {
-                        cc_lb_signer_anthropic_key::ProviderKeyKind::Openai
-                    }
-                    UpstreamKind::GeminiApiKey => {
-                        cc_lb_signer_anthropic_key::ProviderKeyKind::Gemini
-                    }
-                    _ => unreachable!("provider arm restricts upstream kind"),
-                };
-                cc_lb_signer_anthropic_key::ProviderKeySignerFactory::new(kind, api_key.as_str())?
-                    .build(upstream)
-                    .await
-            }
+            UpstreamKind::AnthropicApiKey
+            | UpstreamKind::OpenaiApiKey
+            | UpstreamKind::GeminiApiKey
+            | UpstreamKind::VertexApiKey
+            | UpstreamKind::VertexCredential => build_static_signer_for_record(
+                record,
+                &self.inner.aead,
+                &self.inner.vertex_sources,
+                &self.inner.token_registry,
+                &self.inner.vertex_status_sink,
+            ),
             UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth => {
+                if record.oauth_credentials.is_some()
+                    && let Some(refresh_handle) = self.inner.lazy_refresher.clone()
+                    && let Some(state) = self
+                        .inner
+                        .subscription_signer_states
+                        .read()
+                        .get(&record.id)
+                        .cloned()
+                {
+                    let guard = state.read();
+                    if !guard.never_refresh
+                        && record.revision == guard.spec_revision
+                        && record.base_url == guard.base_url
+                        && record.oauth_token_generation <= guard.oauth_token_generation
+                    {
+                        let attempted_access_token = RwLock::new(secrecy::SecretString::new(
+                            guard
+                                .access_token
+                                .expose_secret()
+                                .to_owned()
+                                .into_boxed_str(),
+                        ));
+                        drop(guard);
+                        return Ok(Arc::new(RefreshingSubscriptionSigner {
+                            state,
+                            attempted_access_token,
+                            record: record.clone(),
+                            store: self.inner.upstream_store.clone(),
+                            aead: self.inner.aead.clone(),
+                            clock: self.inner.clock.clone(),
+                            gemini_config: self.inner.gemini_config.clone(),
+                            antigravity_config: self.inner.antigravity_config.clone(),
+                            refresh_handle,
+                            refresh_locks: self.inner.refresh_locks.clone(),
+                        }));
+                    }
+                }
                 let encrypted = record.oauth_credentials.as_ref().ok_or_else(|| {
                     SignerError::MissingCredentials {
                         reason: "subscription oauth upstream has no stored credential".to_owned(),
                     }
                 })?;
                 let tokens = encrypted
-                    .decrypt(&self.aead, record.id.as_bytes())
+                    .decrypt(&self.inner.aead, record.id.as_bytes())
                     .map_err(|source| SignerError::SigningFailed {
                         reason: source.to_string(),
                     })?;
                 let signer = build_subscription_signer_with_policy(
                     record,
                     &tokens,
-                    self.clock.clone(),
-                    Some(&self.gemini_config),
-                    Some(&self.antigravity_config),
+                    self.inner.clock.clone(),
+                    Some(&self.inner.gemini_config),
+                    Some(&self.inner.antigravity_config),
                     true,
                 )?;
                 if !tokens.never_refresh
-                    && let Some(refresh_handle) = self.lazy_refresher.clone()
+                    && let Some(refresh_handle) = self.inner.lazy_refresher.clone()
                 {
-                    let state = {
-                        let existing = self
-                            .subscription_signer_states
-                            .read()
-                            .get(&record.id)
-                            .cloned();
-                        if let Some(shared) = existing {
-                            self.reconcile_subscription_signer_state(
-                                &shared, record, &tokens, signer,
-                            )?;
-                            shared
-                        } else {
-                            self.insert_or_reconcile_subscription_signer_state(
-                                record, &tokens, signer,
-                            )?
-                        }
-                    };
+                    let state = reconcile_subscription_signer_state(
+                        &self.inner.subscription_signer_states,
+                        record,
+                        &tokens,
+                        signer,
+                        &self.inner.clock,
+                        &self.inner.gemini_config,
+                        &self.inner.antigravity_config,
+                    )?;
                     let attempted_access_token = RwLock::new(secrecy::SecretString::new(
                         state
                             .read()
@@ -1579,18 +2199,18 @@ impl SignerFactory for DbCompositeSignerFactory {
                         state,
                         attempted_access_token,
                         record: record.clone(),
-                        store: self.upstream_store.clone(),
-                        aead: self.aead.clone(),
-                        clock: self.clock.clone(),
-                        gemini_config: self.gemini_config.clone(),
-                        antigravity_config: self.antigravity_config.clone(),
+                        store: self.inner.upstream_store.clone(),
+                        aead: self.inner.aead.clone(),
+                        clock: self.inner.clock.clone(),
+                        gemini_config: self.inner.gemini_config.clone(),
+                        antigravity_config: self.inner.antigravity_config.clone(),
                         refresh_handle,
-                        refresh_locks: self.refresh_locks.clone(),
+                        refresh_locks: self.inner.refresh_locks.clone(),
                     }))
                 } else if tokens.never_refresh {
                     Ok(Arc::new(PersistedAccessOnlySubscriptionSigner {
                         signer,
-                        store: self.upstream_store.clone(),
+                        store: self.inner.upstream_store.clone(),
                         upstream_id: record.id,
                         oauth_token_generation: record.oauth_token_generation,
                     }))
@@ -1599,101 +2219,37 @@ impl SignerFactory for DbCompositeSignerFactory {
                 }
             }
             UpstreamKind::AnthropicOauth => {
-                let factory =
+                let mut factory =
                     cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory::for_upstream_name(
-                        self.upstream_store.clone(),
-                        self.aead.clone(),
+                        self.inner.upstream_store.clone(),
+                        self.inner.aead.clone(),
                         record.name.clone(),
-                        self.clock.clone(),
+                        self.inner.clock.clone(),
                     );
-                if let Some(handle) = &self.lazy_refresher {
+                if let Some(cached) = self
+                    .inner
+                    .anthropic_oauth_states
+                    .read()
+                    .get(&record.id)
+                    .cloned()
+                {
+                    factory = factory.with_cached_state(cached);
+                }
+                if let Some(handle) = &self.inner.lazy_refresher {
                     cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactoryWithLazyRefresh::new(
                         factory,
                         handle.clone(),
                         record.id,
                     )
                     .with_shared_refresh_state(
-                        self.refresh_locks.clone(),
-                        self.anthropic_forced_generations.clone(),
+                        self.inner.refresh_locks.clone(),
+                        self.inner.anthropic_forced_generations.clone(),
                     )
                     .build(upstream)
                     .await
                 } else {
                     factory.build(upstream).await
                 }
-            }
-            UpstreamKind::VertexApiKey => {
-                let api_key = resolve_api_key(&self.aead, record).map_err(|error| {
-                    SignerError::MissingCredentials {
-                        reason: format!("vertex api-key credential unavailable: {error:?}"),
-                    }
-                })?;
-                let header = HeaderValue::from_str(api_key.as_str()).map_err(|_| {
-                    SignerError::MissingCredentials {
-                        reason: "vertex api-key credential is not a valid header".to_owned(),
-                    }
-                })?;
-                let cfg = record
-                    .vertex
-                    .clone()
-                    .ok_or_else(|| SignerError::MissingCredentials {
-                        reason: "vertex api-key upstream missing Vertex configuration".to_owned(),
-                    })?;
-                Ok(Arc::new(VertexSigner::new(
-                    &record.id.to_string(),
-                    record.kind,
-                    cfg,
-                    record.base_url.clone(),
-                    record.vertex_quota_project_id.clone(),
-                    VertexCredentialSource::ApiKey(header),
-                )))
-            }
-            UpstreamKind::VertexCredential => {
-                if cc_lb_domain::vertex::vertex_credential_requires_replacement(
-                    record.last_apply_error.as_deref(),
-                ) {
-                    return Err(SignerError::MissingCredentials {
-                        reason: "vertex credential requires replacement".to_owned(),
-                    });
-                }
-                let ciphertext = record.api_key_ciphertext.as_deref().ok_or_else(|| {
-                    SignerError::MissingCredentials {
-                        reason: "vertex credential upstream has no stored credential".to_owned(),
-                    }
-                })?;
-                // Installed views keep a strong source reference. The weak
-                // registry is only consulted as a cross-view reuse path; no
-                // decryption or credential parsing occurs on request builds.
-                let source = self
-                    .vertex_sources
-                    .get(&record.id)
-                    .cloned()
-                    .or_else(|| self.token_registry.get(&record.id.to_string(), ciphertext))
-                    .ok_or_else(|| SignerError::MissingCredentials {
-                        reason: "vertex credential source unavailable".to_owned(),
-                    })?;
-                let source: Arc<dyn BearerSource> = Arc::new(source);
-                let source = ReportingBearerSource::new(
-                    source,
-                    (*self.vertex_status_sink).clone(),
-                    record.id,
-                    record.revision,
-                );
-                let cfg = record
-                    .vertex
-                    .clone()
-                    .ok_or_else(|| SignerError::MissingCredentials {
-                        reason: "vertex credential upstream missing Vertex configuration"
-                            .to_owned(),
-                    })?;
-                Ok(Arc::new(VertexSigner::new(
-                    &record.id.to_string(),
-                    record.kind,
-                    cfg,
-                    record.base_url.clone(),
-                    record.vertex_quota_project_id.clone(),
-                    VertexCredentialSource::Bearer(source),
-                )))
             }
         }
     }
@@ -2504,11 +3060,11 @@ mod tests {
         storage: &Storage,
         principal_id: Uuid,
         wasm: Vec<u8>,
-        sha256: [u8; 32],
         filename: &str,
     ) {
         use cc_lb_storage_api::{PluginChainEntryInput, WasmBlob, WasmRegistryEntryInput};
 
+        let sha256: [u8; 32] = Sha256::digest(&wasm).into();
         let metadata = cc_lb_runtime_wasmtime::inspect_wasm_agnostic(&wasm)
             .expect("frame inspection")
             .metadata;
@@ -2623,13 +3179,14 @@ mod tests {
         use cc_lb_storage_api::{WasmBlob, WasmRegistryEntryInput};
 
         let wasm = dual_role_provider_fixture();
+        let sha256: [u8; 32] = Sha256::digest(&wasm).into();
         let metadata = cc_lb_runtime_wasmtime::inspect_wasm_agnostic(&wasm)
             .expect("dual-role inspection")
             .metadata;
         let (registry, _) = storage
             .persist_wasm_upload(
                 WasmBlob {
-                    sha256: [242; 32],
+                    sha256,
                     size_bytes: wasm.len() as u64,
                     bytes: wasm,
                 },
@@ -2746,7 +3303,9 @@ mod tests {
             let shaped = cc_lb_upstream::shape_request(
                 dialect.as_ref(),
                 &context,
-                &cc_lb_domain::Upstream::AnthropicDirect { base_url: None },
+                &cc_lb_domain::Upstream::AnthropicDirect {
+                    base_url: Some("https://dual-role.example.test".parse().expect("valid URL")),
+                },
                 &identity,
             )
             .expect("shape executes");
@@ -3082,13 +3641,14 @@ mod tests {
         .await
         .expect("Anthropic enabled");
         let wasm = anthropic_filter_provider_fixture();
+        let sha256: [u8; 32] = Sha256::digest(&wasm).into();
         let metadata = cc_lb_runtime_wasmtime::inspect_wasm_agnostic(&wasm)
             .expect("inspection")
             .metadata;
         let (registry, _) = storage
             .persist_wasm_upload(
                 WasmBlob {
-                    sha256: [240; 32],
+                    sha256,
                     size_bytes: wasm.len() as u64,
                     bytes: wasm,
                 },
@@ -3118,13 +3678,14 @@ mod tests {
             .await
             .expect("chain entry");
         let wasm = openai_response_only_provider_fixture();
+        let sha256: [u8; 32] = Sha256::digest(&wasm).into();
         let metadata = cc_lb_runtime_wasmtime::inspect_wasm_agnostic(&wasm)
             .expect("response inspection")
             .metadata;
         let (registry, _) = storage
             .persist_wasm_upload(
                 WasmBlob {
-                    sha256: [241; 32],
+                    sha256,
                     size_bytes: wasm.len() as u64,
                     bytes: wasm,
                 },
@@ -3381,7 +3942,6 @@ mod tests {
             &storage,
             openai_principal.id,
             frame_only_provider_fixture(cc_lb_plugin_wire::schema::ProviderFamily::Openai, false),
-            [242; 32],
             "openai-frame-only.wasm",
         )
         .await;
@@ -3389,7 +3949,6 @@ mod tests {
             &storage,
             gemini_principal.id,
             frame_only_provider_fixture(cc_lb_plugin_wire::schema::ProviderFamily::Gemini, false),
-            [243; 32],
             "gemini-frame-only.wasm",
         )
         .await;
@@ -3397,7 +3956,6 @@ mod tests {
             &storage,
             noop_principal.id,
             frame_only_provider_fixture(cc_lb_plugin_wire::schema::ProviderFamily::Openai, true),
-            [244; 32],
             "openai-frame-only-noop.wasm",
         )
         .await;
@@ -3831,6 +4389,7 @@ mod tests {
 
         let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
         let mut slot_keys = HashSet::new();
+        let mut has_retryable_plugin_failure = false;
         let pipeline = build_router_pipeline(
             RouterPipelineBuildContext {
                 stores: &stores,
@@ -3843,9 +4402,11 @@ mod tests {
             router_entries,
             &mut slot_keys,
             &[Provider::Anthropic, Provider::Openai, Provider::Gemini],
+            &mut has_retryable_plugin_failure,
         )
         .await
         .expect("pipeline builds");
+        assert!(!has_retryable_plugin_failure);
         drop(dir);
         pipeline
     }
@@ -4925,7 +5486,7 @@ mod tests {
     impl UpstreamRateLimitStateStore for ReconnectMidBuildRateLimits {
         async fn put_observation(
             &self,
-            record: &UpstreamRateLimitObservationRecord,
+            record: &cc_lb_storage_api::UpstreamRateLimitObservationRecord,
         ) -> StorageResult<()> {
             UpstreamRateLimitStateStore::put_observation(self.storage.as_ref(), record).await
         }
@@ -4933,7 +5494,7 @@ mod tests {
         async fn list_for_upstream_ids(
             &self,
             upstream_ids: &[Uuid],
-        ) -> StorageResult<Vec<UpstreamRateLimitObservationRecord>> {
+        ) -> StorageResult<Vec<cc_lb_storage_api::UpstreamRateLimitObservationRecord>> {
             if !self.injected.swap(true, Ordering::SeqCst) {
                 UpstreamStore::set_status(
                     self.storage.as_ref(),
@@ -6697,5 +7258,1214 @@ mod tests {
             .expect("stale occupied miss path stays monotonic");
         assert_eq!(state_after.read().spec_revision, record_v2.revision);
         assert_eq!(state_after.read().base_url, record_v2.base_url);
+    }
+
+    struct CountingUpstreamStore {
+        inner: Arc<Storage>,
+        get_by_name_calls: AtomicUsize,
+        get_by_id_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl UpstreamStore for CountingUpstreamStore {
+        async fn create(&self, create: UpstreamCreate) -> StorageResult<UpstreamRecord> {
+            UpstreamStore::create(&*self.inner, create).await
+        }
+
+        async fn get_by_name(&self, name: &str) -> StorageResult<Option<UpstreamRecord>> {
+            self.get_by_name_calls.fetch_add(1, Ordering::SeqCst);
+            UpstreamStore::get_by_name(&*self.inner, name).await
+        }
+
+        async fn get_by_id(&self, id: Uuid) -> StorageResult<Option<UpstreamRecord>> {
+            self.get_by_id_calls.fetch_add(1, Ordering::SeqCst);
+            UpstreamStore::get_by_id(&*self.inner, id).await
+        }
+
+        async fn list(
+            &self,
+            after: Option<Uuid>,
+            limit: usize,
+        ) -> StorageResult<Vec<UpstreamRecord>> {
+            UpstreamStore::list(&*self.inner, after, limit).await
+        }
+
+        async fn update(
+            &self,
+            id: Uuid,
+            expected_revision: u64,
+            update: UpstreamUpdate,
+        ) -> StorageResult<UpstreamRecord> {
+            UpstreamStore::update(&*self.inner, id, expected_revision, update).await
+        }
+
+        async fn set_status(&self, id: Uuid, status: UpstreamStatusUpdate) -> StorageResult<()> {
+            UpstreamStore::set_status(&*self.inner, id, status).await
+        }
+
+        async fn store_oauth_tokens(
+            &self,
+            id: Uuid,
+            expected_revision: u64,
+            tokens: cc_lb_aead::EncryptedOAuthTokens,
+            never_refresh: bool,
+        ) -> StorageResult<UpstreamRecord> {
+            UpstreamStore::store_oauth_tokens(
+                &*self.inner,
+                id,
+                expected_revision,
+                tokens,
+                never_refresh,
+            )
+            .await
+        }
+
+        async fn complete_refresh(
+            &self,
+            id: Uuid,
+            holder: Uuid,
+            tokens: cc_lb_aead::EncryptedOAuthTokens,
+        ) -> StorageResult<UpstreamRecord> {
+            UpstreamStore::complete_refresh(&*self.inner, id, holder, tokens).await
+        }
+
+        async fn set_last_apply_error(&self, id: Uuid, error: Option<String>) -> StorageResult<()> {
+            UpstreamStore::set_last_apply_error(&*self.inner, id, error).await
+        }
+
+        async fn soft_delete(&self, id: Uuid, expected_revision: u64) -> StorageResult<()> {
+            UpstreamStore::soft_delete(&*self.inner, id, expected_revision).await
+        }
+
+        async fn hard_delete(&self, id: Uuid) -> StorageResult<()> {
+            UpstreamStore::hard_delete(&*self.inner, id).await
+        }
+
+        async fn clear_warmup_dialect_plugin(
+            &self,
+            id: Uuid,
+            expected_revision: u64,
+        ) -> StorageResult<Option<UpstreamRecord>> {
+            UpstreamStore::clear_warmup_dialect_plugin(&*self.inner, id, expected_revision).await
+        }
+    }
+
+    #[tokio::test]
+    async fn anthropic_oauth_signer_uses_shared_cache_with_zero_db_lookups_until_expired() {
+        let (_dir, storage) = storage_fixture(71).await;
+        let aead = Arc::new(AeadService::from_master_key([21; 32]));
+        let clock = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let mut tokens = expired_tokens();
+        tokens.access_token = "anthropic-tok-initial".to_owned();
+        tokens.expires_at_unix_secs = 1_700_001_000;
+        let record = oauth_record(
+            &storage,
+            &aead,
+            "anthropic-cached",
+            UpstreamKind::AnthropicOauth,
+            tokens,
+            None,
+        )
+        .await;
+        let counting_store = Arc::new(CountingUpstreamStore {
+            inner: storage.clone(),
+            get_by_name_calls: AtomicUsize::new(0),
+            get_by_id_calls: AtomicUsize::new(0),
+        });
+        let vertex_state = Arc::new(VertexState::new(counting_store.clone()));
+        let factory = DbCompositeSignerFactory::new_with_vertex_state(
+            vec![record.clone()],
+            counting_store.clone(),
+            aead.clone(),
+            None,
+            clock.clone(),
+            (Default::default(), Default::default()),
+            (vertex_state.clone(), Arc::new(HashMap::new())),
+        )
+        .with_router_choice_state(record.name.clone());
+        let upstream = Upstream::AnthropicDirect { base_url: None };
+
+        for _ in 0..2 {
+            let signer = factory.build(&upstream).await.expect("cached signer");
+            let signed = sign_request(signer.as_ref(), shaped_request())
+                .await
+                .expect("sign cached");
+            assert_eq!(
+                signed.headers().get(http::header::AUTHORIZATION),
+                Some(&http::HeaderValue::from_static(
+                    "Bearer anthropic-tok-initial"
+                ))
+            );
+        }
+        assert_eq!(counting_store.get_by_name_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(counting_store.get_by_id_calls.load(Ordering::SeqCst), 0);
+
+        // Store refreshed token in DB and advance clock past cached expiry.
+        let mut refreshed = expired_tokens();
+        refreshed.access_token = "anthropic-tok-refreshed".to_owned();
+        refreshed.expires_at_unix_secs = 1_700_010_000;
+        let encrypted =
+            cc_lb_aead::EncryptedOAuthTokens::encrypt(&aead, &refreshed, record.id.as_bytes())
+                .expect("encrypt refreshed");
+        UpstreamStore::store_oauth_tokens(
+            storage.as_ref(),
+            record.id,
+            record.revision,
+            encrypted,
+            false,
+        )
+        .await
+        .expect("store refreshed tokens");
+        clock.advance_secs(1_100);
+
+        let signer_after_expiry = factory.build(&upstream).await.expect("fallback signer");
+        let signed_after_expiry = sign_request(signer_after_expiry.as_ref(), shaped_request())
+            .await
+            .expect("sign refreshed");
+        assert_eq!(
+            signed_after_expiry
+                .headers()
+                .get(http::header::AUTHORIZATION),
+            Some(&http::HeaderValue::from_static(
+                "Bearer anthropic-tok-refreshed"
+            ))
+        );
+        assert_eq!(counting_store.get_by_name_calls.load(Ordering::SeqCst), 1);
+
+        // Next build reuses the newly warmed cache without touching DB.
+        let signer_re_cached = factory.build(&upstream).await.expect("re-warmed signer");
+        let signed_re_cached = sign_request(signer_re_cached.as_ref(), shaped_request())
+            .await
+            .expect("sign re-warmed");
+        assert_eq!(
+            signed_re_cached.headers().get(http::header::AUTHORIZATION),
+            Some(&http::HeaderValue::from_static(
+                "Bearer anthropic-tok-refreshed"
+            ))
+        );
+        assert_eq!(counting_store.get_by_name_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn composite_signer_factory_reuses_prebuilt_static_signers_and_avoids_redecrypting_subscription_oauth()
+     {
+        let (_dir, storage) = storage_fixture(72).await;
+        let aead = Arc::new(AeadService::from_master_key([22; 32]));
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+
+        let anthropic_id = Uuid::new_v4();
+        let anthropic_ciphertext = aead
+            .encrypt(b"sk-ant-static", anthropic_id.as_bytes())
+            .expect("encrypt anthropic");
+        let anthropic_rec = UpstreamRecord {
+            id: anthropic_id,
+            name: "ant-static".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            api_key_ciphertext: Some(anthropic_ciphertext),
+            enabled: true,
+            revision: 1,
+            ..UpstreamRecord::default()
+        };
+
+        let openai_id = Uuid::new_v4();
+        let openai_ciphertext = aead
+            .encrypt(b"sk-oai-static", openai_id.as_bytes())
+            .expect("encrypt openai");
+        let openai_rec = UpstreamRecord {
+            id: openai_id,
+            name: "oai-static".to_owned(),
+            kind: UpstreamKind::OpenaiApiKey,
+            api_key_ciphertext: Some(openai_ciphertext),
+            enabled: true,
+            revision: 1,
+            ..UpstreamRecord::default()
+        };
+
+        let mut gemini_tokens = expired_tokens();
+        gemini_tokens.access_token = "gemini-tok-fast".to_owned();
+        gemini_tokens.expires_at_unix_secs = 1_900_000_000;
+        let gemini_rec = oauth_record(
+            &storage,
+            &aead,
+            "gemini-fast",
+            UpstreamKind::GeminiOauth,
+            gemini_tokens,
+            None,
+        )
+        .await;
+        let handle: Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle> =
+            Arc::new(DynamicRefreshHandle {
+                storage: storage.clone(),
+                aead: aead.clone(),
+                refreshed_access_token: "unused".to_owned(),
+                calls: AtomicUsize::new(0),
+                fail: false,
+                gate: None,
+            });
+        let vertex_state = Arc::new(VertexState::new(storage.clone()));
+        let factory = DbCompositeSignerFactory::new_with_vertex_state(
+            vec![
+                anthropic_rec.clone(),
+                openai_rec.clone(),
+                gemini_rec.clone(),
+            ],
+            storage.clone(),
+            aead.clone(),
+            Some(handle.clone()),
+            clock.clone(),
+            (Default::default(), Default::default()),
+            (vertex_state.clone(), Arc::new(HashMap::new())),
+        );
+
+        let ant_factory = cc_lb_engine::ApiKeyAwareSignerFactory::with_router_choice(
+            &factory,
+            "ant-static".to_owned(),
+        );
+        let ant_upstream = Upstream::AnthropicDirect { base_url: None };
+        let ant1 = ant_factory.build(&ant_upstream).await.expect("ant1");
+        let ant2 = ant_factory.build(&ant_upstream).await.expect("ant2");
+        assert!(Arc::ptr_eq(&ant1, &ant2));
+
+        let oai_factory = cc_lb_engine::ApiKeyAwareSignerFactory::with_router_choice(
+            &factory,
+            "oai-static".to_owned(),
+        );
+        let oai_upstream = Upstream::OpenaiDirect { base_url: None };
+        let oai1 = oai_factory.build(&oai_upstream).await.expect("oai1");
+        let oai2 = oai_factory.build(&oai_upstream).await.expect("oai2");
+        assert!(Arc::ptr_eq(&oai1, &oai2));
+
+        // Rebuild view with the same shared VertexState, revision, base_url, and generation
+        // while corrupting ciphertext bytes: build() must hit the shared fast path without AEAD decrypt.
+        let mut gemini_corrupt_ciphertext = gemini_rec.clone();
+        gemini_corrupt_ciphertext.oauth_credentials =
+            Some(cc_lb_aead::EncryptedOAuthTokens::from_ciphertext(vec![
+                1, 2, 3, 4,
+            ]));
+        let fast_factory = DbCompositeSignerFactory::new_with_vertex_state(
+            vec![gemini_corrupt_ciphertext],
+            storage,
+            aead,
+            Some(handle),
+            clock,
+            (Default::default(), Default::default()),
+            (vertex_state, Arc::new(HashMap::new())),
+        )
+        .with_router_choice_state("gemini-fast".to_owned());
+        let gemini_upstream = Upstream::GeminiDirect { base_url: None };
+        let gemini_signer = fast_factory
+            .build(&gemini_upstream)
+            .await
+            .expect("gemini fast path skips AEAD decrypt");
+        let mut shaped = shaped_request();
+        shaped.set_url(
+            "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro:generateContent"
+                .parse()
+                .expect("url"),
+        );
+        shaped.set_body(bytes::Bytes::from_static(br#"{"contents":[]}"#));
+        let signed = sign_request(gemini_signer.as_ref(), shaped)
+            .await
+            .expect("sign fast path");
+        assert_eq!(
+            signed.headers().get(http::header::AUTHORIZATION),
+            Some(&http::HeaderValue::from_static("Bearer gemini-tok-fast"))
+        );
+    }
+
+    #[tokio::test]
+    async fn read_verified_wasm_self_heals_corrupt_disk_cache_and_rejects_corrupt_blob() {
+        let (dir, storage) = storage_fixture(71).await;
+        let stores = stores(
+            storage.clone(),
+            Arc::new(FakePromptCacheObservationStore::new()),
+        );
+        let wasm = anthropic_filter_provider_fixture();
+        let sha256: [u8; 32] = Sha256::digest(&wasm).into();
+        let metadata = cc_lb_runtime_wasmtime::inspect_wasm_agnostic(&wasm)
+            .expect("inspection")
+            .metadata;
+        storage
+            .persist_wasm_upload(
+                cc_lb_storage_api::WasmBlob {
+                    sha256,
+                    size_bytes: wasm.len() as u64,
+                    bytes: wasm.clone(),
+                },
+                cc_lb_storage_api::WasmRegistryEntryInput {
+                    name: metadata.name,
+                    version: Some(metadata.version),
+                    original_filename: "self-heal.wasm".to_owned(),
+                    label: None,
+                    uploaded_at_unix_secs: 1,
+                    uploaded_by_admin_id: Uuid::nil(),
+                    description: metadata.description,
+                    usage: metadata.usage,
+                    hook_metadata: metadata.hooks,
+                    supported_slots: vec![PluginSlotKind::Router],
+                },
+            )
+            .await
+            .expect("persist valid plugin");
+
+        ensure_wasm_cache_dirs(dir.path()).expect("cache dirs");
+        let cache_path = dir
+            .path()
+            .join("plugins")
+            .join("wasm")
+            .join("cache")
+            .join(format!(
+                "{}.wasm",
+                crate::revision_hash::hex_sha256(&sha256)
+            ));
+        std::fs::write(&cache_path, b"corrupted on-disk bytes").expect("seed corrupt cache file");
+
+        let (resolved_path, loaded_bytes) = read_verified_wasm(&stores, dir.path(), sha256)
+            .await
+            .expect("corrupt cache must self-heal from verified storage blob");
+        assert_eq!(resolved_path, cache_path);
+        assert_eq!(loaded_bytes, wasm);
+        assert_eq!(
+            std::fs::read(&cache_path).expect("re-read repaired cache"),
+            wasm
+        );
+
+        let mismatched_sha = [0x99; 32];
+        let bad_blob = b"storage bytes not matching mismatched_sha".to_vec();
+        storage
+            .persist_wasm_upload(
+                cc_lb_storage_api::WasmBlob {
+                    sha256: mismatched_sha,
+                    size_bytes: bad_blob.len() as u64,
+                    bytes: bad_blob,
+                },
+                cc_lb_storage_api::WasmRegistryEntryInput {
+                    name: "corrupt-storage-blob".to_owned(),
+                    version: Some("1.0.0".to_owned()),
+                    original_filename: "corrupt-db.wasm".to_owned(),
+                    label: None,
+                    uploaded_at_unix_secs: 1,
+                    uploaded_by_admin_id: Uuid::nil(),
+                    description: "corrupt".to_owned(),
+                    usage: "test".to_owned(),
+                    hook_metadata: Default::default(),
+                    supported_slots: vec![PluginSlotKind::Router],
+                },
+            )
+            .await
+            .expect("persist corrupt sha row");
+        let err = read_verified_wasm(&stores, dir.path(), mismatched_sha)
+            .await
+            .expect_err("corrupt storage blob must fail closed");
+        assert!(
+            matches!(err, RebindError::Io(ref io_err) if io_err.kind() == io::ErrorKind::InvalidData),
+            "expected InvalidData on mismatched storage blob, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_stale_wasm_disk_cache_removes_unreferenced_wasm_files_and_preserves_tmp() {
+        let (dir, storage) = storage_fixture(72).await;
+        let stores = stores(
+            storage.clone(),
+            Arc::new(FakePromptCacheObservationStore::new()),
+        );
+        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("runtime"));
+        let wasm = anthropic_filter_provider_fixture();
+        let active_sha: [u8; 32] = Sha256::digest(&wasm).into();
+        let metadata = cc_lb_runtime_wasmtime::inspect_wasm_agnostic(&wasm)
+            .expect("inspection")
+            .metadata;
+        storage
+            .persist_wasm_upload(
+                cc_lb_storage_api::WasmBlob {
+                    sha256: active_sha,
+                    size_bytes: wasm.len() as u64,
+                    bytes: wasm.clone(),
+                },
+                cc_lb_storage_api::WasmRegistryEntryInput {
+                    name: metadata.name,
+                    version: Some(metadata.version),
+                    original_filename: "active.wasm".to_owned(),
+                    label: None,
+                    uploaded_at_unix_secs: 1,
+                    uploaded_by_admin_id: Uuid::nil(),
+                    description: metadata.description,
+                    usage: metadata.usage,
+                    hook_metadata: metadata.hooks,
+                    supported_slots: vec![PluginSlotKind::Router],
+                },
+            )
+            .await
+            .expect("persist active plugin");
+
+        ensure_wasm_cache_dirs(dir.path()).expect("cache dirs");
+        let cache_dir = dir.path().join("plugins").join("wasm").join("cache");
+        let active_path = cache_dir.join(format!(
+            "{}.wasm",
+            crate::revision_hash::hex_sha256(&active_sha)
+        ));
+        let stale_path = cache_dir.join(format!("{}.wasm", "aa".repeat(32)));
+        let tmp_path = cache_dir.join(".tmp").join("inflight.wasm");
+        std::fs::write(&active_path, &wasm).expect("write active");
+        std::fs::write(&stale_path, b"stale orphan wasm").expect("write stale");
+        std::fs::write(&tmp_path, b"in-flight temp").expect("write tmp");
+
+        let _view = build_view(&stores, &runtime, dir.path()).await;
+
+        assert!(active_path.exists(), "active registry wasm must remain");
+        assert!(
+            !stale_path.exists(),
+            "unreferenced stale wasm cache file must be swept"
+        );
+        assert!(tmp_path.exists(), ".tmp directory files must be preserved");
+    }
+
+    #[tokio::test]
+    async fn warmup_only_scope_skips_principal_plugin_chains_and_compiles_no_principal_slots() {
+        let (dir, storage) = storage_fixture(73).await;
+        let stores = stores(
+            storage.clone(),
+            Arc::new(FakePromptCacheObservationStore::new()),
+        );
+        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("runtime"));
+
+        let wasm = dual_role_provider_fixture();
+        let sha256: [u8; 32] = Sha256::digest(&wasm).into();
+        let metadata = cc_lb_runtime_wasmtime::inspect_wasm_agnostic(&wasm)
+            .expect("dual-role inspection")
+            .metadata;
+        let (registry, _) = storage
+            .persist_wasm_upload(
+                cc_lb_storage_api::WasmBlob {
+                    sha256,
+                    size_bytes: wasm.len() as u64,
+                    bytes: wasm.clone(),
+                },
+                cc_lb_storage_api::WasmRegistryEntryInput {
+                    name: metadata.name.clone(),
+                    version: Some(metadata.version),
+                    original_filename: "dual-role-warmup.wasm".to_owned(),
+                    label: None,
+                    uploaded_at_unix_secs: 1,
+                    uploaded_by_admin_id: Uuid::nil(),
+                    description: metadata.description,
+                    usage: metadata.usage,
+                    hook_metadata: metadata.hooks,
+                    supported_slots: vec![PluginSlotKind::Router, PluginSlotKind::Shape],
+                },
+            )
+            .await
+            .expect("persist dual-role");
+
+        let principal = PrincipalStore::create(
+            storage.as_ref(),
+            cc_lb_storage_api::PrincipalCreate {
+                openai_oauth_compat: None,
+                name: "warmup-only-principal".to_owned(),
+                kind: cc_lb_storage_api::PrincipalKind::Machine,
+                allowed_models: vec!["*".to_owned()],
+                allowed_upstreams: Vec::new(),
+                default_limits: Vec::new(),
+                cache_keepalive: None,
+            },
+            1,
+        )
+        .await
+        .expect("create principal");
+        storage
+            .insert_chain_entry(cc_lb_storage_api::PluginChainEntryInput {
+                principal_id: principal.id,
+                slot: PluginSlotKind::Router,
+                order: 1000,
+                wasm_registry_id: registry.id,
+                config: serde_json::json!({}),
+            })
+            .await
+            .expect("insert router chain");
+        storage
+            .insert_chain_entry(cc_lb_storage_api::PluginChainEntryInput {
+                principal_id: principal.id,
+                slot: PluginSlotKind::Shape,
+                order: 1000,
+                wasm_registry_id: registry.id,
+                config: serde_json::json!({}),
+            })
+            .await
+            .expect("insert shape chain");
+
+        let upstream_rec = UpstreamStore::create(
+            storage.as_ref(),
+            cc_lb_storage_api::upstream::UpstreamCreate {
+                id: Uuid::new_v4(),
+                name: "warmup-upstream".to_owned(),
+                kind: UpstreamKind::AnthropicApiKey,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: true,
+                warmup_dialect_plugin: Some(
+                    cc_lb_storage_api::upstream::UpstreamWarmupDialectPlugin {
+                        wasm_registry_id: registry.id,
+                        config: serde_json::json!({}),
+                        wire_version: None,
+                    },
+                ),
+                workspace_id: None,
+                api_key_access: None,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
+            },
+        )
+        .await
+        .expect("create upstream with warmup dialect");
+
+        let warmup_key = crate::warmup::dialect::warmup_dialect_slot_key(sha256, &registry.name);
+        runtime
+            .register_shape(warmup_key.clone(), registry.name.clone(), &wasm)
+            .expect("pre-register warmup slot");
+
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+        let view = build_dynamic_view_with_scope(
+            &stores,
+            None,
+            None,
+            Arc::new(AeadService::from_master_key([19; 32])),
+            None,
+            0,
+            &runtime,
+            dir.path(),
+            Arc::new(SubscriptionQuotaCache::new()),
+            30,
+            Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
+            1800,
+            clock,
+            DynamicViewPluginScope::WarmupOnly,
+        )
+        .await
+        .expect("WarmupOnly dynamic view builds");
+
+        let artifacts = view
+            .principal_view
+            .get("warmup-only-principal")
+            .expect("principal present");
+        let resolved_pipeline = artifacts.resolved_pipeline(None);
+        assert!(
+            resolved_pipeline
+                .filters_for(Provider::Anthropic)
+                .is_empty()
+                && resolved_pipeline.provider_filters.is_none(),
+            "WarmupOnly must not build principal router pipelines"
+        );
+        assert!(
+            artifacts.resolved_dialect(upstream_rec.id).is_none(),
+            "WarmupOnly must not build principal shape dialect plugins"
+        );
+
+        let principal_filter_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
+            "warmup-only-principal".to_owned(),
+            registry.name.clone(),
+            cc_lb_runtime_wasmtime::RuntimeSlotRole::Filter,
+        );
+        let principal_shape_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
+            "warmup-only-principal".to_owned(),
+            registry.name.clone(),
+            cc_lb_runtime_wasmtime::RuntimeSlotRole::Shape,
+        );
+        assert!(runtime.get_slot(&principal_filter_key).is_none());
+        assert!(runtime.get_slot(&principal_shape_key).is_none());
+        assert!(
+            runtime.get_slot(&warmup_key).is_some(),
+            "WarmupOnly must retain warmup dialect slots across retain_slots"
+        );
+    }
+
+    fn anthropic_shape_provider_fixture() -> Vec<u8> {
+        use cc_lb_plugin_wire::schema::WireSchema;
+
+        let shape = rkyv::to_bytes::<rkyv::rancor::Error>(&cc_lb_plugin_wire::v2::ShapeResponse {
+            url: Box::from("https://anthropic-shape.example.test/v1/messages"),
+            method: Box::from("POST"),
+            headers: Box::new([]),
+            body: Box::from(&b"anthropic-shaped"[..]),
+        })
+        .expect("shape response");
+        let shape_data: String = shape.iter().map(|byte| format!("\\{byte:02x}")).collect();
+        let shape_packed = cc_lb_plugin_wire::schema::pack_ret(16, shape.len() as u32);
+        let mut wasm = wat::parse_str(format!(
+            r#"(module
+                (memory (export "memory") 1)
+                (data (i32.const 16) "{shape_data}")
+                (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 8192)
+                (func (export "cc_lb_free") (param i32 i32 i32))
+                (func (export "cc_lb_shape_anthropic") (param i32 i32) (result i64) i64.const {shape_packed})
+            )"#
+        ))
+        .expect("anthropic shape module");
+        provider_test_section(
+            &mut wasm,
+            "cc_lb.schema.shape.v2",
+            &<cc_lb_plugin_wire::v2::ShapeRequest as WireSchema>::FINGERPRINT,
+        );
+        provider_test_section(
+            &mut wasm,
+            "cc_lb.plugin.v2",
+            br#"{
+            "name":"anthropic-shape-only","version":"1.0.0","description":"anthropic shape","usage":"test",
+            "hooks":{"shape_anthropic":{"wire_version":2,"description":"shape","usage":"test","mode":"active"}}
+        }"#,
+        );
+        wasm
+    }
+
+    fn hold_sole_pooling_slot(
+        runtime: &Arc<WasmtimeRuntime>,
+    ) -> (std::sync::mpsc::SyncSender<()>, std::thread::JoinHandle<()>) {
+        let blocker_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::global(
+            "pool-blocker",
+            cc_lb_runtime_wasmtime::RuntimeSlotRole::Filter,
+        );
+        let blocker_slot = runtime
+            .register_filter(
+                blocker_key,
+                "pool-blocker",
+                &anthropic_filter_provider_fixture(),
+            )
+            .expect("blocker filter registers before saturation");
+        let blocker_dispatch =
+            WasmPluginWireDispatch::from_slot(blocker_slot, runtime.config_arc());
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let handle = std::thread::spawn(move || {
+            let result = blocker_dispatch.call_filter_scoped(&[], |_| {
+                entered_tx.send(()).expect("signal blocker holds slot");
+                let _ = release_rx.recv();
+            });
+            result.expect("blocker invocation completes");
+        });
+        entered_rx.recv().expect("blocker holds sole pooling slot");
+        (release_tx, handle)
+    }
+
+    #[tokio::test]
+    async fn shape_admission_failure_scopes_fail_closed_to_declared_providers() {
+        let (dir, storage) = storage_fixture(74).await;
+        let stores = Arc::new(stores(
+            storage.clone(),
+            Arc::new(FakePromptCacheObservationStore::new()),
+        ));
+        let principal = create_machine_principal(&storage, "scoped-shape-fail").await;
+        let anthropic_upstream = create_upstream(&storage, "anthropic-upstream").await;
+        let _ = UpstreamStore::update(
+            &*storage,
+            anthropic_upstream.id,
+            anthropic_upstream.revision,
+            UpstreamUpdate {
+                enabled: Some(true),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("enable anthropic");
+        let openai_created = UpstreamStore::create(
+            &*storage,
+            UpstreamCreate {
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
+                id: Uuid::new_v4(),
+                name: "openai-upstream".to_owned(),
+                kind: UpstreamKind::OpenaiApiKey,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .expect("create openai");
+        let _ = UpstreamStore::update(
+            &*storage,
+            openai_created.id,
+            openai_created.revision,
+            UpstreamUpdate {
+                enabled: Some(true),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("enable openai");
+
+        install_shape_plugin(
+            &storage,
+            principal.id,
+            anthropic_shape_provider_fixture(),
+            "anthropic-shape-only.wasm",
+        )
+        .await;
+
+        let runtime = Arc::new(
+            WasmtimeRuntime::new(cc_lb_runtime_wasmtime::HotEngineConfig {
+                allocation_strategy: cc_lb_runtime_wasmtime::HotEngineAllocationStrategy::Pooling,
+                pool_total_memories: 1,
+                pool_total_core_instances: 1,
+                ..cc_lb_runtime_wasmtime::HotEngineConfig::default()
+            })
+            .expect("pooling runtime"),
+        );
+        let (release_tx, blocker_handle) = hold_sole_pooling_slot(&runtime);
+        let view = build_view(&stores, &runtime, dir.path()).await;
+        let _ = release_tx.send(());
+        blocker_handle.join().expect("blocker thread joins");
+
+        assert!(
+            view.has_retryable_plugin_failure(),
+            "pool saturation during shape admission must flag view as retryable"
+        );
+        let cached = view
+            .principal_view
+            .get(&principal.name)
+            .expect("principal cached");
+        assert!(
+            cached
+                .dialect_instantiation_error(Provider::Anthropic)
+                .is_some(),
+            "declared Anthropic provider must fail closed"
+        );
+        assert!(
+            cached
+                .dialect_instantiation_error(Provider::Openai)
+                .is_none(),
+            "undeclared OpenAI provider must keep native routing"
+        );
+        assert!(
+            cached
+                .dialect_instantiation_error(Provider::Gemini)
+                .is_none(),
+            "undeclared Gemini provider must keep native routing"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_retries_transient_pool_saturation_bounded_and_recovers() {
+        let (dir, storage) = storage_fixture(75).await;
+        let stores = Arc::new(stores(
+            storage.clone(),
+            Arc::new(FakePromptCacheObservationStore::new()),
+        ));
+        let principal = create_machine_principal(&storage, "transient-retry-principal").await;
+        let upstream = create_upstream(&storage, "transient-retry-anthropic").await;
+        let _ = UpstreamStore::update(
+            &*storage,
+            upstream.id,
+            upstream.revision,
+            UpstreamUpdate {
+                enabled: Some(true),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("enable upstream");
+        install_shape_plugin(
+            &storage,
+            principal.id,
+            anthropic_shape_provider_fixture(),
+            "anthropic-shape-only.wasm",
+        )
+        .await;
+
+        let runtime = Arc::new(
+            WasmtimeRuntime::new(cc_lb_runtime_wasmtime::HotEngineConfig {
+                allocation_strategy: cc_lb_runtime_wasmtime::HotEngineAllocationStrategy::Pooling,
+                pool_total_memories: 1,
+                pool_total_core_instances: 1,
+                ..cc_lb_runtime_wasmtime::HotEngineConfig::default()
+            })
+            .expect("pooling runtime"),
+        );
+
+        let (release_tx, blocker_handle) = hold_sole_pooling_slot(&runtime);
+        let initial = build_view(&stores, &runtime, dir.path()).await;
+        assert!(initial.has_retryable_plugin_failure());
+        let initial_gen = initial.generation;
+        let initial_hash = initial.upstream_status_snapshot.revision_hash;
+
+        let holder = Arc::new(cc_lb_control::DynamicViewHolder::new(initial));
+        let aead = Arc::new(AeadService::from_master_key([19; 32]));
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let (sink, _writer) = PromptCacheObservationSink::new(
+            stores.prompt_cache_observations.clone(),
+            DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY,
+            cc_lb_observability::cache_observation_store_kind::SQLITE,
+        );
+        let sink: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
+        let reconciler = crate::reconcile::Reconciler::new(
+            stores.clone(),
+            holder.clone(),
+            runtime.clone(),
+            aead.clone(),
+            None,
+            tokio_util::sync::CancellationToken::new(),
+            dir.path().to_path_buf(),
+            Arc::new(SubscriptionQuotaCache::new()),
+            0,
+            sink.clone(),
+            1800,
+            clock.clone(),
+            None,
+            None,
+        );
+
+        // Fast-retry ticks rebuild despite unchanged hash up to TRANSIENT_PLUGIN_RETRY_MAX_ATTEMPTS,
+        // after which fast-retry stops while ordinary periodic reconciliation can still recover.
+        for expected_step in 1..=crate::reconcile::TRANSIENT_PLUGIN_RETRY_MAX_ATTEMPTS {
+            reconciler
+                .reconcile_fast_retry_once()
+                .await
+                .expect("fast retry tick runs");
+            let current = holder.load();
+            assert_eq!(current.generation, initial_gen + u64::from(expected_step));
+            assert_eq!(current.upstream_status_snapshot.revision_hash, initial_hash);
+            assert!(current.has_retryable_plugin_failure());
+        }
+        reconciler
+            .reconcile_fast_retry_once()
+            .await
+            .expect("post-budget fast retry tick runs");
+        assert_eq!(
+            holder.generation(),
+            initial_gen + u64::from(crate::reconcile::TRANSIENT_PLUGIN_RETRY_MAX_ATTEMPTS),
+            "fast retry must stop retrying unchanged revision after bounded attempt budget"
+        );
+
+        // Once pooling capacity returns, ordinary periodic reconciliation on the SAME reconciler
+        // (with the fast-retry budget already exhausted) recovers without needing a storage hash change.
+        let _ = release_tx.send(());
+        blocker_handle.join().expect("blocker thread joins");
+
+        reconciler
+            .reconcile_once()
+            .await
+            .expect("ordinary periodic recovery reconcile runs");
+        let recovered = holder.load();
+        assert!(!recovered.has_retryable_plugin_failure());
+        assert_eq!(
+            recovered.upstream_status_snapshot.revision_hash,
+            initial_hash
+        );
+        let cached = recovered
+            .principal_view
+            .get(&principal.name)
+            .expect("principal cached");
+        assert!(
+            cached
+                .dialect_instantiation_error(Provider::Anthropic)
+                .is_none()
+        );
+        assert!(
+            cached.resolved_dialect(upstream.id).is_some(),
+            "shape dialect must recover once pooling capacity returns"
+        );
+
+        let recovered_gen = recovered.generation;
+        reconciler
+            .reconcile_once()
+            .await
+            .expect("steady-state reconcile");
+        assert_eq!(
+            holder.generation(),
+            recovered_gen,
+            "clean view with unchanged hash must not rebuild again"
+        );
+    }
+
+    #[test]
+    fn declared_shape_providers_preserves_empty_set_for_noop_only_plugin() {
+        use cc_lb_plugin_wire::metadata::{HookMetadata, HookMode};
+        use cc_lb_storage_api::WasmRegistryEntry;
+        use std::collections::BTreeMap;
+
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            "transform_response_anthropic".to_owned(),
+            HookMetadata {
+                wire_version: 2,
+                description: "noop".to_owned(),
+                usage: "test".to_owned(),
+                mode: HookMode::Noop,
+            },
+        );
+        let entry = WasmRegistryEntry {
+            id: Uuid::new_v4(),
+            sha256: [0; 32],
+            name: "noop-only".to_owned(),
+            version: Some("1.0.0".to_owned()),
+            original_filename: "noop-only.wasm".to_owned(),
+            label: None,
+            uploaded_at_unix_secs: 1,
+            uploaded_by_admin_id: Uuid::nil(),
+            refcount: 1,
+            revision: 1,
+            kind: "shape".to_owned(),
+            description: "noop".to_owned(),
+            usage: "test".to_owned(),
+            hook_metadata: hooks,
+            is_builtin: false,
+            metadata: None,
+            supported_slots: vec![PluginSlotKind::Shape],
+        };
+        assert!(
+            declared_shape_providers(&entry, b"not-even-inspected").is_empty(),
+            "known no-op-only shape plugin must not fail-close native providers"
+        );
+
+        let empty_meta = WasmRegistryEntry {
+            hook_metadata: BTreeMap::new(),
+            ..entry.clone()
+        };
+        let wasm_noop = {
+            use cc_lb_plugin_wire::schema::{HookKind, WireSchema};
+
+            let mut wasm = wat::parse_str(
+                r#"(module
+                    (memory (export "memory") 1)
+                    (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 8192)
+                    (func (export "cc_lb_free") (param i32 i32 i32))
+                    (func (export "cc_lb_transform_response_openai") (param i32 i32) (result i64) i64.const 0)
+                )"#,
+            )
+            .expect("minimal module");
+            provider_test_section(
+                &mut wasm,
+                &format!("{}.v2", HookKind::TransformResponse.section_prefix()),
+                &<cc_lb_plugin_wire::v2::TransformResponseRequest as WireSchema>::FINGERPRINT,
+            );
+            provider_test_section(
+                &mut wasm,
+                "cc_lb.plugin.v2",
+                br#"{"name":"noop-wasm","version":"1.0.0","description":"noop","usage":"test","hooks":{"transform_response_openai":{"wire_version":2,"description":"noop","usage":"test","mode":"noop"}}}"#,
+            );
+            wasm
+        };
+        assert!(
+            declared_shape_providers(&empty_meta, &wasm_noop).is_empty(),
+            "wasm inspection showing only noop hooks must not fail-close native providers"
+        );
+        assert_eq!(
+            declared_shape_providers(&empty_meta, b"corrupt-wasm"),
+            vec![Provider::Anthropic, Provider::Openai, Provider::Gemini],
+            "unknown metadata plus uninspectable bytes must still fail closed across all providers"
+        );
+    }
+
+    #[tokio::test]
+    async fn epoch_interrupted_shape_and_filter_probes_fail_closed_and_schedule_reconcile_retry() {
+        use cc_lb_plugin_wire::schema::{HookKind, WireSchema};
+        use cc_lb_storage_api::{PluginChainEntryInput, WasmBlob, WasmRegistryEntryInput};
+
+        // Shape plugin whose Anthropic probe spins indefinitely to trigger epoch interruption.
+        let mut looping_shape_wasm = wat::parse_str(
+            r#"(module
+                (memory (export "memory") 1)
+                (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 8192)
+                (func (export "cc_lb_free") (param i32 i32 i32))
+                (func (export "cc_lb_shape_anthropic") (param i32 i32) (result i64)
+                    (loop $hang br $hang)
+                    i64.const 0
+                )
+            )"#,
+        )
+        .expect("looping shape module");
+        provider_test_section(
+            &mut looping_shape_wasm,
+            &format!("{}.v2", HookKind::Shape.section_prefix()),
+            &<cc_lb_plugin_wire::v2::ShapeRequest as WireSchema>::FINGERPRINT,
+        );
+        provider_test_section(
+            &mut looping_shape_wasm,
+            "cc_lb.plugin.v2",
+            br#"{
+                "name":"epoch-loop-shape","version":"1.0.0","description":"loop shape","usage":"test",
+                "hooks":{"shape_anthropic":{"wire_version":2,"description":"shape","usage":"test","mode":"active"}}
+            }"#,
+        );
+
+        let (dir, storage) = storage_fixture(76).await;
+        let stores = Arc::new(stores(
+            storage.clone(),
+            Arc::new(FakePromptCacheObservationStore::new()),
+        ));
+        let principal = create_machine_principal(&storage, "epoch-shape-principal").await;
+        let upstream = create_upstream(&storage, "epoch-shape-anthropic").await;
+        let _ = UpstreamStore::update(
+            &*storage,
+            upstream.id,
+            upstream.revision,
+            UpstreamUpdate {
+                enabled: Some(true),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("enable anthropic");
+        install_shape_plugin(
+            &storage,
+            principal.id,
+            looping_shape_wasm,
+            "epoch-loop-shape.wasm",
+        )
+        .await;
+
+        let runtime = Arc::new(
+            WasmtimeRuntime::new_with_execution_timeout(
+                cc_lb_runtime_wasmtime::HotEngineConfig::default(),
+                std::time::Duration::from_millis(10),
+            )
+            .expect("short-epoch runtime"),
+        );
+        let initial = build_view(&stores, &runtime, dir.path()).await;
+        assert!(
+            initial.has_retryable_plugin_failure(),
+            "epoch-interrupted shape probe must mark view retryable"
+        );
+        assert!(
+            initial
+                .principal_view
+                .get(&principal.name)
+                .expect("principal cached")
+                .dialect_instantiation_error(Provider::Anthropic)
+                .is_some(),
+            "affected Anthropic provider must stay fail-closed"
+        );
+        assert!(
+            initial
+                .principal_view
+                .get(&principal.name)
+                .expect("principal cached")
+                .dialect_instantiation_error(Provider::Openai)
+                .is_none(),
+            "undeclared OpenAI provider must keep native routing"
+        );
+
+        let holder = Arc::new(cc_lb_control::DynamicViewHolder::new(initial));
+        let aead = Arc::new(AeadService::from_master_key([21; 32]));
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let (sink, _writer) = PromptCacheObservationSink::new(
+            stores.prompt_cache_observations.clone(),
+            DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY,
+            cc_lb_observability::cache_observation_store_kind::SQLITE,
+        );
+        let sink: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
+        let reconciler = crate::reconcile::Reconciler::new(
+            stores.clone(),
+            holder.clone(),
+            runtime.clone(),
+            aead,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+            dir.path().to_path_buf(),
+            Arc::new(SubscriptionQuotaCache::new()),
+            0,
+            sink,
+            1800,
+            clock,
+            None,
+            None,
+        );
+        let before_gen = holder.generation();
+        reconciler
+            .reconcile_once()
+            .await
+            .expect("reconcile_once retries epoch-interrupted shape probe");
+        assert!(
+            holder.generation() > before_gen,
+            "reconcile_once must retry unchanged revision hash after epoch-interrupted shape probe"
+        );
+
+        // Now verify an epoch-interrupted router filter probe also flags retryable failure
+        // and keeps the principal fail-closed.
+        let mut looping_filter_wasm = wat::parse_str(
+            r#"(module
+                (memory (export "memory") 1)
+                (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 8192)
+                (func (export "cc_lb_free") (param i32 i32 i32))
+                (func (export "cc_lb_filter_anthropic") (param i32 i32) (result i64)
+                    (loop $hang br $hang)
+                    i64.const 0
+                )
+            )"#,
+        )
+        .expect("looping filter module");
+        provider_test_section(
+            &mut looping_filter_wasm,
+            &format!("{}.v3", HookKind::Filter.section_prefix()),
+            &<cc_lb_plugin_wire::v3::FilterRequest as WireSchema>::FINGERPRINT,
+        );
+        provider_test_section(
+            &mut looping_filter_wasm,
+            "cc_lb.plugin.v2",
+            br#"{
+                "name":"epoch-loop-filter","version":"1.0.0","description":"loop filter","usage":"test",
+                "hooks":{"filter_anthropic":{"wire_version":3,"description":"filter","usage":"test","mode":"active"}}
+            }"#,
+        );
+        let filter_principal = create_machine_principal(&storage, "epoch-filter-principal").await;
+        let filter_sha: [u8; 32] = Sha256::digest(&looping_filter_wasm).into();
+        let filter_meta = cc_lb_runtime_wasmtime::inspect_wasm_agnostic(&looping_filter_wasm)
+            .expect("inspect filter")
+            .metadata;
+        let (filter_reg, _) = storage
+            .persist_wasm_upload(
+                WasmBlob {
+                    sha256: filter_sha,
+                    size_bytes: looping_filter_wasm.len() as u64,
+                    bytes: looping_filter_wasm,
+                },
+                WasmRegistryEntryInput {
+                    name: filter_meta.name,
+                    version: Some(filter_meta.version),
+                    original_filename: "epoch-loop-filter.wasm".to_owned(),
+                    label: None,
+                    uploaded_at_unix_secs: 1,
+                    uploaded_by_admin_id: Uuid::nil(),
+                    description: filter_meta.description,
+                    usage: filter_meta.usage,
+                    hook_metadata: filter_meta.hooks,
+                    supported_slots: vec![PluginSlotKind::Router],
+                },
+            )
+            .await
+            .expect("persist filter");
+        storage
+            .insert_chain_entry(PluginChainEntryInput {
+                principal_id: filter_principal.id,
+                slot: PluginSlotKind::Router,
+                order: 1000,
+                wasm_registry_id: filter_reg.id,
+                config: serde_json::json!({}),
+            })
+            .await
+            .expect("insert filter chain");
+
+        let with_filter = build_view(&stores, &runtime, dir.path()).await;
+        assert!(
+            with_filter.has_retryable_plugin_failure(),
+            "epoch-interrupted filter probe must mark view retryable"
+        );
+        let filter_cached = with_filter
+            .principal_view
+            .get(&filter_principal.name)
+            .expect("filter principal cached");
+        assert!(
+            filter_cached
+                .resolved_pipeline(None)
+                .instantiation_error
+                .is_some(),
+            "epoch-interrupted filter probe must keep principal fail-closed"
+        );
     }
 }

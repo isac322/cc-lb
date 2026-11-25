@@ -1049,6 +1049,8 @@ function formatLimitCap(limit: PrincipalDefaultLimit): string {
   return limit.cap_micros.toLocaleString();
 }
 
+const MAX_LIMIT_WINDOW_SECS = 604_800;
+
 function LimitsEditor({
   value,
   onChange,
@@ -1084,7 +1086,7 @@ function LimitsEditor({
         return (
           <div
             key={idx}
-            className="grid grid-cols-2 items-end gap-3 pb-3 border-b border-row @xl:grid-cols-[minmax(0,1fr)_7rem_minmax(0,1fr)_auto]"
+            className="grid grid-cols-2 items-end gap-3 pb-3 border-b border-row @xl:grid-cols-[minmax(0,1fr)_9.5rem_minmax(0,1fr)_auto]"
           >
             <div className="min-w-0">
               <Field label="Kind">
@@ -1100,15 +1102,19 @@ function LimitsEditor({
               </Field>
             </div>
             <div className="min-w-0">
-              <Field label="Window (sec)">
+              <Field label="Window (sec)" hint="Max 7d (604,800s)">
                 <BaseNumberField.Root
                   disabled={disabled}
                   min={1}
+                  max={MAX_LIMIT_WINDOW_SECS}
                   step={1}
                   value={row.window_secs}
                   onValueChange={(nextValue) =>
                     updateRow(idx, {
-                      window_secs: Math.max(1, Math.floor(nextValue ?? 0)),
+                      window_secs: Math.min(
+                        MAX_LIMIT_WINDOW_SECS,
+                        Math.max(1, Math.floor(nextValue ?? 0)),
+                      ),
                     })
                   }
                 >

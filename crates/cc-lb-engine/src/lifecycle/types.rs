@@ -348,6 +348,8 @@ pub(super) enum RawPassthroughError {
 /// value.
 #[derive(Debug)]
 pub(super) enum AttemptFailure {
+    /// Request shaping failed before dispatch.
+    Shape(DialectError),
     /// The raw-passthrough fallback itself failed after dialect shaping had
     /// already failed.
     RawPassthrough(RawPassthroughError),
@@ -427,6 +429,41 @@ impl AttemptFailure {
         capability: ProviderCapability,
     ) -> (Response<Body>, InternalFailure) {
         match self {
+            Self::Shape(source) => {
+                let (response, kind) = match &source {
+                    DialectError::PoolSaturated { .. } => (
+                        provider_error_response_with_retry_after(
+                            capability,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "overloaded_error",
+                            "plugin runtime saturated",
+                            None,
+                            1,
+                        ),
+                        InternalErrorKind::Unavailable,
+                    ),
+                    DialectError::UnsupportedRequest { .. } | DialectError::InvalidUrl { .. } => (
+                        provider_error_response(
+                            capability,
+                            StatusCode::BAD_GATEWAY,
+                            "api_error",
+                            "failed to shape upstream request",
+                            None,
+                        ),
+                        InternalErrorKind::PluginError,
+                    ),
+                };
+                let failure = InternalFailure {
+                    status: response.status(),
+                    error_code: error_codes::UPSTREAM_DISPATCH_FAILED,
+                    error: InternalError {
+                        stage: InternalErrorStage::Shape,
+                        kind,
+                        message: Some(source.to_string()),
+                    },
+                };
+                (response, failure)
+            }
             Self::RawPassthrough(source) => {
                 let response = provider_error_response(
                     capability,
@@ -1170,7 +1207,7 @@ pub(super) fn duration_to_us(duration: Duration) -> u64 {
     duration.as_micros().min(u128::from(u64::MAX)) as u64
 }
 
-pub(super) fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapshot {
+pub(crate) fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapshot {
     cc_lb_lifecycle::UsageSnapshot {
         input_tokens: u.input_tokens,
         output_tokens: u.output_tokens,

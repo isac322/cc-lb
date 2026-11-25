@@ -8,7 +8,8 @@ use cc_lb_scheduler::jobs::upstream_affinity_purge::UpstreamAffinityPurgeStore;
 use cc_lb_scheduler::jobs::usage_prune::UsagePruneRunner;
 use cc_lb_storage_api::{
     ApiKeyUsageBucketStore, ApiKeyUsageCompactionRun, PromptCacheObservationStore, Storage,
-    StorageError, StorageResult, UpstreamAffinityStore, UpstreamRecord, UpstreamStore,
+    StorageError, StorageResult, ThreadStickySubagentStore, UpstreamAffinityStore, UpstreamRecord,
+    UpstreamStore,
     usage_pruner::{PruneResult, UsagePruner},
 };
 use uuid::Uuid;
@@ -64,6 +65,19 @@ impl UpstreamAffinityPurgeStore for StorageHandle {
         )
         .await
     }
+
+    async fn purge_expired_thread_sticky_subagents(
+        &self,
+        now_unix_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        ThreadStickySubagentStore::purge_expired_thread_sticky_subagents(
+            self.storage.as_ref(),
+            now_unix_secs,
+            batch_size,
+        )
+        .await
+    }
 }
 
 impl UsagePruneRunner for StorageHandle {
@@ -86,6 +100,19 @@ impl UsagePruneRunner for StorageHandle {
         ApiKeyUsageBucketStore::compact_api_key_usage_buckets(
             self.storage.as_ref(),
             writer_inactive_after_secs,
+            retain_for_secs,
+            batch_size,
+        )
+        .await
+    }
+
+    async fn prune_expired_api_key_usage_flush_markers(
+        &self,
+        retain_for_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        ApiKeyUsageBucketStore::prune_expired_api_key_usage_flush_markers(
+            self.storage.as_ref(),
             retain_for_secs,
             batch_size,
         )

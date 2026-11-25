@@ -4,15 +4,15 @@
 //! config crate.
 
 /// Whether a shape plugin may return a URL whose origin
-/// (scheme+host+port) differs from the selected upstream. Historical
-/// behaviour is `Unrestricted`; deployments where a compromised or
-/// buggy shape plugin misrouting to a wrong host is a concern can
-/// opt into `SelectedUpstreamOrigin` to reject any URL that does not
-/// match the selected upstream's `base_url` origin.
+/// (scheme+host+port) differs from the selected upstream. The default
+/// is `SelectedUpstreamOrigin`, which rejects any URL that does not
+/// match the selected upstream's `base_url` origin; deployments that
+/// intentionally redirect requests to another host can opt into
+/// `Unrestricted`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ShapeOriginPolicy {
-    #[default]
     Unrestricted,
+    #[default]
     SelectedUpstreamOrigin,
 }
 

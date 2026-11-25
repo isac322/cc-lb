@@ -416,15 +416,7 @@ pub(super) fn build_candidates_with_matches_for_bundles_and_native(
             })
             .filter(|upstream| upstream_credentials_routable(view, upstream))
         {
-            let has_rate_limit_snapshot = rate_limit_cache
-                .snapshots
-                .get(&upstream.id)
-                .is_some_and(|snapshots| !snapshots.is_empty());
-            let observed_at_unix_secs = if has_rate_limit_snapshot {
-                rate_limit_cache.updated_at_unix_secs
-            } else {
-                0
-            };
+            let observed_at_unix_secs = rate_limit_cache.observed_at_for_upstream(upstream.id);
             let bundle_breakpoints = bundles
                 .map(|bundles| bundles.for_upstream(upstream).cache_breakpoints.as_slice())
                 .unwrap_or(request_breakpoints);

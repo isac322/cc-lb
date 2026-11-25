@@ -106,6 +106,49 @@ async fn insert_chain_accepts_builtin_subscription_preference() {
     );
 }
 
+#[tokio::test]
+async fn insert_chain_rejects_oversized_project_config_claims() {
+    use cc_lb_storage_api::plugin_registry::{
+        MAX_PLUGIN_CHAIN_CLAIM_KEY_BYTES, MAX_PLUGIN_CHAIN_CLAIM_VALUE_BYTES,
+        MAX_PLUGIN_CHAIN_CONFIG_CLAIMS,
+    };
+
+    let (_dir, storage) = temp_storage().await;
+    let principal_id = seed_principal(&storage, "principal-claim-bounds").await;
+    let entry = seed_registry_with_wire_version(&storage, 44, "wire-v3-claim-bounds", 3).await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let mut too_many = serde_json::Map::new();
+    for idx in 0..(MAX_PLUGIN_CHAIN_CONFIG_CLAIMS + 1) {
+        too_many.insert(format!("k{idx:03}"), json!("ok"));
+    }
+    let big_key = "k".repeat(MAX_PLUGIN_CHAIN_CLAIM_KEY_BYTES + 1);
+    let big_val = "v".repeat(MAX_PLUGIN_CHAIN_CLAIM_VALUE_BYTES + 1);
+    let chunk = "x".repeat(MAX_PLUGIN_CHAIN_CLAIM_VALUE_BYTES - 10);
+    let too_big_total = json!({ "a": chunk, "b": chunk, "c": chunk });
+
+    for bad_config in [
+        serde_json::Value::Object(too_many),
+        json!({ big_key: "ok" }),
+        json!({ "val": big_val }),
+        too_big_total,
+    ] {
+        let (status, _, body, _) = authed_json(
+            app.clone(),
+            "POST",
+            &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
+            Some(json!({
+                "slot": "router",
+                "wasm_registry_id": entry.id,
+                "config": bad_config,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+        assert_eq!(body["error"], "invalid_input");
+    }
+}
+
 async fn seed_principal(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &str) -> Uuid {
     storage
         .create(

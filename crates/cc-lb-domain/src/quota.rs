@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Upstream rate-limit metric kind observed from upstream responses.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitKind {
     /// Request-count rate limit.

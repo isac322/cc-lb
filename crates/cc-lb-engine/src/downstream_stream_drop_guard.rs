@@ -136,6 +136,8 @@ pub(crate) struct DownstreamStreamDropGuard {
     semantic_completed: bool,
     upstream_terminal: bool,
     response_accounting_guard: Option<ResponseAccountingGuard>,
+    observed_usage: Option<crate::usage_parser::UsageCounts>,
+    response_content_started: bool,
     abnormal_stop: Option<(String, String)>,
     abnormal_stop_recorded: bool,
     finalized: bool,
@@ -165,6 +167,8 @@ impl DownstreamStreamDropGuard {
             semantic_completed: false,
             upstream_terminal: false,
             response_accounting_guard: None,
+            observed_usage: None,
+            response_content_started: false,
             abnormal_stop: None,
             abnormal_stop_recorded: false,
             finalized: false,
@@ -308,8 +312,18 @@ impl DownstreamStreamDropGuard {
 
     pub(crate) fn handoff_response_accounting(&mut self) {
         if let Some(guard) = self.response_accounting_guard.take() {
-            guard.forget();
+            guard.handoff_after_response();
         }
+    }
+
+    pub(crate) fn record_observed_usage(&mut self, usage: &crate::usage_parser::UsageCounts) {
+        if usage.has_billable_usage() {
+            self.observed_usage = Some(usage.clone());
+        }
+    }
+
+    pub(crate) fn mark_response_content_started(&mut self) {
+        self.response_content_started = true;
     }
 
     pub(crate) fn has_abnormal_stop(&self) -> bool {
@@ -492,6 +506,9 @@ impl Drop for DownstreamStreamDropGuard {
         let response_body_ms =
             duration_to_ms(cancellation_at.saturating_duration_since(self.relay_start));
         if let Some((outcome, cause)) = self.pending_terminal {
+            if outcome == StreamTerminationOutcome::Completed {
+                self.handoff_response_accounting();
+            }
             let finalize_ms = duration_to_ms(cancellation_at.elapsed());
             if let Some(observer) = self.observer.as_ref() {
                 observer.set_upstream_body_ms_if_absent(response_body_ms);
@@ -526,6 +543,23 @@ impl Drop for DownstreamStreamDropGuard {
         if let Some(observer) = self.observer.take()
             && let Ok(status) = StatusCode::from_u16(CLIENT_CLOSED_STATUS)
         {
+            if self.initial_upstream_status.is_success() {
+                if let Some(usage) = self
+                    .observed_usage
+                    .take()
+                    .filter(|usage| usage.has_billable_usage())
+                {
+                    observer.set_usage_counts(&usage, false);
+                    observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                        event_id: observer.event_id().to_owned(),
+                        usage: crate::lifecycle::to_usage_snapshot(&usage),
+                        source: cc_lb_lifecycle::UsageSource::MessageDelta,
+                    });
+                    self.handoff_response_accounting();
+                } else if self.response_content_started {
+                    self.handoff_response_accounting();
+                }
+            }
             observer.set_upstream_body_ms_if_absent(response_body_ms);
             observer.set_client_closed(status);
             self.record_terminal(
@@ -1485,5 +1519,199 @@ mod tests {
         assert!(io_timings.response_body_wait_ms.is_some());
         assert_eq!(io_timings.response_body_process_ms, None);
         assert_eq!(io_timings.response_body_downstream_poll_gap_ms, None);
+    }
+
+    fn test_limit_engine() -> (
+        Arc<cc_lb_control::api_keys::limit_engine::LimitEngine>,
+        Arc<cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager>,
+        cc_lb_control::api_keys::limit_engine::Reservation,
+        String,
+    ) {
+        use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
+        use cc_lb_control::api_keys::limit_engine::LimitEngine;
+        use cc_lb_control::api_keys::principal_view::PrincipalView;
+        use cc_lb_storage_api::StoredApiKeyRecord;
+        use cc_lb_storage_api::principal::{Limit, LimitKind};
+
+        let concurrency = Arc::new(KeyConcurrencyManager::new());
+        let engine = LimitEngine::new(concurrency.clone(), Arc::new(SystemClock));
+        let view = PrincipalView::for_tests(
+            "guard-principal",
+            true,
+            vec!["claude-3-opus".to_owned()],
+            vec![
+                Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 10,
+                },
+                Limit {
+                    kind: LimitKind::OutputTokens,
+                    window_secs: 60,
+                    cap_micros: 1_000,
+                },
+                Limit {
+                    kind: LimitKind::Concurrent,
+                    window_secs: 0,
+                    cap_micros: 1,
+                },
+            ],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            key_hash_b64: "guard-key".to_owned(),
+            ..Default::default()
+        };
+        let reservation = engine
+            .reserve(
+                &view,
+                &record,
+                "guard-principal",
+                "claude-3-opus",
+                Some(100),
+                0,
+                None,
+            )
+            .expect("reserve test slot");
+        (engine, concurrency, reservation, record.key_hash_b64)
+    }
+
+    #[tokio::test]
+    async fn client_closed_after_observed_usage_emits_usage_and_hands_off_accounting() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = bus.subscribe_lifecycle();
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "499-observed-usage".to_owned(),
+            bus as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.mark_authn_reached();
+        let (engine, concurrency, reservation, key_id) = test_limit_engine();
+        let res_id = reservation.id().to_owned();
+        let accounting_guard = crate::attempt_rail::AttemptIntent::from_reservation(reservation)
+            .into_reserved()
+            .into_response_accounting_guard();
+        let mut guard = DownstreamStreamDropGuard::armed(
+            Some(observer),
+            Span::none(),
+            StatusCode::OK,
+            None,
+            Instant::now(),
+            BodyIoTiming::default(),
+            test_attribution(),
+        )
+        .with_response_accounting_guard(Some(accounting_guard));
+
+        guard.record_observed_usage(&crate::usage_parser::UsageCounts {
+            present: true,
+            billable_present: true,
+            input_tokens: 12,
+            output_tokens: 34,
+            ..Default::default()
+        });
+        drop(guard);
+
+        assert_eq!(concurrency.current(&key_id), 0);
+        // Reservation must NOT be RAII-refunded; reconcile_by_id still owns it.
+        assert!(engine.reconcile_by_id(&res_id, 12, 34, None));
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        let usage_pos = events
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    LifecycleEvent::UsageObserved { usage, .. }
+                        if usage.input_tokens == 12 && usage.output_tokens == 34
+                )
+            })
+            .expect("UsageObserved emitted on 499 disconnect");
+        let term_pos = events
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    LifecycleEvent::RequestTerminated {
+                        reason: TerminationReason::ErrorCode(code),
+                        client_status: 499,
+                        ..
+                    } if code == "client_closed_request"
+                )
+            })
+            .expect("RequestTerminated(499) emitted");
+        assert!(usage_pos < term_pos);
+    }
+
+    #[tokio::test]
+    async fn client_closed_after_content_started_without_usage_hands_off_accounting() {
+        let bus = Arc::new(InMemoryBus::new());
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "499-content-started".to_owned(),
+            bus as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.mark_authn_reached();
+        let (engine, concurrency, reservation, key_id) = test_limit_engine();
+        let res_id = reservation.id().to_owned();
+        let accounting_guard = crate::attempt_rail::AttemptIntent::from_reservation(reservation)
+            .into_reserved()
+            .into_response_accounting_guard();
+        let mut guard = DownstreamStreamDropGuard::armed(
+            Some(observer),
+            Span::none(),
+            StatusCode::OK,
+            None,
+            Instant::now(),
+            BodyIoTiming::default(),
+            test_attribution(),
+        )
+        .with_response_accounting_guard(Some(accounting_guard));
+
+        guard.mark_response_content_started();
+        drop(guard);
+
+        assert_eq!(concurrency.current(&key_id), 0);
+        // Kept alive for LimitReconcileSubscriber to commit_reserved_by_id.
+        assert!(engine.commit_reserved_by_id(&res_id));
+    }
+
+    #[tokio::test]
+    async fn client_closed_before_content_and_usage_refunds_full_reservation() {
+        let bus = Arc::new(InMemoryBus::new());
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "499-before-content".to_owned(),
+            bus as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.mark_authn_reached();
+        let (engine, concurrency, reservation, key_id) = test_limit_engine();
+        let res_id = reservation.id().to_owned();
+        let accounting_guard = crate::attempt_rail::AttemptIntent::from_reservation(reservation)
+            .into_reserved()
+            .into_response_accounting_guard();
+        let guard = DownstreamStreamDropGuard::armed(
+            Some(observer),
+            Span::none(),
+            StatusCode::OK,
+            None,
+            Instant::now(),
+            BodyIoTiming::default(),
+            test_attribution(),
+        )
+        .with_response_accounting_guard(Some(accounting_guard));
+
+        drop(guard);
+
+        assert_eq!(concurrency.current(&key_id), 0);
+        assert!(
+            !engine.refund_by_id(&res_id),
+            "pre-content 499 must be RAII-refunded on drop"
+        );
     }
 }

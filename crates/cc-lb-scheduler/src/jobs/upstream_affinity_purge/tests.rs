@@ -175,6 +175,8 @@ impl UpstreamAffinityPurgeStore for &CancelAfterFirstStore {
 struct FakeStore {
     results: Mutex<VecDeque<StorageResult<u64>>>,
     calls: Mutex<Vec<(u64, u64, usize)>>,
+    sticky_results: Mutex<VecDeque<StorageResult<u64>>>,
+    sticky_calls: Mutex<Vec<(u64, usize)>>,
 }
 
 impl FakeStore {
@@ -182,11 +184,29 @@ impl FakeStore {
         Self {
             results: Mutex::new(results.into_iter().collect()),
             calls: Mutex::new(Vec::new()),
+            sticky_results: Mutex::new(VecDeque::from([Ok(0)])),
+            sticky_calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn with_sticky(
+        results: impl IntoIterator<Item = StorageResult<u64>>,
+        sticky_results: impl IntoIterator<Item = StorageResult<u64>>,
+    ) -> Self {
+        Self {
+            results: Mutex::new(results.into_iter().collect()),
+            calls: Mutex::new(Vec::new()),
+            sticky_results: Mutex::new(sticky_results.into_iter().collect()),
+            sticky_calls: Mutex::new(Vec::new()),
         }
     }
 
     fn calls(&self) -> Vec<(u64, u64, usize)> {
         self.calls.lock().expect("calls lock").clone()
+    }
+
+    fn sticky_calls(&self) -> Vec<(u64, usize)> {
+        self.sticky_calls.lock().expect("sticky calls lock").clone()
     }
 }
 
@@ -207,4 +227,52 @@ impl UpstreamAffinityPurgeStore for &FakeStore {
             .pop_front()
             .expect("fake result for every call")
     }
+
+    async fn purge_expired_thread_sticky_subagents(
+        &self,
+        now_unix_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        self.sticky_calls
+            .lock()
+            .expect("sticky calls lock")
+            .push((now_unix_secs, batch_size));
+        self.sticky_results
+            .lock()
+            .expect("sticky results lock")
+            .pop_front()
+            .unwrap_or(Ok(0))
+    }
+}
+
+#[tokio::test]
+async fn purges_expired_thread_sticky_subagents_after_affinity() {
+    let store = FakeStore::with_sticky(
+        [Ok(2)],
+        [Ok(UPSTREAM_AFFINITY_PURGE_BATCH_SIZE as u64), Ok(3)],
+    );
+    let result = UpstreamAffinityPurgeJobHandler::new(&store)
+        .handle(
+            UpstreamAffinityPurgeJob::default(),
+            NOW_UNIX_SECS,
+            TTL_SECS,
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert_eq!(
+        result,
+        UpstreamAffinityPurgeJobResult::Done {
+            rows_removed: 2,
+            batches: 1,
+            limit_reached: false,
+        }
+    );
+    assert_eq!(
+        store.sticky_calls(),
+        vec![
+            (NOW_UNIX_SECS, UPSTREAM_AFFINITY_PURGE_BATCH_SIZE),
+            (NOW_UNIX_SECS, UPSTREAM_AFFINITY_PURGE_BATCH_SIZE),
+        ]
+    );
 }

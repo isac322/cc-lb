@@ -171,6 +171,9 @@ async fn create_principal(
         Ok(body) => body,
         Err(error) => return error.into_response(),
     };
+    if let Err(error) = cc_lb_storage_api::validate_limits("default_limits", &body.default_limits) {
+        return storage_error(error);
+    }
     let name = body.name.clone();
 
     let input = PrincipalCreate {
@@ -287,6 +290,11 @@ async fn update_principal(
         Ok(body) => body,
         Err(error) => return error.into_response(),
     };
+    if let Some(limits) = body.default_limits.as_deref()
+        && let Err(error) = cc_lb_storage_api::validate_limits("default_limits", limits)
+    {
+        return storage_error(error);
+    }
     let fields_changed = update_fields_changed(&body);
     let route = format!("/admin/v1/principals/{id}");
     update_principal_record(

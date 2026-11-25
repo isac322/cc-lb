@@ -14,6 +14,7 @@ pub struct WasmtimeFilterPlugin {
     dispatch: Arc<WasmPluginWireDispatch>,
     plugin_id: Uuid,
     plugin_name: String,
+    claims: Arc<[(String, Vec<u8>)]>,
 }
 
 impl WasmtimeFilterPlugin {
@@ -26,7 +27,14 @@ impl WasmtimeFilterPlugin {
             dispatch,
             plugin_id,
             plugin_name: plugin_name.into(),
+            claims: Arc::from([]),
         }
+    }
+
+    #[must_use]
+    pub fn with_claims(mut self, claims: Arc<[(String, Vec<u8>)]>) -> Self {
+        self.claims = claims;
+        self
     }
 
     /// Build only applicable provider filters while constructing a principal pipeline.
@@ -66,6 +74,7 @@ impl FilterPlugin for WasmtimeFilterPlugin {
         let guest_result = FilterWireRequest {
             ctx,
             principal,
+            claims: &self.claims,
             candidates,
             cookie_redaction: self.dispatch.cookie_redaction(),
         }
@@ -114,6 +123,9 @@ fn runtime_error_to_filter(err: WasmtimeRuntimeError) -> FilterError {
     match err {
         WasmtimeRuntimeError::GuestTrap { phase, source } => FilterError::Trap {
             reason: format!("{phase}: {source}"),
+        },
+        WasmtimeRuntimeError::PoolSaturated { .. } => FilterError::PoolSaturated {
+            reason: err.to_string(),
         },
         other => FilterError::Runtime {
             reason: other.to_string(),

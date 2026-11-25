@@ -341,7 +341,7 @@ impl SchedulerDispatch {
             .map(|cost| i64::try_from(cost).unwrap_or(i64::MAX));
         let view = self.dynamic_view.load();
         self.limit_engine
-            .reserve(
+            .reserve_async(
                 view.principal_view.as_ref(),
                 &key_record,
                 &record.principal_id,
@@ -350,6 +350,7 @@ impl SchedulerDispatch {
                 i64::try_from(input_estimate).unwrap_or(i64::MAX),
                 cost_estimate_micros,
             )
+            .await
             .map(Some)
             .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(format!("{error:?}")))
     }

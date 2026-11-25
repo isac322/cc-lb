@@ -12,7 +12,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 
-use cc_lb_storage_api::{PriceCatalogCache, PriceCatalogSnapshotFetch};
+use cc_lb_storage_api::{PriceCatalogCache, PriceCatalogSnapshotFetch, StorageError};
 
 use crate::catalog_parser::parse_litellm_json;
 use crate::loader_cache::{put_storage_snapshot, read_disk_cache, write_disk_cache};
@@ -121,14 +121,14 @@ impl LiteLlmLoader {
 
     pub async fn install_latest_local(&self) -> Result<bool, LoaderError> {
         let current = self.catalog.current();
-        let fetched = self
+        let has_real_snapshot =
+            matches!(current.status, CatalogStatus::Ok) && !current.payload_hash.is_empty();
+        match self
             .storage
             .get_price_snapshot_if_changed(&current.payload_hash)
             .await
-            .map_err(|error| LoaderError::Storage(error.to_string()))?;
-
-        match fetched {
-            PriceCatalogSnapshotFetch::Changed(snapshot) => {
+        {
+            Ok(PriceCatalogSnapshotFetch::Changed(snapshot)) => {
                 return install_cached_bytes(
                     &self.catalog,
                     snapshot.json_bytes,
@@ -136,8 +136,24 @@ impl LiteLlmLoader {
                     &*self.clock,
                 );
             }
-            PriceCatalogSnapshotFetch::Unchanged(_) => return Ok(false),
-            PriceCatalogSnapshotFetch::Missing => {}
+            Ok(PriceCatalogSnapshotFetch::Unchanged(_)) => return Ok(false),
+            Ok(PriceCatalogSnapshotFetch::Missing) => {}
+            Err(error @ StorageError::Corrupted { .. }) => {
+                return Err(LoaderError::Storage(error.to_string()));
+            }
+            Err(error) if has_real_snapshot => {
+                return Err(LoaderError::Storage(error.to_string()));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "price catalog storage lookup failed before real snapshot installed; trying disk cache fallback",
+                );
+                if let Some(bytes) = read_disk_cache(self.cache_path.clone()).await? {
+                    return install_cached_bytes(&self.catalog, bytes, None, &*self.clock);
+                }
+                return Err(LoaderError::Storage(error.to_string()));
+            }
         }
 
         if let Some(bytes) = read_disk_cache(self.cache_path.clone()).await? {

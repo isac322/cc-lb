@@ -37,6 +37,7 @@ use cc_lb_control::api_keys::limit_engine::LimitEngine;
 // calls without adding public engine hooks or runtime observation state.
 trait ReservationSettlement {
     fn refund_by_id(&self, id: &str) -> bool;
+    fn commit_reserved_by_id(&self, id: &str) -> bool;
     fn reconcile_by_id(&self, id: &str, input: u64, output: u64, cost: Option<i64>) -> bool;
     fn touch_by_id(&self, id: &str) -> bool;
 }
@@ -48,6 +49,11 @@ impl ReservationSettlement for LimitEngine {
     }
 
     #[inline]
+    fn commit_reserved_by_id(&self, id: &str) -> bool {
+        LimitEngine::commit_reserved_by_id(self, id)
+    }
+
+    #[inline]
     fn reconcile_by_id(&self, id: &str, input: u64, output: u64, cost: Option<i64>) -> bool {
         LimitEngine::reconcile_by_id(self, id, input, output, cost)
     }
@@ -56,6 +62,10 @@ impl ReservationSettlement for LimitEngine {
     fn touch_by_id(&self, id: &str) -> bool {
         LimitEngine::touch_reservation_by_id(self, id)
     }
+}
+
+fn is_client_closed(reason: &TerminationReason) -> bool {
+    matches!(reason, TerminationReason::ErrorCode(code) if code == "client_closed_request")
 }
 
 pub const DEFAULT_LIMIT_RECONCILE_MAP_CAP: usize = 4096;
@@ -282,9 +292,12 @@ fn handle_event(
             .increment(1);
             return;
         };
-        // Measured WebSocket failures are billable too. Wait for their existing
-        // background pricing event, while unmeasured outcomes refund immediately.
-        let expects_priced = (partial.websocket || matches!(reason, TerminationReason::Success))
+        // Measured WebSocket failures and HTTP client disconnects are billable too.
+        // Wait for their existing background pricing event, while unmeasured
+        // errors refund immediately (or commit reserved on post-content 499).
+        let expects_priced = (partial.websocket
+            || matches!(reason, TerminationReason::Success)
+            || is_client_closed(reason))
             && partial.usage_seen
             && !partial.priced_seen;
         let termination = TerminationInfo {
@@ -384,9 +397,27 @@ fn finalize(engine: &impl ReservationSettlement, partial: Partial, reason: &Term
         .increment(1);
         return;
     }
-    // HTTP keeps its existing full-refund error policy. WebSocket turns settle
-    // measured work even when their transport or response ended unsuccessfully.
-    if !partial.usage_seen || (!partial.websocket && !matches!(reason, TerminationReason::Success))
+    // HTTP keeps its existing full-refund error policy except on `client_closed_request`,
+    // where post-usage disconnects reconcile observed work and post-content no-usage
+    // disconnects commit the reservation instead of granting a 100% refund. WebSocket
+    // turns settle measured work even when their transport or response ended unsuccessfully.
+    if !partial.websocket && is_client_closed(reason) {
+        if !partial.usage_seen {
+            let committed = engine.commit_reserved_by_id(&reservation_id);
+            let outcome = if committed {
+                "committed_client_closed"
+            } else {
+                "already_released"
+            };
+            metrics::counter!(
+                "cc_lb_limit_reconcile_subscriber_rows_total",
+                "outcome" => outcome,
+            )
+            .increment(1);
+            return;
+        }
+    } else if !partial.usage_seen
+        || (!partial.websocket && !matches!(reason, TerminationReason::Success))
     {
         let refunded = engine.refund_by_id(&reservation_id);
         let outcome = match (refunded, matches!(reason, TerminationReason::Success)) {
@@ -950,6 +981,7 @@ mod tests {
     struct CountingSettlement<'a> {
         engine: &'a LimitEngine,
         refunds: std::cell::Cell<usize>,
+        commits: std::cell::Cell<usize>,
         reconciles: std::cell::Cell<usize>,
     }
 
@@ -957,6 +989,11 @@ mod tests {
         fn refund_by_id(&self, id: &str) -> bool {
             self.refunds.set(self.refunds.get() + 1);
             self.engine.refund_by_id(id)
+        }
+
+        fn commit_reserved_by_id(&self, id: &str) -> bool {
+            self.commits.set(self.commits.get() + 1);
+            self.engine.commit_reserved_by_id(id)
         }
 
         fn reconcile_by_id(&self, id: &str, input: u64, output: u64, cost: Option<i64>) -> bool {
@@ -1029,6 +1066,7 @@ mod tests {
             let observer = CountingSettlement {
                 engine: engine.as_ref(),
                 refunds: std::cell::Cell::new(0),
+                commits: std::cell::Cell::new(0),
                 reconciles: std::cell::Cell::new(0),
             };
             let event_id = "ws-exactly-once";
@@ -1110,6 +1148,7 @@ mod tests {
             let observer = CountingSettlement {
                 engine: engine.as_ref(),
                 refunds: std::cell::Cell::new(0),
+                commits: std::cell::Cell::new(0),
                 reconciles: std::cell::Cell::new(0),
             };
             let event_id = format!("unknown-priced-{priced_before_termination}");
@@ -1173,6 +1212,7 @@ mod tests {
             let observer = CountingSettlement {
                 engine: engine.as_ref(),
                 refunds: std::cell::Cell::new(0),
+                commits: std::cell::Cell::new(0),
                 reconciles: std::cell::Cell::new(0),
             };
             let event_id = format!("known-priced-{known_cost}");
@@ -1310,6 +1350,7 @@ mod tests {
             let observer = CountingSettlement {
                 engine: engine.as_ref(),
                 refunds: std::cell::Cell::new(0),
+                commits: std::cell::Cell::new(0),
                 reconciles: std::cell::Cell::new(0),
             };
             let event_id = "unknown-pricing-policy";
@@ -1460,5 +1501,195 @@ mod tests {
         }
         sweep_orphans(&mut partials, idle_ttl, max_ttl);
         assert!(!partials.contains_key(&active_id));
+    }
+
+    #[test]
+    fn http_client_closed_with_usage_waits_for_priced_and_reconciles() {
+        let (engine, view, record, concurrency) = accounting_fixture();
+        let mut partial = reserved_partial(
+            &engine,
+            &view,
+            &record,
+            "POST",
+            Some(UsageSnapshot {
+                input_tokens: 15,
+                output_tokens: 25,
+                ..Default::default()
+            }),
+        );
+        partial.cost_micros = None;
+        partial.priced_seen = false;
+        let reservation_id = partial.reservation_id.clone().unwrap();
+        let observer = CountingSettlement {
+            engine: engine.as_ref(),
+            refunds: std::cell::Cell::new(0),
+            commits: std::cell::Cell::new(0),
+            reconciles: std::cell::Cell::new(0),
+        };
+        let event_id = "http-499-usage";
+        let mut partials = HashMap::from([(event_id.to_owned(), partial)]);
+
+        handle_event(
+            &observer,
+            &mut partials,
+            16,
+            terminal_event(
+                event_id,
+                TerminationReason::ErrorCode("client_closed_request".to_owned()),
+            ),
+        );
+        assert_eq!(
+            observer.reconciles.get(),
+            0,
+            "should wait briefly for asynchronous Priced event"
+        );
+        assert_eq!(observer.refunds.get(), 0);
+
+        handle_event(
+            &observer,
+            &mut partials,
+            16,
+            LifecycleEvent::Priced {
+                event_id: event_id.to_owned(),
+                cost: cc_lb_request_log::CostBreakdown {
+                    input_micros: Some(15),
+                    output_micros: Some(25),
+                    total_micros: Some(40),
+                    ..Default::default()
+                },
+            },
+        );
+        assert_eq!(observer.reconciles.get(), 1);
+        assert_eq!(observer.refunds.get(), 0);
+        assert_eq!(observer.commits.get(), 0);
+        assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+        assert!(!engine.refund_by_id(&reservation_id));
+        assert_eq!(remaining_tokens(&engine, &record), "960");
+    }
+
+    #[test]
+    fn http_client_closed_without_usage_commits_if_handed_off_or_noop_if_raii_refunded() {
+        // Case 1: handed off after content started without usage -> commit_reserved_by_id.
+        let (engine, view, record, concurrency) = accounting_fixture();
+        let res = engine
+            .reserve(
+                &view,
+                &record,
+                "ws-accounting-principal",
+                "gpt-5-codex",
+                Some(100),
+                0,
+                Some(200),
+            )
+            .unwrap();
+        let res_id = res.id().to_owned();
+        res.handoff_after_response();
+        assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+
+        let observer = CountingSettlement {
+            engine: engine.as_ref(),
+            refunds: std::cell::Cell::new(0),
+            commits: std::cell::Cell::new(0),
+            reconciles: std::cell::Cell::new(0),
+        };
+        let event_id = "http-499-content-no-usage";
+        let mut partial = Partial::new(Instant::now());
+        partial.reservation_id = Some(res_id.clone());
+        let mut partials = HashMap::from([(event_id.to_owned(), partial)]);
+
+        handle_event(
+            &observer,
+            &mut partials,
+            16,
+            terminal_event(
+                event_id,
+                TerminationReason::ErrorCode("client_closed_request".to_owned()),
+            ),
+        );
+        assert_eq!(observer.commits.get(), 1);
+        assert_eq!(observer.refunds.get(), 0);
+        assert_eq!(observer.reconciles.get(), 0);
+        assert_eq!(remaining_tokens(&engine, &record), "900");
+
+        // Case 2: RAII already refunded before handoff -> commit_reserved_by_id is no-op.
+        let (engine2, view2, record2, concurrency2) = accounting_fixture();
+        let res2 = engine2
+            .reserve(
+                &view2,
+                &record2,
+                "ws-accounting-principal",
+                "gpt-5-codex",
+                Some(100),
+                0,
+                Some(200),
+            )
+            .unwrap();
+        let res_id2 = res2.id().to_owned();
+        drop(res2);
+        assert_eq!(concurrency2.current(&record2.key_hash_b64), 0);
+        assert_eq!(remaining_tokens(&engine2, &record2), "1000");
+
+        let observer2 = CountingSettlement {
+            engine: engine2.as_ref(),
+            refunds: std::cell::Cell::new(0),
+            commits: std::cell::Cell::new(0),
+            reconciles: std::cell::Cell::new(0),
+        };
+        let event_id2 = "http-499-pre-content";
+        let mut partial2 = Partial::new(Instant::now());
+        partial2.reservation_id = Some(res_id2.clone());
+        let mut partials2 = HashMap::from([(event_id2.to_owned(), partial2)]);
+
+        handle_event(
+            &observer2,
+            &mut partials2,
+            16,
+            terminal_event(
+                event_id2,
+                TerminationReason::ErrorCode("client_closed_request".to_owned()),
+            ),
+        );
+        assert_eq!(observer2.commits.get(), 1);
+        assert!(!engine2.commit_reserved_by_id(&res_id2));
+        assert_eq!(remaining_tokens(&engine2, &record2), "1000");
+    }
+
+    #[test]
+    fn http_upstream_stream_error_still_refunds_in_full() {
+        let (engine, view, record, concurrency) = accounting_fixture();
+        let partial = reserved_partial(
+            &engine,
+            &view,
+            &record,
+            "POST",
+            Some(UsageSnapshot {
+                input_tokens: 15,
+                output_tokens: 25,
+                ..Default::default()
+            }),
+        );
+        let observer = CountingSettlement {
+            engine: engine.as_ref(),
+            refunds: std::cell::Cell::new(0),
+            commits: std::cell::Cell::new(0),
+            reconciles: std::cell::Cell::new(0),
+        };
+        let event_id = "http-upstream-error";
+        let mut partials = HashMap::from([(event_id.to_owned(), partial)]);
+
+        handle_event(
+            &observer,
+            &mut partials,
+            16,
+            terminal_event(
+                event_id,
+                TerminationReason::ErrorCode("upstream_stream_error".to_owned()),
+            ),
+        );
+        assert_eq!(observer.refunds.get(), 1);
+        assert_eq!(observer.commits.get(), 0);
+        assert_eq!(observer.reconciles.get(), 0);
+        assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+        assert_eq!(remaining_tokens(&engine, &record), "1000");
     }
 }
