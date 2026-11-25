@@ -167,10 +167,13 @@ fn rate_limit_observation_from_record(
 /// builders and rebinders that only return a view) MUST NOT acquire it; the
 /// caller that publishes the view owns the guard. The lock does not serialize
 /// storage mutations and does not provide a cross-table storage snapshot.
+type OnStoreCallback = Arc<dyn Fn(&DynamicView) + Send + Sync>;
+
 pub struct DynamicViewHolder {
     inner: ArcSwap<DynamicView>,
     rebuild_lock: tokio::sync::Mutex<()>,
     transient_retry_notify: tokio::sync::Notify,
+    on_store: Option<OnStoreCallback>,
 }
 
 impl DynamicViewHolder {
@@ -179,7 +182,13 @@ impl DynamicViewHolder {
             inner: ArcSwap::from(initial),
             rebuild_lock: tokio::sync::Mutex::new(()),
             transient_retry_notify: tokio::sync::Notify::new(),
+            on_store: None,
         }
+    }
+
+    pub fn with_on_store(mut self, callback: OnStoreCallback) -> Self {
+        self.on_store = Some(callback);
+        self
     }
 
     /// Acquire this holder's rebuild/install lock. Waiters are queued in FIFO
@@ -200,9 +209,12 @@ impl DynamicViewHolder {
 
     pub fn store(&self, view: Arc<DynamicView>) {
         let notify = view.has_retryable_plugin_failure();
-        self.inner.store(view);
+        self.inner.store(Arc::clone(&view));
         if notify {
             self.transient_retry_notify.notify_one();
+        }
+        if let Some(callback) = self.on_store.as_ref() {
+            callback(&view);
         }
     }
 
@@ -226,8 +238,14 @@ impl DynamicViewHolder {
                 Arc::clone(current)
             }
         });
-        if prev.generation < new_generation && notify {
-            self.transient_retry_notify.notify_one();
+        if prev.generation < new_generation {
+            if notify {
+                self.transient_retry_notify.notify_one();
+            }
+            if let Some(callback) = self.on_store.as_ref() {
+                let resident = self.inner.load();
+                callback(&resident);
+            }
         }
         self.inner.load().generation >= new_generation
     }
@@ -620,5 +638,31 @@ mod tests {
             cache.snapshots.contains_key(&new_concurrent_id),
             "merge_records must not prune concurrent upstreams absent from an older hydration batch"
         );
+    }
+
+    #[test]
+    fn on_store_fires_for_store_and_newer_installs_only() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let seen_generations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let notifications_cb = Arc::clone(&notifications);
+        let seen_cb = Arc::clone(&seen_generations);
+
+        let holder = DynamicViewHolder::new(test_view(1)).with_on_store(Arc::new(move |view| {
+            notifications_cb.fetch_add(1, Ordering::SeqCst);
+            seen_cb.lock().unwrap().push(view.generation);
+        }));
+
+        assert!(!holder.try_store_if_newer(test_view(0)));
+        assert!(!holder.try_store_if_newer(test_view(1)));
+        assert_eq!(notifications.load(Ordering::SeqCst), 0);
+
+        assert!(holder.try_store_if_newer(test_view(4)));
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+
+        holder.store(test_view(10));
+        assert_eq!(notifications.load(Ordering::SeqCst), 2);
+        assert_eq!(*seen_generations.lock().unwrap(), vec![5, 11]);
     }
 }

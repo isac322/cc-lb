@@ -67,7 +67,7 @@ When routing selects an actual prompt-cache match, the match-only fields `matche
 
 The line is queued after the row insert commits and before the admin event bus publishes the final update. A dedicated thread drains a 1,024-line queue and writes each line with one write call, so lines do not interleave with tracing output in the process.
 
-- **Shared stdout.** Diagnostics share the stdout pipe and its in-process lock with tracing logs. A stalled collector can delay request-path tracing writes.
+- **Shared stdout.** Diagnostics share the stdout pipe with tracing logs, which write through a 4,096-line non-blocking bounded queue on a dedicated writer thread. A stalled collector fills that queue and causes tracing line drops (exported off-path under `cc_lb_dropped_events_total{reason="log_writer_queue_full"}`), rather than blocking request-path tracing writes; fatal panics still write synchronously to stderr before aborting.
 - **Best effort.** Queue overflow, encoding failures, write failures, worker failures, and shutdown deadlines are counted as bounded diagnostics outcomes. The committed relational row remains available when stdout delivery fails.
 - **Process death.** Graceful shutdown drains the queue for up to two seconds. A `SIGKILL` or OOM kill can lose queued lines; those lines are not a second source of the event fields.
 

@@ -21,6 +21,7 @@
       "$ref": "#/$defs/BodyConfig",
       "default": {
         "files_cap_bytes": 104857600,
+        "max_buffered_response_bytes": 104857600,
         "messages_cap_bytes": 33554432
       }
     },
@@ -237,6 +238,7 @@
       "$ref": "#/$defs/TimeoutsConfig",
       "default": {
         "drain_secs": 60,
+        "upstream_connect_secs": 30,
         "upstream_total_secs": 600
       }
     },
@@ -448,6 +450,12 @@
           "format": "uint64",
           "default": 104857600,
           "minimum": 0
+        },
+        "max_buffered_response_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 104857600,
+          "minimum": 1
         },
         "messages_cap_bytes": {
           "type": "integer",
@@ -1344,6 +1352,12 @@
           "default": 60,
           "minimum": 0
         },
+        "upstream_connect_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 1
+        },
         "upstream_total_secs": {
           "type": "integer",
           "format": "uint64",
@@ -1361,6 +1375,12 @@
             "string",
             "null"
           ]
+        },
+        "handshake_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 10,
+          "minimum": 1
         },
         "key_path": {
           "type": [

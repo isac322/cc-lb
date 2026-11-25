@@ -23,7 +23,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
 use crate::attempt_rail::{DispatchBeforeError, DispatchDeadline};
-use crate::dns_cache::{CachingDnsConnector, DnsCacheError, DnsResolverConfig};
+use crate::dns_cache::{CachingDnsConnector, DnsCacheError, DnsResolverConfig, MetricDnsResolver};
 use crate::instrumented_connector::InstrumentedHttpsConnector;
 use crate::lifecycle::{Body, DispatchError, UpstreamDispatch};
 
@@ -248,10 +248,43 @@ impl BulkheadRegistry {
             .clone()
     }
 
+    /// Look up or initialize a bulkhead strictly for semaphore admission without
+    /// allocating an HTTP connector or client pool (used for WebSocket admission).
+    pub fn semaphore_only_bulkhead(
+        &self,
+        upstream_name: impl Into<String>,
+        config: BulkheadRuntimeConfig,
+    ) -> Arc<Bulkhead> {
+        self.bulkhead_with_factory(upstream_name, config, || {
+            Arc::new(SemaphoreOnlyNoopDispatch) as Arc<dyn UpstreamDispatch>
+        })
+    }
+
+    pub fn evict(&self, upstream_name: &str) -> bool {
+        self.map.remove(upstream_name).is_some()
+    }
+
+    pub fn retain_keys(&self, keep: impl Fn(&str) -> bool) {
+        self.map.retain(|key, _| keep(key));
+    }
+
     pub fn get(&self, upstream_name: &str) -> Option<Arc<Bulkhead>> {
         self.map
             .get(upstream_name)
             .map(|bulkhead| Arc::clone(bulkhead.value()))
+    }
+}
+
+struct SemaphoreOnlyNoopDispatch;
+
+#[async_trait]
+impl UpstreamDispatch for SemaphoreOnlyNoopDispatch {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        Err(DispatchError::Transport {
+            source: Box::new(std::io::Error::other(
+                "semaphore-only bulkhead has no HTTP dispatcher",
+            )),
+        })
     }
 }
 
@@ -357,8 +390,19 @@ impl UpstreamDispatch for Arc<Bulkhead> {
 }
 
 pub fn make_default_dispatcher(max_idle_per_host: usize) -> Arc<dyn UpstreamDispatch> {
-    let caching_http = CachingDnsConnector::new(&DnsResolverConfig::default())
-        .expect("default DNS resolver builds");
+    let resolver =
+        MetricDnsResolver::new(&DnsResolverConfig::default()).expect("default DNS resolver builds");
+    make_shared_dispatcher(resolver, None, max_idle_per_host)
+}
+
+/// Builds a dispatcher sharing an existing DNS resolver cache and applying a
+/// bounded TCP connect timeout.
+pub fn make_shared_dispatcher(
+    dns_resolver: MetricDnsResolver,
+    connect_timeout: Option<Duration>,
+    max_idle_per_host: usize,
+) -> Arc<dyn UpstreamDispatch> {
+    let caching_http = CachingDnsConnector::from_metric_resolver(dns_resolver, connect_timeout);
     let connector = HttpsConnectorBuilder::new()
         .with_webpki_roots()
         .https_or_http()

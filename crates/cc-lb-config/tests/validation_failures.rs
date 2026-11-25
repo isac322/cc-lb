@@ -204,3 +204,74 @@ fn misspelled_request_diagnostics_key_is_rejected() {
 
     assert!(error.contains("request_diagnostic_log"), "{error}");
 }
+
+#[test]
+fn zero_tls_handshake_timeout_and_buffered_response_cap_fail_validation() {
+    let (_dir, tls_path) = crate::common::temp_config(
+        r#"[listener.tls]
+cert_path = "/definitely/missing/cert.pem"
+key_path = "/definitely/missing/key.pem"
+handshake_timeout_secs = 0
+"#,
+    );
+    let tls_cfg: Config = toml::from_str(&std::fs::read_to_string(&tls_path).unwrap()).unwrap();
+    let tls_err = tls_cfg
+        .validate_without_filesystem()
+        .unwrap_err()
+        .to_string();
+    assert!(
+        tls_err.contains("listener.tls.handshake_timeout_secs"),
+        "{tls_err}"
+    );
+
+    let (_dir2, body_path) = crate::common::temp_config(
+        r#"[body]
+max_buffered_response_bytes = 0
+"#,
+    );
+    let body_err = Config::load(&body_path).unwrap_err().to_string();
+    assert!(
+        body_err.contains("body.max_buffered_response_bytes"),
+        "{body_err}"
+    );
+}
+
+#[test]
+fn invalid_upstream_connect_timeout_fails_validation() {
+    let (_dir, zero_path) = crate::common::temp_config(
+        r#"[timeouts]
+upstream_connect_secs = 0
+"#,
+    );
+    let zero_err = Config::load(&zero_path).unwrap_err().to_string();
+    assert!(
+        zero_err.contains("timeouts.upstream_connect_secs"),
+        "{zero_err}"
+    );
+
+    let (_dir2, exceeding_path) = crate::common::temp_config(
+        r#"[timeouts]
+upstream_total_secs = 10
+upstream_connect_secs = 11
+"#,
+    );
+    let exceeding_err = Config::load(&exceeding_path).unwrap_err().to_string();
+    assert!(
+        exceeding_err.contains("timeouts.upstream_connect_secs"),
+        "{exceeding_err}"
+    );
+
+    let (_dir3, zero_total_exceeding_path) = crate::common::temp_config(
+        r#"[timeouts]
+upstream_total_secs = 0
+upstream_connect_secs = 2
+"#,
+    );
+    let zero_total_exceeding_err = Config::load(&zero_total_exceeding_path)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        zero_total_exceeding_err.contains("timeouts.upstream_connect_secs"),
+        "{zero_total_exceeding_err}"
+    );
+}

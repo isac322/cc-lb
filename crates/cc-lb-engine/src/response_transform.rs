@@ -83,7 +83,7 @@ impl SseEventTransformHook for GeminiOauthResponseTransform {
 pub(crate) fn unwrap_gemini_code_assist_body(
     body: &[u8],
 ) -> Result<Option<Bytes>, ResponseTransformError> {
-    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+    let Ok(value) = sonic_rs::from_slice::<Value>(body) else {
         return Ok(None);
     };
     let Some(response) = value.get("response") else {

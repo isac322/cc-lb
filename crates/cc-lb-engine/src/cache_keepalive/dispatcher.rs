@@ -125,13 +125,14 @@ impl AnthropicKeepaliveDispatcher {
             .build_keepalive_body_for(mode)
             .map_err(|source| source.to_string())?;
         let target_url = resolve_keepalive_url(snapshot, upstream)?;
-        let shaped = shaped_request_from_snapshot(
+        let mut shaped = shaped_request_from_snapshot(
             snapshot,
             keepalive_body.clone(),
             &upstream_api,
             target_url,
             source_ref_id,
         )?;
+        shaped.set_upstream_id(upstream.id);
         Ok((signer, shaped, keepalive_body))
     }
 

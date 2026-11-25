@@ -1993,3 +1993,108 @@ async fn backend_codex_websocket_forwards_response_failed_after_in_response_erro
     assert_eq!(u1_ws_calls.load(Ordering::SeqCst), 1);
     assert_eq!(u2_ws_calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn codex_backend_root_non_upgrade_persists_auth_failure_and_local_404_rows() {
+    use sqlx::{Row as _, sqlite::SqlitePoolOptions};
+    use std::time::Duration;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let server = common::spawn_test_server_with_openai_budget("").await;
+    let client = Client::new();
+
+    let unauth_get = client
+        .get(format!(
+            "http://{}/openai/backend-api/codex",
+            server.proxy_addr
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth_get.status(), 401);
+
+    let unauth_post = client
+        .post(format!(
+            "http://{}/openai/backend-api/codex",
+            server.proxy_addr
+        ))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth_post.status(), 401);
+
+    let authed_root_post = client
+        .post(format!(
+            "http://{}/openai/backend-api/codex",
+            server.proxy_addr
+        ))
+        .header("x-api-key", &server.managed_key.plaintext)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(authed_root_post.status(), 404);
+    let body: Value = authed_root_post.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "operation_not_supported");
+
+    let authed_trailing_post = client
+        .post(format!(
+            "http://{}/openai/backend-api/codex/",
+            server.proxy_addr
+        ))
+        .header("x-api-key", &server.managed_key.plaintext)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(authed_trailing_post.status(), 404);
+    let body: Value = authed_trailing_post.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "operation_not_supported");
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(&format!("sqlite://{}", server.sqlite_path.display()))
+        .await
+        .expect("open sqlite db");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let rows = sqlx::query(
+            "SELECT list_status, error_code, principal_id FROM request_events_v1 ORDER BY id ASC",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query request_events_v1");
+        if rows.len() == 4 {
+            assert_eq!(rows[0].get::<Option<i64>, _>("list_status"), Some(401));
+            assert_eq!(
+                rows[0].get::<Option<String>, _>("error_code").as_deref(),
+                Some("authentication_failed")
+            );
+            assert_eq!(rows[1].get::<Option<i64>, _>("list_status"), Some(401));
+            assert_eq!(
+                rows[1].get::<Option<String>, _>("error_code").as_deref(),
+                Some("authentication_failed")
+            );
+            for row in &rows[2..4] {
+                assert_eq!(row.get::<Option<i64>, _>("list_status"), Some(404));
+                assert_eq!(
+                    row.get::<Option<String>, _>("error_code").as_deref(),
+                    Some("operation_not_supported")
+                );
+                assert!(
+                    row.get::<Option<String>, _>("principal_id").is_some(),
+                    "authenticated 404 row should attribute principal_id"
+                );
+            }
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for 4 codex backend root rows; saw {}",
+            rows.len()
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}

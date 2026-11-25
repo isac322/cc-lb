@@ -81,20 +81,22 @@ impl<B> OnRequest<B> for ProxyOnRequest {
         let request_id = header_value(request, "request-id")
             .or_else(|| header_value(request, "x-request-id"))
             .unwrap_or("");
-        let user_agent = header_value(request, "user-agent").unwrap_or("");
         if !request_id.is_empty() {
             span.record("cc_lb.request.id", request_id);
         }
 
-        tracing::info!(
-            target: "cc_lb_observability::http",
-            method = %request.method(),
-            path = request.uri().path(),
-            query_present = request.uri().query().is_some(),
-            request_id,
-            downstream_user_agent = user_agent,
-            "request_started"
-        );
+        if tracing::enabled!(target: "cc_lb_observability::http", tracing::Level::DEBUG) {
+            let user_agent = header_value(request, "user-agent").unwrap_or("");
+            tracing::debug!(
+                target: "cc_lb_observability::http",
+                method = %request.method(),
+                path = request.uri().path(),
+                query_present = request.uri().query().is_some(),
+                request_id,
+                downstream_user_agent = user_agent,
+                "request_started"
+            );
+        }
     }
 }
 
@@ -124,7 +126,7 @@ impl<B> OnResponse<B> for ProxyOnResponse {
         .increment(1);
         metrics::histogram!("cc_lb_request_headers_duration_seconds").record(duration_seconds);
 
-        tracing::info!(
+        tracing::debug!(
             target: "cc_lb_observability::http",
             status = status.as_u16(),
             latency_ms = latency.as_millis(),

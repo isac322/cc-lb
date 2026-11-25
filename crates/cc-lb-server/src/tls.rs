@@ -8,7 +8,16 @@ use axum::serve::Listener;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Semaphore, mpsc};
+use tokio::task::JoinHandle;
 use tokio_rustls::server::TlsStream;
+use tokio_util::sync::CancellationToken;
+
+/// Default maximum time permitted for a TLS client to complete the handshake
+/// before the connection is aborted and dropped.
+pub const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_CONCURRENT_TLS_HANDSHAKES: usize = 512;
+const READY_TLS_CHANNEL_CAPACITY: usize = 256;
 
 pub struct TlsState {
     pub config: ArcSwap<rustls::ServerConfig>,
@@ -70,16 +79,105 @@ impl ReloadableAcceptor {
 }
 
 pub struct ReloadableListener {
-    listener: TcpListener,
-    acceptor: ReloadableAcceptor,
+    local_addr: Result<std::net::SocketAddr, io::ErrorKind>,
+    ready_rx: mpsc::Receiver<(TlsStream<TcpStream>, std::net::SocketAddr)>,
+    cancel: CancellationToken,
+    accept_task: JoinHandle<()>,
 }
 
 impl ReloadableListener {
     pub fn new(listener: TcpListener, state: Arc<TlsState>) -> Self {
+        Self::with_handshake_timeout(listener, state, DEFAULT_TLS_HANDSHAKE_TIMEOUT)
+    }
+
+    pub fn with_handshake_timeout(
+        listener: TcpListener,
+        state: Arc<TlsState>,
+        handshake_timeout: Duration,
+    ) -> Self {
+        let local_addr = listener.local_addr().map_err(|err| err.kind());
+        let handshake_timeout = if handshake_timeout.is_zero() {
+            DEFAULT_TLS_HANDSHAKE_TIMEOUT
+        } else {
+            handshake_timeout
+        };
+        let (ready_tx, ready_rx) = mpsc::channel(READY_TLS_CHANNEL_CAPACITY);
+        let cancel = CancellationToken::new();
+        let loop_cancel = cancel.clone();
+        let acceptor = ReloadableAcceptor::new(state);
+        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_TLS_HANDSHAKES));
+
+        let accept_task = tokio::spawn(async move {
+            loop {
+                let (stream, addr) = tokio::select! {
+                    biased;
+                    _ = loop_cancel.cancelled() => break,
+                    accepted = listener.accept() => match accepted {
+                        Ok(connection) => connection,
+                        Err(error) => {
+                            handle_accept_error(error).await;
+                            continue;
+                        }
+                    }
+                };
+
+                let Ok(permit) = Arc::clone(&semaphore).try_acquire_owned() else {
+                    tracing::warn!(
+                        %addr,
+                        max_concurrent = MAX_CONCURRENT_TLS_HANDSHAKES,
+                        "TLS handshake concurrency limit reached; dropping connection"
+                    );
+                    drop(stream);
+                    continue;
+                };
+
+                let task_cancel = loop_cancel.child_token();
+                let acceptor = acceptor.clone();
+                let ready_tx = ready_tx.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    tokio::select! {
+                        biased;
+                        _ = task_cancel.cancelled() => {}
+                        result = tokio::time::timeout(handshake_timeout, acceptor.accept(stream)) => {
+                            match result {
+                                Ok(Ok(tls_stream)) => {
+                                    tokio::select! {
+                                        biased;
+                                        _ = task_cancel.cancelled() => {}
+                                        _ = ready_tx.send((tls_stream, addr)) => {}
+                                    }
+                                }
+                                Ok(Err(error)) => {
+                                    tracing::warn!(%addr, error = %error, "TLS handshake failed");
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        %addr,
+                                        timeout_ms = handshake_timeout.as_millis() as u64,
+                                        "TLS handshake timed out"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
         Self {
-            listener,
-            acceptor: ReloadableAcceptor::new(state),
+            local_addr,
+            ready_rx,
+            cancel,
+            accept_task,
         }
+    }
+}
+
+impl Drop for ReloadableListener {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.accept_task.abort();
     }
 }
 
@@ -88,26 +186,14 @@ impl Listener for ReloadableListener {
     type Addr = std::net::SocketAddr;
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        loop {
-            let (stream, addr) = match self.listener.accept().await {
-                Ok(connection) => connection,
-                Err(error) => {
-                    handle_accept_error(error).await;
-                    continue;
-                }
-            };
-
-            match self.acceptor.accept(stream).await {
-                Ok(stream) => return (stream, addr),
-                Err(error) => {
-                    tracing::warn!(%addr, error = %error, "TLS handshake failed");
-                }
-            }
+        match self.ready_rx.recv().await {
+            Some(connection) => connection,
+            None => std::future::pending().await,
         }
     }
 
     fn local_addr(&self) -> io::Result<Self::Addr> {
-        self.listener.local_addr()
+        self.local_addr.map_err(io::Error::from)
     }
 }
 

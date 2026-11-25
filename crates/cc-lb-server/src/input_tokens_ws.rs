@@ -5,11 +5,21 @@ const INPUT_TOKENS_MARKER_VALUE: &str = "input-tokens-ws";
 
 pub(crate) struct InputTokensWebsocketDispatch {
     inner: Arc<dyn UpstreamDispatch>,
+    dns_resolver: cc_lb_engine::MetricDnsResolver,
+    connect_timeout: Duration,
 }
 
 impl InputTokensWebsocketDispatch {
-    pub(crate) fn new(inner: Arc<dyn UpstreamDispatch>) -> Self {
-        Self { inner }
+    pub(crate) fn new(
+        inner: Arc<dyn UpstreamDispatch>,
+        dns_resolver: cc_lb_engine::MetricDnsResolver,
+        connect_timeout: Duration,
+    ) -> Self {
+        Self {
+            inner,
+            dns_resolver,
+            connect_timeout,
+        }
     }
 }
 
@@ -74,6 +84,8 @@ fn top_level_error_public(value: &serde_json::Value) -> (StatusCode, serde_json:
 
 async fn emulate_input_tokens(
     request: SignedRequest,
+    dns_resolver: &cc_lb_engine::MetricDnsResolver,
+    connect_timeout: Duration,
 ) -> Result<Response<Body>, cc_lb_engine::DispatchError> {
     let mut url = request.url().clone();
     let path = url
@@ -141,10 +153,37 @@ async fn emulate_input_tokens(
         HeaderName::from_static("openai-beta"),
         HeaderValue::from_static("responses_websockets=2026-02-06"),
     );
-    let connection = tokio::time::timeout(
-        Duration::from_secs(30),
-        connect_async_with_config(ws_request, None, false),
-    )
+    let host = ws_request
+        .uri()
+        .host()
+        .ok_or_else(|| dispatch_error("input_tokens WebSocket URL missing host"))?
+        .to_owned();
+    let port = ws_request.uri().port_u16().unwrap_or_else(|| {
+        if ws_request.uri().scheme_str() == Some("wss") {
+            443
+        } else {
+            80
+        }
+    });
+    let connection = tokio::time::timeout(connect_timeout, async move {
+        let dial_deadline = tokio::time::Instant::now() + connect_timeout;
+        let addrs = dns_resolver
+            .resolve_host(&host, port)
+            .await
+            .map_err(|err| {
+                tokio_tungstenite::tungstenite::Error::Io(io::Error::other(err.to_string()))
+            })?;
+        if addrs.is_empty() {
+            return Err(tokio_tungstenite::tungstenite::Error::Io(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "DNS resolution returned no socket addresses",
+            )));
+        }
+        let tcp = cc_lb_engine::dns_cache::connect_tcp_with_fallback(&addrs, dial_deadline)
+            .await
+            .map_err(tokio_tungstenite::tungstenite::Error::Io)?;
+        client_async_tls_with_config(ws_request, tcp, None, None).await
+    })
     .await
     .map_err(|_| dispatch_error("input_tokens WebSocket handshake timed out"))?;
     let (mut ws, _) = match connection {
@@ -236,7 +275,7 @@ impl UpstreamDispatch for InputTokensWebsocketDispatch {
             .and_then(|value| value.to_str().ok())
             == Some(INPUT_TOKENS_MARKER_VALUE);
         if emulate {
-            emulate_input_tokens(request).await
+            emulate_input_tokens(request, &self.dns_resolver, self.connect_timeout).await
         } else {
             self.inner.dispatch(request).await
         }

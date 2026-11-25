@@ -658,6 +658,11 @@ mod tests {
                 "/v1/files/file_1/content",
                 C::OpenaiAccountOwned,
             ),
+            (
+                Method::GET,
+                "/v1/videos/vid_1/content",
+                C::OpenaiAccountOwned,
+            ),
             (Method::POST, "/v1/uploads", C::OpenaiAccountOwned),
             (Method::POST, "/v1/batches", C::OpenaiAccountOwned),
             (Method::POST, "/v1/vector_stores", C::OpenaiAccountOwned),

@@ -281,6 +281,32 @@ pub struct Lifecycle {
     rng: Mutex<StdRng>,
 }
 
+fn is_openai_opaque_content_download(method: &Method, path: &str) -> bool {
+    if method != Method::GET {
+        return false;
+    }
+    let path_without_query = path.split('?').next().unwrap_or(path);
+    let trimmed = path_without_query.trim_start_matches('/');
+    let trimmed = trimmed.strip_prefix("openai/").unwrap_or(trimmed);
+    let mut segments = trimmed.split('/');
+    matches!(
+        (
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+        ),
+        (
+            Some("v1"),
+            Some("files" | "videos"),
+            Some(resource_id),
+            Some("content"),
+            None
+        ) if !resource_id.is_empty()
+    )
+}
+
 impl Lifecycle {
     pub fn new_with_dynamic_view(
         authn: Arc<BuiltinAuthn>,
@@ -593,6 +619,26 @@ impl Lifecycle {
         (observer, request_id)
     }
 
+    /// Allocate a standalone observation context for local non-middleware proxy handlers.
+    pub fn local_observer(&self, path: &str) -> Option<LifecycleContext> {
+        self.websocket_observer(path).0
+    }
+
+    /// Record request start and full authentication success metadata for locally
+    /// served endpoints that do not enter [`Self::handle`].
+    pub fn record_local_auth_succeeded(
+        &self,
+        auth: &crate::authn_rail::Authenticated,
+        observer: &LifecycleContext,
+    ) {
+        observer.emit_request_started(false);
+        self.record_authentication_completed(auth, observer);
+        observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
+            event_id: observer.event_id().to_owned(),
+            result: Ok(self.websocket_auth_info(auth)),
+        });
+    }
+
     /// Queue an already-received provider frame; this never reads a client body
     /// or dispatches upstream. Connection ownership is checked by the gateway.
     pub(crate) fn observe_websocket_quota_frame(
@@ -800,7 +846,13 @@ impl Lifecycle {
                 });
             }
             let route_started = Instant::now();
-            let (ctx, mut pipeline_result, unknown_reasoning_plan, fallback_candidates) = self
+            let (
+                ctx,
+                mut pipeline_result,
+                unknown_reasoning_plan,
+                fallback_candidates,
+                has_explicit_affinity,
+            ) = self
                 .websocket_routing(
                     &view,
                     auth,
@@ -1010,6 +1062,7 @@ impl Lifecycle {
                 setup_timings,
                 request_id: request_id.to_owned(),
                 unknown_reasoning_plan,
+                has_explicit_affinity,
             })
         }
         .instrument(span.clone())
@@ -1098,6 +1151,32 @@ impl Lifecycle {
             .map(|record| record.kind == StorageUpstreamKind::OpenaiOauth)
     }
 
+    pub(crate) fn websocket_candidate_for_upstream(
+        &self,
+        upstream_id: Uuid,
+        codex_backend: bool,
+    ) -> Option<WebSocketCandidate> {
+        let view = self.dynamic_view.load();
+        let record = view.upstreams_snapshot().iter().find(|record| {
+            record.id == upstream_id && record.enabled && record.deleted_at_unix_secs.is_none()
+        })?;
+        if !matches!(
+            record.kind,
+            StorageUpstreamKind::OpenaiApiKey | StorageUpstreamKind::OpenaiOauth
+        ) {
+            return None;
+        }
+        if codex_backend && record.kind != StorageUpstreamKind::OpenaiOauth {
+            return None;
+        }
+        Some(WebSocketCandidate {
+            upstream_id: record.id,
+            upstream_name: record.name.clone(),
+            socket_per_lane: record.kind == StorageUpstreamKind::OpenaiOauth,
+            is_api_key: record.kind == StorageUpstreamKind::OpenaiApiKey,
+        })
+    }
+
     /// Recheck a retained connection against the current view without reserving again.
     #[cfg(test)]
     pub(crate) async fn validate_websocket_turn(
@@ -1161,6 +1240,7 @@ impl Lifecycle {
             FilterPipelineResult,
             WsUnknownReasoningPlan,
             Vec<UpstreamCandidate>,
+            bool,
         ),
         WebSocketError,
     > {
@@ -1663,7 +1743,14 @@ impl Lifecycle {
                 pending_keys,
             },
         };
-        Ok((ctx, result, plan, fallback_candidates))
+        let has_explicit_affinity = affinity.is_some() || has_connection_owner;
+        Ok((
+            ctx,
+            result,
+            plan,
+            fallback_candidates,
+            has_explicit_affinity,
+        ))
     }
 
     /// Shape one WebSocket frame for its selected upstream.
@@ -3281,6 +3368,7 @@ impl Lifecycle {
                             authenticated: auth,
                             reserved: reserved.as_ref(),
                             ctx: &ctx,
+                            parsed_body: body_view.value(),
                             principal: &principal,
                             routed: &routed,
                             signer: signer.clone(),
@@ -3329,6 +3417,7 @@ impl Lifecycle {
                         auth,
                         reserved.as_ref(),
                         &ctx,
+                        body_view.value(),
                         &principal,
                         &routed,
                         signer.clone(),
@@ -3425,6 +3514,7 @@ impl Lifecycle {
                                 authenticated: auth,
                                 reserved: reserved.as_ref(),
                                 ctx: &ctx,
+                                parsed_body: body_view.value(),
                                 principal: &principal,
                                 routed: &routed,
                                 signer: new_signer.clone(),
@@ -3473,6 +3563,7 @@ impl Lifecycle {
                             auth,
                             reserved.as_ref(),
                             &ctx,
+                            body_view.value(),
                             &principal,
                             &routed,
                             new_signer.clone(),
@@ -3633,6 +3724,7 @@ impl Lifecycle {
                         auth,
                         reserved.as_ref(),
                         &ctx,
+                        body_view.value(),
                         &principal,
                         &routed,
                         signer.clone(),
@@ -3724,6 +3816,7 @@ impl Lifecycle {
                                     auth,
                                     reserved.as_ref(),
                                     &ctx,
+                                    body_view.value(),
                                     &principal,
                                     &routed,
                                     signer.clone(),
@@ -3924,6 +4017,7 @@ impl Lifecycle {
                         auth,
                         reserved.as_ref(),
                         &retry_ctx,
+                        Some(&next),
                         &principal,
                         &routed,
                         signer.clone(),
@@ -4387,9 +4481,9 @@ impl Lifecycle {
         }
 
         let status = response.status();
-        // Audio endpoints also stream binary/text payloads without a JSON
-        // `stream` flag. Buffered transforms apply to semantic JSON media
-        // types and Gemini OAuth envelopes, not arbitrary streamed bytes.
+        // Audio endpoints and opaque file content downloads also stream binary/text
+        // payloads without a JSON `stream` flag. Buffered transforms apply to semantic
+        // JSON media types and Gemini OAuth envelopes, not arbitrary streamed bytes.
         let response_is_json = has_json_content_type(response.headers());
         let gemini_catalog = transform_ctx.gemini_oauth
             && response_affinity_context.capability == ProviderCapability::GeminiModels;
@@ -4403,7 +4497,13 @@ impl Lifecycle {
             response_affinity_context.capability,
             ProviderCapability::OpenaiAudio | ProviderCapability::OpenaiAudioTranscriptions
         ) && !response_is_json;
-        let stream_response = stream_requested || audio_stream;
+        let opaque_file_download = status.is_success()
+            && response_affinity_context.capability == ProviderCapability::OpenaiAccountOwned
+            && is_openai_opaque_content_download(
+                &transform_ctx.request_method,
+                &transform_ctx.request_path,
+            );
+        let stream_response = stream_requested || audio_stream || opaque_file_download;
         // A streamed public Responses request still gets a non-SSE error body
         // (Codex `{detail}`) buffered so it is rewritten to the public error shape.
         let compat_force_buffered = compat_response_plan.as_ref().is_some_and(|plan| {
@@ -4412,9 +4512,10 @@ impl Lifecycle {
                     && !response_is_sse)
                 || (matches!(&plan.kind, CompatResponseKind::Chat { .. }) && !status.is_success())
         });
-        let buffered_transform_required = compat_force_buffered
-            || transform_ctx.gemini_oauth
-            || (response_is_json && transform_ctx.dialect.response_transform_hook().is_some());
+        let buffered_transform_required = !opaque_file_download
+            && (compat_force_buffered
+                || transform_ctx.gemini_oauth
+                || (response_is_json && transform_ctx.dialect.response_transform_hook().is_some()));
         let restricted_codex_models = transform_ctx.codex_backend
             && response_affinity_context.capability == ProviderCapability::OpenaiModels
             && self
@@ -4462,13 +4563,13 @@ impl Lifecycle {
         }
         strip_hop_by_hop(&mut parts.headers);
         let mut body_buf: Vec<u8> = Vec::new();
-        // Ordinary buffered responses remain uncapped. Requested streams
-        // requiring JSON/OAuth transforms use the path's cap; non-SSE,
-        // non-JSON streaming responses instead relay incrementally above.
+        // Requested streams requiring JSON/OAuth transforms use the path's cap;
+        // ordinary buffered responses are bounded by `max_buffered_response_bytes`;
+        // non-SSE, non-JSON streaming responses relay incrementally above.
         let body_cap = if stream_response {
             body_cap_for_path(&self.config, &transform_ctx.request_path)
         } else {
-            usize::MAX
+            self.config.max_buffered_response_bytes
         };
         let mut body_collect_failed = false;
         let mut body_limit_terminal = false;
@@ -4489,6 +4590,14 @@ impl Lifecycle {
                                 &mut body_limit_terminal,
                             )
                         {
+                            tracing::warn!(
+                                request_id = %event_ctx.request_id,
+                                path = %transform_ctx.request_path,
+                                body_cap,
+                                buffered_bytes = body_buf.len(),
+                                chunk_bytes = data.len(),
+                                "buffered upstream response exceeded body cap"
+                            );
                             break;
                         }
                     }
@@ -4554,6 +4663,14 @@ impl Lifecycle {
                                 &mut body_collect_failed,
                                 &mut body_limit_terminal,
                             ) {
+                                tracing::warn!(
+                                    request_id = %event_ctx.request_id,
+                                    path = %transform_ctx.request_path,
+                                    body_cap,
+                                    buffered_bytes = body_buf.len(),
+                                    chunk_bytes = data.len(),
+                                    "buffered upstream response exceeded body cap"
+                                );
                                 break;
                             }
                         }
@@ -4578,7 +4695,7 @@ impl Lifecycle {
         let body_collect_ms = duration_to_ms(body_collect_started.elapsed());
         let first_body_chunk_ms = first_body_chunk_at
             .map(|t| duration_to_ms(t.saturating_duration_since(body_collect_started)));
-        tracing::info!(
+        tracing::debug!(
             request_id = %event_ctx.request_id,
             status = status.as_u16(),
             proxy_setup_ms = event_ctx.proxy_setup_ms,
@@ -5442,6 +5559,7 @@ impl Lifecycle {
             authenticated,
             reserved,
             ctx,
+            parsed_body,
             principal,
             routed,
             signer,
@@ -5464,6 +5582,7 @@ impl Lifecycle {
                 authenticated,
                 reserved,
                 ctx,
+                parsed_body,
                 principal,
                 routed,
                 signer.clone(),
@@ -5491,6 +5610,7 @@ impl Lifecycle {
         authenticated: &crate::authn_rail::Authenticated,
         reserved: Option<&Reserved>,
         ctx: &RequestContext,
+        parsed_body: Option<&Value>,
         principal: &Principal,
         routed: &RoutedUpstream<'_>,
         signer: Arc<dyn Signer>,
@@ -5512,6 +5632,7 @@ impl Lifecycle {
                 self.dispatcher.as_ref(),
                 attempt_scope,
                 ctx,
+                parsed_body,
                 principal,
                 &routed.route,
                 routed.record.kind,
@@ -5544,12 +5665,16 @@ impl Lifecycle {
                 capability,
                 ProviderCapability::OpenaiAudio | ProviderCapability::OpenaiAudioTranscriptions
             ) && !has_json_content_type(response.headers());
+            let opaque_file_download = response.status().is_success()
+                && capability == ProviderCapability::OpenaiAccountOwned
+                && is_openai_opaque_content_download(&ctx.method, &ctx.path);
             let protocol = if response_is_sse && !compat_forces_buffered {
                 cc_lb_request_log::RequestProtocol::HttpSse
             } else if !compat_forces_buffered
                 && response.status().is_success()
-                && !has_json_content_type(response.headers())
-                && (stream_requested || audio_stream)
+                && (opaque_file_download
+                    || (!has_json_content_type(response.headers())
+                        && (stream_requested || audio_stream)))
             {
                 cc_lb_request_log::RequestProtocol::HttpStream
             } else {
@@ -5764,6 +5889,7 @@ impl Lifecycle {
         dispatcher: &dyn UpstreamDispatch,
         attempt_scope: Scoped<'_>,
         ctx: &RequestContext,
+        parsed_body: Option<&Value>,
         principal: &Principal,
         route: &RouteDecision,
         upstream_kind: StorageUpstreamKind,
@@ -5798,6 +5924,7 @@ impl Lifecycle {
                 prepare_request(
                     authenticated,
                     ctx,
+                    parsed_body,
                     capability,
                     upstream_kind,
                     ctx.openai_oauth_compat
@@ -5868,7 +5995,7 @@ impl Lifecycle {
         let realtime_hangup = upstream_kind == StorageUpstreamKind::OpenaiOauth
             && classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope)
                 == Some(ProviderCapability::OpenaiRealtimeHangup);
-        let shaped = match tracing::info_span!("proxy.shape").in_scope(|| {
+        let mut shaped = match tracing::info_span!("proxy.shape").in_scope(|| {
             if realtime_hangup {
                 return shape_request(
                     &RawPassthroughDialect {
@@ -5893,6 +6020,7 @@ impl Lifecycle {
                 return Err(AttemptFailure::Shape(source));
             }
         };
+        shaped.set_upstream_id(route.upstream_id);
         timings.shape_ms = Some(duration_to_ms(shape_start.elapsed()));
         if let Some(shape_ms) = timings.shape_ms {
             tracing::Span::current().record(
@@ -5929,19 +6057,21 @@ impl Lifecycle {
             );
         }
 
-        let signed_header_names: Vec<String> = signed
-            .headers()
-            .keys()
-            .map(|k| k.as_str().to_owned())
-            .collect();
-        tracing::info!(
-            url = %cc_lb_observability::sanitize_url_for_log(signed.url().as_str()),
-            method = %signed.method(),
-            header_count = signed.headers().len(),
-            headers = ?signed_header_names,
-            body_bytes = signed.body_len(),
-            "about to dispatch signed request"
-        );
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let signed_header_names: Vec<String> = signed
+                .headers()
+                .keys()
+                .map(|k| k.as_str().to_owned())
+                .collect();
+            tracing::debug!(
+                url = %cc_lb_observability::sanitize_url_for_log(signed.url().as_str()),
+                method = %signed.method(),
+                header_count = signed.headers().len(),
+                headers = ?signed_header_names,
+                body_bytes = signed.body_len(),
+                "about to dispatch signed request"
+            );
+        }
 
         let _ = keepalive_request_started
             .get_or_init(|| async {
@@ -6212,7 +6342,7 @@ impl Lifecycle {
         }
         let stream_latency_log_dispatch = tracing::enabled!(
             target: "cc_lb_engine::lifecycle",
-            tracing::Level::INFO
+            tracing::Level::DEBUG
         )
         .then(|| tracing::dispatcher::get_default(|dispatch| dispatch.clone()));
         let response_body_timing = BodyIoTiming::default();

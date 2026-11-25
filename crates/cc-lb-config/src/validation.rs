@@ -26,6 +26,8 @@ impl ValidationError {
 
 pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     validate_admin_auth(config)?;
+    validate_body(config)?;
+    validate_timeouts(config)?;
     validate_tls_filesystem(config)?;
     validate_storage(config)?;
     validate_storage_filesystem(config)?;
@@ -40,6 +42,8 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
 
 pub fn validate_config_without_filesystem(config: &Config) -> Result<(), ConfigError> {
     validate_admin_auth(config)?;
+    validate_body(config)?;
+    validate_timeouts(config)?;
     validate_tls(config)?;
     validate_storage(config)?;
     validate_oauth(config)?;
@@ -208,6 +212,36 @@ fn validate_scheduler_keepalive_dispatch_timeout(config: &Config) -> Result<(), 
     Ok(())
 }
 
+fn validate_body(config: &Config) -> Result<(), ValidationError> {
+    if config.body.max_buffered_response_bytes == 0 {
+        return Err(ValidationError::new(
+            "body.max_buffered_response_bytes",
+            "max buffered response bytes must be greater than zero",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_timeouts(config: &Config) -> Result<(), ValidationError> {
+    if config.timeouts.upstream_connect_secs == 0 {
+        return Err(ValidationError::new(
+            "timeouts.upstream_connect_secs",
+            "upstream connect timeout must be greater than zero",
+        ));
+    }
+    let effective_total_secs = config.timeouts.upstream_total_secs.max(1);
+    if config.timeouts.upstream_connect_secs > effective_total_secs {
+        return Err(ValidationError::new(
+            "timeouts.upstream_connect_secs",
+            format!(
+                "upstream connect timeout {}s cannot exceed effective upstream total timeout {}s",
+                config.timeouts.upstream_connect_secs, effective_total_secs
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_tls(config: &Config) -> Result<(), ValidationError> {
     validate_tls_paths(config, |_, _| Ok(()))
 }
@@ -221,6 +255,12 @@ fn validate_tls_paths(
     mut validate_path: impl FnMut(&str, &Path) -> Result<(), ValidationError>,
 ) -> Result<(), ValidationError> {
     if let Some(tls) = &config.listener.tls {
+        if tls.handshake_timeout_secs == 0 {
+            return Err(ValidationError::new(
+                "listener.tls.handshake_timeout_secs",
+                "TLS handshake timeout must be greater than zero",
+            ));
+        }
         let cert_path = tls.cert_path.as_deref().ok_or_else(|| {
             ValidationError::new("listener.tls.cert_path", "missing TLS certificate path")
         })?;

@@ -1,26 +1,16 @@
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Once};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, Once};
+use std::time::{Duration, UNIX_EPOCH};
 
-use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use cc_lb_upstream::SignedRequest;
 use dashmap::DashMap;
-use http::Response;
+use http::{Response, StatusCode};
 use metrics::Unit;
 use thiserror::Error;
 
 use crate::attempt_rail::{DispatchBeforeError, DispatchDeadline};
 use crate::lifecycle::{Body, DispatchError, UpstreamDispatch};
-use cc_lb_clock::{Clock, ClockHandle, unix_secs};
-
-const HALF_OPEN_INITIALIZING: u32 = u32::MAX;
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct FailureWindowState {
-    last_failure_ts: u64,
-    count: u32,
-}
+use cc_lb_clock::{Clock, ClockHandle};
 
 static REGISTER_CIRCUIT_BREAKER_METRICS: Once = Once::new();
 
@@ -79,13 +69,35 @@ pub enum BreakerError {
     HalfOpenFull,
 }
 
+struct BreakerInner {
+    state: BreakerState,
+    generation: u64,
+    failures: u32,
+    last_failure_at: Option<Duration>,
+    opened_at: Option<Duration>,
+    half_open_in_flight: u32,
+}
+
+impl BreakerInner {
+    fn record_closed_failure(&mut self, window: Duration, now: Duration) -> u32 {
+        let outside_window = self.failures == 0
+            || self
+                .last_failure_at
+                .is_none_or(|last| now.saturating_sub(last) > window);
+        self.last_failure_at = Some(now);
+        self.failures = if outside_window {
+            1
+        } else {
+            self.failures.saturating_add(1)
+        };
+        self.failures
+    }
+}
+
 pub struct CircuitBreaker {
     pub upstream_name: String,
     pub config: BreakerRuntimeConfig,
-    pub state: ArcSwap<BreakerState>,
-    failure_state: Mutex<FailureWindowState>,
-    pub last_open_ts: AtomicU64,
-    pub half_open_in_flight: AtomicU32,
+    inner: Mutex<BreakerInner>,
     clock: Arc<dyn Clock>,
 }
 
@@ -99,151 +111,107 @@ impl CircuitBreaker {
         let breaker = Arc::new(Self {
             upstream_name: upstream_name.into(),
             config,
-            state: ArcSwap::from_pointee(BreakerState::Closed),
-            failure_state: Mutex::new(FailureWindowState::default()),
-            last_open_ts: AtomicU64::new(0),
-            half_open_in_flight: AtomicU32::new(0),
+            inner: Mutex::new(BreakerInner {
+                state: BreakerState::Closed,
+                generation: 0,
+                failures: 0,
+                last_failure_at: None,
+                opened_at: None,
+                half_open_in_flight: 0,
+            }),
             clock,
         });
         breaker.emit_state(BreakerState::Closed);
         breaker
     }
 
+    fn lock_inner(&self) -> std::sync::MutexGuard<'_, BreakerInner> {
+        self.inner
+            .lock()
+            .expect("circuit breaker mutex should not be poisoned")
+    }
+
+    fn now_duration(&self) -> Duration {
+        self.clock
+            .now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+    }
+
     pub fn permit(self: &Arc<Self>) -> Result<Permit, BreakerError> {
-        match self.current_state() {
-            BreakerState::Closed => Ok(Permit::new(Arc::clone(self), false)),
-            BreakerState::Open => self.permit_open(),
-            BreakerState::HalfOpen => self.permit_half_open(),
+        let (result, emit) = {
+            let mut inner = self.lock_inner();
+            match inner.state {
+                BreakerState::Closed => (
+                    Ok(Permit::new(Arc::clone(self), false, inner.generation)),
+                    None,
+                ),
+                BreakerState::Open => {
+                    let now = self.now_duration();
+                    let opened_at = inner.opened_at.unwrap_or(Duration::ZERO);
+                    let elapsed = now.saturating_sub(opened_at);
+                    if elapsed < self.config.half_open_after {
+                        (
+                            Err(BreakerError::Open {
+                                retry_after: self.config.half_open_after.saturating_sub(elapsed),
+                            }),
+                            None,
+                        )
+                    } else if self.config.half_open_max_in_flight == 0 {
+                        (Err(BreakerError::HalfOpenFull), None)
+                    } else {
+                        inner.state = BreakerState::HalfOpen;
+                        inner.generation = inner.generation.saturating_add(1);
+                        inner.half_open_in_flight = 1;
+                        let generation = inner.generation;
+                        (
+                            Ok(Permit::new(Arc::clone(self), true, generation)),
+                            Some(BreakerState::HalfOpen),
+                        )
+                    }
+                }
+                BreakerState::HalfOpen => {
+                    if inner.half_open_in_flight >= self.config.half_open_max_in_flight {
+                        (Err(BreakerError::HalfOpenFull), None)
+                    } else {
+                        inner.half_open_in_flight = inner.half_open_in_flight.saturating_add(1);
+                        let generation = inner.generation;
+                        (Ok(Permit::new(Arc::clone(self), true, generation)), None)
+                    }
+                }
+            }
+        };
+        if let Some(state) = emit {
+            self.emit_state(state);
         }
+        result
     }
 
     pub fn current_state(&self) -> BreakerState {
-        **self.state.load()
+        self.lock_inner().state
     }
 
     pub fn failure_count(&self) -> u32 {
-        self.lock_failure_state().count
-    }
-
-    fn lock_failure_state(&self) -> MutexGuard<'_, FailureWindowState> {
-        self.failure_state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.lock_inner().failures
     }
 
     pub fn half_open_in_flight(&self) -> u32 {
-        match self.half_open_in_flight.load(Ordering::SeqCst) {
-            HALF_OPEN_INITIALIZING => 0,
-            count => count,
-        }
+        self.lock_inner().half_open_in_flight
     }
 
-    fn permit_open(self: &Arc<Self>) -> Result<Permit, BreakerError> {
-        let now = unix_secs(self.clock.now());
-        let opened_at = self.last_open_ts.load(Ordering::SeqCst);
-        let elapsed = Duration::from_secs(now.saturating_sub(opened_at));
-        if elapsed <= self.config.half_open_after {
-            return Err(BreakerError::Open {
-                retry_after: self.config.half_open_after.saturating_sub(elapsed),
-            });
-        }
-
-        if self
-            .half_open_in_flight
-            .compare_exchange(
-                0,
-                HALF_OPEN_INITIALIZING,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            )
-            .is_err()
-        {
-            return Err(BreakerError::HalfOpenFull);
-        }
-
-        if self.transition(BreakerState::Open, BreakerState::HalfOpen) {
-            self.half_open_in_flight.store(1, Ordering::SeqCst);
-            self.emit_state(BreakerState::HalfOpen);
-            Ok(Permit::new(Arc::clone(self), true))
-        } else {
-            self.half_open_in_flight.store(0, Ordering::SeqCst);
-            match self.current_state() {
-                BreakerState::Closed => Ok(Permit::new(Arc::clone(self), false)),
-                BreakerState::Open => Err(BreakerError::Open {
-                    retry_after: Duration::ZERO,
-                }),
-                BreakerState::HalfOpen => self.permit_half_open(),
-            }
-        }
+    #[cfg(test)]
+    pub(crate) fn increment_failures(&self, now_secs: u64) -> u32 {
+        self.lock_inner()
+            .record_closed_failure(self.config.failure_window, Duration::from_secs(now_secs))
     }
 
-    fn permit_half_open(self: &Arc<Self>) -> Result<Permit, BreakerError> {
-        let max_in_flight = self.config.half_open_max_in_flight;
-        let mut current = self.half_open_in_flight.load(Ordering::SeqCst);
-        loop {
-            if current == HALF_OPEN_INITIALIZING || current >= max_in_flight {
-                return Err(BreakerError::HalfOpenFull);
-            }
-            match self.half_open_in_flight.compare_exchange(
-                current,
-                current.saturating_add(1),
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => return Ok(Permit::new(Arc::clone(self), true)),
-                Err(next) => current = next,
-            }
-        }
-    }
-
-    fn transition(&self, expected: BreakerState, next: BreakerState) -> bool {
-        let current = self.state.load_full();
-        if *current != expected {
-            return false;
-        }
-        let previous = self.state.compare_and_swap(&current, Arc::new(next));
-        Arc::ptr_eq(&*previous, &current)
-    }
-
-    fn open_from(&self, expected: BreakerState, now: u64) {
-        self.last_open_ts.store(now, Ordering::SeqCst);
-        if self.transition(expected, BreakerState::Open) {
-            self.half_open_in_flight.store(0, Ordering::SeqCst);
-            self.emit_state(BreakerState::Open);
-        }
-    }
-
-    fn increment_failures(&self, now: u64) -> u32 {
-        let window_secs = self.config.failure_window.as_secs();
-        let mut state = self.lock_failure_state();
-        let elapsed = now.saturating_sub(state.last_failure_ts);
-        let outside_window = state.count == 0 || elapsed > window_secs;
-        if outside_window {
-            state.count = 1;
-        } else {
-            state.count = state.count.saturating_add(1);
-        }
-        state.last_failure_ts = now;
-        state.count
-    }
-
-    fn reset_closed_counters(&self) {
-        *self.lock_failure_state() = FailureWindowState::default();
-        self.last_open_ts.store(0, Ordering::SeqCst);
-        self.half_open_in_flight.store(0, Ordering::SeqCst);
-    }
-
-    fn release_half_open_slot(&self) {
-        let _ =
-            self.half_open_in_flight
-                .try_update(
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                    |current| match current {
-                        0 | HALF_OPEN_INITIALIZING => None,
-                        count => Some(count - 1),
-                    },
-                );
+    #[cfg(test)]
+    pub(crate) fn reset_closed_counters(&self) {
+        let mut inner = self.lock_inner();
+        inner.failures = 0;
+        inner.last_failure_at = None;
+        inner.opened_at = None;
+        inner.half_open_in_flight = 0;
     }
 
     fn emit_state(&self, state: BreakerState) {
@@ -259,14 +227,16 @@ impl CircuitBreaker {
 pub struct Permit {
     breaker: Arc<CircuitBreaker>,
     half_open: bool,
+    generation: u64,
     completed: bool,
 }
 
 impl Permit {
-    fn new(breaker: Arc<CircuitBreaker>, half_open: bool) -> Self {
+    fn new(breaker: Arc<CircuitBreaker>, half_open: bool, generation: u64) -> Self {
         Self {
             breaker,
             half_open,
+            generation,
             completed: false,
         }
     }
@@ -276,30 +246,69 @@ impl Permit {
     }
 
     pub fn record_success(mut self) {
-        if self.half_open {
-            if self
-                .breaker
-                .transition(BreakerState::HalfOpen, BreakerState::Closed)
-            {
-                self.breaker.reset_closed_counters();
-                self.breaker.emit_state(BreakerState::Closed);
+        let emit = if self.half_open {
+            let mut inner = self.breaker.lock_inner();
+            if inner.state == BreakerState::HalfOpen && inner.generation == self.generation {
+                inner.state = BreakerState::Closed;
+                inner.generation = inner.generation.saturating_add(1);
+                inner.failures = 0;
+                inner.last_failure_at = None;
+                inner.opened_at = None;
+                inner.half_open_in_flight = 0;
+                Some(BreakerState::Closed)
             } else {
-                self.breaker.release_half_open_slot();
+                None
             }
+        } else {
+            None
+        };
+        if let Some(state) = emit {
+            self.breaker.emit_state(state);
         }
         self.completed = true;
     }
 
     pub fn record_failure(mut self) {
-        let now = unix_secs(self.breaker.clock.now());
-        let failure_count = self.breaker.increment_failures(now);
-        if self.half_open {
-            self.breaker.open_from(BreakerState::HalfOpen, now);
-            self.breaker.half_open_in_flight.store(0, Ordering::SeqCst);
-        } else if self.breaker.current_state() == BreakerState::Closed
-            && failure_count >= self.breaker.config.failures_to_open
-        {
-            self.breaker.open_from(BreakerState::Closed, now);
+        let now = self.breaker.now_duration();
+        let emit = {
+            let mut inner = self.breaker.lock_inner();
+            if self.half_open {
+                if inner.state == BreakerState::HalfOpen && inner.generation == self.generation {
+                    let outside_window = inner.failures == 0
+                        || inner.last_failure_at.is_none_or(|last| {
+                            now.saturating_sub(last) > self.breaker.config.failure_window
+                        });
+                    inner.last_failure_at = Some(now);
+                    inner.failures = if outside_window {
+                        1
+                    } else {
+                        inner.failures.saturating_add(1)
+                    };
+                    inner.state = BreakerState::Open;
+                    inner.generation = inner.generation.saturating_add(1);
+                    inner.opened_at = Some(now);
+                    inner.half_open_in_flight = 0;
+                    Some(BreakerState::Open)
+                } else {
+                    None
+                }
+            } else if inner.state == BreakerState::Closed && inner.generation == self.generation {
+                let failures = inner.record_closed_failure(self.breaker.config.failure_window, now);
+                if failures >= self.breaker.config.failures_to_open {
+                    inner.state = BreakerState::Open;
+                    inner.generation = inner.generation.saturating_add(1);
+                    inner.opened_at = Some(now);
+                    inner.half_open_in_flight = 0;
+                    Some(BreakerState::Open)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(state) = emit {
+            self.breaker.emit_state(state);
         }
         self.completed = true;
     }
@@ -308,7 +317,10 @@ impl Permit {
 impl Drop for Permit {
     fn drop(&mut self) {
         if self.half_open && !self.completed {
-            self.breaker.release_half_open_slot();
+            let mut inner = self.breaker.lock_inner();
+            if inner.state == BreakerState::HalfOpen && inner.generation == self.generation {
+                inner.half_open_in_flight = inner.half_open_in_flight.saturating_sub(1);
+            }
         }
     }
 }
@@ -344,6 +356,10 @@ impl BreakerRegistry {
 
     pub fn evict(&self, upstream_name: &str) -> bool {
         self.map.remove(upstream_name).is_some()
+    }
+
+    pub fn retain_keys(&self, keep: impl Fn(&str) -> bool) {
+        self.map.retain(|key, _| keep(key));
     }
 
     pub async fn drain(&self, upstream_name: &str, grace: Duration) -> bool {
@@ -395,12 +411,18 @@ impl UpstreamDispatch for CircuitBreakerDispatch {
         let permit = breaker.permit().map_err(dispatch_error_from_breaker)?;
         match self.inner.dispatch(request).await {
             Ok(response) => {
-                if response.status().is_server_error() {
+                if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                    drop(permit);
+                } else if response.status().is_server_error() {
                     permit.record_failure();
                 } else {
                     permit.record_success();
                 }
                 Ok(response)
+            }
+            Err(DispatchError::BulkheadFull { retry_after }) => {
+                drop(permit);
+                Err(DispatchError::BulkheadFull { retry_after })
             }
             Err(source) => {
                 permit.record_failure();
@@ -425,7 +447,9 @@ impl UpstreamDispatch for CircuitBreakerDispatch {
             .map_err(DispatchBeforeError::Dispatch)?;
         match self.inner.dispatch_before(request, deadline).await {
             Ok(response) => {
-                if response.status().is_server_error() {
+                if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                    drop(permit);
+                } else if response.status().is_server_error() {
                     permit.record_failure();
                 } else {
                     permit.record_success();
@@ -435,6 +459,12 @@ impl UpstreamDispatch for CircuitBreakerDispatch {
             // No provider request occurred: dropping a half-open permit releases
             // the probe slot without recording a success or failure.
             Err(DispatchBeforeError::DeadlineElapsed) => Err(DispatchBeforeError::DeadlineElapsed),
+            Err(DispatchBeforeError::Dispatch(DispatchError::BulkheadFull { retry_after })) => {
+                drop(permit);
+                Err(DispatchBeforeError::Dispatch(DispatchError::BulkheadFull {
+                    retry_after,
+                }))
+            }
             Err(DispatchBeforeError::Dispatch(source)) => {
                 permit.record_failure();
                 Err(DispatchBeforeError::Dispatch(source))
@@ -703,10 +733,11 @@ mod tests {
             },
             Arc::clone(&clock) as ClockHandle,
         );
-        *breaker.lock_failure_state() = FailureWindowState {
-            last_failure_ts: 100,
-            count: large_threshold - 1,
-        };
+        {
+            let mut inner = breaker.lock_inner();
+            inner.last_failure_at = Some(Duration::from_secs(100));
+            inner.failures = large_threshold - 1;
+        }
         breaker.permit().expect("closed permit").record_failure();
         assert_eq!(breaker.failure_count(), large_threshold);
         assert_eq!(breaker.current_state(), BreakerState::Open);
@@ -723,10 +754,11 @@ mod tests {
             },
             max_clock,
         );
-        *max_breaker.lock_failure_state() = FailureWindowState {
-            last_failure_ts: far_future_ts,
-            count: u32::MAX - 1,
-        };
+        {
+            let mut inner = max_breaker.lock_inner();
+            inner.last_failure_at = Some(Duration::from_secs(far_future_ts));
+            inner.failures = u32::MAX - 1;
+        }
         max_breaker
             .permit()
             .expect("closed permit")
@@ -821,5 +853,282 @@ mod tests {
             .record_failure();
         assert_eq!(boundary_breaker.failure_count(), 3);
         assert_eq!(boundary_breaker.current_state(), BreakerState::Open);
+    }
+
+    #[test]
+    fn exact_half_open_cooldown_boundary_transitions_without_extra_second() {
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+        let breaker = CircuitBreaker::new(
+            "exact-boundary",
+            BreakerRuntimeConfig {
+                failures_to_open: 1,
+                failure_window: Duration::from_secs(10),
+                half_open_after: Duration::from_secs(5),
+                half_open_max_in_flight: 1,
+            },
+            clock.clone(),
+        );
+        breaker.permit().unwrap().record_failure();
+        assert_eq!(breaker.current_state(), BreakerState::Open);
+
+        clock.advance_secs(4);
+        assert!(matches!(
+            breaker.permit(),
+            Err(BreakerError::Open { retry_after }) if retry_after == Duration::from_secs(1)
+        ));
+
+        clock.advance_secs(1);
+        let probe = breaker
+            .permit()
+            .expect("exact cooldown elapsed opens probe");
+        assert!(probe.is_half_open());
+        assert_eq!(breaker.current_state(), BreakerState::HalfOpen);
+        probe.record_success();
+    }
+
+    #[test]
+    fn stale_half_open_permit_cannot_corrupt_newer_generation() {
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+        let breaker = CircuitBreaker::new(
+            "aba-guard",
+            BreakerRuntimeConfig {
+                failures_to_open: 1,
+                failure_window: Duration::from_secs(10),
+                half_open_after: Duration::from_secs(5),
+                half_open_max_in_flight: 1,
+            },
+            clock.clone(),
+        );
+        breaker.permit().unwrap().record_failure();
+        clock.advance_secs(5);
+        let gen1_a = breaker.permit().expect("gen 1 probe a");
+        drop(gen1_a);
+        assert_eq!(breaker.half_open_in_flight(), 0);
+
+        let stale_probe = breaker.permit().expect("gen 1 probe b");
+        assert_eq!(breaker.half_open_in_flight(), 1);
+        let closed_probe = breaker.permit().err().unwrap();
+        assert_eq!(closed_probe, BreakerError::HalfOpenFull);
+
+        // Fail stale_probe to re-open, advance cooldown, then acquire a fresh gen 2 probe.
+        stale_probe.record_failure();
+        assert_eq!(breaker.current_state(), BreakerState::Open);
+
+        // Now repeat with a dropped uncompleted stale permit across generations.
+        clock.advance_secs(5);
+        let stale_drop = breaker.permit().expect("gen 2 probe");
+        let fresh_same_gen_check = breaker.permit();
+        assert_eq!(fresh_same_gen_check.err(), Some(BreakerError::HalfOpenFull));
+        // Close via another generation jump by recording failure then recovering cleanly.
+        let gen3_holder = {
+            // Re-open with a synthetic failure in gen 2 is already prevented because stale_drop holds the slot;
+            // instead test stale_drop NOT touching gen 3 if gen 2 recovered via another probe when max_in_flight=2.
+            stale_drop
+        };
+        drop(gen3_holder);
+
+        let breaker2 = CircuitBreaker::new(
+            "aba-guard-2",
+            BreakerRuntimeConfig {
+                failures_to_open: 1,
+                failure_window: Duration::from_secs(10),
+                half_open_after: Duration::from_secs(5),
+                half_open_max_in_flight: 2,
+            },
+            clock.clone(),
+        );
+        breaker2.permit().unwrap().record_failure();
+        clock.advance_secs(5);
+        let p_stale_drop = breaker2.permit().expect("probe 1");
+        let p_stale_fail = breaker2.permit().expect("probe 2");
+        let p_winner = {
+            drop(p_stale_fail);
+            breaker2.permit().expect("probe 3")
+        };
+        p_winner.record_success();
+        assert_eq!(breaker2.current_state(), BreakerState::Closed);
+
+        breaker2.permit().unwrap().record_failure();
+        clock.advance_secs(5);
+        let new_gen_probe = breaker2.permit().expect("new generation probe");
+        assert_eq!(breaker2.half_open_in_flight(), 1);
+
+        // Dropping an older generation's permit must not decrement new_gen_probe's slot or change state.
+        drop(p_stale_drop);
+        assert_eq!(breaker2.current_state(), BreakerState::HalfOpen);
+        assert_eq!(breaker2.half_open_in_flight(), 1);
+        new_gen_probe.record_success();
+        assert_eq!(breaker2.current_state(), BreakerState::Closed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_breaker_transitions_preserve_half_open_invariants() {
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+        let config = BreakerRuntimeConfig {
+            failures_to_open: 2,
+            failure_window: Duration::from_secs(60),
+            half_open_after: Duration::from_secs(5),
+            half_open_max_in_flight: 1,
+        };
+        let breaker = CircuitBreaker::new("stress", config, clock.clone());
+        let mut tasks = tokio::task::JoinSet::new();
+        for worker in 0..8 {
+            let breaker = Arc::clone(&breaker);
+            let clock = Arc::clone(&clock);
+            tasks.spawn(async move {
+                for step in 0..50 {
+                    if step % 7 == 0 {
+                        clock.advance_secs(6);
+                    }
+                    match breaker.permit() {
+                        Ok(permit) => {
+                            assert!(breaker.half_open_in_flight() <= 1);
+                            match (worker + step) % 3 {
+                                0 => permit.record_failure(),
+                                1 => permit.record_success(),
+                                _ => drop(permit),
+                            }
+                        }
+                        Err(BreakerError::Open { .. } | BreakerError::HalfOpenFull) => {}
+                    }
+                    assert!(breaker.half_open_in_flight() <= 1);
+                }
+            });
+        }
+        while let Some(res) = tasks.join_next().await {
+            res.expect("stress worker completes without panic");
+        }
+        assert_eq!(breaker.half_open_in_flight(), 0);
+    }
+
+    #[tokio::test]
+    async fn dispatch_exempts_429_and_bulkhead_full_from_tripping_and_releases_half_open_on_429() {
+        struct FixedReplyDispatch {
+            next:
+                std::sync::Mutex<std::collections::VecDeque<Result<Response<Body>, DispatchError>>>,
+        }
+
+        #[async_trait]
+        impl UpstreamDispatch for FixedReplyDispatch {
+            async fn dispatch(
+                &self,
+                _request: SignedRequest,
+            ) -> Result<Response<Body>, DispatchError> {
+                self.next.lock().unwrap().pop_front().unwrap()
+            }
+        }
+
+        async fn sample_signed() -> SignedRequest {
+            struct PassDialect;
+            impl cc_lb_upstream::UpstreamDialect for PassDialect {
+                fn shape(
+                    &self,
+                    context: &cc_lb_upstream::DialectShapeContext,
+                    _upstream: &cc_lb_domain::Upstream,
+                    _principal: &cc_lb_domain::Principal,
+                    builder: &mut cc_lb_upstream::ShapedRequestBuilder,
+                ) -> Result<cc_lb_upstream::ShapedRequest, cc_lb_upstream::DialectError>
+                {
+                    Ok(builder.shaped_request(
+                        "https://api.example.test/v1/messages".parse().unwrap(),
+                        context.method.clone(),
+                        context.downstream_headers.clone(),
+                        context.body_bytes.clone(),
+                    ))
+                }
+            }
+            let upstream = cc_lb_domain::Upstream::AnthropicDirect { base_url: None };
+            let context = cc_lb_upstream::DialectShapeContext {
+                request_id: "req-1".to_owned(),
+                downstream_headers: http::HeaderMap::new(),
+                method: http::Method::POST,
+                path: "/v1/messages".to_owned(),
+                query: None,
+                body_bytes: bytes::Bytes::from_static(b"{}"),
+            };
+            let principal = cc_lb_domain::Principal {
+                id: "p1".to_owned(),
+                kind: cc_lb_domain::PrincipalKind::ApiKey,
+            };
+            let shaped =
+                cc_lb_upstream::shape_request(&PassDialect, &context, &upstream, &principal)
+                    .unwrap();
+            struct PassSigner;
+            #[async_trait]
+            impl cc_lb_upstream::Signer for PassSigner {
+                async fn sign(
+                    &self,
+                    shaped: cc_lb_upstream::ShapedRequest,
+                    capability: &mut cc_lb_upstream::SigningCapability,
+                ) -> Result<SignedRequest, cc_lb_upstream::SignerError> {
+                    Ok(SignedRequest::from_shaped(shaped, capability))
+                }
+                async fn on_unauthorized(
+                    &self,
+                    _err: &cc_lb_upstream::UpstreamError,
+                ) -> cc_lb_upstream::RetryDecision {
+                    cc_lb_upstream::RetryDecision::Fail
+                }
+            }
+            cc_lb_upstream::sign_request(&PassSigner, shaped)
+                .await
+                .unwrap()
+        }
+
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+        let registry = Arc::new(BreakerRegistry::new());
+        let inner = Arc::new(FixedReplyDispatch {
+            next: std::sync::Mutex::new(std::collections::VecDeque::from([
+                Ok(Response::builder()
+                    .status(StatusCode::TOO_MANY_REQUESTS)
+                    .body(Body::from(bytes::Bytes::new()))
+                    .unwrap()),
+                Err(DispatchError::BulkheadFull {
+                    retry_after: Duration::from_secs(1),
+                }),
+                Ok(Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from(bytes::Bytes::new()))
+                    .unwrap()),
+                Ok(Response::builder()
+                    .status(StatusCode::TOO_MANY_REQUESTS)
+                    .body(Body::from(bytes::Bytes::new()))
+                    .unwrap()),
+            ])),
+        });
+        let config = BreakerRuntimeConfig {
+            failures_to_open: 1,
+            failure_window: Duration::from_secs(10),
+            half_open_after: Duration::from_secs(5),
+            half_open_max_in_flight: 1,
+        };
+        let dispatch = CircuitBreakerDispatch::new(
+            inner,
+            Arc::clone(&registry),
+            config,
+            Arc::new(|_| "u1".to_owned()),
+            clock.clone(),
+        );
+
+        let r1 = dispatch.dispatch(sample_signed().await).await.unwrap();
+        assert_eq!(r1.status(), StatusCode::TOO_MANY_REQUESTS);
+        let r2 = dispatch.dispatch(sample_signed().await).await;
+        assert!(matches!(r2, Err(DispatchError::BulkheadFull { .. })));
+        let breaker = registry.get("u1").unwrap();
+        assert_eq!(breaker.current_state(), BreakerState::Closed);
+        assert_eq!(breaker.failure_count(), 0);
+
+        let r3 = dispatch.dispatch(sample_signed().await).await.unwrap();
+        assert_eq!(r3.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(breaker.current_state(), BreakerState::Open);
+
+        clock.advance_secs(5);
+        let r4 = dispatch.dispatch(sample_signed().await).await.unwrap();
+        assert_eq!(r4.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(breaker.current_state(), BreakerState::HalfOpen);
+        assert_eq!(breaker.half_open_in_flight(), 0);
+
+        registry.retain_keys(|k| k != "u1");
+        assert!(registry.get("u1").is_none());
     }
 }

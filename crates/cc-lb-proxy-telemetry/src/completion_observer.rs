@@ -162,14 +162,14 @@ impl StreamCompletionLog {
         tracing::dispatcher::with_default(&self.dispatch, || {
             if !tracing::enabled!(
                 target: "cc_lb_engine::lifecycle",
-                tracing::Level::INFO
+                tracing::Level::DEBUG
             ) {
                 return;
             }
             let trace_id = self.trace_id.map(|id| id.to_string());
             let span_id = self.span_id.map(|id| id.to_string());
             let latency = &self.latency;
-            tracing::info!(
+            tracing::debug!(
                 target: "cc_lb_engine::lifecycle",
                 request_id = %self.request_id,
                 trace_id = trace_id.as_deref().unwrap_or(""),

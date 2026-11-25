@@ -63,6 +63,7 @@ pub(super) fn push_buffered_data(
 
 pub(super) const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 pub(super) const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
+pub(super) const DEFAULT_MAX_BUFFERED_RESPONSE_BYTES: usize = 100 * 1024 * 1024;
 pub(crate) const DEFAULT_MAX_INPUT_ESTIMATE: i64 = 4000;
 pub(super) static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -281,6 +282,7 @@ pub(super) fn canonical_model_for_capability(
 pub struct LifecycleConfig {
     pub messages_body_cap_bytes: usize,
     pub files_body_cap_bytes: usize,
+    pub max_buffered_response_bytes: usize,
     pub replica_identity: Option<ReplicaIdentity>,
     pub upstream_affinity_ttl: Duration,
     pub unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy,
@@ -293,6 +295,7 @@ impl Default for LifecycleConfig {
         Self {
             messages_body_cap_bytes: DEFAULT_MESSAGES_CAP_BYTES,
             files_body_cap_bytes: DEFAULT_FILES_CAP_BYTES,
+            max_buffered_response_bytes: DEFAULT_MAX_BUFFERED_RESPONSE_BYTES,
             replica_identity: None,
             upstream_affinity_ttl: std::time::Duration::from_secs(
                 UpstreamAffinityConfig::default().ttl_secs(),
@@ -383,6 +386,7 @@ pub(super) struct ConcurrentAttemptInputs<'a, 'r> {
     pub(super) authenticated: &'a crate::authn_rail::Authenticated,
     pub(super) reserved: Option<&'a Reserved>,
     pub(super) ctx: &'a RequestContext,
+    pub(super) parsed_body: Option<&'a serde_json::Value>,
     pub(super) principal: &'a Principal,
     pub(super) routed: &'a RoutedUpstream<'r>,
     pub(super) signer: Arc<dyn Signer>,

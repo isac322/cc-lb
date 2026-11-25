@@ -51,9 +51,7 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::{
     Message as UpstreamMessage, client::IntoClientRequest, protocol::WebSocketConfig,
 };
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, client_async_tls_with_config, connect_async_with_config,
-};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, client_async_tls_with_config};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tracing::Instrument as _;

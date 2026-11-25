@@ -252,6 +252,7 @@ pub(crate) struct PreparedWebSocketTurn {
     pub setup_timings: cc_lb_lifecycle::RequestSetupTimings,
     pub request_id: String,
     pub unknown_reasoning_plan: WsUnknownReasoningPlan,
+    pub has_explicit_affinity: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -660,6 +661,97 @@ struct Turn {
     unknown_reasoning_retry: Option<WsUnknownReasoningRetry>,
     unknown_reasoning_retried: bool,
     pending_affinity_keys: Vec<UpstreamAffinityKey>,
+    all_candidates_oauth: bool,
+    admitted_session_upstream: Option<Uuid>,
+}
+
+/// Signed WebSocket connection metadata produced off the relay loop.
+pub struct SignedWsConnection {
+    pub url: Url,
+    pub headers: HeaderMap,
+    pub signer: Arc<dyn Signer>,
+    pub prepare_signer_ms: f64,
+    pub sign_ms: u64,
+}
+
+/// Self-contained connection preparation job executed inside a bounded connect
+/// task so OAuth refresh and request signing never stall active WebSocket lanes.
+pub struct PreparedWsConnectJob {
+    lifecycle: Arc<Lifecycle>,
+    turn_id: u64,
+    candidate: WebSocketCandidate,
+    ingress_headers: HeaderMap,
+    sign_headers: HeaderMap,
+    query: Option<String>,
+    frame: Bytes,
+    body: Arc<Value>,
+    codex_backend: bool,
+    reject_exhausted: bool,
+    expected_principal_id: String,
+    expected_key_id: String,
+}
+
+impl PreparedWsConnectJob {
+    pub fn turn_id(&self) -> u64 {
+        self.turn_id
+    }
+
+    pub fn upstream_id(&self) -> Uuid {
+        self.candidate.upstream_id
+    }
+
+    pub async fn run(self) -> Result<SignedWsConnection, WebSocketError> {
+        let auth = self
+            .lifecycle
+            .authenticate(&self.ingress_headers)
+            .await
+            .map_err(|error| {
+                WebSocketError::new(
+                    error.http_status(),
+                    "authentication_error",
+                    error.to_string(),
+                )
+            })?;
+        if auth.principal_id() != self.expected_principal_id
+            || auth.key_id() != self.expected_key_id
+        {
+            return Err(WebSocketError::new(
+                401,
+                "authentication_error",
+                "The client identity changed before connection",
+            ));
+        }
+        self.lifecycle
+            .validate_websocket_turn_with_policy(
+                &auth,
+                WebSocketIngress {
+                    headers: &self.ingress_headers,
+                    frame: &self.frame,
+                    query: self.query.as_deref(),
+                },
+                &self.body,
+                self.candidate.upstream_id,
+                self.codex_backend,
+                self.reject_exhausted,
+            )
+            .await?;
+        let (url, headers, signer, prepare_signer_ms, sign_ms) = self
+            .lifecycle
+            .sign_websocket_connection_with_signer(
+                &auth,
+                &self.sign_headers,
+                &self.candidate,
+                self.query.as_deref(),
+            )
+            .await?;
+        Ok(SignedWsConnection {
+            url,
+            headers,
+            signer,
+            prepare_signer_ms,
+            sign_ms,
+        })
+    }
 }
 
 /// A session owns no authenticated proof until a fresh client check succeeds.
@@ -730,6 +822,11 @@ impl ResponsesWebSocketGateway {
                     .as_millis()
                     .min(u128::from(u64::MAX)) as u64,
         }
+    }
+
+    fn is_session_oauth_effective(&self) -> bool {
+        self.session_oauth
+            || (!self.turns.is_empty() && self.turns.values().all(|turn| turn.all_candidates_oauth))
     }
 
     /// Preserve the downstream upgrade query after removing API-key parameters.
@@ -904,7 +1001,8 @@ impl ResponsesWebSocketGateway {
             .as_ref()
             .and_then(|id| self.owners.get(id))
             .cloned();
-        if self.session_oauth
+        let session_oauth = self.is_session_oauth_effective();
+        if session_oauth
             && let Some(owner) = owner.as_ref()
             && owner.lane.as_deref() != lane.as_deref()
         {
@@ -915,9 +1013,7 @@ impl ResponsesWebSocketGateway {
             )
             .with_stream(lane.clone()));
         }
-        if owner.is_none()
-            && self.session_oauth
-            && previous.as_deref().is_some_and(|id| !id.is_empty())
+        if owner.is_none() && session_oauth && previous.as_deref().is_some_and(|id| !id.is_empty())
         {
             return Err(WebSocketError::new(
                 400,
@@ -1059,6 +1155,11 @@ impl ResponsesWebSocketGateway {
             .map(|candidate| (candidate.upstream_id, candidate.socket_per_lane))
             .collect();
         self.used_bytes = self.used_bytes.saturating_add(charge);
+        let all_candidates_oauth = !prepared.candidates.is_empty()
+            && prepared
+                .candidates
+                .iter()
+                .all(|candidate| candidate.socket_per_lane);
         self.turns.insert(
             turn_id,
             Turn {
@@ -1097,6 +1198,8 @@ impl ResponsesWebSocketGateway {
                 unknown_reasoning_retry,
                 unknown_reasoning_retried: false,
                 pending_affinity_keys,
+                all_candidates_oauth,
+                admitted_session_upstream: self.session_upstream,
             },
         );
         if !self.lanes.contains_key(&lane) {
@@ -1264,6 +1367,11 @@ impl ResponsesWebSocketGateway {
             .map(|candidate| (candidate.upstream_id, candidate.socket_per_lane))
             .collect();
         self.used_bytes = self.used_bytes.saturating_add(charge);
+        let all_candidates_oauth = !prepared.candidates.is_empty()
+            && prepared
+                .candidates
+                .iter()
+                .all(|candidate| candidate.socket_per_lane);
         self.successors.insert(parent.clone(), turn_id);
         self.turns.insert(
             turn_id,
@@ -1301,6 +1409,8 @@ impl ResponsesWebSocketGateway {
                 unknown_reasoning_retry: None,
                 unknown_reasoning_retried: false,
                 pending_affinity_keys: Vec::new(),
+                all_candidates_oauth,
+                admitted_session_upstream: self.session_upstream,
             },
         );
         let lane_state = self.lanes.entry(lane).or_default();
@@ -1382,13 +1492,49 @@ impl ResponsesWebSocketGateway {
     }
 
     fn dispatch(&mut self, turn_id: u64) -> Option<WebSocketDispatch> {
+        let should_reapply_pin = {
+            let turn = self.turns.get(&turn_id)?;
+            self.session_oauth
+                && turn.pinned.is_none()
+                && !turn.prepared.has_explicit_affinity
+                && turn.admitted_session_upstream.is_none()
+        };
+        let session_owner = should_reapply_pin
+            .then_some(self.session_upstream)
+            .flatten();
+        let owner_fallback = session_owner.and_then(|owner| {
+            self.lifecycle
+                .websocket_candidate_for_upstream(owner, self.codex_backend)
+        });
         let turn = self.turns.get_mut(&turn_id)?;
+        let mut candidates = std::mem::take(&mut turn.prepared.candidates);
+        if let Some(owner) = session_owner {
+            let existing_pos = candidates
+                .iter()
+                .position(|candidate| candidate.upstream_id == owner);
+            let owner_cand = existing_pos
+                .map(|pos| candidates.remove(pos))
+                .or(owner_fallback);
+            if let Some(ref owner_cand) = owner_cand {
+                turn.candidate_oauth
+                    .insert(owner, owner_cand.socket_per_lane);
+                turn.initial_selected_upstream_id = Some(owner);
+            }
+            if !is_prewarm_body(&turn.body) {
+                candidates.clear();
+                if let Some(owner_cand) = owner_cand {
+                    candidates.push(owner_cand);
+                }
+            } else if let Some(owner_cand) = owner_cand {
+                candidates.insert(0, owner_cand);
+            }
+        }
         let prefer_api_key_on_final_attempt = !self.codex_backend && turn.pinned.is_none();
         Some(WebSocketDispatch {
             turn_id,
             frame: turn.frame.clone(),
             connection_id: turn.connection_id,
-            candidates: std::mem::take(&mut turn.prepared.candidates),
+            candidates,
             stream_id: turn.lane.clone(),
             control: false,
             prefer_api_key_on_final_attempt,
@@ -1467,19 +1613,20 @@ impl ResponsesWebSocketGateway {
             .await
     }
 
-    pub async fn prepare_connection(
+    /// Return the OAuth upstream currently pinned for this downstream session, if any.
+    pub fn session_upstream(&self) -> Option<Uuid> {
+        self.session_upstream
+    }
+
+    /// Synchronously prepare plugin request state on the relay loop and return a
+    /// self-contained job that performs auth, validation, OAuth token refresh,
+    /// and request signing inside the caller's connect task.
+    pub fn begin_connection_prepare(
         &mut self,
         dispatch: &WebSocketDispatch,
         candidate: &WebSocketCandidate,
-    ) -> Result<(Url, HeaderMap), WebSocketError> {
-        let auth = self.authenticate().await.map_err(|error| {
-            WebSocketError::new(
-                error.http_status(),
-                "authentication_error",
-                error.to_string(),
-            )
-        })?;
-        let (turn_frame, turn_body, reject_exhausted) = {
+    ) -> Result<PreparedWsConnectJob, WebSocketError> {
+        let (turn_frame, turn_body, reject_exhausted, expected_principal_id, expected_key_id) = {
             let turn = self.turns.get(&dispatch.turn_id).ok_or_else(|| {
                 WebSocketError::new(
                     409,
@@ -1487,15 +1634,6 @@ impl ResponsesWebSocketGateway {
                     "The admitted response is no longer available",
                 )
             })?;
-            if auth.principal_id() != turn.prepared.principal_id
-                || auth.key_id() != turn.prepared.key_id
-            {
-                return Err(WebSocketError::new(
-                    401,
-                    "authentication_error",
-                    "The client identity changed before connection",
-                ));
-            }
             if turn
                 .prepared
                 .reservation
@@ -1512,38 +1650,68 @@ impl ResponsesWebSocketGateway {
                 turn.frame.clone(),
                 turn.body.clone(),
                 Self::reject_exhausted_fallback(turn, candidate.upstream_id),
+                turn.prepared.principal_id.clone(),
+                turn.prepared.key_id.clone(),
             )
         };
-        self.lifecycle
-            .validate_websocket_turn_with_policy(
-                &auth,
-                WebSocketIngress {
-                    headers: &self.headers,
-                    frame: &turn_frame,
-                    query: self.query.as_deref(),
-                },
-                &turn_body,
-                candidate.upstream_id,
-                self.codex_backend,
-                reject_exhausted,
-            )
-            .await?;
         self.prepare_plugin_request(dispatch.turn_id, candidate.upstream_id)?;
-        let headers = self
+        let sign_headers = self
             .turns
             .get(&dispatch.turn_id)
             .and_then(|turn| turn.plugin_request.as_ref())
-            .map_or(&self.headers, |(_, request)| &request.headers);
-        let (url, headers, signer, prepare_signer_ms, sign_ms) = self
-            .lifecycle
-            .sign_websocket_connection_with_signer(&auth, headers, candidate, self.query.as_deref())
-            .await?;
-        if let Some(turn) = self.turns.get_mut(&dispatch.turn_id) {
+            .map_or_else(
+                || self.headers.clone(),
+                |(_, request)| request.headers.clone(),
+            );
+        Ok(PreparedWsConnectJob {
+            lifecycle: self.lifecycle.clone(),
+            turn_id: dispatch.turn_id,
+            candidate: candidate.clone(),
+            ingress_headers: self.headers.clone(),
+            sign_headers,
+            query: self.query.clone(),
+            frame: turn_frame,
+            body: turn_body,
+            codex_backend: self.codex_backend,
+            reject_exhausted,
+            expected_principal_id,
+            expected_key_id,
+        })
+    }
+
+    /// Record the signer and signing timings produced off the relay loop.
+    pub fn record_prepared_signer(
+        &mut self,
+        turn_id: u64,
+        upstream_id: Uuid,
+        signer: Arc<dyn Signer>,
+        prepare_signer_ms: f64,
+        sign_ms: u64,
+    ) {
+        if let Some(turn) = self.turns.get_mut(&turn_id) {
             turn.metrics.setup_timings.prepare_signer_ms = Some(prepare_signer_ms);
             turn.metrics.sign_ms = Some(sign_ms);
-            turn.prepared_signers.insert(candidate.upstream_id, signer);
+            turn.prepared_signers.insert(upstream_id, signer);
         }
-        Ok((url, headers))
+    }
+
+    pub async fn prepare_connection(
+        &mut self,
+        dispatch: &WebSocketDispatch,
+        candidate: &WebSocketCandidate,
+    ) -> Result<(Url, HeaderMap), WebSocketError> {
+        let job = self.begin_connection_prepare(dispatch, candidate)?;
+        let turn_id = job.turn_id();
+        let upstream_id = job.upstream_id();
+        let signed = job.run().await?;
+        self.record_prepared_signer(
+            turn_id,
+            upstream_id,
+            signed.signer,
+            signed.prepare_signer_ms,
+            signed.sign_ms,
+        );
+        Ok((signed.url, signed.headers))
     }
 
     fn prepare_plugin_request(
@@ -1817,6 +1985,52 @@ impl ResponsesWebSocketGateway {
                 "A continuation cannot move to another provider connection",
             )
             .with_stream(turn.lane.clone()));
+        }
+        let is_candidate_oauth = turn
+            .candidate_oauth
+            .get(&upstream_id)
+            .copied()
+            .or_else(|| self.lifecycle.is_openai_oauth_upstream(upstream_id))
+            .unwrap_or(false);
+        if self.session_oauth
+            && is_candidate_oauth
+            && !turn.prepared.has_explicit_affinity
+            && turn.admitted_session_upstream.is_none()
+            && let Some(owner) = self.session_upstream.filter(|owner| *owner != upstream_id)
+        {
+            if is_prewarm_body(&turn.body) {
+                if self
+                    .lifecycle
+                    .validate_websocket_turn_with_policy(
+                        &auth,
+                        WebSocketIngress {
+                            headers: &self.headers,
+                            frame: &turn.frame,
+                            query: self.query.as_deref(),
+                        },
+                        &turn.body,
+                        owner,
+                        self.codex_backend,
+                        true,
+                    )
+                    .await
+                    .is_ok()
+                {
+                    return Err(WebSocketError::new(
+                        503,
+                        "upstream_affinity_unavailable",
+                        "The session is pinned to another OAuth account",
+                    )
+                    .with_stream(turn.lane.clone()));
+                }
+            } else {
+                return Err(WebSocketError::new(
+                    503,
+                    "upstream_affinity_unavailable",
+                    "The session is pinned to another OAuth account",
+                )
+                .with_stream(turn.lane.clone()));
+            }
         }
         let reject_exhausted = Self::reject_exhausted_fallback(turn, upstream_id)
             || (turn.pinned.is_none() && has_remaining_candidates);
@@ -3499,7 +3713,7 @@ impl ResponsesWebSocketGateway {
             observer.finish();
             if let Some(dispatch) = tracing::enabled!(
                 target: "cc_lb_engine::lifecycle",
-                tracing::Level::INFO
+                tracing::Level::DEBUG
             )
             .then(|| tracing::dispatcher::get_default(|dispatch| dispatch.clone()))
             {
@@ -4492,6 +4706,7 @@ pub(crate) mod tests {
                     .unwrap(),
                     request_id: "terminal-fixture".to_owned(),
                     unknown_reasoning_plan: WsUnknownReasoningPlan::None,
+                    has_explicit_affinity: false,
                 },
                 body: Arc::new(serde_json::json!({})),
                 frame: Bytes::new(),
@@ -4521,6 +4736,8 @@ pub(crate) mod tests {
                 unknown_reasoning_retry: None,
                 unknown_reasoning_retried: false,
                 pending_affinity_keys: Vec::new(),
+                all_candidates_oauth: false,
+                admitted_session_upstream: None,
             },
         );
         gateway.lanes.insert(
@@ -5136,6 +5353,7 @@ pub(crate) mod tests {
                         .expect("fixture route info"),
                         request_id: "embedded-turn".to_owned(),
                         unknown_reasoning_plan: WsUnknownReasoningPlan::None,
+                        has_explicit_affinity: false,
                     },
                     body: Arc::new(serde_json::json!({})),
                     frame: Bytes::new(),
@@ -5165,6 +5383,8 @@ pub(crate) mod tests {
                     unknown_reasoning_retry: None,
                     unknown_reasoning_retried: false,
                     pending_affinity_keys: Vec::new(),
+                    all_candidates_oauth: false,
+                    admitted_session_upstream: None,
                 },
             );
             gateway.finish_turn(1, None);
@@ -6132,6 +6352,7 @@ pub(crate) mod tests {
                 .unwrap(),
                 request_id: "synthetic-turn".to_owned(),
                 unknown_reasoning_plan: WsUnknownReasoningPlan::None,
+                has_explicit_affinity: false,
             },
             body: Arc::new(serde_json::json!({})),
             frame: Bytes::new(),
@@ -6161,6 +6382,8 @@ pub(crate) mod tests {
             unknown_reasoning_retry: None,
             unknown_reasoning_retried: false,
             pending_affinity_keys: Vec::new(),
+            all_candidates_oauth: false,
+            admitted_session_upstream: None,
         }
     }
 
@@ -7622,8 +7845,11 @@ pub(crate) mod tests {
     }
 
     struct PrewarmMultiUpstreamFixture {
+        headers: HeaderMap,
         auth: Authenticated,
         lifecycle: Arc<Lifecycle>,
+        dynamic_view: Arc<cc_lb_control::dynamic_view::DynamicViewHolder>,
+        upstreams: Vec<cc_lb_storage_api::UpstreamRecord>,
         upstream_a: Uuid,
         upstream_b: Uuid,
         quota_cache: Arc<PrewarmQuotaCache>,
@@ -7895,8 +8121,9 @@ pub(crate) mod tests {
                 .principal_view(view)
                 .subscription_quota_cache(quota_cache.clone())
                 .subscription_quota_routing_max_staleness_secs(60)
-                .upstream_records(upstreams)
+                .upstream_records(upstreams.clone())
                 .build();
+            let dynamic_view = Arc::new(DynamicViewHolder::new(dynamic));
             let affinity_store = Arc::new(PrewarmAffinityStore::default());
             let config = crate::LifecycleConfig {
                 unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy::Hybrid,
@@ -7905,7 +8132,7 @@ pub(crate) mod tests {
             let lifecycle = Arc::new(
                 Lifecycle::new_with_dynamic_view(
                     authn,
-                    Arc::new(DynamicViewHolder::new(dynamic)),
+                    Arc::clone(&dynamic_view),
                     Arc::new(UnusedDispatcher),
                     config,
                     clock,
@@ -7913,13 +8140,31 @@ pub(crate) mod tests {
                 .with_upstream_affinity_store(affinity_store.clone()),
             );
             Self {
+                headers,
                 auth,
                 lifecycle,
+                dynamic_view,
+                upstreams,
                 upstream_a,
                 upstream_b,
                 quota_cache,
                 affinity_store,
             }
+        }
+
+        fn disable_upstream(&self, upstream_id: Uuid) {
+            let mut updated = self.upstreams.clone();
+            for record in &mut updated {
+                if record.id == upstream_id {
+                    record.enabled = false;
+                }
+            }
+            let current = self.dynamic_view.load();
+            self.dynamic_view.store(
+                cc_lb_control::dynamic_view::DynamicViewBuilder::from_view(&current)
+                    .upstream_records(updated)
+                    .build(),
+            );
         }
 
         fn gateway(&self, headers: HeaderMap) -> ResponsesWebSocketGateway {
@@ -8409,5 +8654,292 @@ pub(crate) mod tests {
             d_prewarm_close.candidates[0].upstream_id,
             fixture.upstream_b
         );
+    }
+
+    #[tokio::test]
+    async fn queued_prewarm_reapplies_session_upstream_when_first_turn_establishes_owner_and_blocks_non_owner_while_healthy()
+     {
+        let fixture = PrewarmMultiUpstreamFixture::new().await;
+        let mut gateway = fixture.gateway(fixture.headers.clone());
+
+        // Turn 1 admits before `session_upstream` is established -> initial route picks B.
+        let turn1 = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "stream_id": "lane-1",
+                "store": false,
+                "input": [{"role": "user", "content": "first"}]
+            }))
+            .unwrap(),
+        );
+        let d1 = gateway
+            .client_message(fixture.auth.clone(), turn1)
+            .await
+            .unwrap()
+            .expect("turn 1 dispatches immediately");
+
+        // Turn 2 (`generate: false`) arrives on the same lane while Turn 1 is still active,
+        // so it queues with pre-pin candidates [B, A].
+        let turn2_prewarm = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "stream_id": "lane-1",
+                "generate": false,
+                "store": false,
+                "input": []
+            }))
+            .unwrap(),
+        );
+        assert!(
+            gateway
+                .client_message(fixture.auth.clone(), turn2_prewarm)
+                .await
+                .unwrap()
+                .is_none(),
+            "second create on busy lane must queue"
+        );
+
+        // Turn 1 completes on OAuth upstream A, setting `session_upstream = Some(A)` and popping Turn 2.
+        gateway.assign_connection(d1.turn_id, 1, fixture.upstream_a, "oauth-a");
+        gateway.commit_send_attempt(d1.turn_id);
+        let _ = gateway.sent_with_timings(
+            d1.turn_id,
+            ResponsesDispatchTimings::reused(),
+            std::time::Instant::now(),
+        );
+        let created = serde_json::to_vec(&serde_json::json!({
+            "type": "response.created",
+            "stream_id": "lane-1",
+            "response": {"id": "resp_owner_a", "status": "in_progress", "store": false}
+        }))
+        .unwrap();
+        let _ = gateway
+            .provider_message(1, &Bytes::from(created))
+            .await
+            .unwrap();
+        let completed = serde_json::to_vec(&serde_json::json!({
+            "type": "response.completed",
+            "stream_id": "lane-1",
+            "response": {
+                "id": "resp_owner_a",
+                "status": "completed",
+                "store": false,
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }
+        }))
+        .unwrap();
+        let popped = gateway
+            .provider_message(1, &Bytes::from(completed))
+            .await
+            .unwrap();
+        let d2 = popped
+            .dispatches
+            .into_iter()
+            .find(|dispatch| dispatch.turn_id != d1.turn_id && !dispatch.control)
+            .expect("completing turn 1 pops queued turn 2");
+        assert_eq!(
+            d2.candidates[0].upstream_id, fixture.upstream_a,
+            "queued generate:false turn must reapply session owner A at index 0"
+        );
+        let non_owner_err = gateway
+            .validate_candidate_for_send(d2.turn_id, fixture.upstream_b, None, false)
+            .await
+            .expect_err("healthy owner A must prevent queued generate:false from dialing B");
+        assert_eq!(non_owner_err.code, "upstream_affinity_unavailable");
+        gateway
+            .validate_candidate_for_send(d2.turn_id, fixture.upstream_a, None, true)
+            .await
+            .expect("pinned owner A validates cleanly");
+    }
+
+    #[tokio::test]
+    async fn queued_prewarm_falls_back_to_alternate_oauth_account_when_session_owner_becomes_disabled()
+     {
+        let fixture = PrewarmMultiUpstreamFixture::new().await;
+        let mut gateway = fixture.gateway(fixture.headers.clone());
+
+        let turn1 = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "stream_id": "lane-1",
+                "store": false,
+                "input": [{"role": "user", "content": "first"}]
+            }))
+            .unwrap(),
+        );
+        let d1 = gateway
+            .client_message(fixture.auth.clone(), turn1)
+            .await
+            .unwrap()
+            .unwrap();
+        let turn2_prewarm = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "stream_id": "lane-1",
+                "generate": false,
+                "store": false,
+                "input": []
+            }))
+            .unwrap(),
+        );
+        assert!(
+            gateway
+                .client_message(fixture.auth.clone(), turn2_prewarm)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        gateway.assign_connection(d1.turn_id, 1, fixture.upstream_a, "oauth-a");
+        gateway.commit_send_attempt(d1.turn_id);
+        let _ = gateway.sent_with_timings(
+            d1.turn_id,
+            ResponsesDispatchTimings::reused(),
+            std::time::Instant::now(),
+        );
+        let created = serde_json::to_vec(&serde_json::json!({
+            "type": "response.created",
+            "stream_id": "lane-1",
+            "response": {"id": "resp_disable_a", "status": "in_progress", "store": false}
+        }))
+        .unwrap();
+        let _ = gateway
+            .provider_message(1, &Bytes::from(created))
+            .await
+            .unwrap();
+        let completed = serde_json::to_vec(&serde_json::json!({
+            "type": "response.completed",
+            "stream_id": "lane-1",
+            "response": {
+                "id": "resp_disable_a",
+                "status": "completed",
+                "store": false,
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }
+        }))
+        .unwrap();
+        let popped = gateway
+            .provider_message(1, &Bytes::from(completed))
+            .await
+            .unwrap();
+        let d2 = popped
+            .dispatches
+            .into_iter()
+            .find(|dispatch| dispatch.turn_id != d1.turn_id && !dispatch.control)
+            .expect("queued turn 2 pops");
+
+        // Now disable session owner A; existing availability fallback lets generate:false use B.
+        fixture.disable_upstream(fixture.upstream_a);
+        assert!(
+            d2.candidates
+                .iter()
+                .any(|cand| cand.upstream_id == fixture.upstream_b),
+            "prewarm dispatch must retain fallback candidate B"
+        );
+        gateway
+            .validate_candidate_for_send(d2.turn_id, fixture.upstream_b, None, false)
+            .await
+            .expect("disabled owner A must allow prewarm fallback to B");
+    }
+
+    #[tokio::test]
+    async fn queued_turn_with_explicit_response_affinity_preserves_target_after_session_pin() {
+        let fixture = PrewarmMultiUpstreamFixture::new().await;
+        let owned_cipher = "gAAAAAB_explicit_b_owner";
+        fixture.seed_encrypted_content_owner(owned_cipher, fixture.upstream_b);
+
+        let mut gateway = fixture.gateway(fixture.headers.clone());
+        let turn1 = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "stream_id": "lane-1",
+                "store": false,
+                "input": [{"role": "user", "content": "first"}]
+            }))
+            .unwrap(),
+        );
+        let d1 = gateway
+            .client_message(fixture.auth.clone(), turn1)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Turn 2 has explicit encrypted-content affinity to B while Turn 1 establishes owner A.
+        let turn2_affinity = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "stream_id": "lane-1",
+                "store": false,
+                "input": [{
+                    "type": "reasoning",
+                    "id": "rs_queued_b",
+                    "summary": [],
+                    "content": [],
+                    "encrypted_content": owned_cipher
+                }]
+            }))
+            .unwrap(),
+        );
+        assert!(
+            gateway
+                .client_message(fixture.auth.clone(), turn2_affinity)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        gateway.assign_connection(d1.turn_id, 1, fixture.upstream_a, "oauth-a");
+        gateway.commit_send_attempt(d1.turn_id);
+        let _ = gateway.sent_with_timings(
+            d1.turn_id,
+            ResponsesDispatchTimings::reused(),
+            std::time::Instant::now(),
+        );
+        let created = serde_json::to_vec(&serde_json::json!({
+            "type": "response.created",
+            "stream_id": "lane-1",
+            "response": {"id": "resp_explicit_a", "status": "in_progress", "store": false}
+        }))
+        .unwrap();
+        let _ = gateway
+            .provider_message(1, &Bytes::from(created))
+            .await
+            .unwrap();
+        let completed = serde_json::to_vec(&serde_json::json!({
+            "type": "response.completed",
+            "stream_id": "lane-1",
+            "response": {
+                "id": "resp_explicit_a",
+                "status": "completed",
+                "store": false,
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }
+        }))
+        .unwrap();
+        let popped = gateway
+            .provider_message(1, &Bytes::from(completed))
+            .await
+            .unwrap();
+        let d2 = popped
+            .dispatches
+            .into_iter()
+            .find(|dispatch| dispatch.turn_id != d1.turn_id && !dispatch.control)
+            .expect("queued explicit-affinity turn pops");
+        assert_eq!(
+            d2.candidates.len(),
+            1,
+            "explicit response affinity must keep its target candidate list intact"
+        );
+        assert_eq!(d2.candidates[0].upstream_id, fixture.upstream_b);
+        gateway
+            .validate_candidate_for_send(d2.turn_id, fixture.upstream_b, None, false)
+            .await
+            .expect("explicit affinity to B must not be overridden by session_upstream A");
     }
 }

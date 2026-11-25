@@ -89,6 +89,7 @@ pub(crate) fn retain_api_key_candidates(
 pub(crate) async fn prepare_request(
     _auth: &Authenticated,
     ctx: &RequestContext,
+    parsed_body: Option<&Value>,
     capability: ProviderCapability,
     upstream_kind: StorageUpstreamKind,
     policy: &OpenaiOauthCompatPolicy,
@@ -108,17 +109,19 @@ pub(crate) async fn prepare_request(
     let mut plan = None;
     match capability {
         ProviderCapability::OpenaiResponses => {
-            if let Ok(value) = sonic_rs::from_slice::<Value>(&ctx.body_bytes) {
-                let features = api_key_only_features(Some(&value), capability);
-                let degraded = !features.is_empty();
-                let value = if degraded {
-                    openai_compat::request::degrade_without_api_key(&value, &features, policy)?
+            if let Some(value) = parsed_body {
+                let features = api_key_only_features(Some(value), capability);
+                let degraded_value = if !features.is_empty() {
+                    Some(openai_compat::request::degrade_without_api_key(
+                        value, &features, policy,
+                    )?)
                 } else {
-                    value
+                    None
                 };
+                let effective = degraded_value.as_ref().unwrap_or(value);
                 let normalized =
                     openai_compat::request::normalize_responses_request(NormalizeInput {
-                        body: &value,
+                        body: effective,
                         policy,
                         transport: Transport::Http,
                     })?;
@@ -140,8 +143,8 @@ pub(crate) async fn prepare_request(
                     body = serde_json::to_vec(&next)
                         .map(Bytes::from)
                         .map_err(|_| CompatReject::unsupported_parameter("body"))?;
-                } else if degraded {
-                    body = serde_json::to_vec(&value)
+                } else if let Some(degraded_value) = degraded_value {
+                    body = serde_json::to_vec(&degraded_value)
                         .map(Bytes::from)
                         .map_err(|_| CompatReject::unsupported_parameter("body"))?;
                 }
@@ -151,17 +154,16 @@ pub(crate) async fn prepare_request(
             if policy.compact == EmulateOrReject::Reject {
                 return Err(CompatReject::unsupported_parameter("compact"));
             }
-            let value = sonic_rs::from_slice::<Value>(&ctx.body_bytes)
-                .map_err(|_| CompatReject::unsupported_parameter("body"))?;
+            let value = parsed_body.ok_or_else(|| CompatReject::unsupported_parameter("body"))?;
             // Hosted tools (`file_search`, `code_interpreter`, …) follow the same
             // API-key-or-degrade policy as a Responses request on this account.
-            let features = api_key_only_features(Some(&value), capability);
+            let features = api_key_only_features(Some(value), capability);
             let degraded;
             let sent = if features.is_empty() {
-                &value
+                value
             } else {
                 degraded =
-                    openai_compat::request::degrade_without_api_key(&value, &features, policy)?;
+                    openai_compat::request::degrade_without_api_key(value, &features, policy)?;
                 &degraded
             };
             body = serde_json::to_vec(&openai_compat::compact::compact_request_to_responses(sent)?)
@@ -174,9 +176,8 @@ pub(crate) async fn prepare_request(
             });
         }
         ProviderCapability::OpenaiChatCompletions => {
-            let value = sonic_rs::from_slice::<Value>(&ctx.body_bytes)
-                .map_err(|_| CompatReject::unsupported_parameter("body"))?;
-            let translated = openai_compat::chat::translate_chat_request(&value, policy)?;
+            let value = parsed_body.ok_or_else(|| CompatReject::unsupported_parameter("body"))?;
+            let translated = openai_compat::chat::translate_chat_request(value, policy)?;
             body = serde_json::to_vec(&translated.responses_body)
                 .map(Bytes::from)
                 .map_err(|_| CompatReject::unsupported_parameter("body"))?;
@@ -232,6 +233,7 @@ pub(crate) async fn prepare_request(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
             if content_type
+                .trim_start()
                 .to_ascii_lowercase()
                 .starts_with("multipart/form-data")
             {
@@ -253,21 +255,19 @@ pub(crate) async fn prepare_request(
                     });
                 }
             } else {
-                let value = sonic_rs::from_slice::<Value>(&ctx.body_bytes)
-                    .map_err(|_| CompatReject::unsupported_parameter("body"))?;
-                plan = image_stream_plan(&value, ImageStreamKind::Edit);
+                let value =
+                    parsed_body.ok_or_else(|| CompatReject::unsupported_parameter("body"))?;
+                plan = image_stream_plan(value, ImageStreamKind::Edit);
             }
         }
         ProviderCapability::OpenaiImages if ctx.path == "/v1/images/generations" => {
-            let value = sonic_rs::from_slice::<Value>(&ctx.body_bytes)
-                .map_err(|_| CompatReject::unsupported_parameter("body"))?;
-            plan = image_stream_plan(&value, ImageStreamKind::Generation);
+            let value = parsed_body.ok_or_else(|| CompatReject::unsupported_parameter("body"))?;
+            plan = image_stream_plan(value, ImageStreamKind::Generation);
         }
         ProviderCapability::OpenaiResponsesInputTokens => {
-            let value = sonic_rs::from_slice::<Value>(&ctx.body_bytes)
-                .map_err(|_| CompatReject::unsupported_parameter("body"))?;
+            let value = parsed_body.ok_or_else(|| CompatReject::unsupported_parameter("body"))?;
             let normalized = openai_compat::request::normalize_responses_request(NormalizeInput {
-                body: &value,
+                body: value,
                 policy,
                 transport: Transport::WebSocket,
             })?;

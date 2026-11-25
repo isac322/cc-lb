@@ -5686,13 +5686,15 @@ async fn keepalive_bulkhead_admission_rechecks_deadline_and_preserves_started_ht
         };
         let upstream = "deadline-upstream";
         if breaker_open {
-            let breaker =
-                breakers.breaker(upstream, BreakerRuntimeConfig::default(), clock.clone());
-            breaker.state.store(Arc::new(BreakerState::Open));
-            breaker.last_open_ts.store(
-                record.first_scheduled_at_unix_secs,
-                std::sync::atomic::Ordering::SeqCst,
-            );
+            let breaker_cfg = BreakerRuntimeConfig::default();
+            let breaker = breakers.breaker(upstream, breaker_cfg, clock.clone());
+            for _ in 0..breaker_cfg.failures_to_open {
+                breaker
+                    .permit()
+                    .expect("closed breaker permit")
+                    .record_failure();
+            }
+            assert_eq!(breaker.current_state(), BreakerState::Open);
         }
         let inner = Arc::new(CircuitBreakerDispatch::new(
             fixture.http.clone(),
@@ -5783,11 +5785,10 @@ async fn keepalive_bulkhead_admission_rechecks_deadline_and_preserves_started_ht
         assert_eq!(turns.len(), expected_calls);
         if breaker_open {
             assert_eq!(
-                **breakers
+                breakers
                     .get(upstream)
                     .expect("open breaker retained")
-                    .state
-                    .load(),
+                    .current_state(),
                 BreakerState::Open
             );
         } else if expected_calls == 0 {
@@ -5797,11 +5798,10 @@ async fn keepalive_bulkhead_admission_rechecks_deadline_and_preserves_started_ht
             );
         } else {
             assert_eq!(
-                **breakers
+                breakers
                     .get(upstream)
                     .expect("breaker is not bypassed")
-                    .state
-                    .load(),
+                    .current_state(),
                 BreakerState::Closed
             );
         }

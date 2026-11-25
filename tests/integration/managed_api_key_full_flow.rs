@@ -1149,6 +1149,7 @@ fn base_config(sqlite_path: std::path::PathBuf, litellm_url: String) -> Reserved
     config.listener.admin_addr = admin_reservation.local_addr().expect("admin addr");
     config.listener.metrics_addr = metrics_addr;
     config.timeouts.upstream_total_secs = 10;
+    config.timeouts.upstream_connect_secs = 10;
     config.storage = StorageConfig::Sqlite { path: sqlite_path };
     config.admin.auth.providers = vec![AdminAuthProviderConfig::StaticToken {
         id: "task-31".to_owned(),

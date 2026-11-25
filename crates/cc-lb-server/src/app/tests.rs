@@ -9,11 +9,12 @@ use std::convert::Infallible;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::state_machine::ServerStateHandle;
 use axum::body::Body;
-use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
+use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use cc_lb_config::Config;
 use cc_lb_control::api_keys::{
     builtin_authn::BuiltinAuthn,
@@ -379,7 +380,7 @@ impl Drop for PendingWebSocketSendDrop {
 
 /// Runs the real authentication path so `read_request_body` receives a
 /// genuine `Authenticated` proof token.
-async fn authenticate_test_request(headers: &HeaderMap) -> cc_lb_engine::Authenticated {
+pub(super) async fn authenticate_test_request(headers: &HeaderMap) -> cc_lb_engine::Authenticated {
     let storage: Arc<dyn ManagedKeyStore> = Arc::new(FixtureKeyStore);
     let authn = BuiltinAuthn::new(
         Arc::new(KeyStore::new(storage)),
@@ -1576,10 +1577,14 @@ async fn pre_authn_timeout_emits_no_lifecycle_events() {
             semaphore_permits: 100,
             acquire_timeout: Duration::from_secs(1),
         },
-        builtin_authn,
         clock,
         breaker_registry: Arc::new(BreakerRegistry::new()),
         breaker_config: BreakerRuntimeConfig::default(),
+        dns_resolver: cc_lb_engine::MetricDnsResolver::new(
+            &cc_lb_engine::dns_cache::DnsResolverConfig::default(),
+        )
+        .expect("default DNS resolver builds"),
+        upstream_connect_timeout: Duration::from_secs(30),
     };
     // Pause after real-clock setup so sqlite worker threads do not race
     // the deterministic middleware deadline.
@@ -2117,7 +2122,6 @@ async fn websocket_test_state_with_affinity_store(
         aead: Arc::new(AeadService::from_master_key([0; 32])),
         storage,
         dynamic_view,
-        builtin_authn,
         clock,
         breaker_registry: Arc::new(BreakerRegistry::new()),
         breaker_config: BreakerRuntimeConfig::default(),
@@ -2127,6 +2131,11 @@ async fn websocket_test_state_with_affinity_store(
             semaphore_permits: 100,
             acquire_timeout: Duration::from_secs(1),
         },
+        dns_resolver: cc_lb_engine::MetricDnsResolver::new(
+            &cc_lb_engine::dns_cache::DnsResolverConfig::default(),
+        )
+        .expect("default DNS resolver builds"),
+        upstream_connect_timeout: Duration::from_secs(30),
     }
 }
 
@@ -3169,20 +3178,30 @@ async fn spawn_holding_upstream() -> (SocketAddr, CancellationToken, JoinHandle<
 /// semantics before another upstream connection is opened.
 #[tokio::test]
 async fn websocket_connection_uses_shared_upstream_bulkhead() {
-    const MAX_CONNECTIONS: usize = 50;
+    const MAX_PERMITS: usize = 4;
     let (upstream_address, upstream_cancel, upstream_task) = spawn_holding_upstream().await;
-    let router = websocket_test_router(
+    let mut state = websocket_test_state(
         vec![websocket_upstream(
             1,
             "openai",
             Url::parse(&format!("http://{upstream_address}/")).expect("upstream URL parses"),
         )],
         TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
     )
     .await;
+    state.websocket_bulkhead_config = BulkheadRuntimeConfig {
+        max_conns_per_upstream: 50,
+        semaphore_permits: MAX_PERMITS as u32,
+        acquire_timeout: Duration::from_millis(50),
+    };
+    let router = proxy_router(state, 30);
     let (proxy_address, proxy_task) = spawn_proxy_router(router).await;
-    let mut clients = Vec::with_capacity(MAX_CONNECTIONS);
-    for _ in 0..MAX_CONNECTIONS {
+    let mut clients = Vec::with_capacity(MAX_PERMITS);
+    for _ in 0..MAX_PERMITS {
         let connected = tokio::time::timeout(
             Duration::from_secs(5),
             connect_async(websocket_request(proxy_address)),
@@ -4926,4 +4945,1702 @@ async fn codex_unknown_reasoning_e2e_mixed_turn2_history() {
     proxy_task.abort();
     fake_a.task.abort();
     fake_b.task.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn responses_request_body_normalize_offloads_zstd_async() {
+    let mut base_headers = HeaderMap::new();
+    base_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let auth = authenticate_test_request(&base_headers).await;
+
+    let raw = br#"{"model":"gpt-5","input":"zstd-async"}"#;
+    let compressed = zstd::bulk::compress(raw, 1).expect("compress zstd request");
+    let mut zstd_req = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/responses")
+        .header(CONTENT_TYPE, "application/json")
+        .header("content-encoding", "zstd")
+        .header(CONTENT_LENGTH, compressed.len().to_string())
+        .body(Bytes::from(compressed.clone()))
+        .unwrap();
+    zstd_req
+        .extensions_mut()
+        .insert(ProviderScope(cc_lb_domain::Provider::Openai));
+
+    let normalized = super::responses_request_body::normalize(zstd_req, 1024, &auth, None)
+        .await
+        .expect("zstd normalize succeeds");
+    assert!(normalized.headers().get("content-encoding").is_none());
+    assert!(normalized.headers().get(CONTENT_LENGTH).is_none());
+    assert_eq!(normalized.body().as_ref(), raw);
+
+    let mut over_cap = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/responses")
+        .header("content-encoding", "zstd")
+        .body(Bytes::from(compressed))
+        .unwrap();
+    over_cap
+        .extensions_mut()
+        .insert(ProviderScope(cc_lb_domain::Provider::Openai));
+    assert_eq!(
+        super::responses_request_body::normalize(over_cap, raw.len() - 1, &auth, None)
+            .await
+            .unwrap_err(),
+        super::responses_request_body::ResponsesRequestBodyError::TooLarge
+    );
+
+    let invalid = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/responses")
+        .header("content-encoding", "zstd")
+        .body(Bytes::from_static(b"not-valid-zstd"))
+        .unwrap();
+    assert_eq!(
+        super::responses_request_body::normalize(invalid, 1024, &auth, None)
+            .await
+            .unwrap_err(),
+        super::responses_request_body::ResponsesRequestBodyError::InvalidEncoding
+    );
+}
+
+#[tokio::test]
+async fn responses_websocket_routes_emit_trace_layer_http_spans() {
+    use tower::ServiceExt as _;
+    use tracing_subscriber::layer::{Context as LayerContext, Layer, SubscriberExt as _};
+    use tracing_subscriber::registry::LookupSpan;
+
+    #[derive(Clone, Default)]
+    struct RecordedHttpSpans(Arc<Mutex<Vec<Option<String>>>>);
+
+    #[derive(Default)]
+    struct RouteVisitor(Option<String>);
+
+    impl tracing::field::Visit for RouteVisitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "http.route" {
+                self.0 = Some(value.to_owned());
+            }
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "http.route" && self.0.is_none() {
+                self.0 = Some(format!("{value:?}").trim_matches('"').to_owned());
+            }
+        }
+    }
+
+    impl<S> Layer<S> for RecordedHttpSpans
+    where
+        S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        fn on_record(
+            &self,
+            id: &tracing::span::Id,
+            values: &tracing::span::Record<'_>,
+            ctx: LayerContext<'_, S>,
+        ) {
+            if let Some(span) = ctx.span(id)
+                && span.metadata().name() == "proxy.request"
+            {
+                let mut visitor = RouteVisitor::default();
+                values.record(&mut visitor);
+                if visitor.0.is_some() {
+                    self.0.lock().unwrap().push(visitor.0);
+                }
+            }
+        }
+    }
+
+    let router = websocket_test_router_with_allowed_models(
+        vec![],
+        TerminalStrategy::FirstPick,
+        vec!["*".to_owned()],
+    )
+    .await;
+    let recorded = RecordedHttpSpans::default();
+    let subscriber = tracing_subscriber::Registry::default().with(recorded.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    for path in [
+        "/v1/responses",
+        "/openai/v1/responses",
+        "/openai/backend-api/codex/responses",
+    ] {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.expect("route responds");
+        // Missing WebSocket upgrade headers -> 426 Upgrade Required after trace_layer enters.
+        assert!(!resp.status().is_success(), "unexpected 2xx on {path}");
+    }
+
+    let spans = recorded.0.lock().unwrap().clone();
+    assert_eq!(
+        spans,
+        vec![
+            Some("/v1/responses".to_owned()),
+            Some("/v1/responses".to_owned()),
+            Some("/v1/responses".to_owned()),
+        ],
+        "expected all 3 Responses WS routes to emit HTTP request trace_layer spans with http.route=/v1/responses"
+    );
+}
+
+#[tokio::test]
+async fn codex_backend_root_non_upgrade_returns_503_when_draining_with_zero_events() {
+    use tower::ServiceExt as _;
+
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut events = bus.subscribe_lifecycle();
+    let drain_controller = DrainController::new();
+    drain_controller.trigger();
+
+    let mut state = websocket_test_state(
+        Vec::new(),
+        TerminalStrategy::FirstPick,
+        drain_controller,
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let lifecycle = Arc::try_unwrap(state.lifecycle)
+        .unwrap_or_else(|_| panic!("test lifecycle has single owner"))
+        .with_event_bus(bus);
+    state.lifecycle = Arc::new(lifecycle);
+    let router = proxy_router(state, 30);
+
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/openai/backend-api/codex")
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.oneshot(req).await.expect("route responds");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok()),
+        Some("60")
+    );
+    assert!(
+        events.try_recv().is_err(),
+        "draining pre-auth 503 on codex backend root must emit 0 request events"
+    );
+}
+
+#[tokio::test]
+async fn dispatcher_isolates_same_host_upstreams_by_id_and_evicts_deleted_upstreams() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    // Unreachable peer triggers Transport error inside CircuitBreakerDispatch without waiting on network.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind port");
+    let closed_addr = listener.local_addr().expect("local addr");
+    drop(listener);
+
+    let clock: ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+    let mut config = Config::default();
+    config.circuit_breaker.failures_to_open = 1;
+    let parts = dispatcher(&config, clock.clone());
+
+    let up_a = websocket_upstream(
+        1,
+        "shared-host-a",
+        Url::parse(&format!("http://{closed_addr}/")).expect("url parses"),
+    );
+    let up_b = websocket_upstream(
+        2,
+        "shared-host-b",
+        Url::parse(&format!("http://{closed_addr}/")).expect("url parses"),
+    );
+    assert_eq!(up_a.base_url, up_b.base_url);
+    assert_ne!(up_a.id, up_b.id);
+
+    async fn signed_for(upstream: &UpstreamRecord, url: &str) -> SignedRequest {
+        struct FixedDialect(Url);
+        impl cc_lb_upstream::UpstreamDialect for FixedDialect {
+            fn shape(
+                &self,
+                context: &cc_lb_upstream::DialectShapeContext,
+                _upstream: &cc_lb_domain::Upstream,
+                _principal: &cc_lb_domain::Principal,
+                builder: &mut cc_lb_upstream::ShapedRequestBuilder,
+            ) -> Result<ShapedRequest, cc_lb_upstream::DialectError> {
+                Ok(builder.shaped_request(
+                    self.0.clone(),
+                    context.method.clone(),
+                    context.downstream_headers.clone(),
+                    context.body_bytes.clone(),
+                ))
+            }
+        }
+        struct PassSigner;
+        #[async_trait]
+        impl Signer for PassSigner {
+            async fn sign(
+                &self,
+                shaped: ShapedRequest,
+                capability: &mut SigningCapability,
+            ) -> Result<SignedRequest, SignerError> {
+                Ok(SignedRequest::from_shaped(shaped, capability))
+            }
+            async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+                RetryDecision::Fail
+            }
+        }
+        let ctx = cc_lb_upstream::DialectShapeContext {
+            request_id: "req-iso".to_owned(),
+            downstream_headers: HeaderMap::new(),
+            method: Method::POST,
+            path: "/v1/messages".to_owned(),
+            query: None,
+            body_bytes: Bytes::from_static(b"{}"),
+        };
+        let principal = cc_lb_domain::Principal {
+            id: TEST_PRINCIPAL.to_owned(),
+            kind: cc_lb_domain::PrincipalKind::ApiKey,
+        };
+        let dom_up = cc_lb_domain::Upstream::AnthropicDirect { base_url: None };
+        let mut shaped = cc_lb_upstream::shape_request(
+            &FixedDialect(Url::parse(url).unwrap()),
+            &ctx,
+            &dom_up,
+            &principal,
+        )
+        .unwrap();
+        shaped.set_upstream_id(upstream.id);
+        cc_lb_upstream::sign_request(&PassSigner, shaped)
+            .await
+            .unwrap()
+    }
+
+    // Dispatch once to up_a (fails on closed port -> opens up_a breaker only).
+    let url = format!("http://{closed_addr}/v1/messages");
+    let _ = parts
+        .dispatcher
+        .dispatch(signed_for(&up_a, &url).await)
+        .await;
+    let breaker_a = parts
+        .breaker_registry
+        .get(&up_a.id.to_string())
+        .expect("up_a breaker registered by UUID");
+    assert_eq!(breaker_a.current_state(), cc_lb_engine::BreakerState::Open);
+    assert!(parts.breaker_registry.get(&up_b.id.to_string()).is_none());
+
+    // Live OK server at the same URL format on another socket? Even on the SAME URL,
+    // up_b stays healthy/independent in its own breaker + bulkhead entry.
+    let ok_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind ok");
+    let ok_addr = ok_listener.local_addr().expect("ok addr");
+    let ok_task = tokio::spawn(async move {
+        if let Ok((mut stream, _)) = ok_listener.accept().await {
+            let mut buf = [0u8; 512];
+            let _ = stream.read(&mut buf).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await;
+        }
+    });
+    let ok_url = format!("http://{ok_addr}/v1/messages");
+    let _ = parts.breaker_registry.breaker(
+        websocket_breaker_key(up_a.id),
+        parts.breaker_config,
+        clock.clone(),
+    );
+    let _ = parts.breaker_registry.breaker(
+        websocket_breaker_key(up_b.id),
+        parts.breaker_config,
+        clock.clone(),
+    );
+    let _ = parts.websocket_bulkheads.semaphore_only_bulkhead(
+        websocket_breaker_key(up_a.id),
+        parts.websocket_bulkhead_config,
+    );
+    let _ = parts.websocket_bulkheads.semaphore_only_bulkhead(
+        websocket_breaker_key(up_b.id),
+        parts.websocket_bulkhead_config,
+    );
+    let ok_resp = parts
+        .dispatcher
+        .dispatch(signed_for(&up_b, &ok_url).await)
+        .await
+        .expect("up_b unaffected by up_a breaker");
+    assert_eq!(ok_resp.status(), StatusCode::OK);
+    ok_task.abort();
+
+    // Wiring DynamicViewHolder eviction removes deleted up_a from breaker, HTTP bulkhead, and WS bulkhead.
+    let principal_view = Arc::new(PrincipalView::for_tests(
+        TEST_PRINCIPAL,
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
+        HashMap::new(),
+    ));
+    let initial = cc_lb_control::DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(WebSocketTestSignerFactory))
+        .principal_view(Arc::clone(&principal_view))
+        .upstream_records(vec![up_a.clone(), up_b.clone()])
+        .build();
+    let holder = wire_dynamic_view_eviction(
+        DynamicViewHolder::new(initial),
+        Arc::clone(&parts.breaker_registry),
+        Arc::clone(&parts.http_bulkheads),
+        Arc::clone(&parts.websocket_bulkheads),
+    );
+    holder.store(
+        cc_lb_control::DynamicViewBuilder::new(1)
+            .signer_factory(Arc::new(WebSocketTestSignerFactory))
+            .principal_view(principal_view)
+            .upstream_records(vec![up_b.clone()])
+            .build(),
+    );
+
+    assert!(parts.breaker_registry.get(&up_a.id.to_string()).is_none());
+    assert!(
+        parts
+            .breaker_registry
+            .get(&websocket_breaker_key(up_a.id))
+            .is_none()
+    );
+    assert!(parts.http_bulkheads.get(&up_a.id.to_string()).is_none());
+    assert!(
+        parts
+            .websocket_bulkheads
+            .get(&websocket_breaker_key(up_a.id))
+            .is_none()
+    );
+
+    assert!(parts.breaker_registry.get(&up_b.id.to_string()).is_some());
+    assert!(
+        parts
+            .breaker_registry
+            .get(&websocket_breaker_key(up_b.id))
+            .is_some()
+    );
+    assert!(parts.http_bulkheads.get(&up_b.id.to_string()).is_some());
+    assert!(
+        parts
+            .websocket_bulkheads
+            .get(&websocket_breaker_key(up_b.id))
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn responses_websocket_stalled_connect_on_one_lane_does_not_block_other_lane() {
+    let fast_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fast");
+    let fast_addr = fast_listener.local_addr().expect("fast addr");
+    let release_fast = Arc::new(tokio::sync::Notify::new());
+    let release_fast_task = Arc::clone(&release_fast);
+    let fast_task = tokio::spawn(async move {
+        let Ok((socket, _)) = fast_listener.accept().await else {
+            return;
+        };
+        let Ok(mut ws) = accept_async(socket).await else {
+            return;
+        };
+        let Some(Ok(_)) = ws.next().await else {
+            return;
+        };
+        let _ = ws
+            .send(UpstreamMessage::Text(
+                r#"{"type":"response.created","stream_id":"lane-fast","response":{"id":"resp_fast","store":false}}"#.into(),
+            ))
+            .await;
+        release_fast_task.notified().await;
+        let _ = ws
+            .send(UpstreamMessage::Text(
+                r#"{"type":"response.completed","stream_id":"lane-fast","response":{"id":"resp_fast","store":false,"usage":{"input_tokens":1,"output_tokens":1}}}"#.into(),
+            ))
+            .await;
+    });
+
+    // Slow upstream accepts TCP socket and holds before completing HTTP 101 WS handshake.
+    let slow_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind slow");
+    let slow_addr = slow_listener.local_addr().expect("slow addr");
+    let slow_connected = Arc::new(tokio::sync::Notify::new());
+    let slow_connected_task = Arc::clone(&slow_connected);
+    let release_slow = Arc::new(tokio::sync::Notify::new());
+    let release_slow_task = Arc::clone(&release_slow);
+    let slow_task = tokio::spawn(async move {
+        let Ok((_held_socket, _)) = slow_listener.accept().await else {
+            return;
+        };
+        slow_connected_task.notify_one();
+        release_slow_task.notified().await;
+    });
+
+    let up_fast = websocket_upstream(
+        1,
+        "openai-fast",
+        Url::parse(&format!("http://{fast_addr}/")).unwrap(),
+    );
+    let up_slow = websocket_upstream(
+        2,
+        "openai-slow",
+        Url::parse(&format!("http://{slow_addr}/")).unwrap(),
+    );
+
+    let state = websocket_test_state(
+        vec![up_fast],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let state_for_swap = state.clone();
+    let (proxy_address, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let (mut client, _) = connect_async(websocket_request(proxy_address))
+        .await
+        .expect("client WS connects");
+
+    // Start lane-fast and receive its first event.
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-4.1","stream_id":"lane-fast","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let created = tokio::time::timeout(Duration::from_secs(2), client.next())
+        .await
+        .expect("fast created does not time out")
+        .unwrap()
+        .unwrap();
+    assert!(
+        created.to_text().unwrap().contains("resp_fast"),
+        "expected resp_fast, got {created:?}"
+    );
+
+    // Route next new lane to slow_upstream, then trigger stalled connect on lane-slow.
+    replace_websocket_upstreams(&state_for_swap, vec![up_slow]);
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-4.1","stream_id":"lane-slow","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), slow_connected.notified())
+        .await
+        .expect("slow upstream accepted TCP and is holding handshake");
+
+    // While lane-slow connect is stalled, ping/pong AND active lane-fast output MUST NOT block.
+    client
+        .send(UpstreamMessage::Ping(Bytes::from_static(b"nonblocking")))
+        .await
+        .unwrap();
+    release_fast.notify_one();
+
+    let mut saw_pong = false;
+    let mut saw_completed = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while (!saw_pong || !saw_completed) && tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(2), client.next()).await {
+            Ok(Some(Ok(UpstreamMessage::Pong(p)))) if p.as_ref() == b"nonblocking" => {
+                saw_pong = true;
+            }
+            Ok(Some(Ok(UpstreamMessage::Text(t)))) if t.contains("response.completed") => {
+                saw_completed = true;
+            }
+            other => panic!("unexpected frame while stalled connect in flight: {other:?}"),
+        }
+    }
+    assert!(saw_pong, "pong must arrive while slow connect is stalled");
+    assert!(
+        saw_completed,
+        "fast lane frame must arrive while slow connect is stalled"
+    );
+
+    release_slow.notify_one();
+    let _ = client.close(None).await;
+    proxy_task.abort();
+    fast_task.abort();
+    slow_task.abort();
+}
+
+#[tokio::test]
+async fn responses_websocket_saturated_bulkhead_fails_over_to_next_candidate() {
+    let (busy_addr, busy_cancel, busy_task) = spawn_holding_upstream().await;
+    let healthy_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind ok");
+    let healthy_addr = healthy_listener.local_addr().expect("ok addr");
+    let healthy_task = tokio::spawn(async move {
+        let Ok((socket, _)) = healthy_listener.accept().await else {
+            return;
+        };
+        let Ok(mut ws) = accept_async(socket).await else {
+            return;
+        };
+        if let Some(Ok(_)) = ws.next().await {
+            let _ = ws
+                .send(UpstreamMessage::Text(
+                    r#"{"type":"response.created","response":{"id":"resp_failover","store":false}}"#
+                        .into(),
+                ))
+                .await;
+        }
+    });
+
+    let mut state = websocket_test_state(
+        vec![
+            websocket_upstream(
+                1,
+                "openai-busy",
+                Url::parse(&format!("http://{busy_addr}/")).unwrap(),
+            ),
+            websocket_upstream(
+                2,
+                "openai-healthy",
+                Url::parse(&format!("http://{healthy_addr}/")).unwrap(),
+            ),
+        ],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    state.websocket_bulkhead_config = BulkheadRuntimeConfig {
+        max_conns_per_upstream: 50,
+        semaphore_permits: 1,
+        acquire_timeout: Duration::from_millis(25),
+    };
+    let (proxy_address, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+
+    // Client 1 saturates openai-busy's 1-slot bulkhead.
+    let (mut client1, _) = connect_async(websocket_request(proxy_address))
+        .await
+        .unwrap();
+    client1
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-4.1","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let created1 = tokio::time::timeout(Duration::from_secs(2), client1.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(created1.to_text().unwrap().contains("response.created"));
+
+    // Client 2 cannot acquire openai-busy's bulkhead, so it fails over to openai-healthy.
+    let (mut client2, _) = connect_async(websocket_request(proxy_address))
+        .await
+        .unwrap();
+    client2
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-4.1","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let created2 = tokio::time::timeout(Duration::from_secs(2), client2.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        created2.to_text().unwrap().contains("resp_failover"),
+        "expected failover to healthy candidate, got {created2:?}"
+    );
+
+    busy_cancel.cancel();
+    let _ = client1.close(None).await;
+    let _ = client2.close(None).await;
+    proxy_task.abort();
+    busy_task.abort();
+    healthy_task.abort();
+}
+
+#[tokio::test]
+async fn responses_websocket_half_open_probe_429_releases_slot_without_closing_breaker() {
+    use std::sync::atomic::AtomicUsize;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let attempt = Arc::new(AtomicUsize::new(0));
+    let attempt_task = Arc::clone(&attempt);
+    let provider_task = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let idx = attempt_task.fetch_add(1, Ordering::SeqCst);
+            if idx < 2 {
+                let mut req = Vec::new();
+                let mut buf = [0u8; 512];
+                while let Ok(n) = socket.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    req.extend_from_slice(&buf[..n]);
+                    if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let status_line = if idx == 0 {
+                    "HTTP/1.1 500 Internal Server Error"
+                } else {
+                    "HTTP/1.1 429 Too Many Requests"
+                };
+                let reply =
+                    format!("{status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let _ = socket.write_all(reply.as_bytes()).await;
+            } else if let Ok(mut ws) = accept_async(socket).await
+                && let Some(Ok(_)) = ws.next().await
+            {
+                let _ = ws
+                    .send(UpstreamMessage::Text(
+                        r#"{"type":"response.created","response":{"id":"resp_recovered","store":false}}"#.into(),
+                    ))
+                    .await;
+            }
+        }
+    });
+
+    let up = websocket_upstream(
+        1,
+        "openai",
+        Url::parse(&format!("http://{addr}/")).expect("url parses"),
+    );
+    let up_id = up.id;
+    let test_clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_000));
+    let mut state = websocket_test_state(
+        vec![up],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    state.clock = test_clock.clone();
+    state.breaker_config = BreakerRuntimeConfig {
+        failures_to_open: 1,
+        failure_window: Duration::from_secs(10),
+        half_open_after: Duration::from_secs(5),
+        half_open_max_in_flight: 1,
+    };
+    let breaker_registry = Arc::clone(&state.breaker_registry);
+    let (proxy_address, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let (mut client, _) = connect_async(websocket_request(proxy_address))
+        .await
+        .unwrap();
+
+    // 1. Provider 500 opens the WS breaker.
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-4.1","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let err1: Value =
+        serde_json::from_str(client.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    assert_eq!(err1["status"], 500);
+    let breaker = breaker_registry
+        .get(&websocket_breaker_key(up_id))
+        .expect("WS breaker exists");
+    assert_eq!(breaker.current_state(), cc_lb_engine::BreakerState::Open);
+
+    // 2. Advance clock to half-open, receive HTTP 429: slot is released without closing breaker.
+    test_clock.advance_secs(5);
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-4.1","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let err2: Value =
+        serde_json::from_str(client.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    assert_eq!(err2["status"], 429);
+    assert_eq!(
+        breaker.current_state(),
+        cc_lb_engine::BreakerState::HalfOpen
+    );
+    assert_eq!(breaker.half_open_in_flight(), 0);
+
+    // 3. Subsequent half-open probe succeeds and closes the breaker.
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-4.1","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let ok = client.next().await.unwrap().unwrap();
+    assert!(ok.to_text().unwrap().contains("resp_recovered"));
+    assert_eq!(breaker.current_state(), cc_lb_engine::BreakerState::Closed);
+
+    let _ = client.close(None).await;
+    proxy_task.abort();
+    provider_task.abort();
+}
+
+#[test]
+fn websocket_provider_request_strips_connection_listed_hop_by_hop_headers() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        CONNECTION,
+        HeaderValue::from_static("x-hop-secret, keep-alive"),
+    );
+    headers.insert("x-hop-secret", HeaderValue::from_static("secret-value"));
+    headers.insert("keep-alive", HeaderValue::from_static("timeout=5"));
+    headers.insert("x-end-to-end", HeaderValue::from_static("preserved"));
+    let request = responses_websocket_request(
+        Url::parse("ws://provider.example/v1/responses").unwrap(),
+        headers,
+    )
+    .expect("provider request builds");
+    assert!(!request.headers().contains_key("x-hop-secret"));
+    assert!(!request.headers().contains_key("keep-alive"));
+    assert_eq!(request.headers()["x-end-to-end"], "preserved");
+    assert!(request.headers().contains_key(CONNECTION));
+    assert!(request.headers().contains_key(UPGRADE));
+}
+
+#[tokio::test]
+async fn websocket_ingress_strips_connection_authorization_before_auth() {
+    let router = websocket_test_router(Vec::new(), TerminalStrategy::FirstPick).await;
+    let (proxy_address, proxy_task) = spawn_proxy_router(router).await;
+    let bearer = format!("Bearer {}", TEST_KEY.plaintext.as_str());
+
+    let mut valid_request = websocket_request(proxy_address);
+    valid_request.headers_mut().remove("x-api-key");
+    valid_request.headers_mut().insert(
+        axum::http::header::AUTHORIZATION,
+        HeaderValue::from_str(&bearer).expect("valid bearer header"),
+    );
+    let (mut client, _) = connect_async(valid_request)
+        .await
+        .expect("Bearer WS auth succeeds");
+    let _ = client.close(None).await;
+
+    let mut stripped_request = websocket_request(proxy_address);
+    stripped_request.headers_mut().remove("x-api-key");
+    stripped_request.headers_mut().insert(
+        axum::http::header::AUTHORIZATION,
+        HeaderValue::from_str(&bearer).expect("valid bearer header"),
+    );
+    stripped_request.headers_mut().insert(
+        CONNECTION,
+        HeaderValue::from_static("Upgrade, Authorization"),
+    );
+    let err = connect_async(stripped_request)
+        .await
+        .expect_err("Connection: Authorization must be stripped before auth and fail with 401");
+    assert!(err.to_string().contains("401"), "unexpected error: {err}");
+    proxy_task.abort();
+}
+
+#[tokio::test]
+async fn responses_websocket_concurrent_initial_oauth_lanes_pin_to_single_account() {
+    use std::sync::atomic::AtomicUsize;
+
+    let a_hits = Arc::new(AtomicUsize::new(0));
+    let b_hits = Arc::new(AtomicUsize::new(0));
+    let accepted_first_a = Arc::new(tokio::sync::Notify::new());
+    let release_first_a = Arc::new(tokio::sync::Notify::new());
+
+    let listener_a = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind oauth-a");
+    let addr_a = listener_a.local_addr().unwrap();
+    let a_hits_task = Arc::clone(&a_hits);
+    let accepted_task = Arc::clone(&accepted_first_a);
+    let release_task = Arc::clone(&release_first_a);
+    let task_a = tokio::spawn(async move {
+        loop {
+            let Ok((socket, _)) = listener_a.accept().await else {
+                break;
+            };
+            let hit = a_hits_task.fetch_add(1, Ordering::SeqCst);
+            if hit == 0 {
+                accepted_task.notify_one();
+                release_task.notified().await;
+            }
+            tokio::spawn(async move {
+                let Ok(mut ws) = accept_async(socket).await else {
+                    return;
+                };
+                if let Some(Ok(_)) = ws.next().await {
+                    let _ = ws
+                        .send(UpstreamMessage::Text(
+                            format!(
+                                r#"{{"type":"response.created","response":{{"id":"resp_a_{hit}","store":false}}}}"#
+                            )
+                            .into(),
+                        ))
+                        .await;
+                    let _ = ws
+                        .send(UpstreamMessage::Text(
+                            format!(
+                                r#"{{"type":"response.completed","response":{{"id":"resp_a_{hit}","store":false,"usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+                            )
+                            .into(),
+                        ))
+                        .await;
+                }
+            });
+        }
+    });
+
+    let listener_b = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind oauth-b");
+    let addr_b = listener_b.local_addr().unwrap();
+    let b_hits_task = Arc::clone(&b_hits);
+    let task_b = tokio::spawn(async move {
+        while let Ok((socket, _)) = listener_b.accept().await {
+            b_hits_task.fetch_add(1, Ordering::SeqCst);
+            drop(socket);
+        }
+    });
+
+    let mut up_a = websocket_upstream(
+        1,
+        "oauth-a",
+        Url::parse(&format!("http://{addr_a}/")).unwrap(),
+    );
+    up_a.kind = UpstreamKind::OpenaiOauth;
+    let mut up_b = websocket_upstream(
+        2,
+        "oauth-b",
+        Url::parse(&format!("http://{addr_b}/")).unwrap(),
+    );
+    up_b.kind = UpstreamKind::OpenaiOauth;
+
+    #[derive(Default)]
+    struct SwapQuotaCache {
+        snapshots: Mutex<HashMap<Uuid, Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot>>>,
+    }
+
+    impl cc_lb_control::SubscriptionQuotaCacheLike for SwapQuotaCache {
+        fn upsert_observation(&self, _record: &cc_lb_storage_api::SubscriptionQuotaSample) {}
+
+        fn snapshot_for_upstream(
+            &self,
+            upstream_id: Uuid,
+            _now_unix_millis: u64,
+            _max_staleness_secs: u64,
+        ) -> Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot> {
+            self.snapshots
+                .lock()
+                .expect("swap quota cache lock")
+                .get(&upstream_id)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    let up_a_id = up_a.id;
+    let up_b_id = up_b.id;
+    let mut state = websocket_test_state(
+        vec![up_a, up_b],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let now_secs = cc_lb_clock::unix_secs(state.clock.now());
+    let quota_snapshot =
+        |window: &str, utilization: f64| cc_lb_domain::SubscriptionQuotaCandidateSnapshot {
+            window: window.to_owned(),
+            state: cc_lb_domain::SubscriptionQuotaDataState::Fresh,
+            source: Some("oauth-pin-test".to_owned()),
+            utilization: Some(utilization),
+            status: Some("allowed".to_owned()),
+            resets_at_unix_secs: Some(now_secs + 10_000),
+            surpassed_threshold: None,
+            representative_claim: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            credits: None,
+            observed_at_unix_millis: Some(now_secs * 1_000),
+            max_staleness_secs: 60,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+        };
+    let quota_cache = Arc::new(SwapQuotaCache::default());
+    {
+        let mut guard = quota_cache.snapshots.lock().expect("swap quota cache lock");
+        guard.insert(
+            up_a_id,
+            vec![quota_snapshot("5h", 0.10), quota_snapshot("7d", 0.10)],
+        );
+        guard.insert(
+            up_b_id,
+            vec![quota_snapshot("5h", 0.80), quota_snapshot("7d", 0.80)],
+        );
+    }
+    let filter: Arc<dyn cc_lb_routing::FilterPlugin> = Arc::new(
+        cc_lb_routing_eval::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::with_clock(
+            state.clock.clone(),
+        ),
+    );
+    let pipeline = Arc::new(RouterPipelineCache {
+        user_filters: vec![filter],
+        terminal: TerminalStrategy::FirstPick,
+        instantiation_error: None,
+        provider_filters: None,
+    });
+    let principal_view = Arc::new(PrincipalView::for_tests(
+        TEST_PRINCIPAL,
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
+        HashMap::from([(
+            TEST_PRINCIPAL.to_owned(),
+            (Some(pipeline), DialectCache::Inherit),
+        )]),
+    ));
+    let initial_view = state.dynamic_view.load();
+    state.dynamic_view.store(
+        cc_lb_control::DynamicViewBuilder::from_view(&initial_view)
+            .principal_view(principal_view)
+            .subscription_quota_cache(quota_cache.clone())
+            .subscription_quota_routing_max_staleness_secs(60)
+            .build(),
+    );
+
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut events = bus.subscribe_lifecycle();
+    let lifecycle = Arc::try_unwrap(state.lifecycle)
+        .unwrap_or_else(|_| panic!("private fixture lifecycle must have one owner"));
+    state.lifecycle = Arc::new(lifecycle.with_event_bus(bus));
+    let (proxy_address, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let (mut client, _) = connect_async(websocket_request(proxy_address))
+        .await
+        .expect("client WS connects");
+
+    // Lane 1 starts initial unpinned OAuth handshake on oauth-a (0.10 vs 0.80 utilization).
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-5","stream_id":"lane-1","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), accepted_first_a.notified())
+        .await
+        .expect("lane-1 dials oauth-a");
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("lane-1 route event")
+            .expect("lifecycle bus open");
+        if let LifecycleEvent::RouteCompleted {
+            result: Ok(route), ..
+        } = ev
+        {
+            assert_eq!(route.upstream_id, up_a_id, "lane-1 initially picks oauth-a");
+            break;
+        }
+    }
+
+    // Flip subscription quota snapshots so an unpinned lane-2 prefers oauth-b over oauth-a.
+    // Wait for both lane-2's RouteCompleted event (proving initial choice was oauth-b) and an
+    // invalid-event error response (proving the relay loop ran advance_one_dispatch and parked
+    // lane-2 in `deferred_for_session_owner`) BEFORE releasing oauth-a's handshake.
+    {
+        let mut guard = quota_cache.snapshots.lock().expect("swap quota cache lock");
+        guard.insert(
+            up_a_id,
+            vec![quota_snapshot("5h", 0.80), quota_snapshot("7d", 0.80)],
+        );
+        guard.insert(
+            up_b_id,
+            vec![quota_snapshot("5h", 0.10), quota_snapshot("7d", 0.10)],
+        );
+    }
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-5","stream_id":"lane-2","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("lane-2 route event")
+            .expect("lifecycle bus open");
+        if let LifecycleEvent::RouteCompleted {
+            result: Ok(route), ..
+        } = ev
+        {
+            assert_eq!(
+                route.upstream_id, up_b_id,
+                "fixture must select oauth-b for lane 2 before session pin takes effect"
+            );
+            break;
+        }
+    }
+    client
+        .send(UpstreamMessage::Text(r#"{"type":"invalid.sync"}"#.into()))
+        .await
+        .unwrap();
+    let sync_reply = tokio::time::timeout(Duration::from_secs(2), client.next())
+        .await
+        .expect("sync error returns after lane-2 admission")
+        .unwrap()
+        .unwrap();
+    let sync_text = sync_reply.to_text().unwrap();
+    assert!(
+        sync_text.contains("\"invalid_request_error\""),
+        "expected invalid_request_error sync sentinel, got {sync_text}"
+    );
+    assert_eq!(
+        b_hits.load(Ordering::SeqCst),
+        0,
+        "lane-2 must wait for initial OAuth owner instead of dialing oauth-b"
+    );
+
+    release_first_a.notify_one();
+    let mut completed = 0usize;
+    while completed < 2 {
+        let msg = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("both OAuth lanes complete")
+            .unwrap()
+            .unwrap();
+        if let UpstreamMessage::Text(text) = msg
+            && text.contains("\"response.completed\"")
+        {
+            completed += 1;
+        }
+    }
+    assert_eq!(
+        a_hits.load(Ordering::SeqCst),
+        2,
+        "both lanes must pin to oauth-a"
+    );
+    assert_eq!(
+        b_hits.load(Ordering::SeqCst),
+        0,
+        "oauth-b must never be dialed"
+    );
+
+    let _ = client.close(None).await;
+    proxy_task.abort();
+    task_a.abort();
+    task_b.abort();
+}
+
+#[tokio::test]
+async fn responses_websocket_concurrent_shareable_lanes_coalesce_in_flight_dial() {
+    use std::sync::atomic::AtomicUsize;
+
+    let tcp_accepts = Arc::new(AtomicUsize::new(0));
+    let accepted = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind api-key");
+    let addr = listener.local_addr().unwrap();
+    let accepts_task = Arc::clone(&tcp_accepts);
+    let accepted_task = Arc::clone(&accepted);
+    let release_task = Arc::clone(&release);
+    let up_task = tokio::spawn(async move {
+        let Ok((socket, _)) = listener.accept().await else {
+            return;
+        };
+        accepts_task.fetch_add(1, Ordering::SeqCst);
+        accepted_task.notify_one();
+        release_task.notified().await;
+        let Ok(mut ws) = accept_async(socket).await else {
+            return;
+        };
+        let mut count = 0usize;
+        while let Some(Ok(msg)) = ws.next().await {
+            if let UpstreamMessage::Text(req_text) = msg {
+                count += 1;
+                let req_json: Value = serde_json::from_str(&req_text).expect("valid create json");
+                let stream_id = req_json
+                    .get("stream_id")
+                    .and_then(Value::as_str)
+                    .expect("request includes stream_id");
+                let _ = ws
+                    .send(UpstreamMessage::Text(
+                        format!(
+                            r#"{{"type":"response.created","stream_id":"{stream_id}","response":{{"id":"resp_shared_{count}","store":false}}}}"#
+                        )
+                        .into(),
+                    ))
+                    .await;
+                let _ = ws
+                    .send(UpstreamMessage::Text(
+                        format!(
+                            r#"{{"type":"response.completed","stream_id":"{stream_id}","response":{{"id":"resp_shared_{count}","store":false,"usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+                        )
+                        .into(),
+                    ))
+                    .await;
+            }
+        }
+    });
+
+    let up = websocket_upstream(
+        1,
+        "openai-shared",
+        Url::parse(&format!("http://{addr}/")).unwrap(),
+    );
+    let mut state = websocket_test_state(
+        vec![up.clone()],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    state.websocket_bulkhead_config = BulkheadRuntimeConfig {
+        max_conns_per_upstream: 2,
+        semaphore_permits: 2,
+        acquire_timeout: Duration::from_secs(1),
+    };
+    // Hold 1 of 2 bulkhead permits so only 1 permit remains for Turn 1 + Turn 2 together.
+    let _held_guard = state
+        .websocket_bulkheads
+        .semaphore_only_bulkhead(
+            crate::app::responses_websocket::websocket_breaker_key(up.id),
+            state.websocket_bulkhead_config,
+        )
+        .acquire_owned()
+        .await
+        .expect("acquire initial bulkhead permit");
+    let (proxy_address, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let (mut client, _) = connect_async(websocket_request(proxy_address))
+        .await
+        .expect("client WS connects");
+
+    // Turn 1 opens in-flight shareable dial using the sole bulkhead permit.
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-4.1","stream_id":"lane-1","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), accepted.notified())
+        .await
+        .expect("dial 1 accepted");
+
+    // Turn 2 arrives before dial 1 upgrades; Ping/Pong ensures relay processed Turn 2 and
+    // coalesced it onto the in-flight dial without opening a duplicate socket or failing 503.
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-4.1","stream_id":"lane-2","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    client
+        .send(UpstreamMessage::Ping(Bytes::from_static(b"coalesce")))
+        .await
+        .unwrap();
+    let pong = tokio::time::timeout(Duration::from_secs(2), client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(pong, UpstreamMessage::Pong(_)),
+        "expected Pong after Turn 2 coalesced, got {pong:?}"
+    );
+
+    release.notify_one();
+    let mut completed = 0usize;
+    let mut seen_frames = Vec::new();
+    while completed < 2 {
+        let msg = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("both coalesced turns complete; seen_frames={seen_frames:?}")
+            })
+            .unwrap()
+            .unwrap();
+        if let UpstreamMessage::Text(text) = msg {
+            assert!(
+                !text.contains("\"type\":\"error\""),
+                "unexpected error frame during coalesced dispatch: {text}"
+            );
+            seen_frames.push(text.to_string());
+            if text.contains("\"response.completed\"") {
+                completed += 1;
+            }
+        }
+    }
+    assert_eq!(
+        tcp_accepts.load(Ordering::SeqCst),
+        1,
+        "must coalesce onto 1 TCP/WS dial"
+    );
+
+    let _ = client.close(None).await;
+    proxy_task.abort();
+    up_task.abort();
+}
+
+#[tokio::test]
+async fn responses_websocket_registers_connection_before_early_provider_frame() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind oauth");
+    let addr = listener.local_addr().unwrap();
+    let up_task = tokio::spawn(async move {
+        let Ok((socket, _)) = listener.accept().await else {
+            return;
+        };
+        let Ok(mut ws) = accept_async(socket).await else {
+            return;
+        };
+        // Push an immediate unsolicited frame as soon as the WebSocket upgrade finishes.
+        let _ = ws
+            .send(UpstreamMessage::Text(
+                r#"{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":42.0,"window_minutes":300,"reset_at":1900000000},"secondary":{"used_percent":10.0,"window_minutes":10080,"reset_at":1900500000}},"credits":{"has_credits":true,"unlimited":false,"balance":"12.00"}}"#.into(),
+            ))
+            .await;
+        if let Some(Ok(_)) = ws.next().await {
+            let _ = ws
+                .send(UpstreamMessage::Text(
+                    r#"{"type":"response.created","response":{"id":"resp_early","store":false}}"#
+                        .into(),
+                ))
+                .await;
+            let _ = ws
+                .send(UpstreamMessage::Text(
+                    r#"{"type":"response.completed","response":{"id":"resp_early","store":false,"usage":{"input_tokens":1,"output_tokens":1}}}"#.into(),
+                ))
+                .await;
+        }
+    });
+
+    let mut up = websocket_upstream(
+        1,
+        "oauth-early",
+        Url::parse(&format!("http://{addr}/")).unwrap(),
+    );
+    up.kind = UpstreamKind::OpenaiOauth;
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut quota_events = bus.attach_lifecycle_subscription_quota(16);
+    let mut state = websocket_test_state(
+        vec![up.clone()],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let lifecycle = Arc::new(
+        Lifecycle::new_with_dynamic_view(
+            Arc::new(BuiltinAuthn::new(
+                Arc::new(KeyStore::new(Arc::new(FixtureKeyStore))),
+                state.clock.clone(),
+            )),
+            state.dynamic_view.clone(),
+            make_default_dispatcher(50),
+            LifecycleConfig::default(),
+            state.clock.clone(),
+        )
+        .with_event_bus(bus),
+    );
+    state.lifecycle = lifecycle;
+    let (proxy_address, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let (mut client, _) = connect_async(websocket_request(proxy_address))
+        .await
+        .expect("client WS connects");
+
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-5","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("response arrives")
+            .unwrap()
+            .unwrap();
+        if let UpstreamMessage::Text(text) = msg
+            && text.contains("\"response.completed\"")
+        {
+            break;
+        }
+    }
+    let mut observed_early_quota = false;
+    while let Ok(event) = quota_events.try_recv() {
+        if matches!(
+            event,
+            cc_lb_lifecycle::LifecycleEvent::UpstreamQuotaFrameObserved { upstream_id, .. }
+                if upstream_id == up.id
+        ) {
+            observed_early_quota = true;
+            break;
+        }
+    }
+    assert!(
+        observed_early_quota,
+        "early codex.rate_limits frame emitted right after upgrade must be observed on upstream {}",
+        up.id
+    );
+
+    let _ = client.close(None).await;
+    proxy_task.abort();
+    up_task.abort();
+}
+
+#[tokio::test]
+async fn responses_websocket_slow_signer_refresh_does_not_block_active_lane() {
+    #[derive(Clone)]
+    struct SelectableDelayedSignerFactory {
+        delayed_upstream_name: String,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl ApiKeyAwareSignerFactory for SelectableDelayedSignerFactory {
+        fn with_router_choice(
+            &self,
+            router_chosen_upstream_name: String,
+        ) -> Arc<dyn SignerFactory> {
+            Arc::new(SelectableDelayedSignerFactoryChoice {
+                inner: self.clone(),
+                choice: router_chosen_upstream_name,
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct SelectableDelayedSignerFactoryChoice {
+        inner: SelectableDelayedSignerFactory,
+        choice: String,
+    }
+
+    #[async_trait]
+    impl SignerFactory for SelectableDelayedSignerFactoryChoice {
+        async fn build(
+            &self,
+            _upstream: &cc_lb_domain::Upstream,
+        ) -> Result<Arc<dyn Signer>, SignerError> {
+            if self.choice == self.inner.delayed_upstream_name {
+                self.inner.started.notify_one();
+                self.inner.release.notified().await;
+            }
+            Ok(Arc::new(WebSocketTestSigner))
+        }
+    }
+
+    let fast_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fast");
+    let fast_addr = fast_listener.local_addr().unwrap();
+    let release_fast = Arc::new(tokio::sync::Notify::new());
+    let release_fast_task = Arc::clone(&release_fast);
+    let fast_task = tokio::spawn(async move {
+        let Ok((socket, _)) = fast_listener.accept().await else {
+            return;
+        };
+        let Ok(mut ws) = accept_async(socket).await else {
+            return;
+        };
+        if let Some(Ok(_)) = ws.next().await {
+            let _ = ws
+                .send(UpstreamMessage::Text(
+                    r#"{"type":"response.created","stream_id":"lane-fast","response":{"id":"resp_fast_sign","store":false}}"#.into(),
+                ))
+                .await;
+            release_fast_task.notified().await;
+            let _ = ws
+                .send(UpstreamMessage::Text(
+                    r#"{"type":"response.completed","stream_id":"lane-fast","response":{"id":"resp_fast_sign","store":false,"usage":{"input_tokens":1,"output_tokens":1}}}"#.into(),
+                ))
+                .await;
+        }
+    });
+
+    let slow_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind slow");
+    let slow_addr = slow_listener.local_addr().unwrap();
+    let up_fast = websocket_upstream(
+        1,
+        "openai-fast",
+        Url::parse(&format!("http://{fast_addr}/")).unwrap(),
+    );
+    let mut up_slow = websocket_upstream(
+        2,
+        "openai-slow-signer",
+        Url::parse(&format!("http://{slow_addr}/")).unwrap(),
+    );
+    up_slow.kind = UpstreamKind::OpenaiOauth;
+
+    let signer_started = Arc::new(tokio::sync::Notify::new());
+    let signer_release = Arc::new(tokio::sync::Notify::new());
+    let state = websocket_test_state(
+        vec![up_fast],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(SelectableDelayedSignerFactory {
+            delayed_upstream_name: "openai-slow-signer".to_owned(),
+            started: Arc::clone(&signer_started),
+            release: Arc::clone(&signer_release),
+        }),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let state_for_swap = state.clone();
+    let (proxy_address, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let (mut client, _) = connect_async(websocket_request(proxy_address))
+        .await
+        .expect("client WS connects");
+
+    // Start fast lane and receive created frame.
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-4.1","stream_id":"lane-fast","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let created = tokio::time::timeout(Duration::from_secs(2), client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(created.to_text().unwrap().contains("resp_fast_sign"));
+
+    // Swap dynamic view to slow-signer upstream and start a slow lane.
+    replace_websocket_upstreams(&state_for_swap, vec![up_slow]);
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-5","stream_id":"lane-slow","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), signer_started.notified())
+        .await
+        .expect("slow signer entered build() off relay loop");
+
+    // While slow signer blocks off-loop, ping/pong and lane-fast completion proceed unblocked.
+    client
+        .send(UpstreamMessage::Ping(Bytes::from_static(
+            b"unblocked-by-sign",
+        )))
+        .await
+        .unwrap();
+    release_fast.notify_one();
+
+    let mut saw_pong = false;
+    let mut saw_completed = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while (!saw_pong || !saw_completed) && tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(2), client.next()).await {
+            Ok(Some(Ok(UpstreamMessage::Pong(p)))) if p.as_ref() == b"unblocked-by-sign" => {
+                saw_pong = true;
+            }
+            Ok(Some(Ok(UpstreamMessage::Text(t)))) if t.contains("response.completed") => {
+                saw_completed = true;
+            }
+            other => panic!("unexpected frame while signer build blocked: {other:?}"),
+        }
+    }
+    assert!(saw_pong && saw_completed);
+
+    signer_release.notify_one();
+    let _ = client.close(None).await;
+    proxy_task.abort();
+    fast_task.abort();
+}
+
+#[tokio::test]
+async fn responses_websocket_coalesced_prepare_failure_only_fails_affected_turn() {
+    use std::sync::atomic::AtomicUsize;
+
+    let tcp_accepts = Arc::new(AtomicUsize::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind api-key");
+    let addr = listener.local_addr().unwrap();
+    let accepts_task = Arc::clone(&tcp_accepts);
+    let up_task = tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            accepts_task.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let Ok(mut ws) = accept_async(socket).await else {
+                    return;
+                };
+                while let Some(Ok(msg)) = ws.next().await {
+                    if let UpstreamMessage::Text(req_text) = msg {
+                        let req_json: Value =
+                            serde_json::from_str(&req_text).expect("valid create json");
+                        let stream_id = req_json
+                            .get("stream_id")
+                            .and_then(Value::as_str)
+                            .expect("request includes stream_id");
+                        let _ = ws
+                            .send(UpstreamMessage::Text(
+                                format!(
+                                    r#"{{"type":"response.created","stream_id":"{stream_id}","response":{{"id":"resp_{stream_id}","store":false}}}}"#
+                                )
+                                .into(),
+                            ))
+                            .await;
+                        let _ = ws
+                            .send(UpstreamMessage::Text(
+                                format!(
+                                    r#"{{"type":"response.completed","stream_id":"{stream_id}","response":{{"id":"resp_{stream_id}","store":false,"usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+                                )
+                                .into(),
+                            ))
+                            .await;
+                    }
+                }
+            });
+        }
+    });
+
+    let up = websocket_upstream(
+        1,
+        "openai-shared-prepare-isolation",
+        Url::parse(&format!("http://{addr}/")).unwrap(),
+    );
+    let mut state = websocket_test_state(
+        vec![up.clone()],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    state.websocket_bulkhead_config = BulkheadRuntimeConfig {
+        max_conns_per_upstream: 2,
+        semaphore_permits: 2,
+        acquire_timeout: Duration::from_secs(5),
+    };
+    let bulkhead = state.websocket_bulkheads.semaphore_only_bulkhead(
+        crate::app::responses_websocket::websocket_breaker_key(up.id),
+        state.websocket_bulkhead_config,
+    );
+    let held_guard_1 = bulkhead
+        .acquire_owned()
+        .await
+        .expect("hold first bulkhead permit");
+    let held_guard_2 = bulkhead
+        .acquire_owned()
+        .await
+        .expect("hold second bulkhead permit");
+    let dynamic_view = Arc::clone(&state.dynamic_view);
+    let (proxy_address, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let (mut client, _) = connect_async(websocket_request(proxy_address))
+        .await
+        .expect("client WS connects");
+
+    // Lane 1 (`gpt-4.1`) starts the pending dial and blocks waiting for the sole bulkhead permit.
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-4.1","stream_id":"lane-1","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    client
+        .send(UpstreamMessage::Text(r#"{"type":"invalid.sync"}"#.into()))
+        .await
+        .unwrap();
+    let sync1 = tokio::time::timeout(Duration::from_secs(2), client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        sync1
+            .to_text()
+            .unwrap()
+            .contains("\"invalid_request_error\"")
+    );
+
+    // Lane 2 (`gpt-5`) coalesces onto Lane 1's PendingConnect while bulkhead permit is still held.
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-5","stream_id":"lane-2","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    client
+        .send(UpstreamMessage::Text(r#"{"type":"invalid.sync"}"#.into()))
+        .await
+        .unwrap();
+    let sync2 = tokio::time::timeout(Duration::from_secs(2), client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        sync2
+            .to_text()
+            .unwrap()
+            .contains("\"invalid_request_error\"")
+    );
+
+    // Restrict the principal allowlist to `gpt-5` only before releasing the bulkhead permit so
+    // Lane 1 fails inside `PreparedWsConnectJob::run()` with `model_not_allowed` while Lane 2 stays allowed.
+    let updated_pv = Arc::new(
+        cc_lb_control::api_keys::principal_view::PrincipalView::for_tests(
+            TEST_PRINCIPAL,
+            true,
+            vec!["gpt-5".to_owned()],
+            Vec::new(),
+            HashMap::from([(
+                TEST_PRINCIPAL.to_owned(),
+                (
+                    Some(Arc::new(
+                        cc_lb_control::api_keys::principal_view::RouterPipelineCache {
+                            user_filters: Vec::new(),
+                            terminal: TerminalStrategy::FirstPick,
+                            instantiation_error: None,
+                            provider_filters: None,
+                        },
+                    )),
+                    cc_lb_control::api_keys::principal_view::DialectCache::Inherit,
+                ),
+            )]),
+        ),
+    );
+    let view = dynamic_view.load();
+    dynamic_view.store(
+        cc_lb_control::DynamicViewBuilder::from_view(&view)
+            .principal_view(updated_pv)
+            .build(),
+    );
+
+    drop((held_guard_1, held_guard_2));
+
+    let mut lane1_failed_403 = false;
+    let mut lane2_completed = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while (!lane1_failed_403 || !lane2_completed) && tokio::time::Instant::now() < deadline {
+        let msg = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("turns settle")
+            .unwrap()
+            .unwrap();
+        if let UpstreamMessage::Text(text) = msg {
+            if text.contains("\"lane-1\"") && text.contains("\"model_not_allowed\"") {
+                lane1_failed_403 = true;
+            } else if text.contains("\"lane-2\"") && text.contains("\"response.completed\"") {
+                lane2_completed = true;
+            } else if text.contains("\"lane-2\"") && text.contains("\"type\":\"error\"") {
+                panic!("lane-2 waiter must not inherit lane-1 prepare failure: {text}");
+            }
+        }
+    }
+    assert!(lane1_failed_403, "lane-1 must fail with model_not_allowed");
+    assert!(lane2_completed, "lane-2 must revalidate and succeed");
+    assert_eq!(tcp_accepts.load(Ordering::SeqCst), 1);
+
+    let _ = client.close(None).await;
+    proxy_task.abort();
+    up_task.abort();
 }
