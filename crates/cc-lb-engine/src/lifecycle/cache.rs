@@ -704,12 +704,27 @@ pub(super) fn eligible_ttls_for_entry(requested: TtlClass, entry: TtlClass) -> b
     eligible_ttls(requested).contains(&entry)
 }
 
+#[cfg(test)]
 pub(super) fn cache_pricing_summary_for_model(
     catalog: &cc_lb_pricing::PriceCatalog,
     model: &str,
     service_tier: Option<&str>,
     gross_input_tokens: Option<u64>,
 ) -> CachePricingSummary {
+    cache_pricing_summary_for_model_with_estimator(catalog, model, service_tier, || {
+        gross_input_tokens
+    })
+}
+
+pub(super) fn cache_pricing_summary_for_model_with_estimator<F>(
+    catalog: &cc_lb_pricing::PriceCatalog,
+    model: &str,
+    service_tier: Option<&str>,
+    estimate_gross_input_tokens: F,
+) -> CachePricingSummary
+where
+    F: FnOnce() -> Option<u64>,
+{
     if model.is_empty() {
         return CachePricingSummary {
             native: None,
@@ -734,6 +749,11 @@ pub(super) fn cache_pricing_summary_for_model(
             ..CachePricingSummary::default()
         };
     }
+    let catalog_has_bands = catalog.has_threshold_bands(model);
+    let mut estimator = Some(estimate_gross_input_tokens);
+    let mut gross_input_tokens = catalog_has_bands
+        .then(|| estimator.take().and_then(|estimate| estimate()))
+        .flatten();
     let pricing =
         catalog.routing_cache_pricing_for_prompt_tokens(model, service_tier, gross_input_tokens);
     let input = pricing.map(|rates| rates.input_per_million_usd.as_micros_usd());
@@ -754,12 +774,16 @@ pub(super) fn cache_pricing_summary_for_model(
     });
     let status = if input.is_some() && cache_creation_5m.is_some() && cache_read.is_some() {
         "known"
+    } else if catalog_has_bands {
+        "unknown"
     } else {
-        let missing_tiered_prompt_count =
-            gross_input_tokens.is_none() && catalog.has_threshold_bands(model);
-        if !missing_tiered_prompt_count
-            && let Some(mut fallback) =
-                anthropic_family_cache_pricing_summary(&normalized, gross_input_tokens)
+        if anthropic_family_has_threshold_bands(&normalized)
+            && let Some(estimate) = estimator.take()
+        {
+            gross_input_tokens = estimate();
+        }
+        if let Some(mut fallback) =
+            anthropic_family_cache_pricing_summary(&normalized, gross_input_tokens)
         {
             fallback.native = native;
             return fallback;
@@ -920,6 +944,10 @@ pub(super) fn anthropic_family_cache_pricing_summary(
 ///
 /// Source: <https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing>
 /// (retrieved 2026-07-27).
+pub(super) fn anthropic_family_has_threshold_bands(model: &str) -> bool {
+    model.starts_with("claude-haiku-5-5")
+}
+
 pub(super) fn anthropic_family_input_micros_per_million(
     model: &str,
     gross_input_tokens: Option<u64>,
@@ -935,7 +963,7 @@ pub(super) fn anthropic_family_input_micros_per_million(
     const HAIKU_CURRENT: u64 = 1_000_000;
     const HAIKU_LEGACY: u64 = 800_000;
 
-    if model.starts_with("claude-haiku-5-5") {
+    if anthropic_family_has_threshold_bands(model) {
         let gross_input_tokens = gross_input_tokens?;
         return Some(if gross_input_tokens > 100_000 {
             HAIKU_5_5_ABOVE_100K
@@ -2710,6 +2738,186 @@ mod cache_score_tests {
             .expect("subscription preference trace emitted");
         assert_eq!(trace.candidates.len(), 1);
         assert_eq!(trace.candidates[0].estimated_input_cost_micros, 75_000);
+    }
+
+    #[test]
+    fn cache_pricing_summary_defers_prompt_estimation_until_needed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let catalog = PriceCatalog::new_empty();
+        let mut snapshot = CatalogSnapshot::empty_cost_disabled();
+        snapshot.status = CatalogStatus::Ok;
+        snapshot.models.insert(
+            "claude-sonnet-4-5".to_owned(),
+            Pricing {
+                native: None,
+                model: "claude-sonnet-4-5".to_owned(),
+                input_per_million_usd: UsdPerMillion::from_whole_usd(3),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
+                by_tier: BTreeMap::new(),
+            },
+        );
+        snapshot.cache_creation_per_million_usd.insert(
+            "claude-sonnet-4-5".to_owned(),
+            UsdPerMillion::from_micros_usd(3_750_000),
+        );
+        snapshot.cache_read_per_million_usd.insert(
+            "claude-sonnet-4-5".to_owned(),
+            UsdPerMillion::from_micros_usd(300_000),
+        );
+        snapshot.models.insert(
+            "gpt-native".to_owned(),
+            Pricing {
+                native: Some(ProviderNativePricing {
+                    provider: NativePricingProvider::OpenAi,
+                    ordinary_input: NativePricingRate::known(UsdPerMillion::from_whole_usd(2)),
+                    cached_input_read: NativePricingRate::known(UsdPerMillion::from_micros_usd(
+                        500_000,
+                    )),
+                    cached_input_read_by_tier: BTreeMap::new(),
+                    cached_input_read_above_tokens: BTreeMap::new(),
+                    total_write: BTreeMap::new(),
+                    explicit_resource: Default::default(),
+                }),
+                model: "gpt-native".to_owned(),
+                input_per_million_usd: UsdPerMillion::from_whole_usd(2),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(8),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
+                by_tier: BTreeMap::new(),
+            },
+        );
+        snapshot.models.insert(
+            "claude-haiku-5-5".to_owned(),
+            Pricing {
+                native: None,
+                model: "claude-haiku-5-5".to_owned(),
+                input_per_million_usd: UsdPerMillion::from_micros_usd(100_000),
+                output_per_million_usd: UsdPerMillion::from_micros_usd(500_000),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
+                by_tier: BTreeMap::new(),
+            },
+        );
+        snapshot.cache_creation_per_million_usd.insert(
+            "claude-haiku-5-5".to_owned(),
+            UsdPerMillion::from_micros_usd(125_000),
+        );
+        snapshot.cache_read_per_million_usd.insert(
+            "claude-haiku-5-5".to_owned(),
+            UsdPerMillion::from_micros_usd(10_000),
+        );
+        snapshot.above_tokens_rates.insert(
+            "claude-haiku-5-5".to_owned(),
+            BTreeMap::from([(
+                100_000,
+                cc_lb_pricing::ThresholdBand {
+                    default: cc_lb_pricing::ThresholdRate {
+                        input_per_million_usd: Some(UsdPerMillion::from_micros_usd(500_000)),
+                        output_per_million_usd: Some(UsdPerMillion::from_micros_usd(2_500_000)),
+                        cache_creation_per_million_usd: Some(UsdPerMillion::from_micros_usd(
+                            625_000,
+                        )),
+                        cache_read_per_million_usd: Some(UsdPerMillion::from_micros_usd(50_000)),
+                    },
+                    by_tier: BTreeMap::new(),
+                },
+            )]),
+        );
+        catalog.install_snapshot(snapshot);
+
+        for (target_catalog, model, expected_calls) in [
+            (catalog.as_ref(), "", 0),
+            (catalog.as_ref(), "gpt-native", 0),
+            (catalog.as_ref(), "claude-sonnet-4-5", 0),
+            (catalog.as_ref(), "claude-haiku-5-5", 1),
+        ] {
+            let calls = AtomicUsize::new(0);
+            let _ = super::cache_pricing_summary_for_model_with_estimator(
+                target_catalog,
+                model,
+                None,
+                || {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    Some(120_000)
+                },
+            );
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                expected_calls,
+                "model {model} should invoke estimator {expected_calls} times"
+            );
+        }
+
+        let empty_catalog = PriceCatalog::new_empty();
+        for (model, expected_calls, expected_status) in [
+            ("claude-sonnet-5-5", 0, "known"),
+            ("mystery-model", 0, "unknown"),
+            ("claude-haiku-5-5", 1, "known"),
+        ] {
+            let calls = AtomicUsize::new(0);
+            let summary = super::cache_pricing_summary_for_model_with_estimator(
+                empty_catalog.as_ref(),
+                model,
+                None,
+                || {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    Some(120_000)
+                },
+            );
+            assert_eq!(summary.status, expected_status);
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                expected_calls,
+                "fallback model {model} should invoke estimator {expected_calls} times"
+            );
+        }
+    }
+
+    #[test]
+    fn cacheable_inline_image_stays_on_base_haiku_5_5_band() {
+        let base64_payload = "A".repeat(160_000);
+        let body = serde_json::json!({
+            "model": "claude-haiku-5-5",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": base64_payload,
+                    },
+                    "cache_control": { "type": "ephemeral" }
+                }]
+            }]
+        });
+        let breakpoints = vec![breakpoint(0, 150_000, TtlClass::Ephemeral5m)];
+        let gross_tokens = super::super::limits::estimate_routing_gross_prompt_tokens(
+            Some(&body),
+            "claude-haiku-5-5",
+            Some(crate::provider_capability::ProviderCapability::AnthropicMessages),
+            &breakpoints,
+        )
+        .expect("gross prompt tokens for inline image");
+        assert!(
+            gross_tokens < 10_000,
+            "inline image should use Anthropic allowance (~4,784), got {gross_tokens}"
+        );
+
+        let catalog = PriceCatalog::new_empty();
+        let summary = super::cache_pricing_summary_for_model_with_estimator(
+            catalog.as_ref(),
+            "claude-haiku-5-5",
+            None,
+            || Some(gross_tokens),
+        );
+        assert_eq!(summary.status, "known");
+        assert_eq!(summary.input_micros_per_million, Some(100_000));
+        assert_eq!(summary.cache_creation_5m_micros_per_million, Some(125_000));
+        assert_eq!(summary.cache_read_micros_per_million, Some(10_000));
     }
 
     #[test]

@@ -182,31 +182,20 @@ pub(super) fn estimate_routing_gross_prompt_tokens(
     capability: Option<ProviderCapability>,
     breakpoints: &[CacheBreakpoint],
 ) -> Option<u64> {
-    let max_breakpoint_tokens = breakpoints
-        .iter()
-        .map(|bp| bp.prefix_bytes.as_token_estimate())
-        .max()
-        .unwrap_or(0);
-    if capability == Some(ProviderCapability::AnthropicMessages)
-        && let Some(value) = value
-    {
+    let value = value?;
+    if capability == Some(ProviderCapability::AnthropicMessages) {
         let input = estimate_anthropic_input(value, breakpoints);
-        let whole = input
-            .uncached_input_tokens
-            .saturating_add(input.cache_prefix_5m_tokens)
-            .saturating_add(input.cache_prefix_1h_tokens);
-        return Some(whole.max(max_breakpoint_tokens));
+        return Some(
+            input
+                .uncached_input_tokens
+                .saturating_add(input.cache_prefix_5m_tokens)
+                .saturating_add(input.cache_prefix_1h_tokens),
+        );
     }
-    if let Some(value) = value {
-        let estimated = estimate_provider_input(value, model, capability)
-            .unwrap_or_else(|| estimate_input_tokens(value))
-            .max(0) as u64;
-        return Some(estimated.max(max_breakpoint_tokens));
-    }
-    if !breakpoints.is_empty() {
-        return Some(max_breakpoint_tokens);
-    }
-    None
+    let estimated = estimate_provider_input(value, model, capability)
+        .unwrap_or_else(|| estimate_input_tokens(value))
+        .max(0) as u64;
+    Some(estimated)
 }
 
 pub(crate) const INPUT_ESTIMATE_MAX_NODES: usize = 16_384;
