@@ -104,7 +104,7 @@ impl AuthRejectionGuard {
         Arc::clone(&self.sleep_semaphore).try_acquire_owned().ok()
     }
 
-    fn try_begin_audit(&self, now: Instant) -> Option<(SemaphorePermit<'_>, u64)> {
+    fn try_begin_audit(&self, now: Instant) -> Option<ClaimedRejectAudit<'_>> {
         let permit = self.audit_semaphore.try_acquire().ok()?;
         let allowed = self
             .audit_bucket
@@ -115,13 +115,61 @@ impl AuthRejectionGuard {
             return None;
         }
         let suppressed = self.suppressed_audit_count.swap(0, Ordering::AcqRel);
-        Some((permit, suppressed))
+        Some(ClaimedRejectAudit {
+            guard: self,
+            _permit: permit,
+            suppressed,
+            settled: false,
+        })
     }
 
     fn record_suppressed(&self, count: u64) {
         if count > 0 {
             self.suppressed_audit_count
                 .fetch_add(count, Ordering::Relaxed);
+        }
+    }
+}
+
+/// RAII claim on a rolled-up rejection audit write so neither known write
+/// failures, timeouts, nor future cancellations drop the claimed count.
+struct ClaimedRejectAudit<'a> {
+    guard: &'a AuthRejectionGuard,
+    _permit: SemaphorePermit<'a>,
+    suppressed: u64,
+    settled: bool,
+}
+
+impl ClaimedRejectAudit<'_> {
+    fn suppressed(&self) -> u64 {
+        self.suppressed
+    }
+
+    fn mark_succeeded(mut self) {
+        self.settled = true;
+    }
+
+    fn mark_failed(mut self) {
+        self.settled = true;
+        // Write is known not to have persisted: carry forward prior suppressed
+        // rejections plus this failed attempt.
+        self.guard
+            .record_suppressed(self.suppressed.saturating_add(1));
+    }
+
+    /// Uncertainty policy on timeout or future cancellation: restore only the
+    /// previously claimed `suppressed` count and do not add `+ 1` for the
+    /// in-flight attempt, since the storage write may still commit asynchronously.
+    fn mark_uncertain(mut self) {
+        self.settled = true;
+        self.guard.record_suppressed(self.suppressed);
+    }
+}
+
+impl Drop for ClaimedRejectAudit<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.guard.record_suppressed(self.suppressed);
         }
     }
 }
@@ -294,7 +342,7 @@ pub async fn require_admin_auth(
                     .into_response();
             };
 
-            if let Some((_audit_permit, suppressed)) = guard.try_begin_audit(Instant::now()) {
+            if let Some(claim) = guard.try_begin_audit(Instant::now()) {
                 match tokio::time::timeout(
                     REJECT_AUDIT_WRITE_TIMEOUT,
                     record_auth_rejected_with_suppressed(
@@ -302,14 +350,14 @@ pub async fn require_admin_auth(
                         request.method(),
                         request.uri().path(),
                         error.reason(),
-                        suppressed,
+                        claim.suppressed(),
                     ),
                 )
                 .await
                 {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(())) => claim.mark_succeeded(),
                     Ok(Err(audit_error)) => {
-                        guard.record_suppressed(suppressed);
+                        claim.mark_failed();
                         tracing::warn!(
                             error = %audit_error,
                             reason = error.reason(),
@@ -317,7 +365,7 @@ pub async fn require_admin_auth(
                         );
                     }
                     Err(_) => {
-                        guard.record_suppressed(suppressed);
+                        claim.mark_uncertain();
                         tracing::warn!(
                             reason = error.reason(),
                             timeout_secs = REJECT_AUDIT_WRITE_TIMEOUT.as_secs(),
@@ -387,13 +435,13 @@ mod tests {
         let guard = AuthRejectionGuard::new(4, 2, Duration::from_secs(10));
         let t0 = Instant::now();
 
-        let (p1, sup1) = guard.try_begin_audit(t0).expect("burst 1");
-        assert_eq!(sup1, 0);
-        drop(p1);
+        let claim1 = guard.try_begin_audit(t0).expect("burst 1");
+        assert_eq!(claim1.suppressed(), 0);
+        claim1.mark_succeeded();
 
-        let (p2, sup2) = guard.try_begin_audit(t0).expect("burst 2");
-        assert_eq!(sup2, 0);
-        drop(p2);
+        let claim2 = guard.try_begin_audit(t0).expect("burst 2");
+        assert_eq!(claim2.suppressed(), 0);
+        claim2.mark_succeeded();
 
         // Next 3 calls at t0 exhaust burst and are rolled up into suppressed count.
         for _ in 0..3 {
@@ -402,10 +450,42 @@ mod tests {
         }
 
         // Next audit after refill carries the rolled-up suppressed count.
-        let (p3, sup3) = guard
+        let claim3 = guard
             .try_begin_audit(t0 + Duration::from_secs(10))
             .expect("refill after 10s");
-        assert_eq!(sup3, 3);
-        drop(p3);
+        assert_eq!(claim3.suppressed(), 3);
+        claim3.mark_succeeded();
+        assert_eq!(guard.suppressed_audit_count.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn claimed_reject_audit_preserves_rollup_on_failure_timeout_and_cancellation() {
+        let guard = AuthRejectionGuard::new(4, 10, Duration::from_secs(10));
+        let t0 = Instant::now();
+
+        // 1. Known append failure restores carried suppressed + 1 for the failed attempt.
+        guard.record_suppressed(2);
+        let claim_fail = guard.try_begin_audit(t0).expect("claim fail");
+        assert_eq!(claim_fail.suppressed(), 2);
+        claim_fail.mark_failed();
+        assert_eq!(guard.suppressed_audit_count.load(Ordering::Acquire), 3);
+
+        // 2. Timeout (uncertain write) restores carried suppressed without adding + 1.
+        let claim_timeout = guard.try_begin_audit(t0).expect("claim timeout");
+        assert_eq!(claim_timeout.suppressed(), 3);
+        claim_timeout.mark_uncertain();
+        assert_eq!(guard.suppressed_audit_count.load(Ordering::Acquire), 3);
+
+        // 3. Dropping an unsettled claim (future cancellation) restores carried suppressed.
+        let claim_cancel = guard.try_begin_audit(t0).expect("claim cancel");
+        assert_eq!(claim_cancel.suppressed(), 3);
+        drop(claim_cancel);
+        assert_eq!(guard.suppressed_audit_count.load(Ordering::Acquire), 3);
+
+        // 4. Success clears carried suppressed.
+        let claim_ok = guard.try_begin_audit(t0).expect("claim ok");
+        assert_eq!(claim_ok.suppressed(), 3);
+        claim_ok.mark_succeeded();
+        assert_eq!(guard.suppressed_audit_count.load(Ordering::Acquire), 0);
     }
 }

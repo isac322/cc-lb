@@ -438,6 +438,7 @@ async fn build_admin_app_with_storage_inner(
         storage.clone(),
         scheduler_backend.clone(),
         clock.clone(),
+        Some(aead.clone()),
     ));
     let split_limit_reset_refresh = Arc::new(
         crate::split_ports::SplitSchedulerLimitResetUsageRefresh::new(

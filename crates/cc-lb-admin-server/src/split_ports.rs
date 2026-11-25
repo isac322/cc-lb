@@ -4,21 +4,35 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cc_lb_admin::ports::{SplitManualWarmupError, SplitManualWarmupPort};
+use cc_lb_aead::AeadService;
 use cc_lb_clock::{ClockHandle, unix_secs};
 use cc_lb_control::{
     LimitResetUsageRefresh, LimitResetUsageRefreshPort, ManualWarmupJobResult,
-    SPLIT_BRIDGE_DEFAULT_TIMEOUT, SPLIT_BRIDGE_POLL_INTERVAL, load_manual_warmup_result,
-    load_oauth_usage_refresh_result, oauth_refresh_bridge_idempotency_key,
+    SPLIT_BRIDGE_DEFAULT_TIMEOUT, SPLIT_BRIDGE_POLL_INTERVAL, oauth_refresh_bridge_idempotency_key,
+    take_manual_warmup_result, take_oauth_usage_refresh_result,
 };
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsageRefreshJob;
 use cc_lb_scheduler::jobs::warmup::ManualWarmupJob;
-use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerBackend, SchedulerPushTask, TaskStatus};
+use cc_lb_scheduler::worker::{
+    AdaptiveJob, SchedulerBackend, SchedulerPushTask, SchedulerTaskStatusRow, TaskStatus,
+};
 use cc_lb_signer_anthropic_oauth::{LazyRefreshError, LazyRefreshHandle};
-use cc_lb_storage_api::{Storage, UpstreamStore, WarmupLane};
+use cc_lb_storage_api::{Storage, UpstreamRecord, UpstreamStore, WarmupLane};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+fn task_status_is_active(row: &SchedulerTaskStatusRow) -> bool {
+    matches!(
+        row.status,
+        TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Running
+    ) || (row.status == TaskStatus::Failed && row.attempts < row.max_attempts)
+}
+
+fn task_status_is_terminal(row: &SchedulerTaskStatusRow) -> bool {
+    !task_status_is_active(row)
+}
 
 #[derive(Clone)]
 struct SplitSchedulerBridge {
@@ -192,12 +206,19 @@ impl SplitSchedulerBridge {
 #[derive(Clone)]
 pub struct SplitSchedulerLazyRefresher {
     bridge: SplitSchedulerBridge,
+    aead: Option<Arc<AeadService>>,
 }
 
 impl SplitSchedulerLazyRefresher {
-    pub fn new(storage: Arc<dyn Storage>, backend: SchedulerBackend, clock: ClockHandle) -> Self {
+    pub fn new(
+        storage: Arc<dyn Storage>,
+        backend: SchedulerBackend,
+        clock: ClockHandle,
+        aead: Option<Arc<AeadService>>,
+    ) -> Self {
         Self {
             bridge: SplitSchedulerBridge::new(storage, backend, clock),
+            aead,
         }
     }
 
@@ -205,74 +226,201 @@ impl SplitSchedulerLazyRefresher {
         self.bridge = self.bridge.with_timeout(timeout, poll_interval);
         self
     }
-}
 
-#[async_trait]
-impl LazyRefreshHandle for SplitSchedulerLazyRefresher {
-    async fn refresh_one(&self, upstream_id: Uuid) -> Result<(), LazyRefreshError> {
-        let deadline = self.bridge.deadline();
+    fn plan_oauth_refresh(
+        &self,
+        upstream: &UpstreamRecord,
+        gen_before: u64,
+    ) -> (OAuthRefreshJob, Option<String>) {
+        if let (Some(aead), Some(creds)) =
+            (self.aead.as_deref(), upstream.oauth_credentials.as_ref())
+            && let Ok(bundle) = creds.decrypt(aead, upstream.id.as_bytes())
+        {
+            let job = OAuthRefreshJob::for_credential(
+                upstream.id,
+                gen_before,
+                bundle.expires_at_unix_secs,
+            );
+            let gen_key = job.generation_idempotency_key(gen_before, bundle.expires_at_unix_secs);
+            return (job, Some(gen_key));
+        }
+        (
+            OAuthRefreshJob::with_expected_generation(upstream.id, gen_before),
+            None,
+        )
+    }
+
+    async fn enqueue_or_join_oauth_refresh(
+        &self,
+        upstream_id: Uuid,
+        deadline: Instant,
+    ) -> Result<(u64, Option<String>), BridgeStepError> {
         let upstream = SplitSchedulerBridge::await_bounded(deadline, None, async {
             UpstreamStore::get_by_id(self.bridge.storage.as_ref(), upstream_id)
                 .await
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| "upstream not found".to_owned())
         })
-        .await
-        .map_err(|err| LazyRefreshError::Failed {
-            reason: err.into_reason("oauth refresh was not completed by a proxy scheduler worker"),
-        })?;
+        .await?;
         let gen_before = upstream.oauth_token_generation;
-        let key = oauth_refresh_bridge_idempotency_key(upstream_id, Uuid::new_v4());
-        self.bridge
-            .push_expedited(
-                AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
-                key.clone(),
-                2,
-                None,
-                deadline,
-            )
+        let (job, tagged_gen_key) = self.plan_oauth_refresh(&upstream, gen_before);
+        if let Some(ref gen_key) = tagged_gen_key {
+            let statuses = SplitSchedulerBridge::await_bounded(deadline, None, async {
+                self.bridge
+                    .backend
+                    .get_adaptive_task_statuses_by_key_or_subkey(gen_key)
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await?;
+            if statuses.iter().any(task_status_is_active) {
+                let exact_statuses = SplitSchedulerBridge::await_bounded(deadline, None, async {
+                    self.bridge
+                        .backend
+                        .get_adaptive_task_statuses_by_key(gen_key)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await?;
+                if exact_statuses
+                    .iter()
+                    .any(|row| row.status == TaskStatus::Pending && row.attempts == 0)
+                {
+                    self.bridge
+                        .push_expedited(
+                            AdaptiveJob::OAuthRefresh(job),
+                            gen_key.clone(),
+                            2,
+                            None,
+                            deadline,
+                        )
+                        .await?;
+                }
+            } else {
+                let push_key = if statuses.is_empty() {
+                    gen_key.clone()
+                } else {
+                    format!("{gen_key}:bridge:{}", Uuid::new_v4())
+                };
+                self.bridge
+                    .push_expedited(AdaptiveJob::OAuthRefresh(job), push_key, 2, None, deadline)
+                    .await?;
+            }
+            return Ok((gen_before, tagged_gen_key));
+        }
+
+        let family_prefix = format!("adaptive:oauth_refresh:{upstream_id}:");
+        let active_keys = SplitSchedulerBridge::await_bounded(deadline, None, async {
+            self.bridge
+                .backend
+                .list_active_adaptive_idempotency_keys_by_prefix(&family_prefix)
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await?;
+        if active_keys.is_empty() {
+            let key = oauth_refresh_bridge_idempotency_key(upstream_id, Uuid::new_v4());
+            self.bridge
+                .push_expedited(AdaptiveJob::OAuthRefresh(job), key, 2, None, deadline)
+                .await?;
+        }
+        Ok((gen_before, None))
+    }
+}
+
+#[async_trait]
+impl LazyRefreshHandle for SplitSchedulerLazyRefresher {
+    async fn refresh_one(&self, upstream_id: Uuid) -> Result<(), LazyRefreshError> {
+        let deadline = self.bridge.deadline();
+        let (gen_before, tagged_gen_key) = self
+            .enqueue_or_join_oauth_refresh(upstream_id, deadline)
             .await
             .map_err(|err| LazyRefreshError::Failed {
                 reason: err
                     .into_reason("oauth refresh was not completed by a proxy scheduler worker"),
             })?;
 
-        let settled = self
-            .bridge
-            .poll_until_settled(&key, None, deadline, || async {
-                let latest = UpstreamStore::get_by_id(self.bridge.storage.as_ref(), upstream_id)
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| "upstream not found".to_owned())?;
-                if latest.oauth_token_generation > gen_before {
-                    Ok(Some(()))
-                } else {
-                    Ok(None)
-                }
-            })
-            .await
-            .map_err(|reason| LazyRefreshError::Failed { reason })?;
+        let check_advanced = || async {
+            let latest = UpstreamStore::get_by_id(self.bridge.storage.as_ref(), upstream_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "upstream not found".to_owned())?;
+            Ok::<bool, String>(latest.oauth_token_generation > gen_before)
+        };
 
-        match settled {
-            Some(()) => Ok(()),
-            None => Err(LazyRefreshError::Failed {
-                reason: "oauth refresh was not completed by a proxy scheduler worker".to_owned(),
-            }),
+        loop {
+            match SplitSchedulerBridge::await_bounded(deadline, None, check_advanced()).await {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(BridgeStepError::TimedOut) => {
+                    return Err(LazyRefreshError::Failed {
+                        reason: "oauth refresh was not completed by a proxy scheduler worker"
+                            .to_owned(),
+                    });
+                }
+                Err(BridgeStepError::Failed(reason)) => {
+                    return Err(LazyRefreshError::Failed { reason });
+                }
+            }
+            if let Some(ref gen_key) = tagged_gen_key {
+                let statuses = match SplitSchedulerBridge::await_bounded(deadline, None, async {
+                    self.bridge
+                        .backend
+                        .get_adaptive_task_statuses_by_key_or_subkey(gen_key)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await
+                {
+                    Ok(statuses) => statuses,
+                    Err(BridgeStepError::TimedOut) => {
+                        return Err(LazyRefreshError::Failed {
+                            reason: "oauth refresh was not completed by a proxy scheduler worker"
+                                .to_owned(),
+                        });
+                    }
+                    Err(BridgeStepError::Failed(reason)) => {
+                        return Err(LazyRefreshError::Failed { reason });
+                    }
+                };
+                if !statuses.is_empty() && statuses.iter().all(task_status_is_terminal) {
+                    return match SplitSchedulerBridge::await_bounded(
+                        deadline,
+                        None,
+                        check_advanced(),
+                    )
+                    .await
+                    {
+                        Ok(true) => Ok(()),
+                        Ok(false) | Err(BridgeStepError::TimedOut) => {
+                            Err(LazyRefreshError::Failed {
+                                reason:
+                                    "oauth refresh was not completed by a proxy scheduler worker"
+                                        .to_owned(),
+                            })
+                        }
+                        Err(BridgeStepError::Failed(reason)) => {
+                            Err(LazyRefreshError::Failed { reason })
+                        }
+                    };
+                }
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(LazyRefreshError::Failed {
+                    reason: "oauth refresh was not completed by a proxy scheduler worker"
+                        .to_owned(),
+                });
+            }
+            tokio::time::sleep((deadline - now).min(self.bridge.poll_interval)).await;
         }
     }
 
     async fn enqueue_only(&self, upstream_id: Uuid) -> Result<(), LazyRefreshError> {
         let deadline = self.bridge.deadline();
-        let key = oauth_refresh_bridge_idempotency_key(upstream_id, Uuid::new_v4());
-        self.bridge
-            .push_expedited(
-                AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
-                key,
-                2,
-                None,
-                deadline,
-            )
+        self.enqueue_or_join_oauth_refresh(upstream_id, deadline)
             .await
+            .map(|_| ())
             .map_err(|err| LazyRefreshError::Failed {
                 reason: err.into_reason("oauth refresh enqueue timed out"),
             })
@@ -329,7 +477,7 @@ impl LimitResetUsageRefreshPort for SplitSchedulerLimitResetUsageRefresh {
         match self
             .bridge
             .poll_until_settled(&key, Some(cancel), deadline, || async {
-                load_oauth_usage_refresh_result(self.bridge.storage.as_ref(), upstream_id, nonce)
+                take_oauth_usage_refresh_result(self.bridge.storage.as_ref(), upstream_id, nonce)
                     .await
                     .map_err(|error| error.to_string())
             })
@@ -382,8 +530,11 @@ impl SplitManualWarmupPort for SplitSchedulerManualWarmup {
         candidate_cycle_key: i64,
     ) -> Result<ManualWarmupJobResult, SplitManualWarmupError> {
         let deadline = self.bridge.deadline();
+        let expires_at_unix_secs =
+            unix_secs(self.bridge.clock.now()).saturating_add(self.bridge.timeout.as_secs().max(1));
         let nonce = Uuid::new_v4();
-        let job = ManualWarmupJob::new(upstream_id, lane, holder, candidate_cycle_key, nonce);
+        let job = ManualWarmupJob::new(upstream_id, lane, holder, candidate_cycle_key, nonce)
+            .with_expires_at(expires_at_unix_secs);
         let key = job.idempotency_key();
         self.bridge
             .push_expedited(
@@ -395,7 +546,7 @@ impl SplitManualWarmupPort for SplitSchedulerManualWarmup {
             )
             .await
             .map_err(|err| {
-                SplitManualWarmupError(
+                SplitManualWarmupError::Unavailable(
                     err.into_reason("manual warmup was not completed by a proxy scheduler worker"),
                 )
             })?;
@@ -403,18 +554,40 @@ impl SplitManualWarmupPort for SplitSchedulerManualWarmup {
         let settled = self
             .bridge
             .poll_until_settled(&key, None, deadline, || async {
-                load_manual_warmup_result(self.bridge.storage.as_ref(), upstream_id, lane, nonce)
+                take_manual_warmup_result(self.bridge.storage.as_ref(), upstream_id, lane, nonce)
                     .await
                     .map_err(|error| error.to_string())
             })
             .await
-            .map_err(SplitManualWarmupError)?;
+            .map_err(SplitManualWarmupError::OutcomeUnknown)?;
 
-        settled.ok_or_else(|| {
-            SplitManualWarmupError(
-                "manual warmup was not completed by a proxy scheduler worker".to_owned(),
-            )
-        })
+        if let Some(result) = settled {
+            return Ok(result);
+        }
+        if let Ok(Some(result)) =
+            take_manual_warmup_result(self.bridge.storage.as_ref(), upstream_id, lane, nonce).await
+        {
+            return Ok(result);
+        }
+        let now_secs = unix_secs(self.bridge.clock.now());
+        if now_secs >= expires_at_unix_secs
+            && let Ok(statuses) = self
+                .bridge
+                .backend
+                .get_adaptive_task_statuses_by_key(&key)
+                .await
+            && let Some(row) = statuses.first()
+            && matches!(row.status, TaskStatus::Pending | TaskStatus::Queued)
+            && row.attempts == 0
+        {
+            return Err(SplitManualWarmupError::ExpiredBeforeStart(
+                "manual warmup expired in scheduler queue before a worker started it".to_owned(),
+            ));
+        }
+        Err(SplitManualWarmupError::OutcomeUnknown(
+            "manual warmup did not report a result before deadline and may have started on a worker"
+                .to_owned(),
+        ))
     }
 }
 

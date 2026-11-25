@@ -188,12 +188,16 @@ impl SchedulerDispatch {
             &self.cancel,
         )
         .await;
+        let now_unix_secs = cc_lb_clock::unix_secs(self.clock.now());
         cc_lb_control::record_oauth_usage_refresh_result(
             self.storage.as_ref(),
             job.upstream_id,
+            now_unix_secs,
             cc_lb_control::OAuthUsageRefreshJobResult {
                 nonce: job.nonce,
                 outcome,
+                expires_at_unix_secs: now_unix_secs
+                    .saturating_add(cc_lb_control::SPLIT_BRIDGE_RESULT_TTL_SECS),
             },
         )
         .await

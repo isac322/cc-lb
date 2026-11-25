@@ -1900,10 +1900,57 @@ async fn fire_now_upstream_warmup_inner(
             .and_then(|ports| ports.split_manual_warmup.as_ref())
             .cloned()
     {
-        let result = split_warmup
+        let result = match split_warmup
             .fire_manual_warmup(upstream_id, lane, holder.clone(), candidate_cycle_key)
             .await
-            .map_err(|_| UpstreamError::WarmupUnavailable)?;
+        {
+            Ok(result) => result,
+            Err(crate::ports::SplitManualWarmupError::Unavailable(_)) => {
+                return Err(UpstreamError::WarmupUnavailable);
+            }
+            Err(crate::ports::SplitManualWarmupError::ExpiredBeforeStart(detail)) => {
+                tracing::warn!(
+                    target: "warmup",
+                    upstream_id = %upstream_id,
+                    holder = %holder,
+                    error = %detail,
+                    action = "split_dispatch_expired_before_start"
+                );
+                return Ok(FireNowStage::Finished(
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({
+                            "fired": false,
+                            "lane": lane,
+                            "error": "warmup_expired_before_start",
+                            "detail": detail,
+                        })),
+                    )
+                        .into_response(),
+                ));
+            }
+            Err(crate::ports::SplitManualWarmupError::OutcomeUnknown(detail)) => {
+                tracing::warn!(
+                    target: "warmup",
+                    upstream_id = %upstream_id,
+                    holder = %holder,
+                    error = %detail,
+                    action = "split_dispatch_outcome_unknown"
+                );
+                return Ok(FireNowStage::Finished(
+                    (
+                        StatusCode::GATEWAY_TIMEOUT,
+                        Json(json!({
+                            "fired": false,
+                            "lane": lane,
+                            "error": "warmup_outcome_unknown",
+                            "detail": detail,
+                        })),
+                    )
+                        .into_response(),
+                ));
+            }
+        };
         tracing::info!(
             target: "warmup",
             upstream_id = %upstream_id,

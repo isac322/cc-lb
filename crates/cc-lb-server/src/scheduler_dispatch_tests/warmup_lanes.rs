@@ -586,3 +586,258 @@ async fn dispatch_manual_warmup_records_manual_attempt_and_meta_result() {
         WarmupAttemptOutcome::Skipped(WarmupSkipReason::UpstreamDisabled)
     );
 }
+
+#[tokio::test]
+async fn dispatch_manual_warmup_skips_expired_unstarted_job_before_dispatch() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::routing::post;
+    use cc_lb_scheduler::jobs::warmup::ManualWarmupJob;
+
+    let hit_count = Arc::new(AtomicUsize::new(0));
+    let hit_count_handler = Arc::clone(&hit_count);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock origin");
+    let addr = listener.local_addr().expect("mock addr");
+    let server = tokio::spawn(async move {
+        let router = axum::Router::new().route(
+            "/v1/messages",
+            post(move || {
+                let hit_count = Arc::clone(&hit_count_handler);
+                async move {
+                    hit_count.fetch_add(1, Ordering::SeqCst);
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        axum::serve(listener, router).await.ok();
+    });
+
+    let fixture = Fixture::new().await;
+    let aead = AeadService::from_master_key([9; 32]);
+    let upstream_id = Uuid::new_v4();
+    let bundle = OAuthTokenBundle {
+        access_token: "manual-warmup-expired-token".to_owned(),
+        refresh_token: "manual-warmup-expired-refresh".to_owned(),
+        expires_at_unix_secs: now_unix_secs() + 3_600,
+        refresh_token_expires_at_unix_secs: None,
+        account_id: Some("acct".to_owned()),
+        project_id: None,
+        oauth_profile: GeminiOAuthProfile::default(),
+        scopes: Vec::new(),
+        never_refresh: false,
+    };
+    UpstreamStore::create(
+        fixture.storage.as_ref(),
+        UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
+            id: upstream_id,
+            name: "manual-expired-anthropic".to_owned(),
+            kind: UpstreamKind::AnthropicOauth,
+            base_url: Some(url::Url::parse(&format!("http://{addr}/")).expect("mock URL")),
+            api_key_ciphertext: None,
+            oauth_tokens: Some(OAuthTokensCreate {
+                tokens: EncryptedOAuthTokens::encrypt(&aead, &bundle, upstream_id.as_bytes())
+                    .expect("encrypt credentials"),
+                never_refresh: false,
+            }),
+            warmup_enabled: true,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await
+    .expect("create anthropic upstream");
+
+    let dispatch = fixture.dispatch(Arc::new(FailingPusher));
+    let nonce = Uuid::new_v4();
+    let expired_at = now_unix_secs().saturating_sub(1);
+    let outcome = dispatch
+        .dispatch_entity(AdaptiveJob::ManualWarmup(
+            ManualWarmupJob::new(
+                upstream_id,
+                WarmupLane::Primary,
+                "fire-now:expired".to_owned(),
+                1_700_000_000,
+                nonce,
+            )
+            .with_expires_at(expired_at),
+        ))
+        .await
+        .expect("dispatch expired manual warmup");
+
+    server.abort();
+    assert_eq!(outcome, JobOutcome::Skip);
+    assert_eq!(
+        hit_count.load(Ordering::SeqCst),
+        0,
+        "expired unstarted manual warmup must not dispatch upstream HTTP requests"
+    );
+    let attempts = fixture
+        .storage
+        .list_warmup_attempts_for_upstream(upstream_id, WarmupAttemptListFilters::default())
+        .await
+        .expect("list attempts");
+    assert!(
+        attempts.is_empty(),
+        "expired unstarted manual warmup must not record an execution attempt: {attempts:?}"
+    );
+    assert!(
+        cc_lb_control::load_manual_warmup_result(
+            fixture.storage.as_ref(),
+            upstream_id,
+            WarmupLane::Primary,
+            nonce,
+        )
+        .await
+        .expect("load result")
+        .is_none(),
+        "expired unstarted manual warmup must not record a bridge result"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_manual_warmup_records_observations_on_429_quota_exhausted() {
+    use axum::http::{HeaderMap as AxumHeaderMap, HeaderValue, StatusCode};
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use cc_lb_scheduler::jobs::warmup::ManualWarmupJob;
+
+    let reset_ts = (now_unix_secs() + 100_000).to_string();
+    let reset_header = reset_ts.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock 429 origin");
+    let addr = listener.local_addr().expect("mock addr");
+    let server = tokio::spawn(async move {
+        let router = axum::Router::new().route(
+            "/v1/messages",
+            post(move || {
+                let reset_header = reset_header.clone();
+                async move {
+                    let mut headers = AxumHeaderMap::new();
+                    headers.insert(
+                        "anthropic-ratelimit-unified-7d-utilization",
+                        HeaderValue::from_static("1.00"),
+                    );
+                    headers.insert(
+                        "anthropic-ratelimit-unified-7d-status",
+                        HeaderValue::from_static("rejected"),
+                    );
+                    headers.insert(
+                        "anthropic-ratelimit-unified-7d-reset",
+                        HeaderValue::from_str(&reset_header).expect("reset header"),
+                    );
+                    headers.insert(
+                        "anthropic-ratelimit-unified-representative-claim",
+                        HeaderValue::from_static("seven_day"),
+                    );
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        headers,
+                        r#"{"error":{"type":"rate_limit_error","message":"weekly limit exhausted"}}"#,
+                    )
+                        .into_response()
+                }
+            }),
+        );
+        axum::serve(listener, router).await.ok();
+    });
+
+    let fixture = Fixture::new().await;
+    let aead = AeadService::from_master_key([9; 32]);
+    let upstream_id = Uuid::new_v4();
+    let bundle = OAuthTokenBundle {
+        access_token: "manual-warmup-429-token".to_owned(),
+        refresh_token: "manual-warmup-429-refresh".to_owned(),
+        expires_at_unix_secs: now_unix_secs() + 3_600,
+        refresh_token_expires_at_unix_secs: None,
+        account_id: Some("acct".to_owned()),
+        project_id: None,
+        oauth_profile: GeminiOAuthProfile::default(),
+        scopes: Vec::new(),
+        never_refresh: false,
+    };
+    UpstreamStore::create(
+        fixture.storage.as_ref(),
+        UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
+            id: upstream_id,
+            name: "manual-429-anthropic".to_owned(),
+            kind: UpstreamKind::AnthropicOauth,
+            base_url: Some(url::Url::parse(&format!("http://{addr}/")).expect("mock URL")),
+            api_key_ciphertext: None,
+            oauth_tokens: Some(OAuthTokensCreate {
+                tokens: EncryptedOAuthTokens::encrypt(&aead, &bundle, upstream_id.as_bytes())
+                    .expect("encrypt credentials"),
+                never_refresh: false,
+            }),
+            warmup_enabled: true,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await
+    .expect("create anthropic upstream");
+
+    let mut dispatch = fixture.dispatch(Arc::new(FailingPusher));
+    let (subscription_quota_sink, mut quota_rx) = cc_lb_engine::SubscriptionQuotaSink::new();
+    dispatch.subscription_quota_sink = subscription_quota_sink;
+    let nonce = Uuid::new_v4();
+    let outcome = dispatch
+        .dispatch_entity(AdaptiveJob::ManualWarmup(ManualWarmupJob::new(
+            upstream_id,
+            WarmupLane::Primary,
+            "fire-now:429-exhausted".to_owned(),
+            1_700_000_000,
+            nonce,
+        )))
+        .await
+        .expect("dispatch 429 manual warmup");
+
+    server.abort();
+    assert_eq!(outcome, JobOutcome::Done);
+
+    let attempts = fixture
+        .storage
+        .list_warmup_attempts_for_upstream(upstream_id, WarmupAttemptListFilters::default())
+        .await
+        .expect("list attempts");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].outcome,
+        WarmupAttemptOutcome::Skipped(WarmupSkipReason::SevenDayQuotaExhausted)
+    );
+
+    let snapshots = dispatch.subscription_quota_cache.snapshot_for_upstream(
+        upstream_id,
+        now_unix_secs() * 1_000,
+        1_800,
+    );
+    let seven_day = snapshots
+        .iter()
+        .find(|snap| snap.window == SubscriptionQuotaWindow::SevenDay.as_str())
+        .expect("429 manual warmup must publish 7d quota observation");
+    assert_eq!(
+        seven_day.status.as_deref(),
+        Some(cc_lb_storage_api::SubscriptionQuotaStatus::Rejected.as_str())
+    );
+    assert_eq!(seven_day.utilization, Some(1.0));
+    let mut queued = Vec::new();
+    while let Ok(sample) = quota_rx.try_recv() {
+        queued.push(sample);
+    }
+    assert!(
+        queued
+            .iter()
+            .any(|s| s.upstream_id == upstream_id && s.window == SubscriptionQuotaWindow::SevenDay),
+        "429 manual warmup must enqueue 7d quota sample to sink: {queued:?}"
+    );
+}

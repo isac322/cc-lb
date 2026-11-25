@@ -75,9 +75,15 @@ pub trait SubscriptionQuotaIngestionPort: Send + Sync {
     );
 }
 
-#[derive(Debug, Clone, thiserror::Error)]
-#[error("split manual warmup unavailable: {0}")]
-pub struct SplitManualWarmupError(pub String);
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SplitManualWarmupError {
+    #[error("split manual warmup unavailable: {0}")]
+    Unavailable(String),
+    #[error("split manual warmup expired before starting: {0}")]
+    ExpiredBeforeStart(String),
+    #[error("split manual warmup outcome unknown: {0}")]
+    OutcomeUnknown(String),
+}
 
 #[async_trait]
 pub trait SplitManualWarmupPort: Send + Sync {

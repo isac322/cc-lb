@@ -254,15 +254,52 @@ impl SchedulerBackend {
                 .await?
             }
         };
-        rows.into_iter()
-            .map(|(status, attempts, max_attempts)| {
-                Ok(SchedulerTaskStatusRow {
-                    status: parse_task_status(&status)?,
-                    attempts,
-                    max_attempts,
-                })
-            })
-            .collect()
+        parse_status_rows(rows)
+    }
+
+    /// Reads status/attempt metadata for matching adaptive tasks by exact idempotency key
+    /// or `"{idempotency_key}:*"` subkeys (such as `:watchdog:*` or `:bridge:*` recovery rows).
+    pub async fn get_adaptive_task_statuses_by_key_or_subkey(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Vec<SchedulerTaskStatusRow>, SchedulerError> {
+        let subkey_prefix = format!("{idempotency_key}:");
+        let Some(subkey_upper) = prefix_upper_bound(&subkey_prefix) else {
+            return self
+                .get_adaptive_task_statuses_by_key(idempotency_key)
+                .await;
+        };
+        let rows: Vec<(String, i32, i32)> = match self {
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(sqlite) => {
+                sqlx::query_as(
+                    "SELECT status, attempts, max_attempts FROM Jobs \
+                     WHERE job_type = ?1 \
+                       AND (idempotency_key = ?2 OR (idempotency_key >= ?3 AND idempotency_key < ?4))",
+                )
+                .bind(ADAPTIVE_QUEUE)
+                .bind(idempotency_key)
+                .bind(&subkey_prefix)
+                .bind(subkey_upper)
+                .fetch_all(sqlite.pool())
+                .await?
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => {
+                sqlx::query_as(
+                    "SELECT status, attempts, max_attempts FROM apalis.jobs \
+                     WHERE job_type = $1 \
+                       AND (idempotency_key = $2 OR (idempotency_key >= $3 AND idempotency_key < $4))",
+                )
+                .bind(ADAPTIVE_QUEUE)
+                .bind(idempotency_key)
+                .bind(&subkey_prefix)
+                .bind(subkey_upper)
+                .fetch_all(postgres.pool())
+                .await?
+            }
+        };
+        parse_status_rows(rows)
     }
 
     /// Lists idempotency keys of active adaptive tasks matching `prefix` using the partial
@@ -744,7 +781,20 @@ fn parse_task_status(raw: &str) -> Result<TaskStatus, SchedulerError> {
     }
 }
 
-#[cfg(feature = "sqlite")]
+fn parse_status_rows(
+    rows: Vec<(String, i32, i32)>,
+) -> Result<Vec<SchedulerTaskStatusRow>, SchedulerError> {
+    rows.into_iter()
+        .map(|(status, attempts, max_attempts)| {
+            Ok(SchedulerTaskStatusRow {
+                status: parse_task_status(&status)?,
+                attempts,
+                max_attempts,
+            })
+        })
+        .collect()
+}
+
 fn prefix_upper_bound(prefix: &str) -> Option<String> {
     let mut chars: Vec<char> = prefix.chars().collect();
     while let Some(last) = chars.pop() {

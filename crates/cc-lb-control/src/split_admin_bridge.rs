@@ -10,7 +10,8 @@ use crate::warmup_ports::LimitResetUsageRefresh;
 
 pub const SPLIT_BRIDGE_DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
 pub const SPLIT_BRIDGE_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const MAX_RETAINED_RESULTS_PER_KEY: usize = 4;
+pub const SPLIT_BRIDGE_RESULT_TTL_SECS: u64 = 120;
+const MAX_RETAINED_RESULTS_PER_KEY: usize = 64;
 const MAX_RESULT_CAS_ATTEMPTS: usize = 32;
 
 pub fn oauth_refresh_bridge_idempotency_key(upstream_id: Uuid, nonce: Uuid) -> String {
@@ -42,12 +43,46 @@ pub struct ManualWarmupJobResult {
     pub outcome: WarmupAttemptOutcome,
     pub cycle_key: Option<i64>,
     pub error_detail: Option<String>,
+    #[serde(default)]
+    pub expires_at_unix_secs: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthUsageRefreshJobResult {
     pub nonce: Uuid,
     pub outcome: LimitResetUsageRefresh,
+    #[serde(default)]
+    pub expires_at_unix_secs: u64,
+}
+
+pub trait BridgeResultEntry {
+    fn nonce(&self) -> Uuid;
+    fn expires_at_unix_secs(&self) -> u64;
+    fn set_expires_at_unix_secs(&mut self, expires_at: u64);
+}
+
+impl BridgeResultEntry for ManualWarmupJobResult {
+    fn nonce(&self) -> Uuid {
+        self.nonce
+    }
+    fn expires_at_unix_secs(&self) -> u64 {
+        self.expires_at_unix_secs
+    }
+    fn set_expires_at_unix_secs(&mut self, expires_at: u64) {
+        self.expires_at_unix_secs = expires_at;
+    }
+}
+
+impl BridgeResultEntry for OAuthUsageRefreshJobResult {
+    fn nonce(&self) -> Uuid {
+        self.nonce
+    }
+    fn expires_at_unix_secs(&self) -> u64 {
+        self.expires_at_unix_secs
+    }
+    fn set_expires_at_unix_secs(&mut self, expires_at: u64) {
+        self.expires_at_unix_secs = expires_at;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,14 +100,25 @@ impl<T> Default for BoundedBridgeResults<T> {
 
 impl<T> BoundedBridgeResults<T>
 where
-    T: for<'de> Deserialize<'de>,
+    T: for<'de> Deserialize<'de> + BridgeResultEntry,
 {
     pub fn parse_or_empty(raw: Option<&str>) -> Self {
         raw.and_then(|value| serde_json::from_str::<Self>(value).ok())
             .unwrap_or_default()
     }
 
-    pub fn push_bounded(&mut self, entry: T) {
+    pub fn push_bounded_at(&mut self, mut entry: T, now_unix_secs: u64) {
+        if entry.expires_at_unix_secs() == 0 {
+            entry.set_expires_at_unix_secs(
+                now_unix_secs.saturating_add(SPLIT_BRIDGE_RESULT_TTL_SECS),
+            );
+        }
+        let target_nonce = entry.nonce();
+        self.entries.retain(|existing| {
+            existing.nonce() != target_nonce
+                && (existing.expires_at_unix_secs() == 0
+                    || existing.expires_at_unix_secs() > now_unix_secs)
+        });
         self.entries.push(entry);
         if self.entries.len() > MAX_RETAINED_RESULTS_PER_KEY {
             let overflow = self.entries.len() - MAX_RETAINED_RESULTS_PER_KEY;
@@ -85,15 +131,16 @@ async fn append_bounded_meta_result<T>(
     meta: &dyn MetaStore,
     key: &str,
     result: T,
+    now_unix_secs: u64,
     context: &str,
 ) -> StorageResult<()>
 where
-    T: Clone + Serialize + for<'de> Deserialize<'de>,
+    T: Clone + Serialize + for<'de> Deserialize<'de> + BridgeResultEntry,
 {
     for _ in 0..MAX_RESULT_CAS_ATTEMPTS {
         let existing = meta.get_meta_value(key).await?;
         let mut envelope = BoundedBridgeResults::<T>::parse_or_empty(existing.as_deref());
-        envelope.push_bounded(result.clone());
+        envelope.push_bounded_at(result.clone(), now_unix_secs);
         let encoded = serde_json::to_string(&envelope).map_err(|error| StorageError::Fatal {
             message: format!("serialize {context}: {error}"),
         })?;
@@ -111,14 +158,59 @@ where
     })
 }
 
+async fn take_bounded_meta_result<T>(
+    meta: &dyn MetaStore,
+    key: &str,
+    nonce: Uuid,
+    context: &str,
+) -> StorageResult<Option<T>>
+where
+    T: Clone + Serialize + for<'de> Deserialize<'de> + BridgeResultEntry,
+{
+    for _ in 0..MAX_RESULT_CAS_ATTEMPTS {
+        let existing = meta.get_meta_value(key).await?;
+        let mut envelope = BoundedBridgeResults::<T>::parse_or_empty(existing.as_deref());
+        let Some(pos) = envelope
+            .entries
+            .iter()
+            .rposition(|entry| entry.nonce() == nonce)
+        else {
+            return Ok(None);
+        };
+        let found = envelope.entries.remove(pos);
+        let encoded = serde_json::to_string(&envelope).map_err(|error| StorageError::Fatal {
+            message: format!("serialize {context}: {error}"),
+        })?;
+        if meta
+            .compare_and_put_meta_value(key, existing.as_deref(), &encoded)
+            .await?
+        {
+            return Ok(Some(found));
+        }
+    }
+    Err(StorageError::Conflict {
+        message: format!(
+            "{context} read-consume exceeded {MAX_RESULT_CAS_ATTEMPTS} compare-and-put attempts under contention"
+        ),
+    })
+}
+
 pub async fn record_manual_warmup_result(
     storage: &dyn Storage,
     upstream_id: Uuid,
     lane: WarmupLane,
+    now_unix_secs: u64,
     result: ManualWarmupJobResult,
 ) -> StorageResult<()> {
     let key = manual_warmup_result_meta_key(upstream_id, lane);
-    append_bounded_meta_result(storage, &key, result, "split manual warmup result").await
+    append_bounded_meta_result(
+        storage,
+        &key,
+        result,
+        now_unix_secs,
+        "split manual warmup result",
+    )
+    .await
 }
 
 pub async fn load_manual_warmup_result(
@@ -138,13 +230,31 @@ pub async fn load_manual_warmup_result(
         .find(|entry| entry.nonce == nonce))
 }
 
+pub async fn take_manual_warmup_result(
+    storage: &dyn Storage,
+    upstream_id: Uuid,
+    lane: WarmupLane,
+    nonce: Uuid,
+) -> StorageResult<Option<ManualWarmupJobResult>> {
+    let key = manual_warmup_result_meta_key(upstream_id, lane);
+    take_bounded_meta_result(storage, &key, nonce, "split manual warmup result").await
+}
+
 pub async fn record_oauth_usage_refresh_result(
     storage: &dyn Storage,
     upstream_id: Uuid,
+    now_unix_secs: u64,
     result: OAuthUsageRefreshJobResult,
 ) -> StorageResult<()> {
     let key = oauth_usage_refresh_result_meta_key(upstream_id);
-    append_bounded_meta_result(storage, &key, result, "split usage refresh result").await
+    append_bounded_meta_result(
+        storage,
+        &key,
+        result,
+        now_unix_secs,
+        "split usage refresh result",
+    )
+    .await
 }
 
 pub async fn load_oauth_usage_refresh_result(
@@ -161,6 +271,15 @@ pub async fn load_oauth_usage_refresh_result(
         .into_iter()
         .rev()
         .find(|entry| entry.nonce == nonce))
+}
+
+pub async fn take_oauth_usage_refresh_result(
+    storage: &dyn Storage,
+    upstream_id: Uuid,
+    nonce: Uuid,
+) -> StorageResult<Option<OAuthUsageRefreshJobResult>> {
+    let key = oauth_usage_refresh_result_meta_key(upstream_id);
+    take_bounded_meta_result(storage, &key, nonce, "split usage refresh result").await
 }
 
 #[cfg(test)]
@@ -225,16 +344,21 @@ mod tests {
     }
 
     #[test]
-    fn push_bounded_retains_at_most_four_recent_entries() {
+    fn push_bounded_retains_at_most_max_recent_entries() {
         let mut envelope = BoundedBridgeResults::default();
-        let nonces: Vec<Uuid> = (1..=6).map(Uuid::from_u128).collect();
+        let total = MAX_RETAINED_RESULTS_PER_KEY + 2;
+        let nonces: Vec<Uuid> = (1..=total).map(|i| Uuid::from_u128(i as u128)).collect();
         for &nonce in &nonces {
-            envelope.push_bounded(OAuthUsageRefreshJobResult {
-                nonce,
-                outcome: LimitResetUsageRefresh::Refreshed,
-            });
+            envelope.push_bounded_at(
+                OAuthUsageRefreshJobResult {
+                    nonce,
+                    outcome: LimitResetUsageRefresh::Refreshed,
+                    expires_at_unix_secs: 1_120,
+                },
+                1_000,
+            );
         }
-        assert_eq!(envelope.entries.len(), 4);
+        assert_eq!(envelope.entries.len(), MAX_RETAINED_RESULTS_PER_KEY);
         assert_eq!(
             envelope.entries.iter().map(|e| e.nonce).collect::<Vec<_>>(),
             nonces[2..].to_vec()
@@ -258,7 +382,9 @@ mod tests {
                 outcome: WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
                 cycle_key: Some(42),
                 error_detail: None,
+                expires_at_unix_secs: 1_120,
             },
+            1_000,
             "split manual warmup result",
         )
         .await
@@ -276,7 +402,9 @@ mod tests {
                 outcome: WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
                 cycle_key: Some(43),
                 error_detail: None,
+                expires_at_unix_secs: 1_120,
             },
+            1_000,
             "split manual warmup result",
         )
         .await
@@ -297,7 +425,7 @@ mod tests {
         storage.initialize().await.expect("init sqlite");
 
         let upstream_id = Uuid::new_v4();
-        let warmup_nonces: Vec<Uuid> = (0..4).map(|_| Uuid::new_v4()).collect();
+        let warmup_nonces: Vec<Uuid> = (0..12).map(|_| Uuid::new_v4()).collect();
         let mut warmup_set = tokio::task::JoinSet::new();
         for &nonce in &warmup_nonces {
             let storage = Arc::clone(&storage);
@@ -306,11 +434,13 @@ mod tests {
                     storage.as_ref(),
                     upstream_id,
                     WarmupLane::Primary,
+                    1_000,
                     ManualWarmupJobResult {
                         nonce,
                         outcome: WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
                         cycle_key: Some(10),
                         error_detail: None,
+                        expires_at_unix_secs: 1_120,
                     },
                 )
                 .await
@@ -320,22 +450,70 @@ mod tests {
             res.expect("task join")
                 .expect("concurrent warmup CAS write must succeed");
         }
-        for nonce in warmup_nonces {
+        // Record one already-expired entry before adding a fresh one to verify expiry pruning.
+        let expired_nonce = Uuid::new_v4();
+        record_manual_warmup_result(
+            storage.as_ref(),
+            upstream_id,
+            WarmupLane::Primary,
+            1_000,
+            ManualWarmupJobResult {
+                nonce: expired_nonce,
+                outcome: WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
+                cycle_key: Some(10),
+                error_detail: None,
+                expires_at_unix_secs: 1_005,
+            },
+        )
+        .await
+        .expect("record expired warmup");
+        let fresh_nonce = Uuid::new_v4();
+        record_manual_warmup_result(
+            storage.as_ref(),
+            upstream_id,
+            WarmupLane::Primary,
+            1_010,
+            ManualWarmupJobResult {
+                nonce: fresh_nonce,
+                outcome: WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
+                cycle_key: Some(11),
+                error_detail: None,
+                expires_at_unix_secs: 1_130,
+            },
+        )
+        .await
+        .expect("record fresh warmup");
+        assert!(
+            load_manual_warmup_result(
+                storage.as_ref(),
+                upstream_id,
+                WarmupLane::Primary,
+                expired_nonce,
+            )
+            .await
+            .expect("load expired warmup")
+            .is_none(),
+            "expired manual warmup result must be pruned on next write"
+        );
+        for nonce in warmup_nonces
+            .into_iter()
+            .chain(std::iter::once(fresh_nonce))
+        {
             assert!(
-                load_manual_warmup_result(
+                take_manual_warmup_result(
                     storage.as_ref(),
                     upstream_id,
                     WarmupLane::Primary,
                     nonce
                 )
                 .await
-                .expect("load warmup")
+                .expect("take warmup")
                 .is_some(),
                 "lost concurrent manual warmup nonce {nonce}"
             );
         }
 
-        let usage_nonces: Vec<Uuid> = (0..4).map(|_| Uuid::new_v4()).collect();
+        let usage_nonces: Vec<Uuid> = (0..12).map(|_| Uuid::new_v4()).collect();
         let mut usage_set = tokio::task::JoinSet::new();
         for &nonce in &usage_nonces {
             let storage = Arc::clone(&storage);
@@ -343,9 +521,11 @@ mod tests {
                 record_oauth_usage_refresh_result(
                     storage.as_ref(),
                     upstream_id,
+                    1_000,
                     OAuthUsageRefreshJobResult {
                         nonce,
                         outcome: LimitResetUsageRefresh::Refreshed,
+                        expires_at_unix_secs: 1_120,
                     },
                 )
                 .await
@@ -357,9 +537,9 @@ mod tests {
         }
         for nonce in usage_nonces {
             assert!(
-                load_oauth_usage_refresh_result(storage.as_ref(), upstream_id, nonce)
+                take_oauth_usage_refresh_result(storage.as_ref(), upstream_id, nonce)
                     .await
-                    .expect("load usage refresh")
+                    .expect("take usage refresh")
                     .is_some(),
                 "lost concurrent usage refresh nonce {nonce}"
             );

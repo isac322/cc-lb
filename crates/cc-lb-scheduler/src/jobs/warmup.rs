@@ -57,6 +57,8 @@ pub struct ManualWarmupJob {
     pub nonce: Uuid,
     #[serde(default)]
     pub traceparent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_unix_secs: Option<u64>,
 }
 
 impl ManualWarmupJob {
@@ -74,7 +76,13 @@ impl ManualWarmupJob {
             candidate_cycle_key,
             nonce,
             traceparent: None,
+            expires_at_unix_secs: None,
         }
+    }
+
+    pub const fn with_expires_at(mut self, expires_at_unix_secs: u64) -> Self {
+        self.expires_at_unix_secs = Some(expires_at_unix_secs);
+        self
     }
 
     pub fn idempotency_key(&self) -> String {
@@ -172,5 +180,23 @@ mod tests {
             job.idempotency_key(),
             format!("split_manual_warmup:{ID}:third_party:{nonce}")
         );
+    }
+
+    #[test]
+    fn manual_warmup_job_with_expires_at_round_trips() {
+        let nonce = Uuid::from_u128(0x77);
+        let job = ManualWarmupJob::new(
+            id(),
+            WarmupLane::Primary,
+            "fire-now:expiry".to_owned(),
+            1_700_000_000,
+            nonce,
+        )
+        .with_expires_at(1_700_000_015);
+        let encoded = serde_json::to_value(&job).expect("serialize");
+        assert_eq!(encoded["expires_at_unix_secs"], 1_700_000_015);
+        let decoded: ManualWarmupJob = serde_json::from_value(encoded).expect("deserialize");
+        assert_eq!(decoded, job);
+        assert_eq!(decoded.expires_at_unix_secs, Some(1_700_000_015));
     }
 }

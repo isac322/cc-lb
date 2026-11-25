@@ -726,7 +726,13 @@ mod sqlite_tests {
         )
         .await
         .expect_err("no worker should time out gracefully");
-        assert!(unserviced_err.to_string().contains("not completed"));
+        assert!(
+            matches!(
+                unserviced_err,
+                cc_lb_admin::ports::SplitManualWarmupError::OutcomeUnknown(_)
+            ),
+            "unexpected error: {unserviced_err}"
+        );
 
         // 2. Full HTTP route on split admin enqueues ManualWarmupJob and returns 200 once worker settles it.
         let mut cfg = Config {
@@ -769,10 +775,12 @@ mod sqlite_tests {
                     }
                     _ => None,
                 }) {
+                    let now_secs = cc_lb_clock::unix_secs(std::time::SystemTime::now());
                     cc_lb_control::record_manual_warmup_result(
                         storage_for_worker.as_ref(),
                         job.upstream_id,
                         job.lane,
+                        now_secs,
                         cc_lb_control::ManualWarmupJobResult {
                             nonce: job.nonce,
                             outcome: cc_lb_storage_api::WarmupAttemptOutcome::Success(
@@ -780,6 +788,8 @@ mod sqlite_tests {
                             ),
                             cycle_key: Some(job.candidate_cycle_key),
                             error_detail: None,
+                            expires_at_unix_secs: now_secs
+                                .saturating_add(cc_lb_control::SPLIT_BRIDGE_RESULT_TTL_SECS),
                         },
                     )
                     .await
@@ -926,12 +936,16 @@ mod sqlite_tests {
                     }
                     _ => None,
                 }) {
+                    let now_secs = cc_lb_clock::unix_secs(std::time::SystemTime::now());
                     cc_lb_control::record_oauth_usage_refresh_result(
                         s_usage.as_ref(),
                         job.upstream_id,
+                        now_secs,
                         cc_lb_control::OAuthUsageRefreshJobResult {
                             nonce: job.nonce,
                             outcome: cc_lb_control::LimitResetUsageRefresh::Refreshed,
+                            expires_at_unix_secs: now_secs
+                                .saturating_add(cc_lb_control::SPLIT_BRIDGE_RESULT_TTL_SECS),
                         },
                     )
                     .await
@@ -958,6 +972,7 @@ mod sqlite_tests {
             storage_arc.clone(),
             backend.clone(),
             clock.clone(),
+            Some(aead.clone()),
         )
         .with_timeout(
             std::time::Duration::from_millis(120),
@@ -973,6 +988,7 @@ mod sqlite_tests {
             storage_arc.clone(),
             backend.clone(),
             clock.clone(),
+            Some(aead.clone()),
         );
         let s_lazy = storage_arc.clone();
         let aead_lazy = aead.clone();
@@ -1126,6 +1142,536 @@ mod sqlite_tests {
         assert!(
             (body["windows"][0]["utilization"].as_f64().unwrap() - 0.35).abs() < 1e-6,
             "expected split admin aggregate to use durable latest rows: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_lazy_refresher_joins_active_generation_and_watchdog_jobs() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let sqlite_path = dir.path().join("storage.sqlite");
+        let aead = Arc::new(AeadService::from_master_key([0u8; 32]));
+        let clock: ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+        let database_url = format!("sqlite://{}", sqlite_path.display());
+        let storage_arc = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+                .await
+                .expect("open sqlite"),
+        );
+        storage_arc.initialize().await.expect("init sqlite");
+
+        let upstream_id = Uuid::new_v4();
+        let expires_at = 1_900_000_000u64;
+        let bundle = cc_lb_aead::OAuthTokenBundle {
+            access_token: "old-access".to_owned(),
+            refresh_token: "refresh-token".to_owned(),
+            expires_at_unix_secs: expires_at,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: Some("acct".to_owned()),
+            project_id: None,
+            oauth_profile: cc_lb_aead::GeminiOAuthProfile::default(),
+            scopes: Vec::new(),
+            never_refresh: false,
+        };
+        UpstreamStore::create(
+            storage_arc.as_ref(),
+            UpstreamCreate {
+                id: upstream_id,
+                name: "split-lazy-join-oauth".to_owned(),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url: Some(
+                    url::Url::parse("https://api.anthropic.com/").expect("valid base url"),
+                ),
+                api_key_ciphertext: None,
+                oauth_tokens: Some(cc_lb_storage_api::OAuthTokensCreate {
+                    tokens: cc_lb_aead::EncryptedOAuthTokens::encrypt(
+                        &aead,
+                        &bundle,
+                        upstream_id.as_bytes(),
+                    )
+                    .expect("encrypt bundle"),
+                    never_refresh: false,
+                }),
+                warmup_enabled: true,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
+            },
+        )
+        .await
+        .expect("seed oauth upstream");
+
+        let storage_cfg = StorageConfig::Sqlite { path: sqlite_path };
+        let worker_scheduler = cc_lb_scheduler::factory::open_scheduler_storage_with_role(
+            &storage_cfg,
+            &cc_lb_config::SchedulerConfig::default(),
+            cc_lb_scheduler::factory::SchedulerPoolRole::Worker,
+            clock.clone(),
+        )
+        .await
+        .expect("open worker scheduler");
+        let backend = worker_scheduler.lazy_handle();
+
+        // 1. Pre-seed exact generation-keyed job: SplitSchedulerLazyRefresher joins/expedites without conflict.
+        let initial = UpstreamStore::get_by_id(storage_arc.as_ref(), upstream_id)
+            .await
+            .expect("get")
+            .expect("exists");
+        let gen0 = initial.oauth_token_generation;
+        let job0 = cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob::for_credential(
+            upstream_id,
+            gen0,
+            expires_at,
+        );
+        let gen0_key = job0.generation_idempotency_key(gen0, expires_at);
+        backend
+            .push_adaptive_task(cc_lb_scheduler::worker::SchedulerPushTask {
+                args: cc_lb_scheduler::worker::AdaptiveJob::OAuthRefresh(job0),
+                idempotency_key: Some(gen0_key.clone()),
+                run_at_unix_secs: None,
+                max_attempts: None,
+            })
+            .await
+            .expect("seed exact generation job");
+
+        let refresher = cc_lb_admin_server::split_ports::SplitSchedulerLazyRefresher::new(
+            storage_arc.clone(),
+            backend.clone(),
+            clock.clone(),
+            Some(aead.clone()),
+        );
+
+        let b1 = backend.clone();
+        let s1 = storage_arc.clone();
+        let a1 = aead.clone();
+        let bundle1 = bundle.clone();
+        let exact_key = gen0_key.clone();
+        let worker1 = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            let tasks = b1
+                .list_adaptive_tasks(&cc_lb_scheduler::worker::Filter {
+                    status: Some(cc_lb_scheduler::worker::TaskStatus::Pending),
+                    page: 1,
+                    page_size: Some(20),
+                })
+                .await
+                .expect("list");
+            let matching: Vec<_> = tasks
+                .into_iter()
+                .filter(|row| {
+                    matches!(
+                        &row.args,
+                        cc_lb_scheduler::worker::AdaptiveJob::OAuthRefresh(j) if j.upstream_id == upstream_id
+                    )
+                })
+                .collect();
+            assert_eq!(
+                matching.len(),
+                1,
+                "must expedite existing exact generation job without creating a duplicate"
+            );
+            assert_eq!(
+                matching[0].idempotency_key.as_deref(),
+                Some(exact_key.as_str())
+            );
+
+            let current = UpstreamStore::get_by_id(s1.as_ref(), upstream_id)
+                .await
+                .expect("get")
+                .expect("exists");
+            let encrypted =
+                cc_lb_aead::EncryptedOAuthTokens::encrypt(&a1, &bundle1, upstream_id.as_bytes())
+                    .expect("encrypt");
+            UpstreamStore::store_oauth_tokens(
+                s1.as_ref(),
+                upstream_id,
+                current.revision,
+                encrypted,
+                false,
+            )
+            .await
+            .expect("bump gen0 -> gen1");
+        });
+        cc_lb_signer_anthropic_oauth::LazyRefreshHandle::refresh_one(&refresher, upstream_id)
+            .await
+            .expect("joins exact generation job and succeeds once generation bumps");
+        worker1.await.expect("worker1 done");
+
+        // 2. Pre-seed `:watchdog:` subkeyed job on the new generation: refresher joins it without pushing another row.
+        let after_gen1 = UpstreamStore::get_by_id(storage_arc.as_ref(), upstream_id)
+            .await
+            .expect("get")
+            .expect("exists");
+        let gen1 = after_gen1.oauth_token_generation;
+        assert!(gen1 > gen0);
+        let job1 = cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob::for_credential(
+            upstream_id,
+            gen1,
+            expires_at,
+        );
+        let watchdog_key = format!(
+            "{}:watchdog:test",
+            job1.generation_idempotency_key(gen1, expires_at)
+        );
+        backend
+            .push_adaptive_task(cc_lb_scheduler::worker::SchedulerPushTask {
+                args: cc_lb_scheduler::worker::AdaptiveJob::OAuthRefresh(job1),
+                idempotency_key: Some(watchdog_key.clone()),
+                run_at_unix_secs: None,
+                max_attempts: None,
+            })
+            .await
+            .expect("seed watchdog job");
+
+        let b2 = backend.clone();
+        let s2 = storage_arc.clone();
+        let a2 = aead.clone();
+        let bundle2 = bundle.clone();
+        let expected_watchdog_key = watchdog_key.clone();
+        let worker2 = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            let tasks = b2
+                .list_adaptive_tasks(&cc_lb_scheduler::worker::Filter {
+                    status: Some(cc_lb_scheduler::worker::TaskStatus::Pending),
+                    page: 1,
+                    page_size: Some(20),
+                })
+                .await
+                .expect("list");
+            let matching: Vec<_> = tasks
+                .into_iter()
+                .filter(|row| {
+                    matches!(
+                        &row.args,
+                        cc_lb_scheduler::worker::AdaptiveJob::OAuthRefresh(j)
+                            if j.upstream_id == upstream_id && j.expected_generation == Some(gen1)
+                    )
+                })
+                .collect();
+            assert_eq!(
+                matching.len(),
+                1,
+                "must join existing active :watchdog: job without enqueuing a duplicate row: {:?}",
+                matching
+                    .iter()
+                    .map(|r| r.idempotency_key.as_deref())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                matching[0].idempotency_key.as_deref(),
+                Some(expected_watchdog_key.as_str())
+            );
+
+            let current = UpstreamStore::get_by_id(s2.as_ref(), upstream_id)
+                .await
+                .expect("get")
+                .expect("exists");
+            let encrypted =
+                cc_lb_aead::EncryptedOAuthTokens::encrypt(&a2, &bundle2, upstream_id.as_bytes())
+                    .expect("encrypt");
+            UpstreamStore::store_oauth_tokens(
+                s2.as_ref(),
+                upstream_id,
+                current.revision,
+                encrypted,
+                false,
+            )
+            .await
+            .expect("bump gen1 -> gen2");
+        });
+        cc_lb_signer_anthropic_oauth::LazyRefreshHandle::refresh_one(&refresher, upstream_id)
+            .await
+            .expect("joins :watchdog: job and succeeds once generation bumps");
+        worker2.await.expect("worker2 done");
+    }
+
+    #[tokio::test]
+    async fn split_admin_fire_now_reports_503_expired_before_start_and_504_outcome_unknown_with_audit()
+     {
+        use cc_lb_storage_api::{AuditQueryScope, AuditStore as _};
+
+        struct NoopSplitSignerFactory;
+
+        impl cc_lb_upstream::ApiKeyAwareSignerFactory for NoopSplitSignerFactory {
+            fn with_router_choice(
+                &self,
+                _router_chosen_upstream_name: String,
+            ) -> Arc<dyn cc_lb_upstream::SignerFactory> {
+                Arc::new(NoopSplitSignerFactory)
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl cc_lb_upstream::SignerFactory for NoopSplitSignerFactory {
+            async fn build(
+                &self,
+                _upstream: &cc_lb_domain::Upstream,
+            ) -> Result<Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError> {
+                Err(cc_lb_upstream::SignerError::MissingCredentials {
+                    reason: "noop".to_owned(),
+                })
+            }
+        }
+
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var(TEST_TOKEN_ENV, TEST_TOKEN);
+        }
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let sqlite_path = dir.path().join("storage.sqlite");
+        let aead = Arc::new(AeadService::from_master_key([0u8; 32]));
+        let test_clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let clock: ClockHandle = test_clock.clone();
+        let database_url = format!("sqlite://{}", sqlite_path.display());
+        let storage_arc = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+                .await
+                .expect("open sqlite"),
+        );
+        storage_arc.initialize().await.expect("init sqlite");
+
+        let upstream_id = Uuid::new_v4();
+        let bundle = cc_lb_aead::OAuthTokenBundle {
+            access_token: "access".to_owned(),
+            refresh_token: "refresh".to_owned(),
+            expires_at_unix_secs: 1_900_000_000,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: Some("acct".to_owned()),
+            project_id: None,
+            oauth_profile: cc_lb_aead::GeminiOAuthProfile::default(),
+            scopes: Vec::new(),
+            never_refresh: false,
+        };
+        UpstreamStore::create(
+            storage_arc.as_ref(),
+            UpstreamCreate {
+                id: upstream_id,
+                name: "split-fire-now-errors".to_owned(),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url: Some(
+                    url::Url::parse("https://api.anthropic.com/").expect("valid base url"),
+                ),
+                api_key_ciphertext: None,
+                oauth_tokens: Some(cc_lb_storage_api::OAuthTokensCreate {
+                    tokens: cc_lb_aead::EncryptedOAuthTokens::encrypt(
+                        &aead,
+                        &bundle,
+                        upstream_id.as_bytes(),
+                    )
+                    .expect("encrypt"),
+                    never_refresh: false,
+                }),
+                warmup_enabled: true,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
+            },
+        )
+        .await
+        .expect("seed oauth upstream");
+
+        let storage_cfg = StorageConfig::Sqlite {
+            path: sqlite_path.clone(),
+        };
+        let worker_scheduler = cc_lb_scheduler::factory::open_scheduler_storage_with_role(
+            &storage_cfg,
+            &cc_lb_config::SchedulerConfig::default(),
+            cc_lb_scheduler::factory::SchedulerPoolRole::Worker,
+            clock.clone(),
+        )
+        .await
+        .expect("open worker scheduler");
+        let worker_backend = worker_scheduler.lazy_handle();
+
+        let mut cfg = Config {
+            storage: storage_cfg,
+            ..Config::default()
+        };
+        cfg.runtime.data_dir = Some(dir.path().to_path_buf());
+        cfg.admin.auth.providers = vec![AdminAuthProviderConfig::StaticToken {
+            id: "split-test-token".to_owned(),
+            token_env: TEST_TOKEN_ENV.to_owned(),
+        }];
+        let admin_auth = Arc::new(cc_lb_admin::auth::AdminAuthenticator::new(
+            cc_lb_admin::auth::build_providers(&cfg.admin.auth).expect("auth providers"),
+        ));
+        let post_commit_tracker = cc_lb_control::PostCommitTracker::default();
+        let split_manual_warmup = Arc::new(
+            cc_lb_admin_server::split_ports::SplitSchedulerManualWarmup::new(
+                storage_arc.clone(),
+                worker_backend.clone(),
+                clock.clone(),
+            )
+            .with_timeout(
+                std::time::Duration::from_millis(80),
+                std::time::Duration::from_millis(10),
+            ),
+        );
+        let dynamic_view = Arc::new(cc_lb_control::DynamicViewHolder::new(
+            cc_lb_control::DynamicViewBuilder::new(0)
+                .signer_factory(Arc::new(NoopSplitSignerFactory))
+                .principal_view(Arc::new(
+                    cc_lb_control::api_keys::principal_view::PrincipalView::from_db(
+                        &[],
+                        std::collections::HashMap::new(),
+                    ),
+                ))
+                .upstream_status_snapshot(
+                    Arc::new(cc_lb_control::UpstreamStatusSnapshot::default()),
+                )
+                .build(),
+        ));
+        let state = cc_lb_admin::AdminState {
+            build: cc_lb_admin::AdminBuildInfo {
+                git_sha: "test",
+                rustc: "test",
+                profile: "test",
+                target: "test",
+            },
+            config_path: None,
+            startup_config_overrides: Default::default(),
+            storage: Some(storage_arc.clone()),
+            key_store: Some(Arc::new(cc_lb_control::api_keys::key_store::KeyStore::new(
+                storage_arc.clone(),
+            ))),
+            aead,
+            lifecycle: Some(cc_lb_admin::AdminPorts {
+                warmup: None,
+                subscription_quota_ingestion: None,
+                replica_identity: None,
+                split_manual_warmup: Some(split_manual_warmup),
+            }),
+            lazy_refresher: None,
+            runtime: None,
+            data_dir: Some(dir.path().to_path_buf()),
+            warmup_dialect_dispatcher: None,
+            warmup_window_verifier: None,
+            limit_reset_usage_refresh: None,
+            dynamic_view,
+            config: Arc::new(cfg),
+            dynamic_view_rebinder: None,
+            scheduler: None,
+            admin_auth,
+            start_time: std::time::Instant::now(),
+            event_bus: None,
+            storage_tail: cc_lb_admin::events::storage_tail_channel(),
+            clock: clock.clone(),
+            anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
+                .expect("anthropic org api"),
+            post_commit_tracker: post_commit_tracker.clone(),
+        };
+        let router = cc_lb_admin::router(state);
+
+        // 1. Advance TestClock past expiry while task remains Pending (attempts == 0) -> 503 warmup_expired_before_start + audit row.
+        let b_expired = worker_backend.clone();
+        let clock_advance = test_clock.clone();
+        let expirer = tokio::spawn(async move {
+            for _ in 0..100 {
+                let tasks = b_expired
+                    .list_adaptive_tasks(&cc_lb_scheduler::worker::Filter {
+                        status: Some(cc_lb_scheduler::worker::TaskStatus::Pending),
+                        page: 1,
+                        page_size: Some(20),
+                    })
+                    .await
+                    .expect("list");
+                if tasks.iter().any(|row| {
+                    matches!(
+                        &row.args,
+                        cc_lb_scheduler::worker::AdaptiveJob::ManualWarmup(j) if j.upstream_id == upstream_id
+                    )
+                }) {
+                    clock_advance.advance_secs(5);
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            panic!("expected ManualWarmupJob to be queued");
+        });
+
+        let resp_503 = router
+            .clone()
+            .oneshot(
+                Request::post(format!("/admin/v1/upstreams/{upstream_id}/warmup/fire-now"))
+                    .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "lane": "primary" }).to_string()))
+                    .expect("503 request"),
+            )
+            .await
+            .expect("503 response");
+        assert_eq!(resp_503.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body_503: Value = serde_json::from_slice(
+            &resp_503
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("json");
+        assert_eq!(body_503["fired"], false);
+        assert_eq!(body_503["error"], "warmup_expired_before_start");
+        expirer.await.expect("expirer done");
+
+        // 2. Without clock passing expiry when deadline elapses (indeterminate outcome) -> 504 warmup_outcome_unknown + audit row.
+        let resp_504 = router
+            .oneshot(
+                Request::post(format!("/admin/v1/upstreams/{upstream_id}/warmup/fire-now"))
+                    .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "lane": "primary" }).to_string()))
+                    .expect("504 request"),
+            )
+            .await
+            .expect("504 response");
+        assert_eq!(resp_504.status(), StatusCode::GATEWAY_TIMEOUT);
+        let body_504: Value = serde_json::from_slice(
+            &resp_504
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("json");
+        assert_eq!(body_504["fired"], false);
+        assert_eq!(body_504["error"], "warmup_outcome_unknown");
+
+        post_commit_tracker.wait_idle().await;
+        let audits = storage_arc
+            .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 20, true)
+            .await
+            .expect("query audit rows");
+        let statuses: Vec<(u16, Option<&str>, Option<&str>)> = audits
+            .iter()
+            .filter(|entry| entry.admin_action.as_deref() == Some("upstream_warmup_fire_now"))
+            .map(|entry| {
+                (
+                    entry.status,
+                    entry.actor_authority.as_deref(),
+                    entry.actor_subject.as_deref(),
+                )
+            })
+            .collect();
+        assert!(
+            statuses.contains(&(503, Some("static_token"), Some("split-test-token")))
+                || statuses
+                    .iter()
+                    .any(|(s, _, subj)| *s == 503 && *subj == Some("split-test-token")),
+            "expected 503 audit row attributed to split-test-token actor: {audits:?}"
+        );
+        assert!(
+            statuses
+                .iter()
+                .any(|(s, _, subj)| *s == 504 && *subj == Some("split-test-token")),
+            "expected 504 audit row attributed to split-test-token actor: {audits:?}"
         );
     }
 }

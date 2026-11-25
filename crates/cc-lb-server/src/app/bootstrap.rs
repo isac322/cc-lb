@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Router;
+use axum::body::Body;
+use axum::http::Request as HttpRequest;
 use cc_lb_aead::AeadService;
 use cc_lb_clock::ClockHandle;
 use cc_lb_config::{Config, TlsConfig};
@@ -35,11 +37,16 @@ use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{ManagedKeyStore, RuntimeChangeNotifier, Storage};
 use cc_lb_upstream::SignedRequest;
 use futures_util::stream::FuturesUnordered;
+use hyper::body::Incoming;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as HyperAutoBuilder;
+use hyper_util::service::TowerToHyperService;
 use thiserror::Error;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
-use tokio::task::{JoinError, JoinHandle};
+use tokio::task::{JoinError, JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
+use tower::ServiceExt as _;
 
 use crate::dynamic_view_builder::{
     DynamicViewPluginScope, Stores as DynamicStores, VertexState, build_dynamic_view_with_scope,
@@ -300,11 +307,12 @@ pub(super) async fn serve_runtime(
         let admin_listener = TcpListener::bind(admin_addr).await?;
         cc_lb_runtime_sync::warn_if_container_loopback_bind("admin", admin_addr);
         let (admin_stop_tx, admin_shutdown) = watch::channel(false);
-        let admin_task = tokio::spawn(async move {
-            axum::serve(admin_listener, admin_router)
-                .with_graceful_shutdown(signal::wait_for_shutdown(admin_shutdown))
-                .await
-        });
+        let admin_task = tokio::spawn(serve_admin_until_shutdown(
+            admin_listener,
+            admin_router,
+            admin_shutdown,
+            SHUTDOWN_TASK_TIMEOUT,
+        ));
         Some((admin_stop_tx, admin_task, admin_post_commit_tracker))
     } else {
         None
@@ -399,7 +407,15 @@ pub(super) async fn serve_runtime(
     }
     if let Some((admin_stop_tx, admin_task, admin_post_commit_tracker)) = admin_handle {
         let _ = admin_stop_tx.send(true);
-        cc_lb_runtime_sync::await_or_abort(admin_task, SHUTDOWN_TASK_TIMEOUT).await;
+        // `serve_admin_until_shutdown` internally bounds connection draining to
+        // `SHUTDOWN_TASK_TIMEOUT` and then aborts + joins all live connections; give the outer
+        // await enough headroom to let that abort-and-join loop complete before waiting on
+        // post-commit tasks spawned by active handlers.
+        cc_lb_runtime_sync::await_or_abort(
+            admin_task,
+            SHUTDOWN_TASK_TIMEOUT + Duration::from_secs(2),
+        )
+        .await;
         if tokio::time::timeout(
             DURABLE_WRITER_SHUTDOWN_TIMEOUT,
             admin_post_commit_tracker.wait_idle(),
@@ -1952,6 +1968,98 @@ pub(super) fn claude_default_snapshot(
     }
 }
 
+pub(super) async fn serve_admin_until_shutdown(
+    mut listener: TcpListener,
+    router: Router,
+    shutdown_rx: watch::Receiver<bool>,
+    drain_timeout: Duration,
+) -> io::Result<()> {
+    let (conn_stop_tx, conn_stop_rx) = watch::channel(false);
+    let mut shutdown = std::pin::pin!(signal::wait_for_shutdown(shutdown_rx));
+    let mut conn_tasks = JoinSet::new();
+
+    loop {
+        tokio::select! {
+            Some(_) = conn_tasks.join_next(), if !conn_tasks.is_empty() => {}
+            (stream, remote_addr) = axum::serve::Listener::accept(&mut listener) => {
+                spawn_admin_connection(
+                    &mut conn_tasks,
+                    &router,
+                    conn_stop_rx.clone(),
+                    stream,
+                    remote_addr,
+                );
+            }
+            _ = &mut shutdown => {
+                let _ = conn_stop_tx.send(true);
+                break;
+            }
+        }
+    }
+
+    drop(listener);
+    drop(router);
+
+    if !conn_tasks.is_empty()
+        && tokio::time::timeout(drain_timeout, async {
+            while conn_tasks.join_next().await.is_some() {}
+        })
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            timeout_ms = drain_timeout.as_millis() as u64,
+            active_connections = conn_tasks.len(),
+            "combined admin graceful drain elapsed with active connections; aborting connections",
+        );
+        conn_tasks.abort_all();
+        while conn_tasks.join_next().await.is_some() {}
+    }
+
+    Ok(())
+}
+
+fn spawn_admin_connection(
+    conn_tasks: &mut JoinSet<()>,
+    router: &Router,
+    mut stop_rx: watch::Receiver<bool>,
+    stream: TcpStream,
+    remote_addr: SocketAddr,
+) {
+    let tower_service = router
+        .clone()
+        .map_request(|req: HttpRequest<Incoming>| req.map(Body::new));
+    let hyper_service = TowerToHyperService::new(tower_service);
+    let io = TokioIo::new(stream);
+
+    conn_tasks.spawn(async move {
+        let mut builder = HyperAutoBuilder::new(TokioExecutor::new());
+        builder.http2().enable_connect_protocol();
+        let mut conn = std::pin::pin!(builder.serve_connection_with_upgrades(io, hyper_service));
+        let mut graceful_sent = false;
+
+        loop {
+            tokio::select! {
+                result = conn.as_mut() => {
+                    if let Err(err) = result {
+                        tracing::trace!(
+                            peer = %remote_addr,
+                            error = %err,
+                            "combined admin connection closed with error",
+                        );
+                    }
+                    break;
+                }
+                wait_res = stop_rx.wait_for(|stopped| *stopped), if !graceful_sent => {
+                    graceful_sent = true;
+                    let _ = wait_res;
+                    conn.as_mut().graceful_shutdown();
+                }
+            }
+        }
+    });
+}
+
 pub(super) fn server_join_result(
     result: Result<Result<(), io::Error>, JoinError>,
 ) -> Result<(), BuildError> {
@@ -2121,7 +2229,6 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use cc_lb_storage_api::MetaStore as _;
-    use tower::ServiceExt as _;
 
     async fn build_test_proxy_app(role: ProxyRole) -> ProxyApp {
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -2601,6 +2708,70 @@ mod tests {
         assert!(
             worker_dropped.load(Ordering::Acquire),
             "original worker Drop guard must complete before await_tasks_with_shared_timeout returns"
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_admin_until_shutdown_aborts_and_joins_hung_connections_before_returning() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::AsyncWriteExt as _;
+
+        struct DropGuard(Arc<AtomicBool>);
+        impl Drop for DropGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let entered_handler = Arc::clone(&entered);
+        let dropped_handler = Arc::clone(&dropped);
+
+        let router = Router::new().route(
+            "/hung",
+            axum::routing::get(move || {
+                let entered = Arc::clone(&entered_handler);
+                let dropped = Arc::clone(&dropped_handler);
+                async move {
+                    let _guard = DropGuard(dropped);
+                    entered.notify_one();
+                    std::future::pending::<StatusCode>().await
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind admin listener");
+        let addr = listener.local_addr().expect("local addr");
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let server_task = tokio::spawn(serve_admin_until_shutdown(
+            listener,
+            router,
+            stop_rx,
+            Duration::from_millis(100),
+        ));
+
+        let mut client = TcpStream::connect(addr).await.expect("connect admin");
+        client
+            .write_all(b"GET /hung HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("write request");
+
+        entered.notified().await;
+        assert!(!dropped.load(Ordering::Acquire));
+
+        let _ = stop_tx.send(true);
+        tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("admin server shuts down cleanly")
+            .expect("server task joins")
+            .expect("server returns Ok");
+
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "hung admin connection handler must be aborted and joined before serve_admin_until_shutdown returns"
         );
     }
 }

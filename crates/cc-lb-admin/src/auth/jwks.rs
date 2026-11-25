@@ -156,47 +156,63 @@ impl JwksCache {
     }
 
     pub(crate) async fn get(&self, kid: &str) -> Result<Arc<RsaPublicKey>, JwksError> {
-        self.get_at(kid, Instant::now()).await
+        self.get_with_clock(kid, Instant::now).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn get_at(
         &self,
         kid: &str,
         now: Instant,
     ) -> Result<Arc<RsaPublicKey>, JwksError> {
-        if self.cache_is_fresh(now)
+        self.get_with_clock(kid, || now).await
+    }
+
+    pub(crate) async fn get_with_clock(
+        &self,
+        kid: &str,
+        mut now_fn: impl FnMut() -> Instant,
+    ) -> Result<Arc<RsaPublicKey>, JwksError> {
+        let check_now = now_fn();
+        if self.cache_is_fresh(check_now)
             && let Some(key) = self.cached_key(kid)
         {
             return Ok(key);
         }
-        if self.is_unknown_kid_cached(kid, now) {
+        if self.is_unknown_kid_cached(kid, check_now) {
             return Err(JwksError::UnknownKid);
         }
 
         let _refresh_guard = self.refresh_lock.lock().await;
+        let locked_now = now_fn();
 
-        if self.cache_is_fresh(now)
+        if self.cache_is_fresh(locked_now)
             && let Some(key) = self.cached_key(kid)
         {
             return Ok(key);
         }
-        if self.is_unknown_kid_cached(kid, now) {
+        if self.is_unknown_kid_cached(kid, locked_now) {
             return Err(JwksError::UnknownKid);
         }
 
         let cached_key = self.cached_key(kid);
-        if self.refresh_failure_backoff_active(now) {
+        if self.refresh_failure_backoff_active(locked_now) {
             return cached_key.ok_or(JwksError::RefreshThrottled);
         }
 
-        if cached_key.is_none() && self.has_fetched() && !self.consume_miss_refetch_token(now) {
+        if cached_key.is_none()
+            && self.has_fetched()
+            && !self.consume_miss_refetch_token(locked_now)
+        {
             return Err(JwksError::UnknownKid);
         }
 
-        match self.refresh_at(now).await {
+        let refresh_result = self.refresh_with_clock(&mut now_fn).await;
+        let completed_now = now_fn();
+        match refresh_result {
             Ok(()) => self.clear_refresh_failure(),
             Err(error) => {
-                self.mark_refresh_failure(now);
+                self.mark_refresh_failure(completed_now);
                 return cached_key.ok_or(error);
             }
         }
@@ -205,7 +221,7 @@ impl JwksCache {
             return Ok(key);
         }
 
-        self.mark_unknown_kid(kid, now);
+        self.mark_unknown_kid(kid, completed_now);
         Err(JwksError::UnknownKid)
     }
 
@@ -295,7 +311,10 @@ impl JwksCache {
             .clear();
     }
 
-    async fn refresh_at(&self, now: Instant) -> Result<(), JwksError> {
+    async fn refresh_with_clock(
+        &self,
+        now_fn: &mut impl FnMut() -> Instant,
+    ) -> Result<(), JwksError> {
         let mut response = self
             .client
             .get(&self.url)
@@ -360,7 +379,7 @@ impl JwksCache {
         *self
             .fetched_at
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(now);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(now_fn());
         Ok(())
     }
 }
@@ -616,5 +635,56 @@ mod tests {
         let cache = JwksCache::new(url);
         let result = cache.get_at("any", Instant::now()).await;
         assert!(matches!(result, Err(JwksError::InvalidDocument)));
+    }
+
+    #[tokio::test]
+    async fn retry_backoff_starts_at_refresh_completion_not_entry() {
+        let (url, hits) =
+            spawn_jwks_server(|_| (503, Vec::new(), "upstream unavailable".to_owned())).await;
+        let cache = JwksCache::with_timings(
+            url,
+            Duration::from_secs(60),
+            Duration::from_secs(300),
+            3,
+            Duration::from_secs(10),
+            Duration::from_secs(2),
+            Duration::from_secs(30),
+        );
+        let t0 = Instant::now();
+        // Simulates a 3s HTTP fetch failing after entry at t0: check_now=t0, locked_now=t0,
+        // fetch completion=t0+3s. Backoff of 2s must expire at t0+5s, not t0+2s.
+        let calls = AtomicUsize::new(0);
+        let err = cache
+            .get_with_clock("good", || {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    t0
+                } else {
+                    t0 + Duration::from_secs(3)
+                }
+            })
+            .await
+            .err()
+            .expect("failed initial fetch returns error");
+        assert!(matches!(err, JwksError::Request(_)));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // At t0 + 4s (only 1s after completion at t0 + 3s): still in 2s backoff -> throttled.
+        let err_throttled = cache
+            .get_at("good", t0 + Duration::from_secs(4))
+            .await
+            .err()
+            .expect("backoff still active 1s after failure completion");
+        assert!(matches!(err_throttled, JwksError::RefreshThrottled));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // At t0 + 5s (2s after completion at t0 + 3s): backoff elapsed -> retries upstream.
+        let err_retry = cache
+            .get_at("good", t0 + Duration::from_secs(5))
+            .await
+            .err()
+            .expect("retry fails with 503");
+        assert!(matches!(err_retry, JwksError::Request(_)));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 }

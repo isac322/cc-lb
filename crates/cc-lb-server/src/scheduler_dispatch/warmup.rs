@@ -473,6 +473,20 @@ impl SchedulerDispatch {
         &self,
         job: ManualWarmupJob,
     ) -> SchedulerResult<JobOutcome> {
+        let dispatch_now_unix_secs = unix_secs(self.clock.now());
+        if job
+            .expires_at_unix_secs
+            .is_some_and(|expires_at| dispatch_now_unix_secs >= expires_at)
+        {
+            tracing::info!(
+                target: "warmup",
+                upstream_id = %job.upstream_id,
+                lane = job.lane.as_str(),
+                holder = %job.holder,
+                action = "split_manual_warmup_expired_before_start",
+            );
+            return Ok(JobOutcome::Skip);
+        }
         let Some(mut upstream) = UpstreamStore::get_by_id(self.storage.as_ref(), job.upstream_id)
             .await
             .map_err(storage_scheduler_error)?
@@ -500,15 +514,19 @@ impl SchedulerDispatch {
                 },
             })
             .await;
+            let now_u64 = unix_secs(self.clock.now());
             cc_lb_control::record_manual_warmup_result(
                 self.storage.as_ref(),
                 upstream.id,
                 job.lane,
+                now_u64,
                 cc_lb_control::ManualWarmupJobResult {
                     nonce: job.nonce,
                     outcome: record.outcome,
                     cycle_key: record.cycle_key,
                     error_detail: record.error_detail,
+                    expires_at_unix_secs: now_u64
+                        .saturating_add(cc_lb_control::SPLIT_BRIDGE_RESULT_TTL_SECS),
                 },
             )
             .await
@@ -538,15 +556,19 @@ impl SchedulerDispatch {
                     },
                 })
                 .await;
+                let now_u64 = unix_secs(self.clock.now());
                 cc_lb_control::record_manual_warmup_result(
                     self.storage.as_ref(),
                     upstream.id,
                     job.lane,
+                    now_u64,
                     cc_lb_control::ManualWarmupJobResult {
                         nonce: job.nonce,
                         outcome: record.outcome,
                         cycle_key: record.cycle_key,
                         error_detail: record.error_detail,
+                        expires_at_unix_secs: now_u64
+                            .saturating_add(cc_lb_control::SPLIT_BRIDGE_RESULT_TTL_SECS),
                     },
                 )
                 .await
@@ -660,9 +682,10 @@ impl SchedulerDispatch {
         })
         .await;
 
+        let result_now_unix_secs = unix_secs(self.clock.now());
         if matches!(record.outcome, WarmupAttemptOutcome::Success(_)) {
             let status = UpstreamStatusUpdate {
-                last_warmup_at_unix_secs: Some(Some(unix_secs(self.clock.now()))),
+                last_warmup_at_unix_secs: Some(Some(result_now_unix_secs)),
                 ..UpstreamStatusUpdate::default()
             };
             if let Err(error) =
@@ -670,24 +693,27 @@ impl SchedulerDispatch {
             {
                 tracing::warn!(upstream_id = %upstream.id, %error, "manual warmup status writeback failed");
             }
-            if !matches!(
-                window_check.as_ref(),
-                Some(cc_lb_control::WarmupWindowCheck::Started { .. })
-            ) && let WarmupDispatchResult::Response { observations, .. } = final_attempt.result
-            {
-                self.record_warmup_observations(upstream.id, observations)?;
-            }
+        }
+        if !matches!(
+            window_check.as_ref(),
+            Some(cc_lb_control::WarmupWindowCheck::Started { .. })
+        ) && let WarmupDispatchResult::Response { observations, .. } = final_attempt.result
+        {
+            self.record_warmup_observations(upstream.id, observations)?;
         }
 
         cc_lb_control::record_manual_warmup_result(
             self.storage.as_ref(),
             upstream.id,
             job.lane,
+            result_now_unix_secs,
             cc_lb_control::ManualWarmupJobResult {
                 nonce: job.nonce,
                 outcome: record.outcome,
                 cycle_key: record.cycle_key,
                 error_detail: record.error_detail,
+                expires_at_unix_secs: result_now_unix_secs
+                    .saturating_add(cc_lb_control::SPLIT_BRIDGE_RESULT_TTL_SECS),
             },
         )
         .await
