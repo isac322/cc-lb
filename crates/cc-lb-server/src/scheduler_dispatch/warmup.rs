@@ -698,8 +698,15 @@ impl SchedulerDispatch {
             window_check.as_ref(),
             Some(cc_lb_control::WarmupWindowCheck::Started { .. })
         ) && let WarmupDispatchResult::Response { observations, .. } = final_attempt.result
+            && let Err(error) = self.record_warmup_observations(upstream.id, observations)
         {
-            self.record_warmup_observations(upstream.id, observations)?;
+            // Persist `ManualWarmupJobResult` even if the async DB sink is full/closed so
+            // split-admin callers receive the classified outcome (in-memory cache is updated).
+            tracing::warn!(
+                upstream_id = %upstream.id,
+                %error,
+                "manual warmup quota observation publication failed; preserving classified warmup result"
+            );
         }
 
         cc_lb_control::record_manual_warmup_result(

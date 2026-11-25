@@ -1004,6 +1004,57 @@ async fn postgres_push_or_expedite_accelerates_pending_and_preserves_retried_row
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_get_adaptive_task_statuses_by_key_or_subkey_matches_exact_and_colons_only()
+-> Result<()> {
+    with_isolated_database(|pool| async move {
+        let backend = postgres_backend(&pool);
+        let upstream_id = Uuid::new_v4();
+        let now_secs = unix_secs(SystemClock.now());
+        let base_key = format!("adaptive:oauth_refresh:{upstream_id}:gen:0:exp:{now_secs}");
+        let keys = [
+            base_key.clone(),
+            format!("{base_key}:watchdog:1"),
+            format!("{base_key}:bridge:abc"),
+            format!("{base_key}_other"),
+            format!("{base_key}-other"),
+            format!("{base_key};other"),
+        ];
+        for key in keys {
+            backend
+                .push_adaptive_task(SchedulerPushTask {
+                    args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
+                    idempotency_key: Some(key),
+                    run_at_unix_secs: Some(now_secs + 3_600),
+                    max_attempts: Some(4),
+                })
+                .await?;
+        }
+        sqlx::query("UPDATE apalis.jobs SET status = 'Running', attempts = 1 WHERE idempotency_key = $1")
+            .bind(format!("{base_key}:watchdog:1"))
+            .execute(&pool)
+            .await?;
+        sqlx::query("UPDATE apalis.jobs SET status = 'Done', attempts = 1 WHERE idempotency_key = $1")
+            .bind(format!("{base_key}:bridge:abc"))
+            .execute(&pool)
+            .await?;
+
+        let mut statuses = backend
+            .get_adaptive_task_statuses_by_key_or_subkey(&base_key)
+            .await?;
+        statuses.sort_by_key(|row| format!("{:?}:{}", row.status, row.attempts));
+        ensure!(
+            statuses.len() == 3
+                && statuses.iter().any(|row| row.status == cc_lb_scheduler::worker::TaskStatus::Pending)
+                && statuses.iter().any(|row| row.status == cc_lb_scheduler::worker::TaskStatus::Running)
+                && statuses.iter().any(|row| row.status == cc_lb_scheduler::worker::TaskStatus::Done),
+            "expected exact key + :watchdog + :bridge only under postgres collation, got {statuses:?}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_all_worker_queues_claim_future_run_at_after_idle() -> Result<()> {
     with_isolated_database(|pool| async move {
         let backend = postgres_backend(&pool);

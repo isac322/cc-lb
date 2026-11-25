@@ -264,37 +264,32 @@ impl SchedulerBackend {
         idempotency_key: &str,
     ) -> Result<Vec<SchedulerTaskStatusRow>, SchedulerError> {
         let subkey_prefix = format!("{idempotency_key}:");
-        let Some(subkey_upper) = prefix_upper_bound(&subkey_prefix) else {
-            return self
-                .get_adaptive_task_statuses_by_key(idempotency_key)
-                .await;
-        };
         let rows: Vec<(String, i32, i32)> = match self {
             #[cfg(feature = "sqlite")]
             Self::Sqlite(sqlite) => {
                 sqlx::query_as(
                     "SELECT status, attempts, max_attempts FROM Jobs \
                      WHERE job_type = ?1 \
-                       AND (idempotency_key = ?2 OR (idempotency_key >= ?3 AND idempotency_key < ?4))",
+                       AND (idempotency_key = ?2 OR substr(idempotency_key, 1, length(?3)) = ?3)",
                 )
                 .bind(ADAPTIVE_QUEUE)
                 .bind(idempotency_key)
                 .bind(&subkey_prefix)
-                .bind(subkey_upper)
                 .fetch_all(sqlite.pool())
                 .await?
             }
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => {
+                // Postgres `starts_with` is collation-independent (unlike `>= ':' AND < ';'`,
+                // which misorders punctuation under ICU/libc locale collations such as `und`).
                 sqlx::query_as(
                     "SELECT status, attempts, max_attempts FROM apalis.jobs \
                      WHERE job_type = $1 \
-                       AND (idempotency_key = $2 OR (idempotency_key >= $3 AND idempotency_key < $4))",
+                       AND (idempotency_key = $2 OR starts_with(idempotency_key, $3))",
                 )
                 .bind(ADAPTIVE_QUEUE)
                 .bind(idempotency_key)
                 .bind(&subkey_prefix)
-                .bind(subkey_upper)
                 .fetch_all(postgres.pool())
                 .await?
             }
@@ -795,6 +790,7 @@ fn parse_status_rows(
         .collect()
 }
 
+#[cfg(feature = "sqlite")]
 fn prefix_upper_bound(prefix: &str) -> Option<String> {
     let mut chars: Vec<char> = prefix.chars().collect();
     while let Some(last) = chars.pop() {
@@ -1027,6 +1023,77 @@ mod tests {
             .await
             .expect("indexed prefix query ignores corrupt job payload");
         assert_eq!(active_keys, vec![active_key]);
+    }
+
+    #[tokio::test]
+    async fn get_adaptive_task_statuses_by_key_or_subkey_matches_exact_and_colons_only() {
+        use std::sync::Arc;
+
+        use cc_lb_clock::SystemClock;
+
+        use crate::worker::{SchedulerBackend, SqliteSchedulerBackend, TaskStatus};
+
+        let pool = SqlitePool::connect(":memory:").await.expect("sqlite pool");
+        apalis_sqlite::SqliteStorage::setup(&pool)
+            .await
+            .expect("apalis setup");
+        crate::migrations::apply_post_setup_migrations(&pool)
+            .await
+            .expect("post setup migrations");
+
+        let base_key = format!("adaptive:oauth_refresh:{}:gen:0:exp:100", Uuid::new_v4());
+        let rows = [
+            (base_key.clone(), "Pending", 0_i32, 5_i32),
+            (format!("{base_key}:watchdog:1"), "Running", 1_i32, 3_i32),
+            (format!("{base_key}:bridge:abc"), "Done", 1_i32, 2_i32),
+            (format!("{base_key}_other"), "Pending", 0_i32, 5_i32),
+            (format!("{base_key};other"), "Pending", 0_i32, 5_i32),
+            (format!("other:{base_key}"), "Pending", 0_i32, 5_i32),
+        ];
+        for (key, status, attempts, max_attempts) in rows {
+            sqlx::query(
+                "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, idempotency_key) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+            )
+            .bind(b"null".to_vec())
+            .bind(ulid::Ulid::generate().to_string())
+            .bind(ADAPTIVE_QUEUE)
+            .bind(status)
+            .bind(attempts)
+            .bind(max_attempts)
+            .bind(key)
+            .execute(&pool)
+            .await
+            .expect("insert job row");
+        }
+
+        let backend =
+            SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(pool, Arc::new(SystemClock)));
+        let mut statuses = backend
+            .get_adaptive_task_statuses_by_key_or_subkey(&base_key)
+            .await
+            .expect("query key or subkeys");
+        statuses.sort_by_key(|row| format!("{:?}:{}", row.status, row.attempts));
+        assert_eq!(
+            statuses,
+            vec![
+                super::SchedulerTaskStatusRow {
+                    status: TaskStatus::Done,
+                    attempts: 1,
+                    max_attempts: 2,
+                },
+                super::SchedulerTaskStatusRow {
+                    status: TaskStatus::Pending,
+                    attempts: 0,
+                    max_attempts: 5,
+                },
+                super::SchedulerTaskStatusRow {
+                    status: TaskStatus::Running,
+                    attempts: 1,
+                    max_attempts: 3,
+                },
+            ]
+        );
     }
 
     #[test]

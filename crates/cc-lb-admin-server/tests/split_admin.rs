@@ -707,11 +707,13 @@ mod sqlite_tests {
         let worker_backend = worker_scheduler.lazy_handle();
 
         // 1. Direct port with short timeout degrades cleanly when no worker picks up the job.
+        // Freeze clock on a whole-second boundary because `expires_at_unix_secs` has 1s precision;
+        // a wall clock crossing a whole second during a 120ms wait would report ExpiredBeforeStart.
         let unserviced_id = Uuid::new_v4();
         let unserviced = cc_lb_admin_server::split_ports::SplitSchedulerManualWarmup::new(
             storage_arc.clone(),
             worker_backend.clone(),
-            clock.clone(),
+            Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000)),
         )
         .with_timeout(
             std::time::Duration::from_millis(120),
@@ -839,7 +841,7 @@ mod sqlite_tests {
         let bundle = cc_lb_aead::OAuthTokenBundle {
             access_token: "old-access".to_owned(),
             refresh_token: "refresh-token".to_owned(),
-            expires_at_unix_secs: 1_900_000_000,
+            expires_at_unix_secs: cc_lb_clock::unix_secs(clock.now()).saturating_add(10),
             refresh_token_expires_at_unix_secs: None,
             account_id: Some("acct".to_owned()),
             project_id: None,
@@ -1012,9 +1014,13 @@ mod sqlite_tests {
                         .await
                         .expect("get")
                         .expect("exists");
+                    let mut refreshed_bundle = bundle.clone();
+                    refreshed_bundle.access_token = "new-access".to_owned();
+                    refreshed_bundle.expires_at_unix_secs =
+                        cc_lb_clock::unix_secs(std::time::SystemTime::now()).saturating_add(3_600);
                     let encrypted = cc_lb_aead::EncryptedOAuthTokens::encrypt(
                         &aead_lazy,
-                        &bundle,
+                        &refreshed_bundle,
                         upstream_id.as_bytes(),
                     )
                     .expect("encrypt");
@@ -1160,7 +1166,7 @@ mod sqlite_tests {
         storage_arc.initialize().await.expect("init sqlite");
 
         let upstream_id = Uuid::new_v4();
-        let expires_at = 1_900_000_000u64;
+        let expires_at = cc_lb_clock::unix_secs(clock.now()).saturating_add(10);
         let bundle = cc_lb_aead::OAuthTokenBundle {
             access_token: "old-access".to_owned(),
             refresh_token: "refresh-token".to_owned(),
@@ -1368,9 +1374,16 @@ mod sqlite_tests {
                 .await
                 .expect("get")
                 .expect("exists");
-            let encrypted =
-                cc_lb_aead::EncryptedOAuthTokens::encrypt(&a2, &bundle2, upstream_id.as_bytes())
-                    .expect("encrypt");
+            let mut refreshed_bundle2 = bundle2.clone();
+            refreshed_bundle2.access_token = "new-access-2".to_owned();
+            refreshed_bundle2.expires_at_unix_secs =
+                cc_lb_clock::unix_secs(std::time::SystemTime::now()).saturating_add(3_600);
+            let encrypted = cc_lb_aead::EncryptedOAuthTokens::encrypt(
+                &a2,
+                &refreshed_bundle2,
+                upstream_id.as_bytes(),
+            )
+            .expect("encrypt");
             UpstreamStore::store_oauth_tokens(
                 s2.as_ref(),
                 upstream_id,
@@ -1385,6 +1398,202 @@ mod sqlite_tests {
             .await
             .expect("joins :watchdog: job and succeeds once generation bumps");
         worker2.await.expect("worker2 done");
+    }
+
+    #[tokio::test]
+    async fn split_lazy_refresher_skips_scheduling_when_reread_credential_is_already_fresh() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let sqlite_path = dir.path().join("storage.sqlite");
+        let aead = Arc::new(AeadService::from_master_key([0u8; 32]));
+        let test_clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let clock: ClockHandle = test_clock.clone();
+        let database_url = format!("sqlite://{}", sqlite_path.display());
+        let storage_arc = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+                .await
+                .expect("open sqlite"),
+        );
+        storage_arc.initialize().await.expect("init sqlite");
+
+        let storage_cfg = cc_lb_config::StorageConfig::Sqlite { path: sqlite_path };
+        let scheduler = cc_lb_scheduler::factory::open_scheduler_storage_with_role(
+            &storage_cfg,
+            &cc_lb_config::SchedulerConfig::default(),
+            cc_lb_scheduler::factory::SchedulerPoolRole::Worker,
+            clock.clone(),
+        )
+        .await
+        .expect("open scheduler");
+        let backend = scheduler.lazy_handle();
+
+        // 1. Fresh refreshable credential beyond 60s lookahead: no scheduler job is enqueued.
+        let fresh_id = Uuid::new_v4();
+        let fresh_bundle = cc_lb_aead::OAuthTokenBundle {
+            access_token: "fresh-access".to_owned(),
+            refresh_token: "refresh-token".to_owned(),
+            expires_at_unix_secs: 1_800_003_600,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: Some("acct".to_owned()),
+            project_id: None,
+            oauth_profile: cc_lb_aead::GeminiOAuthProfile::default(),
+            scopes: Vec::new(),
+            never_refresh: false,
+        };
+        UpstreamStore::create(
+            storage_arc.as_ref(),
+            cc_lb_storage_api::UpstreamCreate {
+                id: fresh_id,
+                name: "split-lazy-already-fresh".to_owned(),
+                kind: cc_lb_storage_api::UpstreamKind::AnthropicOauth,
+                base_url: Some(
+                    url::Url::parse("https://api.anthropic.com/").expect("valid base url"),
+                ),
+                api_key_ciphertext: None,
+                oauth_tokens: Some(cc_lb_storage_api::OAuthTokensCreate {
+                    tokens: cc_lb_aead::EncryptedOAuthTokens::encrypt(
+                        &aead,
+                        &fresh_bundle,
+                        fresh_id.as_bytes(),
+                    )
+                    .expect("encrypt"),
+                    never_refresh: false,
+                }),
+                warmup_enabled: true,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
+            },
+        )
+        .await
+        .expect("create fresh upstream");
+
+        // 2. Unexpired `never_refresh` credential: returns Ok without enqueueing a job.
+        let long_lived_id = Uuid::new_v4();
+        let long_lived_bundle = cc_lb_aead::OAuthTokenBundle {
+            access_token: "long-lived-access".to_owned(),
+            refresh_token: String::new(),
+            expires_at_unix_secs: 1_800_000_030,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: Some("acct".to_owned()),
+            project_id: None,
+            oauth_profile: cc_lb_aead::GeminiOAuthProfile::default(),
+            scopes: Vec::new(),
+            never_refresh: true,
+        };
+        UpstreamStore::create(
+            storage_arc.as_ref(),
+            cc_lb_storage_api::UpstreamCreate {
+                id: long_lived_id,
+                name: "split-lazy-never-refresh-live".to_owned(),
+                kind: cc_lb_storage_api::UpstreamKind::AnthropicOauth,
+                base_url: Some(
+                    url::Url::parse("https://api.anthropic.com/").expect("valid base url"),
+                ),
+                api_key_ciphertext: None,
+                oauth_tokens: Some(cc_lb_storage_api::OAuthTokensCreate {
+                    tokens: cc_lb_aead::EncryptedOAuthTokens::encrypt(
+                        &aead,
+                        &long_lived_bundle,
+                        long_lived_id.as_bytes(),
+                    )
+                    .expect("encrypt"),
+                    never_refresh: true,
+                }),
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
+            },
+        )
+        .await
+        .expect("create long-lived upstream");
+
+        // 3. Expired `never_refresh` credential fails immediately without enqueueing.
+        let expired_long_lived_id = Uuid::new_v4();
+        let expired_bundle = cc_lb_aead::OAuthTokenBundle {
+            access_token: "expired-long-lived".to_owned(),
+            refresh_token: String::new(),
+            expires_at_unix_secs: 1_800_000_000,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: Some("acct".to_owned()),
+            project_id: None,
+            oauth_profile: cc_lb_aead::GeminiOAuthProfile::default(),
+            scopes: Vec::new(),
+            never_refresh: true,
+        };
+        UpstreamStore::create(
+            storage_arc.as_ref(),
+            cc_lb_storage_api::UpstreamCreate {
+                id: expired_long_lived_id,
+                name: "split-lazy-never-refresh-expired".to_owned(),
+                kind: cc_lb_storage_api::UpstreamKind::AnthropicOauth,
+                base_url: Some(
+                    url::Url::parse("https://api.anthropic.com/").expect("valid base url"),
+                ),
+                api_key_ciphertext: None,
+                oauth_tokens: Some(cc_lb_storage_api::OAuthTokensCreate {
+                    tokens: cc_lb_aead::EncryptedOAuthTokens::encrypt(
+                        &aead,
+                        &expired_bundle,
+                        expired_long_lived_id.as_bytes(),
+                    )
+                    .expect("encrypt"),
+                    never_refresh: true,
+                }),
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
+            },
+        )
+        .await
+        .expect("create expired long-lived upstream");
+
+        let refresher = cc_lb_admin_server::split_ports::SplitSchedulerLazyRefresher::new(
+            storage_arc,
+            backend.clone(),
+            clock,
+            Some(aead),
+        )
+        .with_timeout(
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_millis(10),
+        );
+
+        cc_lb_signer_anthropic_oauth::LazyRefreshHandle::refresh_one(&refresher, fresh_id)
+            .await
+            .expect("fresh credential skips scheduler bridge without worker");
+        cc_lb_signer_anthropic_oauth::LazyRefreshHandle::refresh_one(&refresher, long_lived_id)
+            .await
+            .expect("unexpired never_refresh credential skips scheduler bridge");
+        cc_lb_signer_anthropic_oauth::LazyRefreshHandle::refresh_one(
+            &refresher,
+            expired_long_lived_id,
+        )
+        .await
+        .expect_err("expired never_refresh credential fails without enqueuing refresh");
+
+        let tasks = backend
+            .list_adaptive_tasks(&cc_lb_scheduler::worker::Filter {
+                status: None,
+                page: 1,
+                page_size: Some(20),
+            })
+            .await
+            .expect("list adaptive tasks");
+        assert!(
+            tasks.is_empty(),
+            "expected zero OAuthRefresh tasks to be scheduled for fresh or never_refresh credentials: {tasks:?}"
+        );
     }
 
     #[tokio::test]

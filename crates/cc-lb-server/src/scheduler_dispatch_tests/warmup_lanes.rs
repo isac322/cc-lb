@@ -700,8 +700,7 @@ async fn dispatch_manual_warmup_skips_expired_unstarted_job_before_dispatch() {
     );
 }
 
-#[tokio::test]
-async fn dispatch_manual_warmup_records_observations_on_429_quota_exhausted() {
+async fn run_manual_warmup_429_quota_exhausted_case(close_quota_sink: bool) -> usize {
     use axum::http::{HeaderMap as AxumHeaderMap, HeaderValue, StatusCode};
     use axum::response::IntoResponse;
     use axum::routing::post;
@@ -788,7 +787,13 @@ async fn dispatch_manual_warmup_records_observations_on_429_quota_exhausted() {
     .expect("create anthropic upstream");
 
     let mut dispatch = fixture.dispatch(Arc::new(FailingPusher));
-    let (subscription_quota_sink, mut quota_rx) = cc_lb_engine::SubscriptionQuotaSink::new();
+    let (subscription_quota_sink, quota_rx) = cc_lb_engine::SubscriptionQuotaSink::new();
+    let mut quota_rx = if close_quota_sink {
+        drop(quota_rx);
+        None
+    } else {
+        Some(quota_rx)
+    };
     dispatch.subscription_quota_sink = subscription_quota_sink;
     let nonce = Uuid::new_v4();
     let outcome = dispatch
@@ -816,6 +821,20 @@ async fn dispatch_manual_warmup_records_observations_on_429_quota_exhausted() {
         WarmupAttemptOutcome::Skipped(WarmupSkipReason::SevenDayQuotaExhausted)
     );
 
+    let manual_result = cc_lb_control::take_manual_warmup_result(
+        fixture.storage.as_ref(),
+        upstream_id,
+        WarmupLane::Primary,
+        nonce,
+    )
+    .await
+    .expect("read manual warmup result")
+    .expect("manual warmup result must be persisted even when quota sink fails");
+    assert_eq!(
+        manual_result.outcome,
+        WarmupAttemptOutcome::Skipped(WarmupSkipReason::SevenDayQuotaExhausted)
+    );
+
     let snapshots = dispatch.subscription_quota_cache.snapshot_for_upstream(
         upstream_id,
         now_unix_secs() * 1_000,
@@ -830,14 +849,30 @@ async fn dispatch_manual_warmup_records_observations_on_429_quota_exhausted() {
         Some(cc_lb_storage_api::SubscriptionQuotaStatus::Rejected.as_str())
     );
     assert_eq!(seven_day.utilization, Some(1.0));
+
     let mut queued = Vec::new();
-    while let Ok(sample) = quota_rx.try_recv() {
-        queued.push(sample);
+    if let Some(ref mut rx) = quota_rx {
+        while let Ok(sample) = rx.try_recv() {
+            queued.push(sample);
+        }
     }
-    assert!(
-        queued
-            .iter()
-            .any(|s| s.upstream_id == upstream_id && s.window == SubscriptionQuotaWindow::SevenDay),
-        "429 manual warmup must enqueue 7d quota sample to sink: {queued:?}"
+    queued
+        .into_iter()
+        .filter(|s| s.upstream_id == upstream_id && s.window == SubscriptionQuotaWindow::SevenDay)
+        .count()
+}
+
+#[tokio::test]
+async fn dispatch_manual_warmup_records_observations_on_429_quota_exhausted() {
+    let matching_samples = run_manual_warmup_429_quota_exhausted_case(false).await;
+    assert_eq!(
+        matching_samples, 1,
+        "429 manual warmup must enqueue 7d quota sample to sink"
     );
+}
+
+#[tokio::test]
+async fn dispatch_manual_warmup_preserves_result_and_cache_when_quota_sink_is_closed() {
+    let matching_samples = run_manual_warmup_429_quota_exhausted_case(true).await;
+    assert_eq!(matching_samples, 0);
 }

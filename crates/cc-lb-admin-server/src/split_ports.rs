@@ -200,6 +200,16 @@ impl SplitSchedulerBridge {
     }
 }
 
+const SPLIT_OAUTH_REFRESH_LOOKAHEAD_SECS: u64 = 60;
+
+enum OAuthRefreshEnrollment {
+    AlreadyFresh,
+    Enqueued {
+        gen_before: u64,
+        tagged_gen_key: Option<String>,
+    },
+}
+
 /// Bridges on-demand metadata-refresh OAuth token refreshes in DB-only split
 /// `cc-lb-admin` via durable `AdaptiveJob::OAuthRefresh` tasks claimed by
 /// proxy scheduler workers.
@@ -231,30 +241,44 @@ impl SplitSchedulerLazyRefresher {
         &self,
         upstream: &UpstreamRecord,
         gen_before: u64,
-    ) -> (OAuthRefreshJob, Option<String>) {
+    ) -> Result<Option<(OAuthRefreshJob, Option<String>)>, BridgeStepError> {
+        let now_secs = unix_secs(self.bridge.clock.now());
         if let (Some(aead), Some(creds)) =
             (self.aead.as_deref(), upstream.oauth_credentials.as_ref())
             && let Ok(bundle) = creds.decrypt(aead, upstream.id.as_bytes())
         {
+            if bundle.never_refresh {
+                if bundle.expires_at_unix_secs > now_secs {
+                    return Ok(None);
+                }
+                return Err(BridgeStepError::Failed(
+                    "long-lived oauth credential expired; reauthorization is required".to_owned(),
+                ));
+            }
+            if bundle.expires_at_unix_secs
+                > now_secs.saturating_add(SPLIT_OAUTH_REFRESH_LOOKAHEAD_SECS)
+            {
+                return Ok(None);
+            }
             let job = OAuthRefreshJob::for_credential(
                 upstream.id,
                 gen_before,
                 bundle.expires_at_unix_secs,
             );
             let gen_key = job.generation_idempotency_key(gen_before, bundle.expires_at_unix_secs);
-            return (job, Some(gen_key));
+            return Ok(Some((job, Some(gen_key))));
         }
-        (
+        Ok(Some((
             OAuthRefreshJob::with_expected_generation(upstream.id, gen_before),
             None,
-        )
+        )))
     }
 
     async fn enqueue_or_join_oauth_refresh(
         &self,
         upstream_id: Uuid,
         deadline: Instant,
-    ) -> Result<(u64, Option<String>), BridgeStepError> {
+    ) -> Result<OAuthRefreshEnrollment, BridgeStepError> {
         let upstream = SplitSchedulerBridge::await_bounded(deadline, None, async {
             UpstreamStore::get_by_id(self.bridge.storage.as_ref(), upstream_id)
                 .await
@@ -263,7 +287,9 @@ impl SplitSchedulerLazyRefresher {
         })
         .await?;
         let gen_before = upstream.oauth_token_generation;
-        let (job, tagged_gen_key) = self.plan_oauth_refresh(&upstream, gen_before);
+        let Some((job, tagged_gen_key)) = self.plan_oauth_refresh(&upstream, gen_before)? else {
+            return Ok(OAuthRefreshEnrollment::AlreadyFresh);
+        };
         if let Some(ref gen_key) = tagged_gen_key {
             let statuses = SplitSchedulerBridge::await_bounded(deadline, None, async {
                 self.bridge
@@ -306,7 +332,10 @@ impl SplitSchedulerLazyRefresher {
                     .push_expedited(AdaptiveJob::OAuthRefresh(job), push_key, 2, None, deadline)
                     .await?;
             }
-            return Ok((gen_before, tagged_gen_key));
+            return Ok(OAuthRefreshEnrollment::Enqueued {
+                gen_before,
+                tagged_gen_key,
+            });
         }
 
         let family_prefix = format!("adaptive:oauth_refresh:{upstream_id}:");
@@ -324,7 +353,10 @@ impl SplitSchedulerLazyRefresher {
                 .push_expedited(AdaptiveJob::OAuthRefresh(job), key, 2, None, deadline)
                 .await?;
         }
-        Ok((gen_before, None))
+        Ok(OAuthRefreshEnrollment::Enqueued {
+            gen_before,
+            tagged_gen_key: None,
+        })
     }
 }
 
@@ -332,13 +364,19 @@ impl SplitSchedulerLazyRefresher {
 impl LazyRefreshHandle for SplitSchedulerLazyRefresher {
     async fn refresh_one(&self, upstream_id: Uuid) -> Result<(), LazyRefreshError> {
         let deadline = self.bridge.deadline();
-        let (gen_before, tagged_gen_key) = self
+        let (gen_before, tagged_gen_key) = match self
             .enqueue_or_join_oauth_refresh(upstream_id, deadline)
             .await
             .map_err(|err| LazyRefreshError::Failed {
                 reason: err
                     .into_reason("oauth refresh was not completed by a proxy scheduler worker"),
-            })?;
+            })? {
+            OAuthRefreshEnrollment::AlreadyFresh => return Ok(()),
+            OAuthRefreshEnrollment::Enqueued {
+                gen_before,
+                tagged_gen_key,
+            } => (gen_before, tagged_gen_key),
+        };
 
         let check_advanced = || async {
             let latest = UpstreamStore::get_by_id(self.bridge.storage.as_ref(), upstream_id)
@@ -551,43 +589,73 @@ impl SplitManualWarmupPort for SplitSchedulerManualWarmup {
                 )
             })?;
 
-        let settled = self
-            .bridge
-            .poll_until_settled(&key, None, deadline, || async {
+        let outcome_unknown = || {
+            SplitManualWarmupError::OutcomeUnknown(
+                "manual warmup did not report a result before deadline and may have started on a worker"
+                    .to_owned(),
+            )
+        };
+        let take_result_bounded = || {
+            SplitSchedulerBridge::await_bounded(deadline, None, async {
                 take_manual_warmup_result(self.bridge.storage.as_ref(), upstream_id, lane, nonce)
                     .await
                     .map_err(|error| error.to_string())
             })
-            .await
-            .map_err(SplitManualWarmupError::OutcomeUnknown)?;
+        };
 
-        if let Some(result) = settled {
-            return Ok(result);
+        loop {
+            if Instant::now() >= deadline {
+                return Err(outcome_unknown());
+            }
+            match take_result_bounded().await {
+                Ok(Some(result)) => return Ok(result),
+                Ok(None) => {}
+                Err(BridgeStepError::TimedOut) => return Err(outcome_unknown()),
+                Err(BridgeStepError::Failed(error)) => {
+                    return Err(SplitManualWarmupError::OutcomeUnknown(error));
+                }
+            }
+            let statuses = match SplitSchedulerBridge::await_bounded(deadline, None, async {
+                self.bridge
+                    .backend
+                    .get_adaptive_task_statuses_by_key(&key)
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            {
+                Ok(statuses) => statuses,
+                Err(BridgeStepError::TimedOut) => return Err(outcome_unknown()),
+                Err(BridgeStepError::Failed(error)) => {
+                    return Err(SplitManualWarmupError::OutcomeUnknown(error));
+                }
+            };
+            if let Some(row) = statuses.first() {
+                if task_status_is_terminal(row) {
+                    return match take_result_bounded().await {
+                        Ok(Some(result)) => Ok(result),
+                        Ok(None) | Err(BridgeStepError::TimedOut) => Err(outcome_unknown()),
+                        Err(BridgeStepError::Failed(error)) => {
+                            Err(SplitManualWarmupError::OutcomeUnknown(error))
+                        }
+                    };
+                }
+                if unix_secs(self.bridge.clock.now()) >= expires_at_unix_secs
+                    && matches!(row.status, TaskStatus::Pending | TaskStatus::Queued)
+                    && row.attempts == 0
+                {
+                    return Err(SplitManualWarmupError::ExpiredBeforeStart(
+                        "manual warmup expired in scheduler queue before a worker started it"
+                            .to_owned(),
+                    ));
+                }
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(outcome_unknown());
+            }
+            tokio::time::sleep((deadline - now).min(self.bridge.poll_interval)).await;
         }
-        if let Ok(Some(result)) =
-            take_manual_warmup_result(self.bridge.storage.as_ref(), upstream_id, lane, nonce).await
-        {
-            return Ok(result);
-        }
-        let now_secs = unix_secs(self.bridge.clock.now());
-        if now_secs >= expires_at_unix_secs
-            && let Ok(statuses) = self
-                .bridge
-                .backend
-                .get_adaptive_task_statuses_by_key(&key)
-                .await
-            && let Some(row) = statuses.first()
-            && matches!(row.status, TaskStatus::Pending | TaskStatus::Queued)
-            && row.attempts == 0
-        {
-            return Err(SplitManualWarmupError::ExpiredBeforeStart(
-                "manual warmup expired in scheduler queue before a worker started it".to_owned(),
-            ));
-        }
-        Err(SplitManualWarmupError::OutcomeUnknown(
-            "manual warmup did not report a result before deadline and may have started on a worker"
-                .to_owned(),
-        ))
     }
 }
 
@@ -664,5 +732,93 @@ mod tests {
             .await
             .expect_err("cancellation must abort stalled poll");
         assert_eq!(err, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn split_manual_warmup_bounds_all_db_checks_within_deadline() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let sqlite_path = dir.path().join("split-warmup-deadline.sqlite");
+        let database_url = format!("sqlite://{}", sqlite_path.display());
+        let test_clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let clock: ClockHandle = test_clock.clone();
+        let storage = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+                .await
+                .expect("open sqlite"),
+        );
+        storage.initialize().await.expect("init sqlite");
+
+        let scheduler = cc_lb_scheduler::factory::open_scheduler_storage_with_role(
+            &StorageConfig::Sqlite { path: sqlite_path },
+            &SchedulerConfig::default(),
+            cc_lb_scheduler::factory::SchedulerPoolRole::Worker,
+            clock.clone(),
+        )
+        .await
+        .expect("open scheduler");
+        let backend = scheduler.lazy_handle();
+
+        // 1. Without expiry advancement, timeout returns OutcomeUnknown bounded near timeout.
+        let warmup = SplitSchedulerManualWarmup::new(storage.clone(), backend.clone(), clock)
+            .with_timeout(Duration::from_millis(60), Duration::from_millis(10));
+        let started = std::time::Instant::now();
+        let err = warmup
+            .fire_manual_warmup(
+                Uuid::new_v4(),
+                WarmupLane::Primary,
+                "holder:bounded".to_owned(),
+                1_800_000_000,
+            )
+            .await
+            .expect_err("unserviced warmup should return OutcomeUnknown");
+        assert!(
+            matches!(err, SplitManualWarmupError::OutcomeUnknown(_)),
+            "unexpected error: {err}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        // 2. When TestClock passes expiry before deadline while job stays Pending(0),
+        // returns ExpiredBeforeStart strictly within deadline.
+        let upstream_id = Uuid::new_v4();
+        let backend_watch = backend.clone();
+        let clock_advance = test_clock.clone();
+        let expirer = tokio::spawn(async move {
+            for _ in 0..100 {
+                let tasks = backend_watch
+                    .list_adaptive_tasks(&cc_lb_scheduler::worker::Filter {
+                        status: Some(TaskStatus::Pending),
+                        page: 1,
+                        page_size: Some(20),
+                    })
+                    .await
+                    .expect("list");
+                if tasks.iter().any(|row| {
+                    matches!(
+                        &row.args,
+                        AdaptiveJob::ManualWarmup(job) if job.upstream_id == upstream_id
+                    )
+                }) {
+                    clock_advance.advance_secs(5);
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let started = std::time::Instant::now();
+        let expired_err = warmup
+            .fire_manual_warmup(
+                upstream_id,
+                WarmupLane::Primary,
+                "holder:expired".to_owned(),
+                1_800_000_000,
+            )
+            .await
+            .expect_err("expired unstarted warmup must return ExpiredBeforeStart");
+        assert!(
+            matches!(expired_err, SplitManualWarmupError::ExpiredBeforeStart(_)),
+            "unexpected error: {expired_err}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        expirer.await.expect("expirer done");
     }
 }
