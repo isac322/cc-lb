@@ -2753,3 +2753,435 @@ async fn codex_backend_root_non_ws_unauthenticated_persists_request_event() {
 
     task.abort();
 }
+
+#[tokio::test]
+async fn realtime_websocket_active_relay_survives_drain_trigger_until_completion_or_force_close() {
+    // Part 1: an already-relayed session survives `drain.trigger()` until provider finishes cleanly.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let provider_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let _ = ready_tx.send(());
+        let msg = ws.next().await.unwrap().unwrap();
+        assert_eq!(msg.to_text().unwrap(), "after-drain-client");
+        ws.send(UpstreamMessage::Text("after-drain-provider".into()))
+            .await
+            .unwrap();
+        ws.close(None).await.unwrap();
+    });
+    let drain = DrainController::new();
+    let state = websocket_test_state(
+        vec![websocket_upstream(
+            1,
+            "provider",
+            Url::parse(&format!("http://{address}/")).unwrap(),
+        )],
+        TerminalStrategy::FirstPick,
+        drain.clone(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let (proxy, task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let (mut client, _) =
+        connect_async(realtime_request(proxy, "/openai/v1/realtime?model=gpt-realtime"))
+            .await
+            .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), ready_rx)
+        .await
+        .unwrap()
+        .unwrap();
+
+    drain.trigger();
+    assert_eq!(drain.in_flight(), 1);
+    client
+        .send(UpstreamMessage::Text("after-drain-client".into()))
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.to_text().unwrap(), "after-drain-provider");
+    let _ = tokio::time::timeout(Duration::from_secs(5), client.next()).await;
+    provider_task.await.unwrap();
+    assert!(!drain.await_drained(Duration::from_secs(5)).await);
+    task.abort();
+
+    // Part 2: a stalled active relay survives `drain.trigger()` and closes on `mark_force_closed()`.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let provider_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let _ = ready_tx.send(());
+        while let Some(Ok(frame)) = ws.next().await {
+            if frame.is_text() && ws.send(frame).await.is_err() {
+                break;
+            }
+        }
+    });
+    let drain = DrainController::new();
+    let state = websocket_test_state(
+        vec![websocket_upstream(
+            1,
+            "provider",
+            Url::parse(&format!("http://{address}/")).unwrap(),
+        )],
+        TerminalStrategy::FirstPick,
+        drain.clone(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let (proxy, task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let (mut client, _) =
+        connect_async(realtime_request(proxy, "/openai/v1/realtime?model=gpt-realtime"))
+            .await
+            .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), ready_rx)
+        .await
+        .unwrap()
+        .unwrap();
+
+    drain.trigger();
+    assert_eq!(drain.in_flight(), 1);
+    client
+        .send(UpstreamMessage::Text("still-alive".into()))
+        .await
+        .unwrap();
+    let echoed = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(echoed.to_text().unwrap(), "still-alive");
+
+    assert_eq!(drain.mark_force_closed(), 1);
+    assert!(!drain.await_drained(Duration::from_secs(5)).await);
+    let _ = tokio::time::timeout(Duration::from_secs(5), provider_task).await;
+    task.abort();
+}
+
+#[tokio::test]
+async fn realtime_websocket_pending_upgrade_cancels_on_drain_before_relay() {
+    use std::sync::atomic::AtomicUsize;
+
+    struct DrainOnRequest {
+        drain: DrainController,
+    }
+
+    impl tokio_tungstenite::tungstenite::handshake::server::Callback for DrainOnRequest {
+        fn on_request(
+            self,
+            _request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+            response: tokio_tungstenite::tungstenite::handshake::server::Response,
+        ) -> Result<
+            tokio_tungstenite::tungstenite::handshake::server::Response,
+            tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+        > {
+            self.drain.trigger();
+            Ok(response)
+        }
+    }
+
+    // Part 1 (OpenAI Realtime): drain triggers during upstream handshake -> 503 before upgrade.
+    let openai_frames = Arc::new(AtomicUsize::new(0));
+    let openai_frames_task = Arc::clone(&openai_frames);
+    let drain_openai = DrainController::new();
+    let drain_openai_cb = drain_openai.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let provider_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws =
+            tokio_tungstenite::accept_hdr_async(stream, DrainOnRequest { drain: drain_openai_cb })
+                .await
+                .unwrap();
+        while let Some(Ok(frame)) = ws.next().await {
+            if matches!(frame, UpstreamMessage::Text(_) | UpstreamMessage::Binary(_)) {
+                openai_frames_task.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    });
+    let state = websocket_test_state(
+        vec![websocket_upstream(
+            1,
+            "openai-provider",
+            Url::parse(&format!("http://{address}/")).unwrap(),
+        )],
+        TerminalStrategy::FirstPick,
+        drain_openai.clone(),
+        Arc::new(RealtimeKeySignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let (proxy, task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        connect_async(realtime_request(
+            proxy,
+            "/openai/v1/realtime?model=gpt-realtime",
+        )),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    let tokio_tungstenite::tungstenite::Error::Http(response) = err else {
+        panic!("expected 503 draining HTTP rejection, got: {err:?}");
+    };
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(openai_frames.load(Ordering::SeqCst), 0);
+    assert!(!drain_openai.await_drained(Duration::from_secs(2)).await);
+    let _ = tokio::time::timeout(Duration::from_secs(2), provider_task).await;
+    task.abort();
+
+    // Part 2 (Gemini Live): downstream upgraded before upstream dial; drain during provider
+    // connect aborts before setup forwarding or entering relay_realtime_websocket.
+    let gemini_frames = Arc::new(AtomicUsize::new(0));
+    let gemini_frames_task = Arc::clone(&gemini_frames);
+    let drain_gemini = DrainController::new();
+    let drain_gemini_cb = drain_gemini.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let provider_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws =
+            tokio_tungstenite::accept_hdr_async(stream, DrainOnRequest { drain: drain_gemini_cb })
+                .await
+                .unwrap();
+        while let Some(Ok(frame)) = ws.next().await {
+            if matches!(frame, UpstreamMessage::Text(_) | UpstreamMessage::Binary(_)) {
+                gemini_frames_task.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    });
+    let mut gemini_record = websocket_upstream(
+        1,
+        "gemini-provider",
+        Url::parse(&format!("http://{address}/")).unwrap(),
+    );
+    gemini_record.kind = UpstreamKind::GeminiApiKey;
+    let state = websocket_test_state(
+        vec![gemini_record],
+        TerminalStrategy::FirstPick,
+        drain_gemini.clone(),
+        Arc::new(RealtimeKeySignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let (proxy, task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let (mut client, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        connect_async(realtime_request(
+            proxy,
+            "/gemini/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+        )),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"setup":{"model":"models/gemini-2.5-flash"}}"#.into(),
+        ))
+        .await
+        .unwrap();
+    while let Some(Ok(frame)) = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .expect("downstream closes cleanly on drain")
+    {
+        assert!(
+            !matches!(frame, UpstreamMessage::Text(_) | UpstreamMessage::Binary(_)),
+            "drained Gemini Live upgrade must not relay frames: {frame:?}"
+        );
+        if matches!(frame, UpstreamMessage::Close(_)) {
+            break;
+        }
+    }
+    assert_eq!(gemini_frames.load(Ordering::SeqCst), 0);
+    assert!(!drain_gemini.await_drained(Duration::from_secs(2)).await);
+    let _ = tokio::time::timeout(Duration::from_secs(2), provider_task).await;
+    task.abort();
+}
+
+#[tokio::test]
+async fn realtime_websocket_prepare_observes_drain_for_openai_and_gemini() {
+    #[derive(Clone)]
+    struct BlockingPrepareSignerFactory {
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    impl ApiKeyAwareSignerFactory for BlockingPrepareSignerFactory {
+        fn with_router_choice(&self, _name: String) -> Arc<dyn SignerFactory> {
+            Arc::new(self.clone())
+        }
+    }
+
+    #[async_trait]
+    impl SignerFactory for BlockingPrepareSignerFactory {
+        async fn build(
+            &self,
+            _upstream: &cc_lb_domain::Upstream,
+        ) -> Result<Arc<dyn Signer>, SignerError> {
+            self.entered.notify_one();
+            std::future::pending::<()>().await;
+            unreachable!("pending signer build never completes")
+        }
+    }
+
+    async fn attach_event_bus(
+        mut state: ProxyState,
+    ) -> (
+        ProxyState,
+        tokio::sync::broadcast::Receiver<cc_lb_lifecycle::LifecycleEvent>,
+    ) {
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let events = bus.subscribe_lifecycle();
+        let lifecycle = Arc::try_unwrap(state.lifecycle)
+            .unwrap_or_else(|_| panic!("private fixture lifecycle must have one owner"));
+        state.lifecycle = Arc::new(lifecycle.with_event_bus(bus));
+        (state, events)
+    }
+
+    async fn assert_drain_terminated(
+        events: &mut tokio::sync::broadcast::Receiver<cc_lb_lifecycle::LifecycleEvent>,
+        expected_status: u16,
+    ) {
+        let terminated = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match events.recv().await {
+                    Ok(cc_lb_lifecycle::LifecycleEvent::RequestTerminated {
+                        reason,
+                        client_status,
+                        ..
+                    }) => break (reason, client_status),
+                    Ok(_) => continue,
+                    Err(err) => panic!("expected RequestTerminated event, got {err:?}"),
+                }
+            }
+        })
+        .await
+        .expect("RequestTerminated arrives promptly after drain");
+        assert_eq!(terminated.1, expected_status);
+        assert_eq!(
+            terminated.0,
+            cc_lb_lifecycle::TerminationReason::ErrorCode("drain_rejected".to_owned())
+        );
+    }
+
+    // Part 1 (OpenAI Realtime): drain during prepare_realtime_websocket rejects HTTP upgrade with 503,
+    // releases drain guard, and emits drain_rejected terminal event.
+    let entered_openai = Arc::new(tokio::sync::Notify::new());
+    let drain_openai = DrainController::new();
+    let openai_record = websocket_upstream(
+        1,
+        "openai-provider",
+        Url::parse("http://127.0.0.1:1/").unwrap(),
+    );
+    let state = websocket_test_state(
+        vec![openai_record],
+        TerminalStrategy::FirstPick,
+        drain_openai.clone(),
+        Arc::new(BlockingPrepareSignerFactory {
+            entered: Arc::clone(&entered_openai),
+        }),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let (state, mut openai_events) = attach_event_bus(state).await;
+    let (proxy, task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let drain_trigger = drain_openai.clone();
+    let trigger_task = tokio::spawn(async move {
+        entered_openai.notified().await;
+        drain_trigger.trigger();
+    });
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        connect_async(realtime_request(
+            proxy,
+            "/openai/v1/realtime?model=gpt-realtime",
+        )),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    trigger_task.await.unwrap();
+    let tokio_tungstenite::tungstenite::Error::Http(response) = err else {
+        panic!("expected 503 draining HTTP rejection, got: {err:?}");
+    };
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!drain_openai.await_drained(Duration::from_secs(2)).await);
+    assert_drain_terminated(&mut openai_events, StatusCode::SERVICE_UNAVAILABLE.as_u16()).await;
+    task.abort();
+
+    // Part 2 (Gemini Live): drain during prepare_realtime_websocket after setup frame closes WS,
+    // releases drain guard, and emits drain_rejected terminal event.
+    let entered_gemini = Arc::new(tokio::sync::Notify::new());
+    let drain_gemini = DrainController::new();
+    let mut gemini_record = websocket_upstream(
+        1,
+        "gemini-provider",
+        Url::parse("http://127.0.0.1:1/").unwrap(),
+    );
+    gemini_record.kind = UpstreamKind::GeminiApiKey;
+    let state = websocket_test_state(
+        vec![gemini_record],
+        TerminalStrategy::FirstPick,
+        drain_gemini.clone(),
+        Arc::new(BlockingPrepareSignerFactory {
+            entered: Arc::clone(&entered_gemini),
+        }),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let (state, mut gemini_events) = attach_event_bus(state).await;
+    let (proxy, task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let drain_trigger = drain_gemini.clone();
+    let trigger_task = tokio::spawn(async move {
+        entered_gemini.notified().await;
+        drain_trigger.trigger();
+    });
+    let (mut client, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        connect_async(realtime_request(
+            proxy,
+            "/gemini/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+        )),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"setup":{"model":"models/gemini-2.5-flash"}}"#.into(),
+        ))
+        .await
+        .unwrap();
+    trigger_task.await.unwrap();
+    while let Some(Ok(frame)) = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .expect("downstream closes cleanly on prepare drain")
+    {
+        assert!(
+            !matches!(frame, UpstreamMessage::Text(_) | UpstreamMessage::Binary(_)),
+            "drained Gemini Live upgrade must not relay frames: {frame:?}"
+        );
+        if matches!(frame, UpstreamMessage::Close(_)) {
+            break;
+        }
+    }
+    assert!(!drain_gemini.await_drained(Duration::from_secs(2)).await);
+    assert_drain_terminated(&mut gemini_events, StatusCode::SWITCHING_PROTOCOLS.as_u16()).await;
+    task.abort();
+}

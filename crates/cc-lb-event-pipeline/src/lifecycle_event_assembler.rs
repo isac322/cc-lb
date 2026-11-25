@@ -705,6 +705,22 @@ async fn assembler_loop(
             .map(RequestEventBus::assembler_overflow_in_flight)
             .unwrap_or(0);
         if parked == 0 {
+            // Re-check after observing `in_flight == 0` so an event queued into
+            // `rx` right before the overflow drainer dropped `in_flight` to 0
+            // cannot be missed across the boundary.
+            if let Ok(event) = rx.try_recv() {
+                handle_event(
+                    &*storage,
+                    bus.as_deref(),
+                    metrics.as_ref(),
+                    &mut writer,
+                    &mut partials,
+                    map_cap,
+                    event,
+                )
+                .await;
+                continue;
+            }
             break;
         }
         match tokio::time::timeout_at(drain_deadline, rx.recv()).await {
@@ -6791,6 +6807,109 @@ mod tests {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].upstream_ttfb_ms, expected_ttfb);
         }
+    }
+
+    #[tokio::test]
+    async fn overflowed_row_and_pricing_events_persist_cleanly_on_shutdown() {
+        let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+        let storage = Arc::new(CapturingStore::default());
+        let rx = bus.attach_lifecycle_assembler(1);
+
+        // Fill capacity=1 channel, then push a complete second request (`ovf-1`)
+        // including usage + `Priced` + `RequestTerminated` into FIFO overflow BEFORE
+        // starting or shutting down the assembler.
+        bus.publish_lifecycle(LifecycleEvent::RequestStarted {
+            event_id: "evt-fill-0".into(),
+            request_id: "req-fill-0".into(),
+            ts_ms: 1_700_000_000_000,
+            stream: false,
+            source_kind: None,
+            source_ref_id: None,
+            event_kind: None,
+            protocol: None,
+        });
+        bus.publish_lifecycle(LifecycleEvent::RequestStarted {
+            event_id: "evt-ovf-1".into(),
+            request_id: "req-ovf-1".into(),
+            ts_ms: 1_700_000_000_100,
+            stream: false,
+            source_kind: None,
+            source_ref_id: None,
+            event_kind: None,
+            protocol: None,
+        });
+        bus.publish_lifecycle(LifecycleEvent::ParseCompleted {
+            event_id: "evt-ovf-1".into(),
+            result: Ok(cc_lb_lifecycle::ParseInfo {
+                path: "/v1/messages".into(),
+                method: "POST".into(),
+                model: Some("claude-sonnet-4-5".into()),
+                ..Default::default()
+            }),
+        });
+        bus.publish_lifecycle(LifecycleEvent::UsageObserved {
+            event_id: "evt-ovf-1".into(),
+            usage: cc_lb_lifecycle::UsageSnapshot {
+                input_tokens: 100,
+                output_tokens: 50,
+                ..Default::default()
+            },
+            source: UsageSource::Final,
+        });
+        bus.publish_lifecycle(LifecycleEvent::Priced {
+            event_id: "evt-ovf-1".into(),
+            cost: CostBreakdown {
+                total_micros: Some(42),
+                ..Default::default()
+            },
+        });
+        bus.publish_lifecycle(LifecycleEvent::RequestTerminated {
+            event_id: "evt-ovf-1".into(),
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 12,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            proxy_setup_ms: None,
+            setup_timings: cc_lb_lifecycle::RequestSetupTimings::default(),
+            io_timings: cc_lb_lifecycle::RequestIoTimings::default(),
+            upstream_ttfb_ms: None,
+            upstream_body_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
+            first_content_delta_ms: None,
+            first_body_chunk_ms: None,
+            finalize_ms: None,
+            internal_errors: Vec::new(),
+            event_kind: None,
+            funding_ambiguous: false,
+            protocol: None,
+        });
+        assert_eq!(bus.assembler_overflow_in_flight(), 5);
+
+        let handle = spawn_request_event_assembler(
+            rx,
+            Arc::clone(&storage) as Arc<dyn RequestEventStore>,
+            Some(Arc::clone(&bus) as Arc<dyn RequestEventBus>),
+            Arc::new(NoopMetricsHook),
+        );
+        handle.shutdown().await;
+
+        assert_eq!(bus.assembler_overflow_in_flight(), 0);
+        let rows = storage.rows.lock().unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.event_id.as_deref() == Some("evt-ovf-1"))
+            .expect("overflowed evt-ovf-1 row persisted on shutdown");
+        assert_eq!(row.status, 200);
+        assert_eq!(row.input_tokens, Some(100));
+        assert_eq!(row.output_tokens, Some(50));
+        assert_eq!(row.cost_usd_micros, Some(42));
+        assert_ne!(
+            row.error_code.as_deref(),
+            Some("terminated_without_partial")
+        );
     }
 }
 

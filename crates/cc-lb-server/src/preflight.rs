@@ -52,6 +52,8 @@ pub enum PreflightError {
     TlsParse(String),
     #[error(transparent)]
     Config(#[from] cc_lb_config::ConfigError),
+    #[error("strict mode failed with {warning_count} warning(s)")]
+    StrictWarnings { warning_count: usize },
 }
 
 pub async fn run_preflight(

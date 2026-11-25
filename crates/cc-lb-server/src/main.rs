@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use cc_lb_server::app::{BuildError, ServeError};
 use cc_lb_server::cli::{AdminCommand, AdminUpstreamsCommand, Cli, Command, ConfigCommand};
-use cc_lb_server::{run_serve, validate};
+use cc_lb_server::{run_serve, serve_error_exit_code, validate};
 use clap::FromArgMatches;
 use reqwest::{Method, StatusCode};
 use serde_json::Value;
@@ -153,7 +153,9 @@ fn main() -> ExitCode {
             eprintln!("validation: failed: {error}");
             ExitCode::from(2)
         }
-        Err(RunError::Serve(ServeError::Preflight(error))) => {
+        Err(RunError::Serve(
+            ServeError::Preflight(error) | ServeError::Build(BuildError::Preflight(error)),
+        )) => {
             eprintln!("preflight: failed: {error}");
             ExitCode::from(2)
         }
@@ -177,13 +179,6 @@ fn main() -> ExitCode {
             eprintln!("{error}");
             ExitCode::FAILURE
         }
-    }
-}
-
-fn serve_error_exit_code(error: &ServeError) -> ExitCode {
-    match error {
-        ServeError::Build(BuildError::StorageKeyMissing { .. }) => ExitCode::from(2),
-        _ => ExitCode::FAILURE,
     }
 }
 

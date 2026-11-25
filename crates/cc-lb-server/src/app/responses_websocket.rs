@@ -475,6 +475,7 @@ async fn send_responses_dispatch(
     connections: &mut HashMap<u64, WsProviderConnection>,
     dispatch_timings: cc_lb_engine::responses_websocket::ResponsesDispatchTimings,
     deadline: tokio::time::Instant,
+    drain_controller: &DrainController,
 ) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
     let Some(connection) = connections.get_mut(&connection_id) else {
         let mut result =
@@ -547,17 +548,22 @@ async fn send_responses_dispatch(
         let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
         return (ready, vec![error]);
     }
-    match tokio::time::timeout_at(
-        deadline,
-        gateway.validate_candidate_for_send(
-            dispatch.turn_id,
-            upstream_id,
-            Some(connection_id),
-            false,
-        ),
-    )
-    .await
-    {
+    let validation = tokio::select! {
+        biased;
+        _ = drain_controller.wait_for_draining(), if !dispatch.control => {
+            return finish_draining_dispatch(gateway, dispatch).await;
+        }
+        result = tokio::time::timeout_at(
+            deadline,
+            gateway.validate_candidate_for_send(
+                dispatch.turn_id,
+                upstream_id,
+                Some(connection_id),
+                false,
+            ),
+        ) => result,
+    };
+    match validation {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
@@ -573,6 +579,9 @@ async fn send_responses_dispatch(
             let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
             return (ready, vec![error]);
         }
+    }
+    if drain_controller.is_draining() {
+        return finish_draining_dispatch(gateway, dispatch).await;
     }
     commit_and_send_responses_dispatch(
         gateway,
@@ -721,6 +730,16 @@ async fn finish_failed_dispatch(
     (ready, vec![error])
 }
 
+async fn finish_draining_dispatch(
+    gateway: &mut ResponsesWebSocketGateway,
+    dispatch: WebSocketDispatch,
+) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
+    let error =
+        WebSocketError::new(503, "draining", "server is draining").with_stream(dispatch.stream_id);
+    let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
+    (ready, vec![error])
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn advance_one_dispatch(
     gateway: &mut ResponsesWebSocketGateway,
@@ -734,6 +753,10 @@ async fn advance_one_dispatch(
     connect_tasks: &mut tokio::task::JoinSet<ConnectAttemptOutcome>,
     deferred_for_session_owner: &mut VecDeque<PendingDispatchState>,
 ) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
+    if state.drain_controller.is_draining() && !pending.dispatch.control {
+        return finish_draining_dispatch(gateway, pending.dispatch).await;
+    }
+
     if let Some(connection_id) = pending.dispatch.connection_id {
         return send_responses_dispatch(
             gateway,
@@ -742,6 +765,7 @@ async fn advance_one_dispatch(
             connections,
             cc_lb_engine::responses_websocket::ResponsesDispatchTimings::reused(),
             pending.deadline,
+            &state.drain_controller,
         )
         .await;
     }
@@ -788,18 +812,26 @@ async fn advance_one_dispatch(
                 pending.last_error = Some(error.with_stream(pending.dispatch.stream_id.clone()));
                 return finish_failed_dispatch(gateway, pending).await;
             }
-            match tokio::time::timeout_at(
-                pending.deadline,
-                gateway.validate_candidate_for_send(
-                    pending.dispatch.turn_id,
-                    candidate.upstream_id,
-                    Some(connection_id),
-                    has_remaining_candidates,
-                ),
-            )
-            .await
-            {
+            let validation = tokio::select! {
+                biased;
+                _ = state.drain_controller.wait_for_draining(), if !pending.dispatch.control => {
+                    return finish_draining_dispatch(gateway, pending.dispatch).await;
+                }
+                result = tokio::time::timeout_at(
+                    pending.deadline,
+                    gateway.validate_candidate_for_send(
+                        pending.dispatch.turn_id,
+                        candidate.upstream_id,
+                        Some(connection_id),
+                        has_remaining_candidates,
+                    ),
+                ) => result,
+            };
+            match validation {
                 Ok(Ok(())) => {
+                    if state.drain_controller.is_draining() {
+                        return finish_draining_dispatch(gateway, pending.dispatch).await;
+                    }
                     return commit_and_send_responses_dispatch(
                         gateway,
                         pending.dispatch,
@@ -810,6 +842,9 @@ async fn advance_one_dispatch(
                     .await;
                 }
                 Ok(Err(error)) => {
+                    if state.drain_controller.is_draining() {
+                        return finish_draining_dispatch(gateway, pending.dispatch).await;
+                    }
                     let fatal = is_fatal_ws_connect_error(&error);
                     pending.last_error = Some(error);
                     if fatal {
@@ -899,12 +934,18 @@ async fn advance_one_dispatch(
         // Recheck fresh quota and routing eligibility before burning an attempt
         // slot or acquiring the bulkhead so an unpinned fallback whose quota just
         // exhausted skips cleanly to the next eligible upstream.
-        match tokio::time::timeout_at(
-            pending.deadline,
-            gateway.validate_fallback_candidate(&pending.dispatch, &candidate),
-        )
-        .await
-        {
+        let fallback_validation = tokio::select! {
+            biased;
+            _ = state.drain_controller.wait_for_draining(), if !pending.dispatch.control => {
+                drop(permit);
+                return finish_draining_dispatch(gateway, pending.dispatch).await;
+            }
+            result = tokio::time::timeout_at(
+                pending.deadline,
+                gateway.validate_fallback_candidate(&pending.dispatch, &candidate),
+            ) => result,
+        };
+        match fallback_validation {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 drop(permit);
@@ -950,6 +991,10 @@ async fn advance_one_dispatch(
             ));
             break;
         };
+        if state.drain_controller.is_draining() && !pending.dispatch.control {
+            drop(permit);
+            return finish_draining_dispatch(gateway, pending.dispatch).await;
+        }
         let connection_id = *next_connection_id;
         *next_connection_id = next_id;
 
@@ -1140,7 +1185,22 @@ async fn handle_connect_outcome(
             candidates.push(pending.primary);
             candidates.extend(pending.waiters);
 
+            if state.drain_controller.is_draining() {
+                for entry in candidates {
+                    let (ready, errs) = finish_draining_dispatch(gateway, entry.dispatch).await;
+                    dispatches.extend(ready);
+                    errors.extend(errs);
+                }
+                return errors;
+            }
+
             for mut entry in candidates {
+                if state.drain_controller.is_draining() {
+                    let (ready, errs) = finish_draining_dispatch(gateway, entry.dispatch).await;
+                    dispatches.extend(ready);
+                    errors.extend(errs);
+                    continue;
+                }
                 let now = tokio::time::Instant::now();
                 if now >= entry.deadline {
                     entry.last_error = Some(WebSocketError::new(
@@ -1183,18 +1243,33 @@ async fn handle_connect_outcome(
                     errors.extend(errs);
                     continue;
                 }
-                match tokio::time::timeout_at(
-                    entry.deadline,
-                    gateway.validate_candidate_for_send(
-                        entry.dispatch.turn_id,
-                        upstream_id,
-                        existing_conn,
-                        has_remaining_candidates,
-                    ),
-                )
-                .await
-                {
+                let validation = tokio::select! {
+                    biased;
+                    _ = state.drain_controller.wait_for_draining(), if !entry.dispatch.control => {
+                        let (ready, errs) = finish_draining_dispatch(gateway, entry.dispatch).await;
+                        dispatches.extend(ready);
+                        errors.extend(errs);
+                        continue;
+                    }
+                    result = tokio::time::timeout_at(
+                        entry.deadline,
+                        gateway.validate_candidate_for_send(
+                            entry.dispatch.turn_id,
+                            upstream_id,
+                            existing_conn,
+                            has_remaining_candidates,
+                        ),
+                    ) => result,
+                };
+                match validation {
                     Ok(Ok(())) => {
+                        if state.drain_controller.is_draining() {
+                            let (ready, errs) =
+                                finish_draining_dispatch(gateway, entry.dispatch).await;
+                            dispatches.extend(ready);
+                            errors.extend(errs);
+                            continue;
+                        }
                         let timings = if let Some(attempt) = pending_attempt.take() {
                             // Register ownership BEFORE spawning the reader so no early provider
                             // frame (such as `codex.rate_limits`) can arrive ahead of registration.
@@ -1242,6 +1317,13 @@ async fn handle_connect_outcome(
                         errors.extend(errs);
                     }
                     Ok(Err(error)) => {
+                        if state.drain_controller.is_draining() {
+                            let (ready, errs) =
+                                finish_draining_dispatch(gateway, entry.dispatch).await;
+                            dispatches.extend(ready);
+                            errors.extend(errs);
+                            continue;
+                        }
                         let fatal = is_fatal_ws_connect_error(&error);
                         entry.last_error = Some(error);
                         if fatal {
@@ -1266,6 +1348,14 @@ async fn handle_connect_outcome(
             }
         }
         Err(ConnectAttemptError::Prepare(error)) => {
+            if state.drain_controller.is_draining() {
+                for entry in std::iter::once(pending.primary).chain(pending.waiters) {
+                    let (ready, errs) = finish_draining_dispatch(gateway, entry.dispatch).await;
+                    dispatches.extend(ready);
+                    errors.extend(errs);
+                }
+                return errors;
+            }
             let now = tokio::time::Instant::now();
             let mut primary = pending.primary;
             primary.last_error = Some(error.clone());
@@ -1297,6 +1387,14 @@ async fn handle_connect_outcome(
             }
         }
         Err(ConnectAttemptError::Dial(error)) => {
+            if state.drain_controller.is_draining() {
+                for entry in std::iter::once(pending.primary).chain(pending.waiters) {
+                    let (ready, errs) = finish_draining_dispatch(gateway, entry.dispatch).await;
+                    dispatches.extend(ready);
+                    errors.extend(errs);
+                }
+                return errors;
+            }
             let now = tokio::time::Instant::now();
             for mut entry in std::iter::once(pending.primary).chain(pending.waiters) {
                 entry.last_error = Some(error.clone());
@@ -1900,6 +1998,7 @@ async fn relay_responses_websocket(
     );
     activity_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    let mut drain_handled = false;
     let body = async {
         'relay: loop {
             let dispatched_any = !dispatches.is_empty();
@@ -1964,7 +2063,58 @@ async fn relay_responses_websocket(
                 .iter()
                 .map(|entry| entry.deadline)
                 .min();
+            if state.drain_controller.is_draining()
+                && !gateway.has_active_turns()
+                && pending_deadline.is_none()
+                && pending_connects.is_empty()
+                && deferred_for_session_owner.is_empty()
+                && dispatches.is_empty()
+            {
+                break 'relay;
+            }
+
             tokio::select! {
+                _ = state.drain_controller.wait_for_draining(), if !drain_handled => {
+                    drain_handled = true;
+                    connect_tasks.abort_all();
+                    while connect_tasks.join_next().await.is_some() {}
+                    for (_, pending) in pending_connects.drain() {
+                        for entry in std::iter::once(pending.primary).chain(pending.waiters) {
+                            let error =
+                                WebSocketError::new(503, "draining", "server is draining")
+                                    .with_stream(entry.dispatch.stream_id);
+                            let ready =
+                                gateway.fail_dispatch(entry.dispatch.turn_id, &error).await;
+                            dispatches.extend(ready);
+                            if downstream_sink
+                                .send(websocket_error_message(&error))
+                                .await
+                                .is_err()
+                            {
+                                break 'relay;
+                            }
+                        }
+                    }
+                    for entry in deferred_for_session_owner.drain(..) {
+                        let error = WebSocketError::new(503, "draining", "server is draining")
+                            .with_stream(entry.dispatch.stream_id);
+                        let ready = gateway.fail_dispatch(entry.dispatch.turn_id, &error).await;
+                        dispatches.extend(ready);
+                        if downstream_sink
+                            .send(websocket_error_message(&error))
+                            .await
+                            .is_err()
+                        {
+                            break 'relay;
+                        }
+                    }
+                    if !gateway.has_active_turns()
+                        && gateway.next_pending_error_deadline().is_none()
+                        && dispatches.is_empty()
+                    {
+                        break 'relay;
+                    }
+                }
                 _ = activity_heartbeat.tick(), if gateway.has_active_turns() => {
                     gateway.observe_active_turns_heartbeat();
                 }
@@ -2054,6 +2204,30 @@ async fn relay_responses_websocket(
                                     continue;
                                 }
                             };
+                            if state.drain_controller.is_draining()
+                                && let Ok(parsed) = sonic_rs::from_str::<serde_json::Value>(&frame)
+                                && parsed.get("type").and_then(serde_json::Value::as_str)
+                                    == Some("response.create")
+                            {
+                                let stream_id = parsed
+                                    .get("stream_id")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned);
+                                let error = WebSocketError::new(
+                                    503,
+                                    "draining",
+                                    "server is draining",
+                                )
+                                .with_stream(stream_id);
+                                if downstream_sink
+                                    .send(websocket_error_message(&error))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                continue;
+                            }
                             match gateway.client_message(auth, frame.into()).await {
                                 Ok(Some(dispatch)) => dispatches.push_back(dispatch),
                                 Ok(None) => {}
@@ -2107,14 +2281,14 @@ async fn relay_responses_websocket(
             }
         }
     };
-    let draining =
-        run_responses_websocket_until_cancelled(body, &client_closed, &state.drain_controller)
+    let force_closed =
+        run_responses_websocket_until_force_closed(body, &client_closed, &state.drain_controller)
             .await;
 
     connect_tasks.abort_all();
     while connect_tasks.join_next().await.is_some() {}
     pending_connects.clear();
-    if draining {
+    if force_closed || state.drain_controller.is_draining() {
         gateway.drain();
     } else {
         gateway.close();
@@ -2143,6 +2317,7 @@ async fn relay_responses_websocket(
     }
 }
 
+#[cfg(all(test, feature = "admin"))]
 pub(super) async fn run_responses_websocket_until_cancelled<F>(
     body: F,
     client_closed: &CancellationToken,
@@ -2158,6 +2333,24 @@ where
         _ = &mut body => false,
         _ = client_closed.cancelled() => false,
         _ = &mut drain_wait => true,
+    }
+}
+
+async fn run_responses_websocket_until_force_closed<F>(
+    body: F,
+    client_closed: &CancellationToken,
+    drain_controller: &DrainController,
+) -> bool
+where
+    F: Future<Output = ()>,
+{
+    tokio::pin!(body);
+    let force_close_wait = drain_controller.wait_for_force_close();
+    tokio::pin!(force_close_wait);
+    tokio::select! {
+        _ = &mut body => false,
+        _ = client_closed.cancelled() => false,
+        _ = &mut force_close_wait => true,
     }
 }
 
@@ -2389,5 +2582,321 @@ mod tests {
             "expected lane-2 frame on upstream socket, got {sent_frame}"
         );
         up_task.abort();
+    }
+
+    #[derive(Clone)]
+    struct BlockingValidateKeyStore {
+        armed: Arc<std::sync::atomic::AtomicBool>,
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl cc_lb_storage_api::ManagedKeyStore for BlockingValidateKeyStore {
+        async fn issue(
+            &self,
+            principal_id: &str,
+            key_id: &str,
+            params: cc_lb_storage_api::IssueParams,
+        ) -> cc_lb_storage_api::StorageResult<cc_lb_storage_api::StoredApiKeyRecord> {
+            crate::app::tests::FixtureKeyStore
+                .issue(principal_id, key_id, params)
+                .await
+        }
+
+        async fn get(
+            &self,
+            principal_id: &str,
+            key_id: &str,
+        ) -> cc_lb_storage_api::StorageResult<Option<cc_lb_storage_api::StoredApiKeyRecord>>
+        {
+            crate::app::tests::FixtureKeyStore
+                .get(principal_id, key_id)
+                .await
+        }
+
+        async fn lookup_by_index_hash(
+            &self,
+            index_hash: &[u8; 32],
+        ) -> cc_lb_storage_api::StorageResult<
+            Option<(String, String, cc_lb_storage_api::StoredApiKeyRecord)>,
+        > {
+            if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+            crate::app::tests::FixtureKeyStore
+                .lookup_by_index_hash(index_hash)
+                .await
+        }
+
+        async fn list_by_principal(
+            &self,
+            principal_id: &str,
+        ) -> cc_lb_storage_api::StorageResult<Vec<cc_lb_storage_api::StoredApiKeyRecord>> {
+            crate::app::tests::FixtureKeyStore
+                .list_by_principal(principal_id)
+                .await
+        }
+
+        async fn list_all(
+            &self,
+        ) -> cc_lb_storage_api::StorageResult<
+            Vec<(String, String, cc_lb_storage_api::StoredApiKeyRecord)>,
+        > {
+            crate::app::tests::FixtureKeyStore.list_all().await
+        }
+
+        async fn update(
+            &self,
+            principal_id: &str,
+            key_id: &str,
+            mutation: cc_lb_storage_api::ApiKeyMutation,
+        ) -> cc_lb_storage_api::StorageResult<()> {
+            crate::app::tests::FixtureKeyStore
+                .update(principal_id, key_id, mutation)
+                .await
+        }
+
+        async fn revoke_zero_secrets(
+            &self,
+            principal_id: &str,
+            key_id: &str,
+        ) -> cc_lb_storage_api::StorageResult<()> {
+            crate::app::tests::FixtureKeyStore
+                .revoke_zero_secrets(principal_id, key_id)
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_fallback_validation_observes_drain_without_dialing() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+
+        let dial_accepts = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fallback upstream");
+        let addr = listener.local_addr().unwrap();
+        let accepts_task = Arc::clone(&dial_accepts);
+        let up_task = tokio::spawn(async move {
+            while let Ok((_socket, _)) = listener.accept().await {
+                accepts_task.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        });
+
+        let up1 = crate::app::tests::websocket_upstream(
+            1,
+            "primary-upstream",
+            url::Url::parse("http://127.0.0.1:1/").unwrap(),
+        );
+        let up2 = crate::app::tests::websocket_upstream(
+            2,
+            "fallback-upstream",
+            url::Url::parse(&format!("http://{addr}/")).unwrap(),
+        );
+        let armed = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let key_store = Arc::new(BlockingValidateKeyStore {
+            armed: Arc::clone(&armed),
+            entered: Arc::clone(&entered),
+        });
+        let drain = DrainController::new();
+        let state = crate::app::tests::websocket_test_state(
+            vec![up1, up2],
+            cc_lb_domain::TerminalStrategy::FirstPick,
+            drain.clone(),
+            Arc::new(crate::app::tests::WebSocketTestSignerFactory),
+            key_store,
+            vec!["*".to_owned()],
+        )
+        .await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_str(crate::app::tests::TEST_KEY.plaintext.as_str()).unwrap(),
+        );
+        let auth = state.lifecycle.authenticate(&headers).await.unwrap();
+        let mut gateway = ResponsesWebSocketGateway::new(
+            state.lifecycle.clone(),
+            &auth,
+            headers,
+            state.body_caps.messages,
+            8,
+        );
+        let d1 = gateway
+            .client_message(
+                auth,
+                Bytes::from_static(
+                    br#"{"type":"response.create","model":"gpt-4.1","stream_id":"fallback-lane","store":false,"input":[]}"#,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let mut pending =
+            PendingDispatchState::new(d1, Duration::from_secs(5), Duration::from_secs(5), 2);
+        // Simulate exhausted primary so `advance_one_dispatch` enters `validate_fallback_candidate`
+        // for `up2` (`reject_exhausted_fallback == true`, triggering `self.authenticate()`).
+        let first = pending.remaining.pop_front().expect("primary candidate");
+        assert_eq!(first.upstream_name, "primary-upstream");
+        assert_eq!(pending.remaining.len(), 1);
+
+        let (events, _rx) = tokio::sync::mpsc::channel(16);
+        let mut connections = HashMap::new();
+        let mut next_connection_id = 1;
+        let mut pending_connects = HashMap::new();
+        let mut connect_tasks = tokio::task::JoinSet::new();
+        let mut deferred = VecDeque::new();
+
+        armed.store(true, AtomicOrdering::SeqCst);
+        let drain_for_trigger = drain.clone();
+        let trigger_task = tokio::spawn(async move {
+            entered.notified().await;
+            drain_for_trigger.trigger();
+        });
+        let (ready, errs) = tokio::time::timeout(
+            Duration::from_secs(2),
+            advance_one_dispatch(
+                &mut gateway,
+                pending,
+                &state,
+                &mut connections,
+                &events,
+                &mut next_connection_id,
+                8,
+                &mut pending_connects,
+                &mut connect_tasks,
+                &mut deferred,
+            ),
+        )
+        .await
+        .expect("advance_one_dispatch cancels blocked fallback validation on drain");
+        trigger_task.await.expect("trigger task completes");
+
+        assert!(ready.is_empty());
+        assert_eq!(errs.len(), 1, "expected 503 draining error, got: {errs:?}");
+        assert_eq!(errs[0].status, 503);
+        assert_eq!(errs[0].code, "draining");
+        assert!(pending_connects.is_empty());
+        assert!(connect_tasks.is_empty());
+        assert_eq!(dial_accepts.load(AtomicOrdering::SeqCst), 0);
+        up_task.abort();
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_pinned_send_validation_observes_drain() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind provider socket");
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            while ws.next().await.is_some() {}
+        });
+
+        let up1 = crate::app::tests::websocket_upstream(
+            1,
+            "primary-upstream",
+            url::Url::parse(&format!("http://{addr}/")).unwrap(),
+        );
+        let armed = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let key_store = Arc::new(BlockingValidateKeyStore {
+            armed: Arc::clone(&armed),
+            entered: Arc::clone(&entered),
+        });
+        let drain = DrainController::new();
+        let state = crate::app::tests::websocket_test_state(
+            vec![up1.clone()],
+            cc_lb_domain::TerminalStrategy::FirstPick,
+            drain.clone(),
+            Arc::new(crate::app::tests::WebSocketTestSignerFactory),
+            key_store,
+            vec!["*".to_owned()],
+        )
+        .await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_str(crate::app::tests::TEST_KEY.plaintext.as_str()).unwrap(),
+        );
+        let auth = state.lifecycle.authenticate(&headers).await.unwrap();
+        let mut gateway = ResponsesWebSocketGateway::new(
+            state.lifecycle.clone(),
+            &auth,
+            headers,
+            state.body_caps.messages,
+            8,
+        );
+        let dispatch = gateway
+            .client_message(
+                auth,
+                Bytes::from_static(
+                    br#"{"type":"response.create","model":"gpt-4.1","stream_id":"pinned-lane","store":false,"input":[]}"#,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        gateway.assign_connection(dispatch.turn_id, 1, up1.id, "primary-upstream");
+
+        let (ws_client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/v1/responses"))
+            .await
+            .expect("connect mock provider socket");
+        let (sink, _stream) = ws_client.split();
+        let bulkhead = state
+            .websocket_bulkheads
+            .semaphore_only_bulkhead(
+                websocket_breaker_key(up1.id),
+                state.websocket_bulkhead_config,
+            )
+            .acquire_owned()
+            .await
+            .expect("bulkhead permit");
+        let mut connections = HashMap::new();
+        connections.insert(
+            1,
+            WsProviderConnection {
+                upstream_id: up1.id,
+                upstream_name: "primary-upstream".to_owned(),
+                sink,
+                task: None,
+                lane: Some("pinned-lane".to_owned()),
+                _bulkhead_guard: bulkhead,
+            },
+        );
+
+        armed.store(true, AtomicOrdering::SeqCst);
+        let drain_for_trigger = drain.clone();
+        let trigger_task = tokio::spawn(async move {
+            entered.notified().await;
+            drain_for_trigger.trigger();
+        });
+        let (ready, errs) = tokio::time::timeout(
+            Duration::from_secs(2),
+            send_responses_dispatch(
+                &mut gateway,
+                dispatch,
+                1,
+                &mut connections,
+                cc_lb_engine::responses_websocket::ResponsesDispatchTimings::reused(),
+                tokio::time::Instant::now() + Duration::from_secs(30),
+                &drain,
+            ),
+        )
+        .await
+        .expect("send_responses_dispatch cancels blocked send validation on drain");
+        trigger_task.await.expect("trigger task completes");
+
+        assert!(ready.is_empty());
+        assert_eq!(errs.len(), 1, "expected 503 draining error, got: {errs:?}");
+        assert_eq!(errs[0].status, 503);
+        assert_eq!(errs[0].code, "draining");
+        server_task.abort();
     }
 }

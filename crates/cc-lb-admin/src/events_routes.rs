@@ -268,13 +268,17 @@ pub async fn handle_events_stream(
                     match bus_result {
                         BusUpdateResult::Update(update) => {
                             if !apply_filters_to_update(&update, &filters) {
-                                if let RequestEventUpdate::Final(final_update) = &update
-                                    && let Some(sse) = stream_state.remove_partial_event(
+                                if let RequestEventUpdate::Final(final_update) = &update {
+                                    stream_state.mark_finalized_out_of_scope(
+                                        &final_update.event,
+                                        final_update.cursor,
+                                    );
+                                    if let Some(sse) = stream_state.remove_partial_event(
                                         &final_update.event,
                                         stream_state.last_finalized_cursor,
-                                    )
-                                {
-                                    yield Ok::<Event, Infallible>(sse);
+                                    ) {
+                                        yield Ok::<Event, Infallible>(sse);
+                                    }
                                 }
                                 continue;
                             }
@@ -299,7 +303,11 @@ pub async fn handle_events_stream(
                     match storage_result {
                         Ok(update) => {
                             if !apply_filters_to_event(&update.event, &filters) {
-                                if let Some(sse) = stream_state.remove_partial_event(&update.event, update.cursor) {
+                                stream_state
+                                    .mark_finalized_out_of_scope(&update.event, update.cursor);
+                                if let Some(sse) =
+                                    stream_state.remove_partial_event(&update.event, update.cursor)
+                                {
                                     yield Ok::<Event, Infallible>(sse);
                                 }
                                 stream_state.advance_bookmark(update.cursor);
@@ -355,6 +363,8 @@ struct StreamEmitState {
     max_emitted_cursor: u64,
     max_emitted_by_id: HashMap<String, u64>,
     emitted_order: VecDeque<String>,
+    filtered_final_ids: HashSet<String>,
+    filtered_final_order: VecDeque<String>,
     // Only scoped streams need lifecycle retractions after an upstream failover.
     active_partials: Option<HashSet<String>>,
 }
@@ -366,6 +376,8 @@ impl StreamEmitState {
             max_emitted_cursor: last_finalized_cursor,
             max_emitted_by_id: HashMap::new(),
             emitted_order: VecDeque::new(),
+            filtered_final_ids: HashSet::new(),
+            filtered_final_order: VecDeque::new(),
             active_partials: scoped.then(HashSet::new),
         }
     }
@@ -477,10 +489,27 @@ impl StreamEmitState {
         )
     }
 
+    fn mark_finalized_out_of_scope(&mut self, event: &RequestEvent, _cursor: u64) {
+        let Some(event_id) = final_event_id(event) else {
+            return;
+        };
+        if event_id.is_empty() || self.filtered_final_ids.contains(event_id) {
+            return;
+        }
+        while self.filtered_final_ids.len() >= MAX_EMITTED_EVENT_IDS {
+            let Some(oldest) = self.filtered_final_order.pop_front() else {
+                break;
+            };
+            self.filtered_final_ids.remove(&oldest);
+        }
+        let owned = event_id.to_owned();
+        self.filtered_final_order.push_back(owned.clone());
+        self.filtered_final_ids.insert(owned);
+    }
+
     fn partial_is_finalized(&self, partial: &RequestEventPartial) -> bool {
-        self.max_emitted_by_id
-            .get(&partial.event_id)
-            .is_some_and(|cursor| *cursor > self.last_finalized_cursor)
+        self.max_emitted_by_id.contains_key(&partial.event_id)
+            || self.filtered_final_ids.contains(&partial.event_id)
     }
 
     fn advance_bookmark(&mut self, cursor: u64) {
@@ -736,5 +765,157 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn partial_is_finalized_suppresses_late_partials_after_backfill_final() {
+        let mut state = StreamEmitState::new(100, false);
+        let final_evt = RequestEvent {
+            ts: 1_800_000_000,
+            request_id: "req-bf".to_owned(),
+            event_id: Some("evt-bf".to_owned()),
+            ..Default::default()
+        };
+        assert!(state.storage_final_event(&final_evt, 90).is_some());
+        assert_eq!(state.last_finalized_cursor, 100);
+
+        let late_partial = RequestEventUpdate::Partial(RequestEventPartial {
+            event_id: "evt-bf".to_owned(),
+            request_id: "req-bf".to_owned(),
+            ..Default::default()
+        });
+        assert!(state.bus_event(&late_partial).is_none());
+    }
+
+    #[test]
+    fn partial_is_finalized_suppresses_late_partials_after_storage_tail_final_and_bookmark_advance()
+    {
+        let mut state = StreamEmitState::new(10, false);
+        let tail_update = StorageTailUpdate {
+            cursor: 15,
+            event: RequestEvent {
+                ts: 1_800_000_000,
+                request_id: "req-tail".to_owned(),
+                event_id: Some("evt-tail".to_owned()),
+                ..Default::default()
+            },
+        };
+        assert!(state.storage_tail_event(&tail_update).is_some());
+        assert_eq!(state.last_finalized_cursor, 15);
+
+        let late_partial = RequestEventUpdate::Partial(RequestEventPartial {
+            event_id: "evt-tail".to_owned(),
+            request_id: "req-tail".to_owned(),
+            ..Default::default()
+        });
+        // Even immediately at `cursor == last_finalized_cursor`, late partial must be suppressed.
+        assert!(state.bus_event(&late_partial).is_none());
+
+        // Even after another finalized row advances `last_finalized_cursor` further.
+        let newer_tail = StorageTailUpdate {
+            cursor: 25,
+            event: RequestEvent {
+                ts: 1_800_000_001,
+                request_id: "req-newer".to_owned(),
+                event_id: Some("evt-newer".to_owned()),
+                ..Default::default()
+            },
+        };
+        assert!(state.storage_tail_event(&newer_tail).is_some());
+        assert_eq!(state.last_finalized_cursor, 25);
+        assert!(state.bus_event(&late_partial).is_none());
+    }
+
+    #[test]
+    fn partial_is_finalized_suppresses_late_partials_after_bus_final() {
+        let mut state = StreamEmitState::new(10, false);
+        let bus_final = RequestEventUpdate::final_(
+            RequestEvent {
+                ts: 1_800_000_000,
+                request_id: "req-bus".to_owned(),
+                event_id: Some("evt-bus".to_owned()),
+                ..Default::default()
+            },
+            12,
+        );
+        assert!(state.bus_event(&bus_final).is_some());
+
+        let late_partial = RequestEventUpdate::Partial(RequestEventPartial {
+            event_id: "evt-bus".to_owned(),
+            request_id: "req-bus".to_owned(),
+            ..Default::default()
+        });
+        assert!(state.bus_event(&late_partial).is_none());
+    }
+
+    #[test]
+    fn out_of_scope_final_retracts_partial_and_suppresses_subsequent_late_partial() {
+        let mut state = StreamEmitState::new(10, true);
+        let partial_update = RequestEventUpdate::Partial(RequestEventPartial {
+            event_id: "evt-retract".to_owned(),
+            request_id: "req-retract".to_owned(),
+            ..Default::default()
+        });
+        assert!(state.bus_event(&partial_update).is_some());
+
+        let final_evt = RequestEvent {
+            ts: 1_800_000_000,
+            request_id: "req-retract".to_owned(),
+            event_id: Some("evt-retract".to_owned()),
+            ..Default::default()
+        };
+        state.mark_finalized_out_of_scope(&final_evt, 11);
+        assert!(state.remove_partial_event(&final_evt, 11).is_some());
+        state.advance_bookmark(11);
+
+        // A delayed PG NOTIFY partial carrying the same `event_id` must not resurrect it.
+        assert!(state.bus_event(&partial_update).is_none());
+    }
+
+    #[test]
+    fn filtered_out_finals_do_not_evict_emitted_final_ids() {
+        let mut state = StreamEmitState::new(10, true);
+        let matching_event = RequestEvent {
+            ts: 1_800_000_000,
+            request_id: "req-matching".to_owned(),
+            event_id: Some("evt-matching".to_owned()),
+            ..Default::default()
+        };
+        let matching_final = RequestEventUpdate::final_(matching_event.clone(), 12);
+        assert!(state.bus_event(&matching_final).is_some());
+
+        for idx in 0..(MAX_EMITTED_EVENT_IDS + 50) {
+            let unrelated = RequestEvent {
+                ts: 1_800_000_001,
+                request_id: format!("req-unrelated-{idx}"),
+                event_id: Some(format!("evt-unrelated-{idx}")),
+                ..Default::default()
+            };
+            state.mark_finalized_out_of_scope(&unrelated, 13 + idx as u64);
+        }
+
+        // Emitted matching final must stay in `max_emitted_by_id` and deduplicate when storage tail catches up
+        // (emitting only a lightweight bookmark `cursor` event, never the duplicate `message` payload).
+        assert_eq!(state.max_emitted_by_id.get("evt-matching"), Some(&12));
+        let tail_sse = state
+            .storage_tail_event(&StorageTailUpdate {
+                cursor: 12,
+                event: matching_event,
+            })
+            .expect("bookmark advances with cursor event when final was already emitted");
+        let tail_debug = format!("{tail_sse:?}");
+        assert!(
+            tail_debug.contains("cursor") && !tail_debug.contains("evt-matching"),
+            "expected deduplicated cursor event without duplicate message payload, got {tail_debug}"
+        );
+        assert!(state.bus_event(&matching_final).is_none());
+
+        // Recent filtered-out final still suppresses late partials.
+        let late_unrelated_partial = RequestEventUpdate::Partial(RequestEventPartial {
+            event_id: format!("evt-unrelated-{}", MAX_EMITTED_EVENT_IDS + 49),
+            request_id: "req-unrelated-latest".to_owned(),
+            ..Default::default()
+        });
+        assert!(state.bus_event(&late_unrelated_partial).is_none());
     }
 }

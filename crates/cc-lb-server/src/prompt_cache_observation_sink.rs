@@ -12,8 +12,9 @@ use cc_lb_storage_api::{
     PromptCacheObservationRecord, PromptCacheObservationStore, ProviderPromptCacheObservationRecord,
 };
 use thiserror::Error;
-use tokio::sync::mpsc::{self, Sender, error::TrySendError};
+use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 pub const DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY: usize = 4096;
 
@@ -44,6 +45,17 @@ impl PromptCacheObservationSink {
         capacity: usize,
         store_kind: &'static str,
     ) -> (Self, JoinHandle<()>) {
+        Self::new_with_cancel(store, capacity, store_kind, CancellationToken::new())
+    }
+
+    /// Spawns the writer task with a cancellation token that drains queued
+    /// observations on shutdown even while sink clones remain alive.
+    pub fn new_with_cancel(
+        store: Arc<dyn PromptCacheObservationStore + Send + Sync>,
+        capacity: usize,
+        store_kind: &'static str,
+        cancel: CancellationToken,
+    ) -> (Self, JoinHandle<()>) {
         let bounded_capacity = capacity.max(1);
         let (tx, mut rx) = mpsc::channel(bounded_capacity);
         let sink = Self {
@@ -52,16 +64,18 @@ impl PromptCacheObservationSink {
         };
 
         let writer = tokio::spawn(async move {
-            while let Some(observation) = rx.recv().await {
-                let result = match observation {
-                    Observation::Anthropic(record) => store.upsert_observation(&record).await,
-                    Observation::Provider(record) => {
-                        store.upsert_provider_observation(&record).await
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        drain_remaining(&mut rx, &store, store_kind).await;
+                        return;
                     }
-                };
-                if let Err(error) = result {
-                    inc_cache_observation_write_failed(store_kind);
-                    tracing::warn!(error = ?error, "prompt cache observation write failed");
+                    observation = rx.recv() => match observation {
+                        Some(observation) => {
+                            persist_observation(&store, store_kind, observation).await;
+                        }
+                        None => return,
+                    }
                 }
             }
         });
@@ -101,6 +115,32 @@ impl PromptCacheObservationSink {
     /// Reads the dropped counter.
     pub fn dropped_total(&self) -> u64 {
         self.dropped_counter.load(Ordering::Relaxed)
+    }
+}
+
+async fn persist_observation(
+    store: &Arc<dyn PromptCacheObservationStore + Send + Sync>,
+    store_kind: &'static str,
+    observation: Observation,
+) {
+    let result = match observation {
+        Observation::Anthropic(record) => store.upsert_observation(&record).await,
+        Observation::Provider(record) => store.upsert_provider_observation(&record).await,
+    };
+    if let Err(error) = result {
+        inc_cache_observation_write_failed(store_kind);
+        tracing::warn!(error = ?error, "prompt cache observation write failed");
+    }
+}
+
+async fn drain_remaining(
+    rx: &mut Receiver<Observation>,
+    store: &Arc<dyn PromptCacheObservationStore + Send + Sync>,
+    store_kind: &'static str,
+) {
+    rx.close();
+    while let Some(observation) = rx.recv().await {
+        persist_observation(store, store_kind, observation).await;
     }
 }
 
@@ -275,5 +315,32 @@ mod tests {
 
         assert_eq!(sink.enqueue(record(0)), Err(EnqueueError::ChannelClosed));
         assert_eq!(sink.dropped_total(), 1);
+    }
+
+    #[tokio::test]
+    async fn writer_flushes_queued_observations_on_cancel_even_while_sink_clones_exist() {
+        let store = MockStore::default();
+        let records = Arc::clone(&store.records);
+        let cancel = CancellationToken::new();
+        let (sink, writer) = PromptCacheObservationSink::new_with_cancel(
+            Arc::new(store),
+            8,
+            "sqlite",
+            cancel.clone(),
+        );
+        let clone = sink.clone();
+
+        for index in 0..3 {
+            sink.enqueue(record(index)).expect("record enqueued");
+        }
+        cancel.cancel();
+
+        tokio::time::timeout(Duration::from_secs(2), writer)
+            .await
+            .expect("writer exits promptly on cancel despite live sink clones")
+            .expect("writer task joins cleanly");
+        assert_eq!(records.lock().expect("mock store lock").len(), 3);
+        assert_eq!(clone.enqueue(record(99)), Err(EnqueueError::ChannelClosed));
+        drop((sink, clone));
     }
 }

@@ -402,9 +402,15 @@ async fn openai_realtime_websocket_for_target(
     let observation = state
         .lifecycle
         .begin_realtime_websocket(&auth, &target_path);
-    let mut session = match state
-        .lifecycle
-        .prepare_realtime_websocket(
+    let drain_observation = observation.clone();
+    let prepare_result = tokio::select! {
+        biased;
+        _ = state.drain_controller.wait_for_draining() => {
+            drain_observation.finish_draining_with_status(StatusCode::SERVICE_UNAVAILABLE);
+            drop(guard);
+            return websocket_http_error(&WebSocketError::new(503, "draining", "server is draining"));
+        }
+        result = state.lifecycle.prepare_realtime_websocket(
             &auth,
             observation,
             RealtimeWebSocketKind::Openai,
@@ -416,29 +422,55 @@ async fn openai_realtime_websocket_for_target(
                 codex_backend: codex_backend.is_some(),
             },
             Bytes::new(),
-        )
-        .await
-    {
+        ) => result,
+    };
+    let mut session = match prepare_result {
         Ok(session) => session,
         Err(error) => return websocket_http_error(&error),
     };
-    let (upstream, response_headers, bulkhead, connect_timings) =
-        match connect_realtime_provider(&state, &session).await {
-            Ok(connection) => connection,
-            Err(error) => {
-                let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY);
-                session.finish_handshake(status);
-                return websocket_http_error(&error);
-            }
-        };
+    if state.drain_controller.is_draining() {
+        session.finish_draining(StatusCode::SERVICE_UNAVAILABLE);
+        drop(guard);
+        return websocket_http_error(&WebSocketError::new(503, "draining", "server is draining"));
+    }
+    let connect_result = tokio::select! {
+        biased;
+        _ = state.drain_controller.wait_for_draining() => {
+            session.finish_draining(StatusCode::SERVICE_UNAVAILABLE);
+            drop(guard);
+            return websocket_http_error(&WebSocketError::new(503, "draining", "server is draining"));
+        }
+        result = connect_realtime_provider(&state, &session) => result,
+    };
+    let (mut upstream, response_headers, bulkhead, connect_timings) = match connect_result {
+        Ok(connection) => connection,
+        Err(error) => {
+            let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY);
+            session.finish_handshake(status);
+            return websocket_http_error(&error);
+        }
+    };
     session.connected_with_timings(&response_headers, connect_timings);
+    if state.drain_controller.is_draining() {
+        let _ = upstream.send(UpstreamMessage::Close(None)).now_or_never();
+        session.finish_draining(StatusCode::SERVICE_UNAVAILABLE);
+        drop(bulkhead);
+        drop(guard);
+        return websocket_http_error(&WebSocketError::new(503, "draining", "server is draining"));
+    }
     let request_dispatch = tracing::dispatcher::get_default(Clone::clone);
     websocket
         .max_message_size(state.body_caps.messages)
         .max_frame_size(state.body_caps.messages)
-        .on_upgrade(move |downstream| {
+        .on_upgrade(move |mut downstream| {
             async move {
                 let (_guard, _bulkhead) = (guard, bulkhead);
+                if state.drain_controller.is_draining() {
+                    let _ = upstream.send(UpstreamMessage::Close(None)).now_or_never();
+                    let _ = downstream.send(Message::Close(None)).now_or_never();
+                    session.finish_draining(StatusCode::SWITCHING_PROTOCOLS);
+                    return;
+                }
                 relay_realtime_websocket(
                     &auth,
                     downstream,
@@ -559,9 +591,15 @@ pub(super) async fn gemini_live_websocket_handler(
                     _ => unreachable!("first message is a data frame"),
                 };
                 let model = gemini_setup_model(&auth, &setup);
-                let mut session = match state
-                    .lifecycle
-                    .prepare_realtime_websocket(
+                let drain_observation = observation.clone();
+                let prepare_result = tokio::select! {
+                    biased;
+                    _ = state.drain_controller.wait_for_draining() => {
+                        drain_observation.finish_draining();
+                        let _ = downstream.send(Message::Close(None)).now_or_never();
+                        return;
+                    }
+                    result = state.lifecycle.prepare_realtime_websocket(
                         &auth,
                         observation,
                         RealtimeWebSocketKind::Gemini,
@@ -573,9 +611,9 @@ pub(super) async fn gemini_live_websocket_handler(
                             codex_backend: false,
                         },
                         setup,
-                    )
-                    .await
-                {
+                    ) => result,
+                };
+                let mut session = match prepare_result {
                     Ok(session) => session,
                     Err(error) => {
                         let _ = downstream.send(websocket_error_message(&error)).await;
@@ -583,8 +621,22 @@ pub(super) async fn gemini_live_websocket_handler(
                         return;
                     }
                 };
+                if state.drain_controller.is_draining() {
+                    let _ = downstream.send(Message::Close(None)).now_or_never();
+                    session.finish_draining(StatusCode::SWITCHING_PROTOCOLS);
+                    return;
+                }
+                let connect_result = tokio::select! {
+                    biased;
+                    _ = state.drain_controller.wait_for_draining() => {
+                        let _ = downstream.send(Message::Close(None)).now_or_never();
+                        session.finish_draining(StatusCode::SWITCHING_PROTOCOLS);
+                        return;
+                    }
+                    result = connect_realtime_provider(&state, &session) => result,
+                };
                 let (mut upstream, response_headers, _bulkhead, connect_timings) =
-                    match connect_realtime_provider(&state, &session).await {
+                    match connect_result {
                         Ok(connection) => connection,
                         Err(error) => {
                             let status = StatusCode::from_u16(error.status)
@@ -596,6 +648,12 @@ pub(super) async fn gemini_live_websocket_handler(
                         }
                     };
                 session.connected_with_timings(&response_headers, connect_timings);
+                if state.drain_controller.is_draining() {
+                    let _ = upstream.send(UpstreamMessage::Close(None)).now_or_never();
+                    let _ = downstream.send(Message::Close(None)).now_or_never();
+                    session.finish_draining(StatusCode::SWITCHING_PROTOCOLS);
+                    return;
+                }
                 let first = match transform_realtime_message(
                     &session,
                     cc_lb_upstream::RealtimeFrameDirection::Setup,
@@ -632,8 +690,9 @@ pub(super) async fn gemini_live_websocket_handler(
                     first
                 };
                 let sent = tokio::select! {
-                    sent = upstream.send(first) => Some(sent),
+                    biased;
                     _ = state.drain_controller.wait_for_draining() => None,
+                    sent = upstream.send(first) => Some(sent),
                 };
                 match sent {
                     Some(Ok(())) => {}
@@ -648,15 +707,17 @@ pub(super) async fn gemini_live_websocket_handler(
                         return;
                     }
                     None => {
-                        session.finish(
-                            RealtimeUsage::default(),
-                            RealtimeStreamMetrics::new(),
-                            RealtimeWebSocketTermination::DownstreamCancelled,
-                            cc_lb_engine::realtime_websocket::RealtimeWebSocketDiagnostics::default(
-                            ),
-                        );
+                        let _ = upstream.send(UpstreamMessage::Close(None)).now_or_never();
+                        let _ = downstream.send(Message::Close(None)).now_or_never();
+                        session.finish_draining(StatusCode::SWITCHING_PROTOCOLS);
                         return;
                     }
+                }
+                if state.drain_controller.is_draining() {
+                    let _ = upstream.send(UpstreamMessage::Close(None)).now_or_never();
+                    let _ = downstream.send(Message::Close(None)).now_or_never();
+                    session.finish_draining(StatusCode::SWITCHING_PROTOCOLS);
+                    return;
                 }
                 relay_realtime_websocket(
                     &auth,
@@ -863,7 +924,7 @@ async fn relay_realtime_websocket(
     };
     let (termination, diagnostics) = tokio::select! {
         result = relay => result,
-        _ = state.drain_controller.wait_for_draining() => (
+        _ = state.drain_controller.wait_for_force_close() => (
             RealtimeWebSocketTermination::DownstreamCancelled,
             cc_lb_engine::realtime_websocket::RealtimeWebSocketDiagnostics::default(),
         ),

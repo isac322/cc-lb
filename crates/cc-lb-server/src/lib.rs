@@ -41,7 +41,7 @@ pub mod wasm_host;
 pub use app::{App, build_app, build_app_with_path, run_serve};
 pub use app::{
     BuildError, ProxyApp, ProxyRole, ProxyServeOptions, ServeError, build_proxy_app_with_storage,
-    run_proxy_serve,
+    run_proxy_serve, serve_error_exit_code,
 };
 pub(crate) use plugin_manifest::PluginManifest;
 #[cfg(any(feature = "storage-sqlite", feature = "storage-postgres"))]

@@ -1793,7 +1793,7 @@ async fn proxy_timeout_middleware_does_not_rewrite_started_streaming_response() 
     );
 }
 
-struct WebSocketTestSignerFactory;
+pub(super) struct WebSocketTestSignerFactory;
 
 impl ApiKeyAwareSignerFactory for WebSocketTestSignerFactory {
     fn with_router_choice(&self, _router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {
@@ -7168,4 +7168,496 @@ async fn responses_websocket_deferred_unestablished_reasoning_preserves_cipherte
     proxy_task.abort();
     task_a.abort();
     task_b.abort();
+}
+
+#[tokio::test]
+async fn responses_websocket_active_turn_finishes_during_drain_and_force_closes_on_deadline() {
+    // Phase 1: an in-flight turn completes normally past `drain.trigger()` while
+    // new `response.create` frames on the same socket are rejected with 503 draining.
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("provider listener binds");
+    let address = listener
+        .local_addr()
+        .expect("provider address is available");
+    let (delta_sent_tx, delta_sent_rx) = tokio::sync::oneshot::channel();
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+    let provider_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("provider accepts");
+        let mut ws = accept_async(stream).await.expect("provider handshake");
+        let frame = ws
+            .next()
+            .await
+            .expect("provider receives create")
+            .expect("valid text");
+        assert!(frame.to_text().expect("text").contains("response.create"));
+        ws.send(UpstreamMessage::Text(
+            r#"{"type":"response.created","response":{"id":"resp-1","store":false}}"#.into(),
+        ))
+        .await
+        .expect("provider sends created");
+        let _ = delta_sent_tx.send(());
+        let _ = finish_rx.await;
+        ws.send(UpstreamMessage::Text(
+            r#"{"type":"response.completed","response":{"id":"resp-1","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#
+                .into(),
+        ))
+        .await
+        .expect("provider sends completed");
+        let _ = ws.close(None).await;
+    });
+
+    let drain = DrainController::new();
+    let router = websocket_test_router_with_drain(
+        vec![websocket_upstream(
+            1,
+            "openai",
+            Url::parse(&format!("http://{address}/")).expect("upstream URL parses"),
+        )],
+        TerminalStrategy::FirstPick,
+        drain.clone(),
+    )
+    .await;
+    let (proxy_address, proxy_task) = spawn_proxy_router(router).await;
+    let (mut client, _) = connect_async(websocket_request(proxy_address))
+        .await
+        .expect("downstream handshake");
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-4.1","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .expect("send initial create");
+
+    tokio::time::timeout(Duration::from_secs(5), delta_sent_rx)
+        .await
+        .expect("provider sends created")
+        .expect("created signal");
+    let first_created = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .expect("client receives created")
+        .expect("created frame")
+        .expect("valid ws frame");
+    assert!(
+        first_created
+            .to_text()
+            .expect("text")
+            .contains("response.created")
+    );
+
+    drain.trigger();
+    assert_eq!(drain.in_flight(), 1);
+
+    // New turn creation during drain must be rejected cleanly with `draining`.
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","stream_id":"during-drain","model":"gpt-4.1","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .expect("send second create");
+    let reject_frame = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .expect("client receives drain error")
+        .expect("reject frame")
+        .expect("valid ws frame");
+    let reject_text = reject_frame.to_text().expect("error text");
+    assert!(
+        reject_text.contains("\"draining\"") && reject_text.contains("\"during-drain\""),
+        "expected 503 draining error for new turn during drain, got: {reject_text}"
+    );
+    assert_eq!(drain.in_flight(), 1);
+
+    // Let active turn complete: connection finishes and releases drain guard automatically.
+    let _ = finish_tx.send(());
+    let completed = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .expect("client receives completion")
+        .expect("completed frame")
+        .expect("valid ws frame");
+    assert!(
+        completed
+            .to_text()
+            .expect("text")
+            .contains("response.completed")
+    );
+    tokio::time::timeout(Duration::from_secs(5), provider_task)
+        .await
+        .expect("provider finishes")
+        .expect("provider task");
+    assert!(!drain.await_drained(Duration::from_secs(5)).await);
+    let _ = client.close(None).await;
+    proxy_task.abort();
+
+    // Phase 2: a stalled active turn survives `trigger()` and closes on `mark_force_closed()`.
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("provider listener binds");
+    let address = listener
+        .local_addr()
+        .expect("provider address is available");
+    let (stalled_tx, stalled_rx) = tokio::sync::oneshot::channel();
+    let provider_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("provider accepts");
+        let mut ws = accept_async(stream).await.expect("provider handshake");
+        let _ = ws.next().await;
+        ws.send(UpstreamMessage::Text(
+            r#"{"type":"response.created","response":{"id":"resp-stalled","store":false}}"#.into(),
+        ))
+        .await
+        .expect("provider sends created");
+        let _ = stalled_tx.send(());
+        // Hold open until force close drops the upstream connection.
+        while ws.next().await.is_some() {}
+    });
+
+    let drain = DrainController::new();
+    let router = websocket_test_router_with_drain(
+        vec![websocket_upstream(
+            1,
+            "openai",
+            Url::parse(&format!("http://{address}/")).expect("upstream URL parses"),
+        )],
+        TerminalStrategy::FirstPick,
+        drain.clone(),
+    )
+    .await;
+    let (proxy_address, proxy_task) = spawn_proxy_router(router).await;
+    let (mut client, _) = connect_async(websocket_request(proxy_address))
+        .await
+        .expect("downstream handshake");
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-4.1","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .expect("send stalled turn create");
+    tokio::time::timeout(Duration::from_secs(5), stalled_rx)
+        .await
+        .expect("provider sends stalled delta")
+        .expect("stalled signal");
+    let _ = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .expect("client receives stalled delta");
+
+    drain.trigger();
+    assert_eq!(drain.in_flight(), 1);
+    assert_eq!(drain.mark_force_closed(), 1);
+    assert!(!drain.await_drained(Duration::from_secs(5)).await);
+    let _ = tokio::time::timeout(Duration::from_secs(5), provider_task).await;
+    proxy_task.abort();
+}
+
+#[tokio::test]
+async fn responses_websocket_pending_handshake_rechecks_drain_before_first_write() {
+    use std::sync::atomic::AtomicUsize;
+
+    let provider_writes = Arc::new(AtomicUsize::new(0));
+    let accepted = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("provider listener binds");
+    let address = listener
+        .local_addr()
+        .expect("provider address is available");
+    let accepted_task = Arc::clone(&accepted);
+    let release_task = Arc::clone(&release);
+    let writes_task = Arc::clone(&provider_writes);
+    let provider_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("provider accepts TCP");
+        accepted_task.notify_one();
+        release_task.notified().await;
+        if let Ok(mut ws) = accept_async(stream).await
+            && let Ok(Some(Ok(_))) =
+                tokio::time::timeout(Duration::from_millis(250), ws.next()).await
+        {
+            writes_task.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+
+    let drain = DrainController::new();
+    let router = websocket_test_router_with_drain(
+        vec![websocket_upstream(
+            1,
+            "openai",
+            Url::parse(&format!("http://{address}/")).expect("upstream URL parses"),
+        )],
+        TerminalStrategy::FirstPick,
+        drain.clone(),
+    )
+    .await;
+    let (proxy_address, proxy_task) = spawn_proxy_router(router).await;
+    let (mut client, _) = connect_async(websocket_request(proxy_address))
+        .await
+        .expect("downstream handshake");
+
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","stream_id":"race-drain","model":"gpt-4.1","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .expect("send create");
+    tokio::time::timeout(Duration::from_secs(2), accepted.notified())
+        .await
+        .expect("pending connect accepted TCP before completing WS handshake");
+
+    // Trigger drain, then immediately release the provider WS upgrade so `connect_tasks`
+    // can complete right alongside the drain notification.
+    drain.trigger();
+    release.notify_one();
+
+    let reject = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .expect("client receives drain rejection")
+        .expect("frame present")
+        .expect("valid WS frame");
+    let text = reject.to_text().expect("error text");
+    assert!(
+        text.contains("\"draining\"") && text.contains("\"race-drain\""),
+        "expected 503 draining error, got: {text}"
+    );
+    assert!(
+        !drain.await_drained(Duration::from_secs(2)).await,
+        "relay must release drain guard cleanly once pending turn settles"
+    );
+    let _ = tokio::time::timeout(Duration::from_secs(2), provider_task).await;
+    assert_eq!(
+        provider_writes.load(Ordering::SeqCst),
+        0,
+        "provider must not receive a first write after drain triggered"
+    );
+
+    let _ = client.close(None).await;
+    proxy_task.abort();
+}
+
+#[tokio::test]
+async fn responses_websocket_drain_waits_for_pending_error_terminal_response_failed() {
+    // Part 1: attributable `error` arrives after `drain.trigger()` (exercises main loop exit gate).
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("provider listener binds");
+    let address = listener
+        .local_addr()
+        .expect("provider address is available");
+    let (send_error_tx, send_error_rx) = tokio::sync::oneshot::channel();
+    let (send_failed_tx, send_failed_rx) = tokio::sync::oneshot::channel();
+    let provider_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("provider accepts");
+        let mut ws = accept_async(stream).await.expect("provider handshake");
+        let _ = ws.next().await;
+        ws.send(UpstreamMessage::Text(
+            r#"{"type":"response.created","response":{"id":"resp-err-drain","store":false}}"#
+                .into(),
+        ))
+        .await
+        .expect("provider sends created");
+        let _ = send_error_rx.await;
+        ws.send(UpstreamMessage::Text(
+            r#"{"type":"error","response_id":"resp-err-drain","status":503,"error":{"code":"server_is_overloaded","message":"Overloaded"}}"#
+                .into(),
+        ))
+        .await
+        .expect("provider sends attributable error");
+        let _ = send_failed_rx.await;
+        ws.send(UpstreamMessage::Text(
+            r#"{"type":"response.failed","response":{"id":"resp-err-drain","status":"failed","error":{"code":"server_is_overloaded","message":"Overloaded"},"usage":{"input_tokens":12,"output_tokens":3}}}"#
+                .into(),
+        ))
+        .await
+        .expect("provider sends trailing response.failed");
+        let _ = ws.close(None).await;
+    });
+
+    let drain = DrainController::new();
+    let router = websocket_test_router_with_drain(
+        vec![websocket_upstream(
+            1,
+            "openai",
+            Url::parse(&format!("http://{address}/")).expect("upstream URL parses"),
+        )],
+        TerminalStrategy::FirstPick,
+        drain.clone(),
+    )
+    .await;
+    let (proxy_address, proxy_task) = spawn_proxy_router(router).await;
+    let (mut client, _) = connect_async(websocket_request(proxy_address))
+        .await
+        .expect("downstream handshake");
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-4.1","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .expect("send create");
+
+    let created = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .expect("client receives created")
+        .expect("created frame")
+        .expect("valid WS frame");
+    assert!(
+        created
+            .to_text()
+            .expect("text")
+            .contains("response.created")
+    );
+
+    drain.trigger();
+    assert_eq!(drain.in_flight(), 1);
+    let _ = send_error_tx.send(());
+
+    let error_frame = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .expect("client receives error")
+        .expect("error frame")
+        .expect("valid WS frame");
+    assert!(
+        error_frame
+            .to_text()
+            .expect("text")
+            .contains("\"server_is_overloaded\"")
+    );
+    // Give the relay a tick to re-evaluate loop exit guards while response.failed is pending.
+    tokio::task::yield_now().await;
+    assert_eq!(
+        drain.in_flight(),
+        1,
+        "relay must stay open during drain while pending error terminal awaits response.failed"
+    );
+
+    let _ = send_failed_tx.send(());
+    let failed_frame = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .expect("client receives trailing response.failed during drain")
+        .expect("failed frame")
+        .expect("valid WS frame");
+    assert!(
+        failed_frame
+            .to_text()
+            .expect("text")
+            .contains("response.failed")
+    );
+    tokio::time::timeout(Duration::from_secs(5), provider_task)
+        .await
+        .expect("provider finishes")
+        .expect("provider task");
+    assert!(
+        !drain.await_drained(Duration::from_secs(5)).await,
+        "relay must exit cleanly once trailing response.failed finishes"
+    );
+    let _ = client.close(None).await;
+    proxy_task.abort();
+
+    // Part 2: `drain.trigger()` arrives after `error` is forwarded (exercises `wait_for_draining` exit gate).
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("provider listener binds");
+    let address = listener
+        .local_addr()
+        .expect("provider address is available");
+    let (send_failed_tx2, send_failed_rx2) = tokio::sync::oneshot::channel();
+    let provider_task2 = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("provider accepts");
+        let mut ws = accept_async(stream).await.expect("provider handshake");
+        let _ = ws.next().await;
+        ws.send(UpstreamMessage::Text(
+            r#"{"type":"response.created","response":{"id":"resp-err-before-drain","store":false}}"#
+                .into(),
+        ))
+        .await
+        .expect("provider sends created");
+        ws.send(UpstreamMessage::Text(
+            r#"{"type":"error","response_id":"resp-err-before-drain","status":503,"error":{"code":"server_is_overloaded","message":"Overloaded"}}"#
+                .into(),
+        ))
+        .await
+        .expect("provider sends attributable error");
+        let _ = send_failed_rx2.await;
+        ws.send(UpstreamMessage::Text(
+            r#"{"type":"response.failed","response":{"id":"resp-err-before-drain","status":"failed","error":{"code":"server_is_overloaded","message":"Overloaded"},"usage":{"input_tokens":7,"output_tokens":2}}}"#
+                .into(),
+        ))
+        .await
+        .expect("provider sends trailing response.failed");
+        let _ = ws.close(None).await;
+    });
+
+    let drain2 = DrainController::new();
+    let router2 = websocket_test_router_with_drain(
+        vec![websocket_upstream(
+            1,
+            "openai",
+            Url::parse(&format!("http://{address}/")).expect("upstream URL parses"),
+        )],
+        TerminalStrategy::FirstPick,
+        drain2.clone(),
+    )
+    .await;
+    let (proxy_address2, proxy_task2) = spawn_proxy_router(router2).await;
+    let (mut client2, _) = connect_async(websocket_request(proxy_address2))
+        .await
+        .expect("downstream handshake");
+    client2
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-4.1","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .expect("send create");
+
+    let created2 = tokio::time::timeout(Duration::from_secs(5), client2.next())
+        .await
+        .expect("client receives created")
+        .expect("created frame")
+        .expect("valid WS frame");
+    assert!(
+        created2
+            .to_text()
+            .expect("text")
+            .contains("response.created")
+    );
+
+    let error_frame2 = tokio::time::timeout(Duration::from_secs(5), client2.next())
+        .await
+        .expect("client receives error before drain")
+        .expect("error frame")
+        .expect("valid WS frame");
+    assert!(
+        error_frame2
+            .to_text()
+            .expect("text")
+            .contains("\"server_is_overloaded\"")
+    );
+
+    drain2.trigger();
+    tokio::task::yield_now().await;
+    assert_eq!(
+        drain2.in_flight(),
+        1,
+        "wait_for_draining branch must keep relay open while pending error terminal awaits response.failed"
+    );
+
+    let _ = send_failed_tx2.send(());
+    let failed_frame2 = tokio::time::timeout(Duration::from_secs(5), client2.next())
+        .await
+        .expect("client receives trailing response.failed after drain")
+        .expect("failed frame")
+        .expect("valid WS frame");
+    assert!(
+        failed_frame2
+            .to_text()
+            .expect("text")
+            .contains("response.failed")
+    );
+    tokio::time::timeout(Duration::from_secs(5), provider_task2)
+        .await
+        .expect("provider2 finishes")
+        .expect("provider2 task");
+    assert!(
+        !drain2.await_drained(Duration::from_secs(5)).await,
+        "relay must release drain guard cleanly after trailing response.failed"
+    );
+    let _ = client2.close(None).await;
+    proxy_task2.abort();
 }

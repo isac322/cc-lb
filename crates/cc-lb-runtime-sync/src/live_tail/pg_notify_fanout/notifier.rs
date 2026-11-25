@@ -9,6 +9,7 @@ use crate::live_tail::metrics_labels::{NotifyDropReason, NotifySentOutcome};
 
 const NOTIFY_PAYLOAD_LIMIT_BYTES: usize = 7500;
 const MAX_TRIMMED_LABEL_CHARS: usize = 128;
+const MAX_NOTIFY_BATCH: usize = 64;
 
 pub struct PgNotifier {
     pub pg_pool: sqlx::PgPool,
@@ -50,70 +51,110 @@ impl PgNotifier {
     }
 
     async fn run(mut self, mut shutdown_rx: watch::Receiver<bool>) {
+        const MAX_SHUTDOWN_DRAIN: usize = 4096;
+        let mut batch = Vec::with_capacity(MAX_NOTIFY_BATCH);
         loop {
+            batch.clear();
             tokio::select! {
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() {
+                        let mut drained = 0usize;
+                        while drained < MAX_SHUTDOWN_DRAIN {
+                            batch.clear();
+                            while batch.len() < MAX_NOTIFY_BATCH && drained < MAX_SHUTDOWN_DRAIN {
+                                match self.in_rx.try_recv() {
+                                    Ok(update) => {
+                                        batch.push(update);
+                                        drained += 1;
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                            if batch.is_empty() {
+                                break;
+                            }
+                            self.publish_batch(&mut batch).await;
+                        }
                         return;
                     }
                 }
-                update = self.in_rx.recv() => {
-                    let Some(update) = update else { return; };
-                    self.publish_update(update).await;
+                count = self.in_rx.recv_many(&mut batch, MAX_NOTIFY_BATCH) => {
+                    if count == 0 {
+                        return;
+                    }
+                    self.publish_batch(&mut batch).await;
                 }
             }
         }
     }
 
-    async fn publish_update(&self, update: RequestEventUpdate) {
-        let RequestEventUpdate::Partial(partial) = update else {
-            return;
-        };
-        let full_update = RequestEventUpdate::Partial(partial.clone());
-        let inline_payload = match serde_json::to_vec(&super::protocol::InlinePartialNotify {
-            update: &full_update,
-            producer_id: self.producer_id.as_str(),
-        }) {
-            Ok(payload) => payload,
-            Err(error) => {
-                record_notify_dropped(NotifyDropReason::SerializeError);
-                tracing::warn!(%error, "partial notify serialization failed");
-                return;
-            }
-        };
+    async fn publish_batch(&self, batch: &mut Vec<RequestEventUpdate>) {
+        let mut payloads = Vec::with_capacity(batch.len());
+        let mut outcomes = Vec::with_capacity(batch.len());
 
-        let (notify_payload, outcome) = if notify_payload_fits_inline(inline_payload.len()) {
-            (inline_payload, NotifySentOutcome::Sent)
-        } else {
-            match fit_inline_partial(partial, self.producer_id.as_str()) {
-                Ok(Some(fitted)) => fitted,
-                Ok(None) => {
-                    record_notify_dropped(NotifyDropReason::PayloadTooLarge);
-                    tracing::warn!(
-                        "pg_notify partial payload exceeds {}B even after trimming; dropping",
-                        NOTIFY_PAYLOAD_LIMIT_BYTES
-                    );
-                    return;
-                }
+        for update in batch.drain(..) {
+            let RequestEventUpdate::Partial(partial) = update else {
+                continue;
+            };
+            let full_update = RequestEventUpdate::Partial(partial.clone());
+            let inline_payload = match serde_json::to_vec(&super::protocol::InlinePartialNotify {
+                update: &full_update,
+                producer_id: self.producer_id.as_str(),
+            }) {
+                Ok(payload) => payload,
                 Err(error) => {
                     record_notify_dropped(NotifyDropReason::SerializeError);
-                    tracing::warn!(%error, "trimmed partial notify serialization failed");
-                    return;
+                    tracing::warn!(%error, "partial notify serialization failed");
+                    continue;
                 }
-            }
-        };
+            };
 
-        match sqlx::query("SELECT pg_notify($1, $2)")
+            let (notify_payload, outcome) = if notify_payload_fits_inline(inline_payload.len()) {
+                (inline_payload, NotifySentOutcome::Sent)
+            } else {
+                match fit_inline_partial(partial, self.producer_id.as_str()) {
+                    Ok(Some(fitted)) => fitted,
+                    Ok(None) => {
+                        record_notify_dropped(NotifyDropReason::PayloadTooLarge);
+                        tracing::warn!(
+                            "pg_notify partial payload exceeds {}B even after trimming; dropping",
+                            NOTIFY_PAYLOAD_LIMIT_BYTES
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        record_notify_dropped(NotifyDropReason::SerializeError);
+                        tracing::warn!(%error, "trimmed partial notify serialization failed");
+                        continue;
+                    }
+                }
+            };
+
+            payloads.push(String::from_utf8_lossy(&notify_payload).into_owned());
+            outcomes.push(outcome);
+        }
+
+        if payloads.is_empty() {
+            return;
+        }
+
+        match sqlx::query("SELECT pg_notify($1, payload) FROM unnest($2::text[]) AS t(payload)")
             .bind(&self.channel)
-            .bind(String::from_utf8_lossy(&notify_payload).as_ref())
+            .bind(&payloads)
             .execute(&self.pg_pool)
             .await
         {
-            Ok(_) => record_notify_sent(outcome),
+            Ok(_) => {
+                for outcome in outcomes {
+                    record_notify_sent(outcome);
+                }
+            }
             Err(error) => {
-                record_notify_dropped(NotifyDropReason::PgError);
-                record_notify_sent(NotifySentOutcome::Failed);
-                tracing::warn!(%error, "pg_notify partial publish failed");
+                for _ in outcomes {
+                    record_notify_dropped(NotifyDropReason::PgError);
+                    record_notify_sent(NotifySentOutcome::Failed);
+                }
+                tracing::warn!(%error, count = payloads.len(), "pg_notify partial batch publish failed");
             }
         }
     }
@@ -129,7 +170,8 @@ fn fit_inline_partial(
     mut partial: RequestEventPartial,
     producer_id: &str,
 ) -> Result<Option<(Vec<u8>, NotifySentOutcome)>, serde_json::Error> {
-    partial.thread_id = None;
+    // Pass 1: drop non-filter identity/classification metadata, preserving
+    // `thread_id` because `?thread_id=` is an active admin SSE stream filter.
     partial.observed_session_id = None;
     partial.parent_session_id = None;
     partial.claude_agent_id = None;
@@ -155,6 +197,7 @@ fn fit_inline_partial(
         return Ok(Some((bytes, NotifySentOutcome::TrimmedSent)));
     }
 
+    // Pass 2: trim verbose labels and stage timings while still preserving `thread_id`.
     truncate_chars_in_place(&mut partial.model, MAX_TRIMMED_LABEL_CHARS);
     truncate_chars_in_place(&mut partial.upstream_name, MAX_TRIMMED_LABEL_CHARS);
     partial.request_body_read_ms = None;
@@ -189,6 +232,14 @@ fn fit_inline_partial(
     partial.retry_overhead_ms = None;
     partial.finalize_ms = None;
 
+    let bytes = serialize(&partial)?;
+    if notify_payload_fits_inline(bytes.len()) {
+        return Ok(Some((bytes, NotifySentOutcome::TrimmedSent)));
+    }
+
+    // Pass 3 (last resort): an oversized `thread_id` itself is pushing the
+    // payload past Postgres's 8KB wire ceiling.
+    partial.thread_id = None;
     let bytes = serialize(&partial)?;
     if notify_payload_fits_inline(bytes.len()) {
         return Ok(Some((bytes, NotifySentOutcome::TrimmedSent)));
@@ -297,5 +348,35 @@ mod tests {
 
         let fitted = fit_inline_partial(partial, "prod-1").expect("serialization succeeds");
         assert!(fitted.is_none());
+    }
+
+    #[test]
+    fn oversize_metadata_partial_preserves_short_thread_id_for_sse_filter() {
+        let mut partial = base_partial();
+        partial.thread_id = Some("thread-123".to_owned());
+        partial.observed_session_id = Some("y".repeat(4_000));
+        partial.model = Some("m".repeat(4_000));
+        partial.upstream_name = Some("u".repeat(4_000));
+        partial.request_body_read_ms = Some(15);
+        partial.finalize_ms = Some(5);
+
+        let (bytes, outcome) = fit_inline_partial(partial, "prod-1")
+            .expect("trim serializes")
+            .expect("pass 2 trimmed partial fits inline");
+
+        assert_eq!(outcome, NotifySentOutcome::TrimmedSent);
+        assert!(notify_payload_fits_inline(bytes.len()));
+
+        let decoded: RequestEventUpdate =
+            serde_json::from_slice(&bytes).expect("valid update JSON");
+        let RequestEventUpdate::Partial(trimmed) = decoded else {
+            panic!("expected partial update");
+        };
+        assert_eq!(trimmed.thread_id.as_deref(), Some("thread-123"));
+        assert!(trimmed.observed_session_id.is_none());
+        assert_eq!(
+            trimmed.model.as_deref().map(str::len),
+            Some(MAX_TRIMMED_LABEL_CHARS)
+        );
     }
 }

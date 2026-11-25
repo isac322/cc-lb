@@ -14,11 +14,12 @@
 //! [`RequestEventBus::publish`] is synchronous and non-blocking; a
 //! `SendError` from no live receivers is silently swallowed.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
-use cc_lb_lifecycle::LifecycleEvent;
+use cc_lb_lifecycle::{LifecycleEvent, UsageSource};
 #[cfg(test)]
 use cc_lb_request_log::{RequestEvent, RequestEventPartial};
 pub use cc_lb_request_log::{RequestEventPhase, RequestEventUpdate};
@@ -86,10 +87,33 @@ pub struct InMemoryBus {
     inner: Arc<InMemoryBusInner>,
 }
 
+struct AssemblerOverflow {
+    queue: Mutex<VecDeque<LifecycleEvent>>,
+    in_flight: AtomicUsize,
+    drainer_started: AtomicBool,
+}
+
+impl AssemblerOverflow {
+    fn new() -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::new()),
+            in_flight: AtomicUsize::new(0),
+            drainer_started: AtomicBool::new(false),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AssemblerSender {
+    tx: mpsc::Sender<LifecycleEvent>,
+    overflow: Arc<AssemblerOverflow>,
+    runtime_handle: Option<tokio::runtime::Handle>,
+}
+
 #[derive(Clone, Default)]
 struct LifecycleSubscribers {
     writer_tx: Option<mpsc::Sender<LifecycleEvent>>,
-    assembler_tx: Option<mpsc::Sender<LifecycleEvent>>,
+    assembler_tx: Option<AssemblerSender>,
     pricing_tx: Option<mpsc::Sender<LifecycleEvent>>,
     limit_reconcile_tx: Option<mpsc::Sender<LifecycleEvent>>,
     rate_limit_header_tx: Option<mpsc::Sender<LifecycleEvent>>,
@@ -124,9 +148,6 @@ struct InMemoryBusInner {
     attach_lock: Mutex<()>,
     /// Optional single-channel ingest queue draining into a background fanout worker.
     dispatcher: ArcSwapOption<DispatcherChannel>,
-    /// Detached overflow tasks currently parked on a full assembler channel. Bounded
-    /// by [`MAX_ASSEMBLER_OVERFLOW_TASKS`].
-    assembler_overflow_in_flight: AtomicUsize,
 }
 
 /// Handle to the background fanout dispatcher spawned by [`InMemoryBus::spawn_lifecycle_dispatcher`].
@@ -164,7 +185,6 @@ impl InMemoryBus {
                 subscribers: ArcSwap::from_pointee(LifecycleSubscribers::default()),
                 attach_lock: Mutex::new(()),
                 dispatcher: ArcSwapOption::empty(),
-                assembler_overflow_in_flight: AtomicUsize::new(0),
             }),
         }
     }
@@ -232,7 +252,21 @@ impl InMemoryBus {
     }
 
     pub fn attach_lifecycle_assembler(&self, capacity: usize) -> mpsc::Receiver<LifecycleEvent> {
-        self.update_subscriber(capacity, |subs, tx| subs.assembler_tx = Some(tx))
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        let sender = AssemblerSender {
+            tx,
+            overflow: Arc::new(AssemblerOverflow::new()),
+            runtime_handle: tokio::runtime::Handle::try_current().ok(),
+        };
+        let _guard = self
+            .inner
+            .attach_lock
+            .lock()
+            .expect("event bus subscriber attach mutex poisoned");
+        let mut next = (**self.inner.subscribers.load()).clone();
+        next.assembler_tx = Some(sender);
+        self.inner.subscribers.store(Arc::new(next));
+        rx
     }
 
     pub fn attach_lifecycle_pricing(&self, capacity: usize) -> mpsc::Receiver<LifecycleEvent> {
@@ -288,91 +322,80 @@ impl InMemoryBus {
     }
 
     /// Whether this event carries request-log meaning for the durable
-    /// assembler: it creates the row (`RequestStarted`), finalizes it
-    /// (`RequestTerminated`), or records an abnormal outcome
-    /// (`RequestLogUpstreamErrorObserved`, `UpstreamStreamDiagnosticsObserved`,
-    /// `StreamCompleted`, and authoritative final usage). These must not be
-    /// dropped when the assembler channel is full.
+    /// assembler. Exhaustive match so new `LifecycleEvent` variants cannot
+    /// be silently shed during dispatcher or assembler saturation.
     fn carries_request_row(event: &LifecycleEvent) -> bool {
-        matches!(
-            event,
+        match event {
+            LifecycleEvent::RequestActivity { .. } => false,
+            LifecycleEvent::UsageObserved { source, .. } => !matches!(
+                source,
+                UsageSource::MessageStart | UsageSource::MessageDelta
+            ),
             LifecycleEvent::RequestStarted { .. }
-                | LifecycleEvent::RequestTerminated { .. }
-                | LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
-                | LifecycleEvent::UpstreamStreamDiagnosticsObserved { .. }
-                | LifecycleEvent::StreamCompleted { .. }
-                | LifecycleEvent::UpstreamQuotaFrameObserved { .. }
-                | LifecycleEvent::RequestFundingObserved { .. }
-                | LifecycleEvent::UsageObserved {
-                    source: cc_lb_lifecycle::UsageSource::Final,
-                    ..
-                }
-        )
+            | LifecycleEvent::ParseCompleted { .. }
+            | LifecycleEvent::AuthCompleted { .. }
+            | LifecycleEvent::AuthenticationCompleted { .. }
+            | LifecycleEvent::RouteCompleted { .. }
+            | LifecycleEvent::LimitDecision { .. }
+            | LifecycleEvent::UpstreamAttempt { .. }
+            | LifecycleEvent::UpstreamResponseStarted { .. }
+            | LifecycleEvent::UpstreamQuotaFrameObserved { .. }
+            | LifecycleEvent::RequestFundingObserved { .. }
+            | LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
+            | LifecycleEvent::UpstreamStreamDiagnosticsObserved { .. }
+            | LifecycleEvent::StreamCompleted { .. }
+            | LifecycleEvent::RequestTerminated { .. }
+            | LifecycleEvent::Priced { .. } => true,
+        }
     }
 
-    /// Detached overflow tasks currently parked on a full assembler channel. Read
-    /// by the assembler's shutdown drain; see
-    /// [`RequestEventBus::assembler_overflow_in_flight`].
+    /// Overflow events currently queued or awaiting delivery to the
+    /// lifecycle-assembler channel. Read by the assembler's shutdown drain;
+    /// see [`RequestEventBus::assembler_overflow_in_flight`].
     pub fn assembler_overflow_in_flight(&self) -> usize {
         self.inner
-            .assembler_overflow_in_flight
-            .load(Ordering::Relaxed)
+            .subscribers
+            .load()
+            .assembler_tx
+            .as_ref()
+            .map_or(0, |sender| {
+                sender.overflow.in_flight.load(Ordering::Acquire)
+            })
     }
 }
 
-fn send_to_assembler(
-    inner: &Arc<InMemoryBusInner>,
-    subs: &LifecycleSubscribers,
-    event: LifecycleEvent,
-) {
-    let Some(tx) = subs.assembler_tx.clone() else {
+fn send_to_assembler(subs: &LifecycleSubscribers, event: LifecycleEvent) {
+    let Some(sender) = subs.assembler_tx.as_ref() else {
         return;
     };
-    match tx.try_send(event) {
-        Ok(()) => {}
-        Err(mpsc::error::TrySendError::Full(dropped)) => {
-            if InMemoryBus::carries_request_row(&dropped) {
-                spawn_assembler_overflow(Arc::clone(inner), tx, dropped);
-            } else {
-                record_dropped_events_by("lifecycle_assembler_full", 1);
-                tracing::error!(
-                    kind = dropped.kind(),
-                    event_id = %dropped.event_id(),
-                    "lifecycle assembler mpsc full; dropping event (request row may be missing)",
-                );
+    let event = if sender.overflow.in_flight.load(Ordering::Acquire) == 0 {
+        match sender.tx.try_send(event) {
+            Ok(()) => return,
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!("lifecycle assembler mpsc closed");
+                return;
             }
+            Err(mpsc::error::TrySendError::Full(event)) => event,
         }
-        Err(mpsc::error::TrySendError::Closed(_)) => {
-            tracing::debug!("lifecycle assembler mpsc closed");
-        }
-    }
-}
+    } else {
+        event
+    };
 
-fn spawn_assembler_overflow(
-    inner: Arc<InMemoryBusInner>,
-    tx: mpsc::Sender<LifecycleEvent>,
-    event: LifecycleEvent,
-) {
-    let in_flight = inner
-        .assembler_overflow_in_flight
-        .fetch_add(1, Ordering::Relaxed);
-    if in_flight >= MAX_ASSEMBLER_OVERFLOW_TASKS {
-        inner
-            .assembler_overflow_in_flight
-            .fetch_sub(1, Ordering::Relaxed);
+    if !InMemoryBus::carries_request_row(&event) {
         record_dropped_events_by("lifecycle_assembler_full", 1);
         tracing::error!(
             kind = event.kind(),
             event_id = %event.event_id(),
-            in_flight,
-            "overflow task cap reached; dropping row-bearing event (request row may be missing)",
+            "lifecycle assembler mpsc full; dropping non-row event",
         );
         return;
     }
-    if tokio::runtime::Handle::try_current().is_err() {
-        inner
-            .assembler_overflow_in_flight
-            .fetch_sub(1, Ordering::Relaxed);
+
+    let handle = sender
+        .runtime_handle
+        .clone()
+        .or_else(|| tokio::runtime::Handle::try_current().ok());
+    let Some(handle) = handle else {
         record_dropped_events_by("lifecycle_assembler_full", 1);
         tracing::error!(
             kind = event.kind(),
@@ -380,19 +403,91 @@ fn spawn_assembler_overflow(
             "mpsc full outside a tokio runtime; dropping row-bearing event (request row may be missing)",
         );
         return;
-    }
-    tokio::spawn(async move {
-        if let Err(send_error) = tx.send(event).await {
-            let event = send_error.0;
+    };
+
+    {
+        let mut queue = sender
+            .overflow
+            .queue
+            .lock()
+            .expect("assembler overflow queue mutex poisoned");
+        if sender.tx.is_closed() {
+            tracing::debug!("lifecycle assembler mpsc closed");
+            return;
+        }
+        let in_flight = sender.overflow.in_flight.load(Ordering::Acquire);
+        if in_flight >= MAX_ASSEMBLER_OVERFLOW_TASKS {
+            record_dropped_events_by("lifecycle_assembler_full", 1);
             tracing::error!(
                 kind = event.kind(),
                 event_id = %event.event_id(),
-                "mpsc closed while overflow task waited; request row may be missing",
+                in_flight,
+                "overflow queue cap reached; dropping row-bearing event (request row may be missing)",
             );
+            return;
         }
-        inner
-            .assembler_overflow_in_flight
-            .fetch_sub(1, Ordering::Release);
+        queue.push_back(event);
+        sender.overflow.in_flight.fetch_add(1, Ordering::AcqRel);
+    }
+
+    ensure_assembler_overflow_drainer(sender, &handle);
+}
+
+fn ensure_assembler_overflow_drainer(sender: &AssemblerSender, handle: &tokio::runtime::Handle) {
+    if sender
+        .overflow
+        .drainer_started
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let tx = sender.tx.clone();
+    let overflow = Arc::clone(&sender.overflow);
+    handle.spawn(async move {
+        let clear_remaining = |overflow: &AssemblerOverflow, extra: usize| {
+            let mut queue = overflow
+                .queue
+                .lock()
+                .expect("assembler overflow queue mutex poisoned");
+            let cleared = queue.len();
+            queue.clear();
+            let total = extra.saturating_add(cleared);
+            if total > 0 {
+                overflow.in_flight.fetch_sub(total, Ordering::AcqRel);
+            }
+            overflow.drainer_started.store(false, Ordering::Release);
+        };
+
+        loop {
+            let next = {
+                let mut queue = overflow
+                    .queue
+                    .lock()
+                    .expect("assembler overflow queue mutex poisoned");
+                match queue.pop_front() {
+                    Some(event) => Some(event),
+                    None => {
+                        overflow.drainer_started.store(false, Ordering::Release);
+                        None
+                    }
+                }
+            };
+            let Some(event) = next else {
+                return;
+            };
+            if let Err(send_error) = tx.send(event).await {
+                let event = send_error.0;
+                tracing::error!(
+                    kind = event.kind(),
+                    event_id = %event.event_id(),
+                    "mpsc closed while overflow drainer waited; request row may be missing",
+                );
+                clear_remaining(&overflow, 1);
+                return;
+            }
+            overflow.in_flight.fetch_sub(1, Ordering::AcqRel);
+        }
     });
 }
 
@@ -457,7 +552,7 @@ fn fanout_lifecycle_event(inner: &Arc<InMemoryBusInner>, event: LifecycleEvent) 
         let targets = [
             (subs.writer_tx.as_ref(), "lifecycle_writer_activity_dropped"),
             (
-                subs.assembler_tx.as_ref(),
+                subs.assembler_tx.as_ref().map(|sender| &sender.tx),
                 "lifecycle_assembler_activity_dropped",
             ),
             (
@@ -503,7 +598,7 @@ fn fanout_lifecycle_event(inner: &Arc<InMemoryBusInner>, event: LifecycleEvent) 
                 if !event_id.is_empty()
         );
         if request_scoped {
-            send_to_assembler(inner, &subs, event.clone());
+            send_to_assembler(&subs, event.clone());
         }
         if let Some(tx) = subs.subscription_quota_tx.as_ref()
             && tx.try_send(event).is_err()
@@ -513,7 +608,7 @@ fn fanout_lifecycle_event(inner: &Arc<InMemoryBusInner>, event: LifecycleEvent) 
         return;
     }
     if matches!(&event, LifecycleEvent::RequestFundingObserved { .. }) {
-        send_to_assembler(inner, &subs, event);
+        send_to_assembler(&subs, event);
         return;
     }
     if matches!(
@@ -530,7 +625,7 @@ fn fanout_lifecycle_event(inner: &Arc<InMemoryBusInner>, event: LifecycleEvent) 
             _ => None,
         };
         // Row-bearing event routed only to the durable assembler.
-        send_to_assembler(inner, &subs, event);
+        send_to_assembler(&subs, event);
         if let Some((event_id, retry_after)) = retry_after {
             let sanitized = LifecycleEvent::RequestLogUpstreamErrorObserved {
                 event_id,
@@ -554,7 +649,7 @@ fn fanout_lifecycle_event(inner: &Arc<InMemoryBusInner>, event: LifecycleEvent) 
         let _ = inner.lifecycle_broadcast_tx.send(event.clone());
     }
 
-    send_to_assembler(inner, &subs, event.clone());
+    send_to_assembler(&subs, event.clone());
     let routes = [
         (
             subs.writer_tx.as_ref(),
@@ -1192,5 +1287,162 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn carries_request_row_protects_pricing_limit_route_parse_and_non_stream_usage_under_base_saturation()
+     {
+        let bus = InMemoryBus::new();
+        let mut assembler_rx = bus.attach_lifecycle_assembler(64);
+        let dispatcher = bus.spawn_lifecycle_dispatcher(1);
+
+        // Hold the sole base permit so only row-protected events can enqueue into
+        // the dispatcher's reserved headroom.
+        let held_permit = bus
+            .inner
+            .dispatcher
+            .load_full()
+            .expect("dispatcher attached")
+            .base_permits
+            .clone()
+            .try_acquire_owned()
+            .expect("sole base permit available");
+
+        let zero_usage = cc_lb_lifecycle::UsageSnapshot::default();
+        bus.publish_lifecycle(LifecycleEvent::RequestActivity {
+            event_id: "evt-drop-activity".into(),
+        });
+        bus.publish_lifecycle(LifecycleEvent::UsageObserved {
+            event_id: "evt-drop-start".into(),
+            usage: zero_usage.clone(),
+            source: UsageSource::MessageStart,
+        });
+        bus.publish_lifecycle(LifecycleEvent::UsageObserved {
+            event_id: "evt-drop-delta".into(),
+            usage: zero_usage.clone(),
+            source: UsageSource::MessageDelta,
+        });
+
+        let expected_ids = [
+            "evt-parse",
+            "evt-route",
+            "evt-limit",
+            "evt-priced",
+            "evt-usage-final",
+            "evt-usage-nonstream",
+            "evt-usage-stop",
+        ];
+        bus.publish_lifecycle(LifecycleEvent::ParseCompleted {
+            event_id: "evt-parse".into(),
+            result: Ok(cc_lb_lifecycle::ParseInfo::default()),
+        });
+        bus.publish_lifecycle(LifecycleEvent::RouteCompleted {
+            event_id: "evt-route".into(),
+            result: Err(cc_lb_lifecycle::RouteFailure::RouterPipelineUnavailable),
+            routing_trace: None,
+        });
+        bus.publish_lifecycle(LifecycleEvent::LimitDecision {
+            event_id: "evt-limit".into(),
+            decision: cc_lb_lifecycle::LimitDecisionKind::Reserved {
+                reservation_id: "res-1".into(),
+                amount: 10,
+                limit_reserve_ms: None,
+            },
+        });
+        bus.publish_lifecycle(LifecycleEvent::Priced {
+            event_id: "evt-priced".into(),
+            cost: cc_lb_request_log::CostBreakdown::default(),
+        });
+        bus.publish_lifecycle(LifecycleEvent::UsageObserved {
+            event_id: "evt-usage-final".into(),
+            usage: zero_usage.clone(),
+            source: UsageSource::Final,
+        });
+        bus.publish_lifecycle(LifecycleEvent::UsageObserved {
+            event_id: "evt-usage-nonstream".into(),
+            usage: zero_usage.clone(),
+            source: UsageSource::NonStreamBody,
+        });
+        bus.publish_lifecycle(LifecycleEvent::UsageObserved {
+            event_id: "evt-usage-stop".into(),
+            usage: zero_usage,
+            source: UsageSource::MessageStop,
+        });
+
+        drop(held_permit);
+        dispatcher.shutdown().await;
+
+        let mut received_ids = Vec::new();
+        while let Ok(event) = assembler_rx.try_recv() {
+            received_ids.push(event.event_id().clone());
+        }
+        for dropped in ["evt-drop-activity", "evt-drop-start", "evt-drop-delta"] {
+            assert!(
+                !received_ids.iter().any(|id| id == dropped),
+                "non-row event {dropped} should have been dropped under base saturation"
+            );
+        }
+        for expected in expected_ids {
+            assert!(
+                received_ids.iter().any(|id| id == expected),
+                "row/pricing event {expected} was dropped under base saturation; got {received_ids:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn assembler_overflow_preserves_strict_fifo_without_try_send_overtaking() {
+        let bus = InMemoryBus::new();
+        let mut assembler_rx = bus.attach_lifecycle_assembler(1);
+
+        // Fill capacity=1 channel, then overflow `e1` RequestStarted.
+        bus.publish_lifecycle(sample_lifecycle_event("fill"));
+        bus.publish_lifecycle(sample_lifecycle_event("e1"));
+        assert_eq!(bus.assembler_overflow_in_flight(), 1);
+
+        // Pop `fill` to free a slot while `e1` is still waiting in overflow, then
+        // synchronously publish `e1` RequestTerminated: it must NOT overtake via `try_send`.
+        let popped = assembler_rx.try_recv().expect("fill event queued");
+        assert_eq!(popped.event_id(), "evt-fill");
+
+        bus.publish_lifecycle(LifecycleEvent::RequestTerminated {
+            event_id: "evt-e1".into(),
+            reason: cc_lb_lifecycle::TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 5,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            proxy_setup_ms: None,
+            setup_timings: cc_lb_lifecycle::RequestSetupTimings::default(),
+            io_timings: cc_lb_lifecycle::RequestIoTimings::default(),
+            upstream_ttfb_ms: None,
+            upstream_body_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
+            first_content_delta_ms: None,
+            first_body_chunk_ms: None,
+            finalize_ms: None,
+            internal_errors: Vec::new(),
+            event_kind: None,
+            funding_ambiguous: false,
+            protocol: None,
+        });
+        assert_eq!(bus.assembler_overflow_in_flight(), 2);
+
+        let first = assembler_rx.recv().await.expect("first ordered event");
+        let second = assembler_rx.recv().await.expect("second ordered event");
+        assert_eq!(first.kind(), "request_started");
+        assert_eq!(first.event_id(), "evt-e1");
+        assert_eq!(second.kind(), "request_terminated");
+        assert_eq!(second.event_id(), "evt-e1");
+
+        for _ in 0..16 {
+            if bus.assembler_overflow_in_flight() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(bus.assembler_overflow_in_flight(), 0);
     }
 }

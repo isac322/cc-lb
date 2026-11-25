@@ -428,6 +428,7 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 #[must_use]
+#[derive(Clone)]
 pub struct RealtimeWebSocketObservation {
     pub(crate) observer: Option<LifecycleContext>,
     pub(crate) completion_observer: Arc<CompletionObserver>,
@@ -483,9 +484,13 @@ impl RealtimeWebSocketObservation {
     }
 
     pub fn finish_draining(self) {
+        self.finish_draining_with_status(StatusCode::SWITCHING_PROTOCOLS);
+    }
+
+    pub fn finish_draining_with_status(self, status: StatusCode) {
         if let Some(observer) = &self.observer {
             observer.set_failure(InternalFailure {
-                status: StatusCode::SWITCHING_PROTOCOLS,
+                status,
                 error_code: crate::terminal_observer::error_codes::DRAIN_REJECTED,
                 error: InternalError {
                     stage: InternalErrorStage::Relay,
@@ -938,6 +943,26 @@ impl RealtimeWebSocketSession {
             } else {
                 observer.set_success_status(status);
             }
+            observer.finish();
+        }
+    }
+
+    /// Finalize a pending Realtime upgrade canceled by graceful drain before
+    /// relaying began.
+    pub fn finish_draining(mut self, status: StatusCode) {
+        if let Some(observer) = &self.observer {
+            if let Some(reservation) = self.reservation.take() {
+                reservation.handoff_after_response();
+            }
+            observer.set_failure(InternalFailure {
+                status,
+                error_code: crate::terminal_observer::error_codes::DRAIN_REJECTED,
+                error: InternalError {
+                    stage: InternalErrorStage::Relay,
+                    kind: InternalErrorKind::Unavailable,
+                    message: Some("server is draining".to_owned()),
+                },
+            });
             observer.finish();
         }
     }

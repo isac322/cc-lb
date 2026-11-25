@@ -7,7 +7,7 @@
 //! The app's own hooks (registered first) perform real SQLite I/O on blocking
 //! threads, which a paused clock would race with auto-advance. The tests
 //! therefore run on the real clock until the gated hook has started (every
-//! earlier hook has finished by then) and only pause it for the 15 s bound.
+//! earlier hook has finished by then) and only pause it for the 25 s bound.
 
 use std::net::TcpListener as StdTcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};

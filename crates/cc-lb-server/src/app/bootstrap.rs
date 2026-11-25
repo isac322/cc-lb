@@ -34,6 +34,7 @@ use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{ManagedKeyStore, RuntimeChangeNotifier, Storage};
 use cc_lb_upstream::SignedRequest;
+use futures_util::stream::FuturesUnordered;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -61,6 +62,8 @@ use crate::tls::{ReloadableListener, TlsState};
 use super::*;
 
 pub(super) const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_millis(500);
+pub(super) const DURABLE_WRITER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const SCHEDULER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) const PRICE_CATALOG_LOCAL_INSTALL_INTERVAL: Duration = Duration::from_secs(60);
 pub(super) const WASMTIME_POOL_METRICS_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -88,15 +91,19 @@ pub(super) struct ShutdownRuntime {
     pub(super) notify_cancel: Option<CancellationToken>,
     pub(super) notifier_task: Option<JoinHandle<()>>,
     pub(super) notify_listener_task: Option<JoinHandle<()>>,
+    pub(super) reconcile_cancel: Option<CancellationToken>,
+    pub(super) refresh_cancel: Option<CancellationToken>,
     pub(super) price_catalog_install_cancel: Option<CancellationToken>,
     pub(super) price_catalog_install_task: Option<JoinHandle<()>>,
     pub(super) wasmtime_pool_metrics_cancel: Option<CancellationToken>,
     pub(super) wasmtime_pool_metrics_task: Option<JoinHandle<()>>,
     pub(super) scheduler_cancel: Option<CancellationToken>,
-    pub(super) scheduler_tasks: Vec<JoinHandle<()>>,
+    pub(super) scheduler_tasks_slot: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
     pub(super) audit_writer_task: Option<JoinHandle<()>>,
     pub(super) upstream_rate_limit_writer_task: Option<JoinHandle<()>>,
+    pub(super) subscription_quota_writer_cancel: Option<CancellationToken>,
     pub(super) subscription_quota_writer_task: Option<JoinHandle<()>>,
+    pub(super) prompt_cache_observation_writer_cancel: Option<CancellationToken>,
     pub(super) prompt_cache_observation_writer_task: Option<JoinHandle<()>>,
     pub(super) event_fanout_shutdown_tx: Option<watch::Sender<bool>>,
     pub(super) event_fanout_tasks: Vec<JoinHandle<()>>,
@@ -210,6 +217,20 @@ pub enum BuildError {
     RequestDiagnosticsSink(#[source] io::Error),
 }
 
+pub fn serve_error_exit_code(error: &ServeError) -> std::process::ExitCode {
+    match error {
+        ServeError::Config(_)
+        | ServeError::Preflight(_)
+        | ServeError::Build(
+            BuildError::Config(_)
+            | BuildError::Preflight(_)
+            | BuildError::StorageKeyMissing { .. }
+            | BuildError::InvalidStorageKey,
+        ) => std::process::ExitCode::from(2),
+        _ => std::process::ExitCode::FAILURE,
+    }
+}
+
 impl ProxyApp {
     pub fn set_draining(&self, draining: bool) {
         self.shutdown.drain_controller.set_draining(draining);
@@ -224,9 +245,14 @@ impl ProxyApp {
     }
 
     pub async fn start(self) -> Result<(), BuildError> {
+        let scheduler_workers = self
+            .shutdown
+            .scheduler_tasks_slot
+            .try_lock()
+            .map_or(0, |tasks| tasks.len());
         tracing::info!(
             role = ?self.role,
-            scheduler_workers = self.shutdown.scheduler_tasks.len(),
+            scheduler_workers,
             proxy_addr = %self.proxy_addr,
             "starting cc-lb proxy",
         );
@@ -245,15 +271,19 @@ pub(super) async fn serve_runtime(
         notify_cancel,
         notifier_task,
         notify_listener_task,
+        reconcile_cancel,
+        refresh_cancel,
         price_catalog_install_cancel,
         price_catalog_install_task,
         wasmtime_pool_metrics_cancel,
         wasmtime_pool_metrics_task,
         scheduler_cancel,
-        scheduler_tasks,
+        scheduler_tasks_slot,
         audit_writer_task,
         upstream_rate_limit_writer_task,
+        subscription_quota_writer_cancel,
         subscription_quota_writer_task,
+        prompt_cache_observation_writer_cancel,
         prompt_cache_observation_writer_task,
         event_fanout_shutdown_tx,
         event_fanout_tasks,
@@ -311,80 +341,108 @@ pub(super) async fn serve_runtime(
         }
     };
 
-    // The proxy task ended. When a shutdown run started it, the hooks
-    // (assembler flush, diagnostics drain, subscriber shutdowns) are still
-    // running inside the detached shutdown task; returning now would let
-    // `main` drop the runtime and cut them off mid-write (#948). Wait for
-    // `drain_complete`, which the shutdown task sends only after every hook
-    // finished, bounded by SHUTDOWN_HOOKS_TIMEOUT so a wedged hook cannot
-    // hold the process forever. A proxy that stopped on its own with no
-    // shutdown started keeps the old behavior: no hooks are running, so
-    // there is nothing to wait for.
-    if signals.is_shutdown_started()
-        && tokio::time::timeout(
+    // The proxy task ended. When a shutdown run started it, wait for request
+    // drain to finish (`hooks_started`) before applying `SHUTDOWN_HOOKS_TIMEOUT`
+    // so long graceful drains do not steal budget from shutdown hooks. Then wait
+    // for `drain_complete`, bounded by SHUTDOWN_HOOKS_TIMEOUT so a wedged hook
+    // cannot hold the process forever. A proxy that stopped on its own with no
+    // shutdown started keeps the old behavior: no hooks are running, so there is
+    // nothing to wait for.
+    if signals.is_shutdown_started() {
+        signal::wait_for_shutdown(signals.subscribe_hooks_started()).await;
+        if tokio::time::timeout(
             signal::SHUTDOWN_HOOKS_TIMEOUT,
             signal::wait_for_shutdown(signals.subscribe_drain_complete()),
         )
         .await
         .is_err()
-    {
-        tracing::warn!(
-            timeout_secs = signal::SHUTDOWN_HOOKS_TIMEOUT.as_secs(),
-            "shutdown hooks did not finish before the bound; they continue detached"
-        );
+        {
+            tracing::warn!(
+                timeout_secs = signal::SHUTDOWN_HOOKS_TIMEOUT.as_secs(),
+                "shutdown hooks did not finish before the bound; they continue detached"
+            );
+        }
     }
 
+    // 1. Stop polling loops and scheduler workers before shutting down durable writers.
     if let Some(cancel) = notify_cancel {
         cancel.cancel();
     }
+    if let Some(cancel) = reconcile_cancel {
+        cancel.cancel();
+    }
+    if let Some(cancel) = refresh_cancel {
+        cancel.cancel();
+    }
+    if let Some(cancel) = price_catalog_install_cancel {
+        cancel.cancel();
+    }
+    if let Some(cancel) = wasmtime_pool_metrics_cancel {
+        cancel.cancel();
+    }
+    if let Some(cancel) = scheduler_cancel {
+        cancel.cancel();
+    }
+
+    // 2. Await non-durable polling and admin HTTP tasks.
     if let Some(task) = notifier_task {
         cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
     }
     if let Some(task) = notify_listener_task {
         cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
     }
-    if let Some(cancel) = price_catalog_install_cancel {
-        cancel.cancel();
-    }
     if let Some(task) = price_catalog_install_task {
         cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
     }
-    if let Some(cancel) = wasmtime_pool_metrics_cancel {
-        cancel.cancel();
-    }
     if let Some(task) = wasmtime_pool_metrics_task {
-        cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
-    }
-    if let Some(cancel) = scheduler_cancel {
-        cancel.cancel();
-    }
-    for task in scheduler_tasks {
         cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
     }
     if let Some((admin_stop_tx, admin_task)) = admin_handle {
         let _ = admin_stop_tx.send(true);
         cc_lb_runtime_sync::await_or_abort(admin_task, SHUTDOWN_TASK_TIMEOUT).await;
     }
-    if let Some(task) = audit_writer_task {
-        cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+
+    // 3. Await any remaining scheduler tasks concurrently under one shared 10s deadline.
+    let scheduler_tasks = std::mem::take(&mut *scheduler_tasks_slot.lock().await);
+    await_tasks_with_shared_timeout(scheduler_tasks, SCHEDULER_SHUTDOWN_TIMEOUT, "scheduler").await;
+
+    // 4. Signal durable writers to drain once producers, hooks, and scheduler stopped.
+    if let Some(cancel) = subscription_quota_writer_cancel {
+        cancel.cancel();
     }
-    if let Some(task) = upstream_rate_limit_writer_task {
-        cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+    if let Some(cancel) = prompt_cache_observation_writer_cancel {
+        cancel.cancel();
     }
-    if let Some(task) = subscription_quota_writer_task {
-        cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
-    }
-    if let Some(task) = prompt_cache_observation_writer_task {
-        cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
-    }
+
+    // 5. Await durable writer tasks concurrently under a 5s shared deadline.
+    let durable_writer_tasks: Vec<_> = [
+        audit_writer_task,
+        upstream_rate_limit_writer_task,
+        subscription_quota_writer_task,
+        prompt_cache_observation_writer_task,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    await_tasks_with_shared_timeout(
+        durable_writer_tasks,
+        DURABLE_WRITER_SHUTDOWN_TIMEOUT,
+        "durable_writers",
+    )
+    .await;
+
+    // 6. Shut down cross-replica event fanout tasks concurrently under a 5s shared deadline.
     if let Some(tx) = event_fanout_shutdown_tx {
         let _ = tx.send(true);
     }
-    for task in event_fanout_tasks {
-        cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
-    }
-    // Optional observations must not consume the durable writers' flush budget.
-    // The worker has drained concurrently during the mandatory cleanup above.
+    await_tasks_with_shared_timeout(
+        event_fanout_tasks,
+        DURABLE_WRITER_SHUTDOWN_TIMEOUT,
+        "event_fanout",
+    )
+    .await;
+
+    // 7. Flush remaining lifecycle observer tasks.
     if tokio::time::timeout(SHUTDOWN_TASK_TIMEOUT, lifecycle.shutdown())
         .await
         .is_err()
@@ -399,6 +457,32 @@ pub(super) async fn serve_runtime(
     }
     proxy_result?;
     Ok(())
+}
+
+async fn await_tasks_with_shared_timeout(
+    tasks: Vec<JoinHandle<()>>,
+    budget: Duration,
+    label: &'static str,
+) {
+    if tasks.is_empty() {
+        return;
+    }
+    let abort_handles: Vec<_> = tasks.iter().map(JoinHandle::abort_handle).collect();
+    let mut pending: FuturesUnordered<_> = tasks.into_iter().collect();
+    if tokio::time::timeout(budget, async { while pending.next().await.is_some() {} })
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            timeout_secs = budget.as_secs(),
+            task_group = label,
+            "shutdown task group exceeded shared deadline; aborting remaining tasks"
+        );
+        for handle in abort_handles {
+            handle.abort();
+        }
+        while pending.next().await.is_some() {}
+    }
 }
 
 pub async fn run_proxy_serve(
@@ -561,6 +645,34 @@ pub(super) async fn build_runtime_with_storage_core(
     let server_state = Arc::new(ServerStateHandle::new_starting());
     let metrics_hook: Arc<dyn cc_lb_observability::EngineMetricsHook> =
         Arc::new(cc_lb_observability::MetricsCrateHook);
+    let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
+    let storage_for_dynamic = storage.clone();
+    ensure_wasm_cache_dirs(&data_dir)?;
+    let stores = Arc::new(DynamicStores {
+        upstreams: storage_for_dynamic.clone(),
+        vertex_state: Arc::new(VertexState::new(storage_for_dynamic.clone())),
+        principals: storage_for_dynamic.clone(),
+        plugin_registry: storage_for_dynamic.clone(),
+        upstream_rate_limits: storage_for_dynamic.clone(),
+        upstream_subscription_quotas: storage_for_dynamic.clone(),
+        upstream_subscription_metadata: storage_for_dynamic.clone(),
+        organization_metadata: storage_for_dynamic.clone(),
+        plan_tiers: storage_for_dynamic.clone(),
+        prompt_cache_observations: storage_for_dynamic.clone(),
+        anthropic_compatibility_kv: storage_for_dynamic.clone(),
+        audit: Some(storage_for_dynamic.clone()),
+    });
+    if let Some(startup_preflight) = startup_preflight {
+        let report = preflight::run_preflight(&stores, &data_dir, &config, aead.as_ref()).await?;
+        print_preflight_report(&report);
+        if startup_preflight.strict_preflight && !report.warnings.is_empty() {
+            return Err(BuildError::Preflight(
+                preflight::PreflightError::StrictWarnings {
+                    warning_count: report.warnings.len(),
+                },
+            ));
+        }
+    }
     let key_store = match &config.storage {
         cc_lb_config::StorageConfig::Postgres { .. } => {
             if let Some(conn_state) = storage.connection_state() {
@@ -620,9 +732,6 @@ pub(super) async fn build_runtime_with_storage_core(
             .map_err(BuildError::WasmtimeRuntimeInit)?;
     let (wasmtime_pool_metrics_cancel, wasmtime_pool_metrics_task) =
         spawn_wasmtime_pool_metrics_publisher(runtime.clone());
-    let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
-    let storage_for_dynamic = storage.clone();
-    ensure_wasm_cache_dirs(&data_dir)?;
 
     let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
     let limit_engine = LimitEngine::new(concurrent_mgr, clock.clone());
@@ -665,20 +774,6 @@ pub(super) async fn build_runtime_with_storage_core(
         id: replica::load_or_create_replica_id_or_ephemeral(&data_dir),
     });
 
-    let stores = Arc::new(DynamicStores {
-        upstreams: storage_for_dynamic.clone(),
-        vertex_state: Arc::new(VertexState::new(storage_for_dynamic.clone())),
-        principals: storage_for_dynamic.clone(),
-        plugin_registry: storage_for_dynamic.clone(),
-        upstream_rate_limits: storage_for_dynamic.clone(),
-        upstream_subscription_quotas: storage_for_dynamic.clone(),
-        upstream_subscription_metadata: storage_for_dynamic.clone(),
-        organization_metadata: storage_for_dynamic.clone(),
-        plan_tiers: storage_for_dynamic.clone(),
-        prompt_cache_observations: storage_for_dynamic.clone(),
-        anthropic_compatibility_kv: storage_for_dynamic.clone(),
-        audit: Some(storage_for_dynamic.clone()),
-    });
     let prompt_cache_grace_margin_secs = config.prompt_cache_shadow.grace_margin_secs;
     let observation_store_kind = match &config.storage {
         cc_lb_config::StorageConfig::Sqlite { .. } => {
@@ -688,10 +783,12 @@ pub(super) async fn build_runtime_with_storage_core(
             cc_lb_observability::cache_observation_store_kind::POSTGRES
         }
     };
-    let (sink, writer) = PromptCacheObservationSink::new(
+    let prompt_cache_observation_writer_cancel = CancellationToken::new();
+    let (sink, writer) = PromptCacheObservationSink::new_with_cancel(
         stores.prompt_cache_observations.clone(),
         DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY,
         observation_store_kind,
+        prompt_cache_observation_writer_cancel.clone(),
     );
     let prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
     let prompt_cache_observation_writer_task = Some(writer);
@@ -705,17 +802,6 @@ pub(super) async fn build_runtime_with_storage_core(
         .replica_identity
         .as_ref()
         .map(|identity| identity.id);
-    if let Some(startup_preflight) = startup_preflight {
-        let report = preflight::run_preflight(&stores, &data_dir, &config, aead.as_ref()).await?;
-        print_preflight_report(&report);
-        if startup_preflight.strict_preflight && !report.warnings.is_empty() {
-            eprintln!(
-                "preflight: strict mode failed with {} warning(s)",
-                report.warnings.len()
-            );
-            std::process::exit(1);
-        }
-    }
 
     let oauth_cfg = Arc::new(config.oauth.anthropic.clone().unwrap_or_default());
     let refresh_cancel = CancellationToken::new();
@@ -1132,6 +1218,30 @@ pub(super) async fn build_runtime_with_storage_core(
         Duration::from_secs(config.timeouts.drain_secs),
         sighup_handler(reload_tls_state),
     );
+    let scheduler_cancel = CancellationToken::new();
+    let scheduler_tasks_slot: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    {
+        // Stop claiming new background scheduler jobs as soon as graceful drain begins.
+        signals.add_drain_start_cancel_token(scheduler_cancel.clone());
+    }
+    {
+        // Join active scheduler workers BEFORE draining/shutting down downstream
+        // subscribers (`api_key_usage_slot`, `lifecycle_dispatcher_slot`, etc.) so
+        // in-flight cache-keepalive finalizers flush into `LimitEngine` first.
+        let scheduler_cancel_for_hook = scheduler_cancel.clone();
+        let scheduler_tasks_slot = scheduler_tasks_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let scheduler_cancel_for_hook = scheduler_cancel_for_hook.clone();
+            let scheduler_tasks_slot = scheduler_tasks_slot.clone();
+            async move {
+                scheduler_cancel_for_hook.cancel();
+                let tasks = std::mem::take(&mut *scheduler_tasks_slot.lock().await);
+                await_tasks_with_shared_timeout(tasks, SCHEDULER_SHUTDOWN_TIMEOUT, "scheduler")
+                    .await;
+            }
+        });
+    }
     {
         // Drain the single-channel bus dispatcher before downstream subscribers/assembler shut down.
         let dispatcher_slot = lifecycle_dispatcher_slot.clone();
@@ -1146,11 +1256,13 @@ pub(super) async fn build_runtime_with_storage_core(
         });
     }
     {
-        let logger_slot = lifecycle_event_logger_slot.clone();
+        // Drain pricing BEFORE shutting down assembler & logger so `Priced` events
+        // emitted during shutdown are merged onto finalized request rows.
+        let pricing_slot = lifecycle_pricing_subscriber_slot.clone();
         signals.add_shutdown_hook(move || {
-            let logger_slot = logger_slot.clone();
+            let pricing_slot = pricing_slot.clone();
             async move {
-                let mut guard = logger_slot.lock().await;
+                let mut guard = pricing_slot.lock().await;
                 if let Some(handle) = guard.take() {
                     handle.shutdown().await;
                 }
@@ -1170,11 +1282,11 @@ pub(super) async fn build_runtime_with_storage_core(
         });
     }
     {
-        let pricing_slot = lifecycle_pricing_subscriber_slot.clone();
+        let logger_slot = lifecycle_event_logger_slot.clone();
         signals.add_shutdown_hook(move || {
-            let pricing_slot = pricing_slot.clone();
+            let logger_slot = logger_slot.clone();
             async move {
-                let mut guard = pricing_slot.lock().await;
+                let mut guard = logger_slot.lock().await;
                 if let Some(handle) = guard.take() {
                     handle.shutdown().await;
                 }
@@ -1291,7 +1403,6 @@ pub(super) async fn build_runtime_with_storage_core(
     }
     let anthropic_org_api =
         AnthropicOrgApi::production().map_err(BuildError::AnthropicOrgOrigin)?;
-    let scheduler_cancel = CancellationToken::new();
     let (scheduler_ctx, limit_reset_usage_refresh, warmup_window_verifier) =
         crate::scheduler_dispatch::build_scheduler_ctx(
             crate::scheduler_dispatch::SchedulerDispatchDeps {
@@ -1330,9 +1441,7 @@ pub(super) async fn build_runtime_with_storage_core(
             .spawn(scheduler_ctx, scheduler_cancel.clone())
             .await?
     };
-    spawn_reconcile_shutdown(signals.subscribe(), scheduler_cancel.clone());
-    spawn_reconcile_shutdown(signals.subscribe(), subscription_quota_writer_cancel);
-    spawn_reconcile_shutdown(signals.subscribe(), refresh_cancel);
+    *scheduler_tasks_slot.lock().await = scheduler_tasks;
     let reconcile_cancel = CancellationToken::new();
     spawn_reconciler(ReconcilerParams {
         stores: stores.clone(),
@@ -1353,7 +1462,6 @@ pub(super) async fn build_runtime_with_storage_core(
         antigravity_config: config.oauth.antigravity.clone(),
         plugin_scope,
     });
-    spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
     let state = ProxyState {
         lifecycle: lifecycle.clone(),
         body_caps,
@@ -1389,15 +1497,19 @@ pub(super) async fn build_runtime_with_storage_core(
             notify_cancel: Some(notify_cancel),
             notifier_task,
             notify_listener_task,
+            reconcile_cancel: Some(reconcile_cancel),
+            refresh_cancel: Some(refresh_cancel),
             price_catalog_install_cancel: Some(price_catalog_install_cancel),
             price_catalog_install_task: Some(price_catalog_install_task),
             wasmtime_pool_metrics_cancel: Some(wasmtime_pool_metrics_cancel),
             wasmtime_pool_metrics_task: Some(wasmtime_pool_metrics_task),
             scheduler_cancel: Some(scheduler_cancel),
-            scheduler_tasks,
+            scheduler_tasks_slot,
             audit_writer_task: Some(audit_writer_task),
             upstream_rate_limit_writer_task: Some(upstream_rate_limit_writer_task),
+            subscription_quota_writer_cancel: Some(subscription_quota_writer_cancel),
             subscription_quota_writer_task: Some(subscription_quota_writer_task),
+            prompt_cache_observation_writer_cancel: Some(prompt_cache_observation_writer_cancel),
             prompt_cache_observation_writer_task,
             event_fanout_shutdown_tx: Some(event_fanout_shutdown_tx),
             event_fanout_tasks,
@@ -1550,13 +1662,6 @@ pub(super) fn spawn_reconciler(params: ReconcilerParams) {
         .with_plugin_scope(params.plugin_scope),
     );
     tokio::spawn(reconciler.run());
-}
-
-pub(super) fn spawn_reconcile_shutdown(shutdown: watch::Receiver<bool>, cancel: CancellationToken) {
-    tokio::spawn(async move {
-        signal::wait_for_shutdown(shutdown).await;
-        cancel.cancel();
-    });
 }
 
 pub(super) fn lifecycle_config_from_config(
@@ -2036,19 +2141,34 @@ mod tests {
     async fn proxy_only_spawns_zero_scheduler_tasks_while_worker_roles_spawn_them() {
         let proxy_only = build_test_proxy_app(ProxyRole::ProxyOnly).await;
         assert!(
-            proxy_only.shutdown.scheduler_tasks.is_empty(),
+            proxy_only
+                .shutdown
+                .scheduler_tasks_slot
+                .lock()
+                .await
+                .is_empty(),
             "ProxyOnly must not spawn apalis scheduler worker tasks",
         );
 
         let proxy_worker = build_test_proxy_app(ProxyRole::ProxyWorker).await;
         assert!(
-            !proxy_worker.shutdown.scheduler_tasks.is_empty(),
+            !proxy_worker
+                .shutdown
+                .scheduler_tasks_slot
+                .lock()
+                .await
+                .is_empty(),
             "ProxyWorker must spawn scheduler worker tasks",
         );
 
         let worker_only = build_test_proxy_app(ProxyRole::WorkerOnly).await;
         assert!(
-            !worker_only.shutdown.scheduler_tasks.is_empty(),
+            !worker_only
+                .shutdown
+                .scheduler_tasks_slot
+                .lock()
+                .await
+                .is_empty(),
             "WorkerOnly must spawn scheduler worker tasks",
         );
     }
@@ -2091,5 +2211,383 @@ mod tests {
             .await
             .expect("admin response");
         assert_eq!(admin.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn serve_error_exit_code_maps_build_preflight_to_exit_code_2() {
+        let err = ServeError::Build(BuildError::Preflight(
+            crate::preflight::PreflightError::StrictWarnings { warning_count: 1 },
+        ));
+        assert_eq!(serve_error_exit_code(&err), std::process::ExitCode::from(2));
+    }
+
+    #[tokio::test]
+    async fn strict_preflight_returns_typed_error_without_exiting_process() {
+        use cc_lb_storage_api::{
+            PluginChainEntryInput, PluginRegistryStore as _, PluginSlotKind, PrincipalCreate,
+            PrincipalKind, PrincipalStore as _, WasmBlob, WasmRegistryEntryInput,
+        };
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let sqlite_path = dir.path().join("storage.sqlite");
+        let aead = Arc::new(AeadService::from_master_key([0u8; 32]));
+        let clock: ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+        let database_url = format!("sqlite://{}", sqlite_path.display());
+        let storage_arc = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+                .await
+                .expect("open sqlite"),
+        );
+        storage_arc.initialize().await.expect("init sqlite");
+
+        let principal = storage_arc
+            .create(
+                PrincipalCreate {
+                    name: "strict-preflight-principal".to_owned(),
+                    kind: PrincipalKind::Machine,
+                    allowed_models: vec!["*".to_owned()],
+                    allowed_upstreams: Vec::new(),
+                    default_limits: Vec::new(),
+                    cache_keepalive: None,
+                    openai_oauth_compat: None,
+                },
+                1_800_000_000,
+            )
+            .await
+            .expect("create principal");
+        let (entry, _) = storage_arc
+            .persist_wasm_upload(
+                WasmBlob {
+                    sha256: [7u8; 32],
+                    bytes: b"wasm-stub".to_vec(),
+                    size_bytes: 9,
+                },
+                WasmRegistryEntryInput {
+                    name: "shape-only-plugin".to_owned(),
+                    version: None,
+                    original_filename: "shape.wasm".to_owned(),
+                    label: None,
+                    uploaded_at_unix_secs: 1_800_000_000,
+                    uploaded_by_admin_id: uuid::Uuid::from_u128(1),
+                    description: String::new(),
+                    usage: String::new(),
+                    hook_metadata: Default::default(),
+                    supported_slots: vec![PluginSlotKind::Shape],
+                },
+            )
+            .await
+            .expect("persist wasm");
+        storage_arc
+            .insert_chain_entry(PluginChainEntryInput {
+                principal_id: principal.id,
+                slot: PluginSlotKind::Router,
+                order: 0,
+                wasm_registry_id: entry.id,
+                config: serde_json::json!({}),
+            })
+            .await
+            .expect("insert unsupported slot chain entry");
+
+        let mut config = Config {
+            storage: cc_lb_config::StorageConfig::Sqlite { path: sqlite_path },
+            ..Config::default()
+        };
+        config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
+        config.runtime.data_dir = Some(dir.path().to_path_buf());
+        let opened_scheduler = crate::scheduler_factory::open_scheduler_storage_with_role(
+            &config.storage,
+            &config.scheduler,
+            crate::scheduler_factory::SchedulerPoolRole::EnqueueOnly,
+            clock.clone(),
+        )
+        .await
+        .expect("open scheduler");
+
+        let err = match build_runtime_with_storage_core(
+            config,
+            ProxyRole::ProxyOnly,
+            None,
+            storage_arc.clone() as Arc<dyn ManagedKeyStore>,
+            storage_arc as Arc<dyn Storage>,
+            aead,
+            Some(StartupPreflight {
+                strict_preflight: true,
+            }),
+            opened_scheduler,
+            None,
+            clock,
+        )
+        .await
+        {
+            Ok(_) => {
+                panic!("strict preflight must return BuildError::Preflight when warnings exist")
+            }
+            Err(err) => err,
+        };
+
+        assert!(
+            matches!(
+                err,
+                BuildError::Preflight(crate::preflight::PreflightError::StrictWarnings {
+                    warning_count
+                }) if warning_count >= 1
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn pricing_subscriber_flushes_before_assembler_during_app_shutdown() {
+        use cc_lb_storage_api::RequestEventStore as _;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let sqlite_path = dir.path().join("storage.sqlite");
+        let aead = Arc::new(AeadService::from_master_key([0u8; 32]));
+        let clock: ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+        let database_url = format!("sqlite://{}", sqlite_path.display());
+        let storage_arc = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+                .await
+                .expect("open sqlite"),
+        );
+        storage_arc.initialize().await.expect("init sqlite");
+        let mut config = Config {
+            storage: cc_lb_config::StorageConfig::Sqlite { path: sqlite_path },
+            ..Config::default()
+        };
+        config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
+        config.runtime.data_dir = Some(dir.path().to_path_buf());
+        let opened_scheduler = crate::scheduler_factory::open_scheduler_storage_with_role(
+            &config.storage,
+            &config.scheduler,
+            crate::scheduler_factory::SchedulerPoolRole::EnqueueOnly,
+            clock.clone(),
+        )
+        .await
+        .expect("open scheduler");
+
+        let core = build_runtime_with_storage_core(
+            config,
+            ProxyRole::ProxyOnly,
+            None,
+            storage_arc.clone() as Arc<dyn ManagedKeyStore>,
+            storage_arc.clone() as Arc<dyn Storage>,
+            aead,
+            None,
+            opened_scheduler,
+            None,
+            clock,
+        )
+        .await
+        .expect("runtime builds");
+
+        // Hold an in-flight request across shutdown trigger, publish lifecycle events
+        // that require `PricingSubscriber` -> `Priced` before assembler finalizes,
+        // then drop the guard so shutdown hooks execute in sequence.
+        let guard = core
+            .shutdown
+            .drain_controller
+            .try_track()
+            .expect("drain guard acquired");
+        core.event_bus
+            .publish_lifecycle(cc_lb_lifecycle::LifecycleEvent::RequestStarted {
+                event_id: "evt-shutdown-price".to_owned(),
+                request_id: "req-shutdown-price".to_owned(),
+                ts_ms: 1_700_000_000_000,
+                stream: false,
+                source_kind: None,
+                source_ref_id: None,
+                event_kind: None,
+                protocol: None,
+            });
+        core.event_bus
+            .publish_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
+                event_id: "evt-shutdown-price".to_owned(),
+                result: Ok(cc_lb_lifecycle::ParseInfo {
+                    path: "/v1/messages".to_owned(),
+                    method: "POST".to_owned(),
+                    model: Some("claude-sonnet-4-5-20250929".to_owned()),
+                    ..Default::default()
+                }),
+            });
+        core.event_bus
+            .publish_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                event_id: "evt-shutdown-price".to_owned(),
+                usage: cc_lb_lifecycle::UsageSnapshot {
+                    input_tokens: 1_000_000,
+                    output_tokens: 1_000_000,
+                    ..Default::default()
+                },
+                source: cc_lb_lifecycle::UsageSource::Final,
+            });
+        core.event_bus
+            .publish_lifecycle(cc_lb_lifecycle::LifecycleEvent::RequestTerminated {
+                event_id: "evt-shutdown-price".to_owned(),
+                reason: cc_lb_lifecycle::TerminationReason::Success,
+                client_status: 200,
+                duration_ms: 15,
+                request_body_read_ms: None,
+                request_body_bytes: None,
+                proxy_setup_ms: None,
+                setup_timings: cc_lb_lifecycle::RequestSetupTimings::default(),
+                io_timings: cc_lb_lifecycle::RequestIoTimings::default(),
+                upstream_ttfb_ms: None,
+                upstream_body_ms: None,
+                dns_ms: None,
+                connect_ms: None,
+                connection_reused: None,
+                first_content_delta_ms: None,
+                first_body_chunk_ms: None,
+                finalize_ms: None,
+                internal_errors: Vec::new(),
+                event_kind: None,
+                funding_ambiguous: false,
+                protocol: None,
+            });
+
+        let drain_complete = core.shutdown.signals.subscribe_drain_complete();
+        core.shutdown.signals.start_shutdown();
+        drop(guard);
+
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            signal::wait_for_shutdown(drain_complete),
+        )
+        .await
+        .expect("shutdown hooks complete cleanly");
+
+        let row = storage_arc
+            .get_request_event("evt-shutdown-price")
+            .await
+            .expect("query persisted row")
+            .expect("shutdown-flushed request event row exists");
+        assert!(
+            row.cost_usd_micros.is_some_and(|micros| micros > 0),
+            "pricing subscriber must flush `Priced` before assembler shuts down; got {:?}",
+            row.cost_usd_micros
+        );
+        drop(core);
+    }
+
+    #[tokio::test]
+    async fn scheduler_cancels_at_drain_start_and_joins_before_post_usage_hooks() {
+        let app = build_test_proxy_app(ProxyRole::ProxyWorker).await;
+        let signals = app.signal_handle();
+        let drain = app.drain_controller();
+        let scheduler_cancel = app
+            .shutdown
+            .scheduler_cancel
+            .clone()
+            .expect("scheduler_cancel set");
+        let guard = drain.try_track().expect("acquire drain guard");
+
+        let (sched_cancelled_tx, sched_cancelled_rx) = tokio::sync::oneshot::channel();
+        let (sched_release_tx, sched_release_rx) = tokio::sync::oneshot::channel::<()>();
+        let sched_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sched_finished_task = Arc::clone(&sched_finished);
+        {
+            let mut tasks = app.shutdown.scheduler_tasks_slot.lock().await;
+            tasks.push(tokio::spawn(async move {
+                scheduler_cancel.cancelled().await;
+                let _ = sched_cancelled_tx.send(());
+                let _ = sched_release_rx.await;
+                sched_finished_task.store(true, std::sync::atomic::Ordering::Release);
+            }));
+        }
+
+        let (after_usage_tx, after_usage_rx) = tokio::sync::oneshot::channel();
+        let after_usage_tx = Arc::new(std::sync::Mutex::new(Some(after_usage_tx)));
+        let sched_finished_hook = Arc::clone(&sched_finished);
+        // Registered after `api_key_usage_slot` (and every built-in shutdown hook) at startup.
+        signals.add_shutdown_hook(move || {
+            let after_usage_tx = Arc::clone(&after_usage_tx);
+            let sched_finished_hook = Arc::clone(&sched_finished_hook);
+            async move {
+                let observed = sched_finished_hook.load(std::sync::atomic::Ordering::Acquire);
+                if let Ok(mut slot) = after_usage_tx.lock()
+                    && let Some(tx) = slot.take()
+                {
+                    let _ = tx.send(observed);
+                }
+            }
+        });
+
+        let hooks_started = signals.subscribe_hooks_started();
+        let drain_complete = signals.subscribe_drain_complete();
+        signals.start_shutdown();
+
+        tokio::time::timeout(Duration::from_secs(2), sched_cancelled_rx)
+            .await
+            .expect("scheduler_cancel fires on drain start while request guard is held")
+            .expect("scheduler cancelled channel sends");
+        assert!(
+            !*hooks_started.borrow(),
+            "hooks_started must stay false while drain guard is active"
+        );
+
+        drop(guard);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            signal::wait_for_shutdown(hooks_started),
+        )
+        .await
+        .expect("hooks_started fires after drain guard drops");
+
+        assert!(
+            !sched_finished.load(std::sync::atomic::Ordering::Acquire),
+            "gated scheduler task has not been released yet"
+        );
+        let _ = sched_release_tx.send(());
+
+        let saw_scheduler_joined = tokio::time::timeout(Duration::from_secs(5), after_usage_rx)
+            .await
+            .expect("post-usage shutdown hook runs")
+            .expect("post-usage hook sends");
+        assert!(
+            saw_scheduler_joined,
+            "scheduler tasks must join before api_key_usage_slot and downstream shutdown hooks run"
+        );
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            signal::wait_for_shutdown(drain_complete),
+        )
+        .await
+        .expect("drain_complete signals");
+        drop(app);
+    }
+
+    #[tokio::test]
+    async fn await_tasks_with_shared_timeout_awaits_aborted_original_workers() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let completed = tokio::spawn(async {});
+        let worker_dropped = Arc::new(AtomicBool::new(false));
+        let worker_dropped_flag = DropFlag(Arc::clone(&worker_dropped));
+        let worker_started = Arc::new(tokio::sync::Notify::new());
+        let worker_started_task = Arc::clone(&worker_started);
+        let stalled = tokio::spawn(async move {
+            let _guard = worker_dropped_flag;
+            worker_started_task.notify_one();
+            std::future::pending::<()>().await;
+        });
+        worker_started.notified().await;
+        await_tasks_with_shared_timeout(
+            vec![completed, stalled],
+            Duration::from_millis(25),
+            "test-workers",
+        )
+        .await;
+        assert!(
+            worker_dropped.load(Ordering::Acquire),
+            "original worker Drop guard must complete before await_tasks_with_shared_timeout returns"
+        );
     }
 }
