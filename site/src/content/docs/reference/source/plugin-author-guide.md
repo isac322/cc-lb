@@ -287,11 +287,14 @@ requests, the host removes:
   from each `Cookie` value, and a `Cookie` header whose crumbs were all removed
   is omitted.
 
-Outbound headers intentionally returned by a V2 shape hook (for example,
-`CF-Access-Client-Id` / `CF-Access-Client-Secret` for a Cloudflare
-Access-protected upstream gateway) are preserved to the upstream transport,
-subject only to shape output filtering (hop-by-hop headers, `host`,
-`content-length`, and host-owned provider credential headers).
+Ingress sanitization leaves outbound headers returned by a V2 shape hook intact
+(for example, `CF-Access-Client-Id` / `CF-Access-Client-Secret` for a Cloudflare
+Access-protected upstream gateway), while shape output filtering (hop-by-hop
+headers, `host`, `content-length`, and host-owned provider credential headers),
+upstream signer header rules, and outbound transport header rules (for example,
+WebSocket connection handshake headers such as `Sec-WebSocket-Protocol`,
+`Sec-WebSocket-Key`, `Sec-WebSocket-Version`, and `Sec-WebSocket-Extensions` on
+the Responses WebSocket builder) still apply.
 
 Filter example:
 
