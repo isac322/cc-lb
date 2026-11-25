@@ -18,5 +18,5 @@ ALTER TABLE upstream_plan_tier_history_v1
 INSERT INTO plan_tier_ratio_history_v1
     (tier_key, pro_relative_ratio, effective_from_unix_millis, effective_to_unix_millis, provenance, created_at_unix_millis)
 VALUES
-    ('free', 0.2, 0, NULL, 'migration:0177_plan_tier_free', (extract(epoch FROM now()) * 1000)::BIGINT)
+    ('free', 0.2, 0, NULL, 'migration:0180_plan_tier_free', (extract(epoch FROM now()) * 1000)::BIGINT)
 ON CONFLICT DO NOTHING;

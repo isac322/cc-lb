@@ -1663,8 +1663,10 @@ pub(super) fn install_default_fallback_if_uninitialized(
 pub(super) fn claude_default_snapshot(
     clock: &dyn cc_lb_clock::Clock,
 ) -> cc_lb_pricing::CatalogSnapshot {
-    use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion};
-    use std::collections::HashMap;
+    use cc_lb_pricing::{
+        CatalogSnapshot, CatalogStatus, Pricing, ThresholdBand, ThresholdRate, UsdPerMillion,
+    };
+    use std::collections::{BTreeMap, HashMap};
 
     // Per-million USD in micros (1 USD = 1_000_000 micros).
     // Source: Anthropic pricing (July 2026 snapshot).
@@ -1763,6 +1765,25 @@ pub(super) fn claude_default_snapshot(
         cache_read.insert((*name).to_owned(), UsdPerMillion::from_micros_usd(*read));
     }
 
+    // Anthropic charges 5x base rates strictly above 100,000 gross input tokens
+    // for Claude Haiku 5.5 (`above_tokens_rates` triggers strictly above threshold).
+    let mut above_tokens_rates = HashMap::new();
+    above_tokens_rates.insert(
+        "claude-haiku-5-5".to_owned(),
+        BTreeMap::from([(
+            100_000,
+            ThresholdBand {
+                default: ThresholdRate {
+                    input_per_million_usd: Some(UsdPerMillion::from_micros_usd(500_000)),
+                    output_per_million_usd: Some(UsdPerMillion::from_micros_usd(2_500_000)),
+                    cache_creation_per_million_usd: Some(UsdPerMillion::from_micros_usd(625_000)),
+                    cache_read_per_million_usd: Some(UsdPerMillion::from_micros_usd(50_000)),
+                },
+                by_tier: BTreeMap::new(),
+            },
+        )]),
+    );
+
     CatalogSnapshot {
         payload_hash: String::new(),
         fetched_at_ms: cc_lb_clock::unix_millis(clock.now())
@@ -1774,7 +1795,7 @@ pub(super) fn claude_default_snapshot(
         cache_read_per_million_usd: cache_read,
         cache_creation_per_million_usd_by_tier: HashMap::new(),
         cache_read_per_million_usd_by_tier: HashMap::new(),
-        above_tokens_rates: HashMap::new(),
+        above_tokens_rates,
         status: CatalogStatus::Ok,
     }
 }

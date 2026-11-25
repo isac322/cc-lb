@@ -167,7 +167,7 @@ DROP TABLE temp.plan_tier_rebuild_before;
 INSERT OR IGNORE INTO plan_tier_ratio_history_v1
     (tier_key, pro_relative_ratio, effective_from_unix_millis, effective_to_unix_millis, provenance, created_at_unix_millis)
 VALUES
-    ('free', 0.2, 0, NULL, 'migration:0132_plan_tier_free', CAST(strftime('%s','now') AS INTEGER) * 1000);
+    ('free', 0.2, 0, NULL, 'migration:0135_plan_tier_free', CAST(strftime('%s','now') AS INTEGER) * 1000);
 
 COMMIT;
 PRAGMA foreign_keys = ON;
