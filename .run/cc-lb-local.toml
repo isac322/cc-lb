@@ -29,11 +29,6 @@ sslmode = "disable"
 [upstream_affinity]
 ttl_days = 90
 
-# The postgres backend always runs the pg_notify event fanout, which needs a
-# peer-reachable identity plus a shared token from CC_LB_CLUSTER_TOKEN.
-[cluster]
-instance_url = "http://127.0.0.1:9090"
-
 # AEAD master key — separate section in the tagged storage format.
 [aead]
 key_env = "CC_LB_MASTER_KEY"

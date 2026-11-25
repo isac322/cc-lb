@@ -54,9 +54,6 @@ url = "$CI_POSTGRES_URL"
 acquire_timeout_secs = 10
 statement_timeout_secs = 25
 
-[cluster]
-instance_url = "http://127.0.0.1:$admin_port"
-
 [aead]
 key_env = "CC_LB_MASTER_KEY"
 
@@ -190,8 +187,8 @@ response=$(curl -sS -w '\n%{http_code}' -X POST \
   -H 'anthropic-version: 2023-06-01' \
   --data '{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hello postgres backend"}],"max_tokens":32}' \
   "http://127.0.0.1:$proxy_port/v1/messages")
-body=$(printf '%s' "$response" | head -n -1)
-status=$(printf '%s' "$response" | tail -n 1)
+body=$(printf '%s\n' "$response" | sed '$d')
+status=$(printf '%s\n' "$response" | tail -n 1)
 echo "HTTP $status"
 echo "body: $body"
 

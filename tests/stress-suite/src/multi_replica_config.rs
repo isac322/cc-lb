@@ -46,7 +46,6 @@ pub struct ReplicaConfig<'a> {
     pub storage_url: &'a str,
     pub ports: ReplicaPorts,
     pub data_dir: &'a str,
-    pub instance_url: &'a str,
 }
 
 #[cfg(test)]
@@ -55,7 +54,6 @@ pub fn render_replica_config(storage_url: &str, ports: ReplicaPorts) -> String {
         storage_url,
         ports,
         data_dir: "/tmp/cc-lb-stress",
-        instance_url: "http://replica.invalid",
     })
 }
 
@@ -88,9 +86,6 @@ sslmode = "disable"
 [event_bus]
 storage_tail_poll_interval_ms = 100
 
-[cluster]
-instance_url = "{instance_url}"
-
 [aead]
 key_env = "CC_LB_MASTER_KEY"
 
@@ -107,7 +102,6 @@ data_dir = "{data_dir}"
         admin = input.ports.admin,
         metrics = input.ports.metrics,
         storage_url = input.storage_url,
-        instance_url = input.instance_url,
         data_dir = input.data_dir,
     )
 }
