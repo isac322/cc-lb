@@ -85,9 +85,13 @@ impl ProviderAdapter for AnthropicProviderAdapter {
 fn canonical_anthropic_model_id(requested: &str) -> &str {
     match requested {
         "claude-fable-5" => "claude-fable-5",
+        "claude-fable-5-1" => "claude-fable-5-1",
+        "claude-fable-5-2" => "claude-fable-5-2",
         "claude-opus-5-5" => "claude-opus-5-5",
         "claude-opus-5" => "claude-opus-5",
         "claude-mythos-5" => "claude-mythos-5",
+        "claude-mythos-5-1" => "claude-mythos-5-1",
+        "claude-mythos-5-2" => "claude-mythos-5-2",
         "claude-mythos-preview" => "claude-mythos-preview",
         "claude-sonnet-5-5" => "claude-sonnet-5-5",
         "claude-sonnet-5" => "claude-sonnet-5",
@@ -133,9 +137,10 @@ fn is_dated_model(model: &str) -> bool {
 
 fn anthropic_cache_threshold_tokens(canonical: &str) -> Option<usize> {
     match canonical {
-        // Claude 5.5 (Opus/Sonnet/Haiku) / Opus 5 / Fable 5 / Mythos 5: 512
+        // Claude 5.5 (Opus/Sonnet/Haiku) / Opus 5 / Fable 5(.1/.2) / Mythos 5(.1/.2): 512
         "claude-opus-5-5" | "claude-sonnet-5-5" | "claude-haiku-5-5" | "claude-opus-5"
-        | "claude-fable-5" | "claude-mythos-5" => Some(512),
+        | "claude-fable-5" | "claude-fable-5-1" | "claude-fable-5-2" | "claude-mythos-5"
+        | "claude-mythos-5-1" | "claude-mythos-5-2" => Some(512),
 
         // Opus 4.8 / Sonnet 5 / Sonnet 4.6 / Sonnet 4.5 / Opus 4.1 / Opus 4 / Sonnet 4: 1024
         "claude-opus-4-8-20250514"
@@ -232,6 +237,20 @@ mod tests {
             Some(4096)
         );
         assert_eq!(adapter.cache_threshold_tokens("unknown-model"), None);
+    }
+
+    #[test]
+    fn resolves_fable_and_mythos_5_1_5_2() {
+        let adapter = AnthropicProviderAdapter;
+        for model in [
+            "claude-fable-5-1",
+            "claude-fable-5-2",
+            "claude-mythos-5-1",
+            "claude-mythos-5-2",
+        ] {
+            assert_eq!(adapter.canonical_model_id(model), model);
+            assert_eq!(adapter.cache_threshold_tokens(model), Some(512));
+        }
     }
 
     #[test]

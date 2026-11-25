@@ -192,6 +192,19 @@ mod tests {
     }
 
     #[test]
+    fn fable_and_mythos_5_1_5_2_are_dateless_canonical_with_512_threshold() {
+        for model in [
+            "claude-fable-5-1",
+            "claude-fable-5-2",
+            "claude-mythos-5-1",
+            "claude-mythos-5-2",
+        ] {
+            assert_eq!(canonical_model_id(Provider::Anthropic, model), model);
+            assert_eq!(cache_threshold_tokens(model), 512);
+        }
+    }
+
+    #[test]
     fn threshold_unknown_defaults_to_1024() {
         assert_eq!(cache_threshold_tokens("unknown-future-model"), 1024);
     }

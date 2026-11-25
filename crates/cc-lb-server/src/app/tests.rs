@@ -1247,6 +1247,17 @@ fn default_fallback_contains_current_anthropic_pricing() {
             .above_tokens_rates
             .contains_key("claude-sonnet-5-5")
     );
+    for model in [
+        "claude-fable-5-1",
+        "claude-fable-5-2",
+        "claude-mythos-5-1",
+        "claude-mythos-5-2",
+    ] {
+        assert!(
+            catalog.lookup(model, None).is_none(),
+            "{model} must stay unavailable in the built-in bootstrap snapshot until speed and inference_geo pricing modifiers are modeled"
+        );
+    }
 }
 
 #[test]
