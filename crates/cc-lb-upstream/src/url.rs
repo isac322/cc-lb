@@ -2,37 +2,39 @@ use std::borrow::Cow;
 
 use url::Url;
 
-/// Removes case-insensitive `key` query parameters while preserving all other
-/// query segments and their order.
+fn is_query_api_key_param(segment: &str) -> bool {
+    let raw_name = segment.split('=').next().unwrap_or(segment);
+    if !raw_name.contains('%') {
+        return raw_name.eq_ignore_ascii_case("key") || raw_name.eq_ignore_ascii_case("api_key");
+    }
+    url::form_urlencoded::parse(raw_name.as_bytes())
+        .next()
+        .is_some_and(|(name, _)| {
+            name.eq_ignore_ascii_case("key") || name.eq_ignore_ascii_case("api_key")
+        })
+}
+
+/// Removes case-insensitive `key` and `api_key` query parameters (including
+/// percent-encoded parameter names) while preserving all other query segments
+/// and their order verbatim.
 #[must_use]
 pub fn scrub_query_api_key(query: &str) -> Cow<'_, str> {
-    let has_api_key = query.split('&').any(|segment| {
-        segment
-            .split('=')
-            .next()
-            .unwrap_or(segment)
-            .eq_ignore_ascii_case("key")
-    });
-    if !has_api_key {
+    if !query.split('&').any(is_query_api_key_param) {
         return Cow::Borrowed(query);
     }
 
     Cow::Owned(
         query
             .split('&')
-            .filter(|segment| {
-                !segment
-                    .split('=')
-                    .next()
-                    .unwrap_or(segment)
-                    .eq_ignore_ascii_case("key")
-            })
+            .filter(|segment| !is_query_api_key_param(segment))
             .collect::<Vec<_>>()
             .join("&"),
     )
 }
 
-/// Removes case-insensitive `key` query parameters from a URL.
+/// Removes case-insensitive `key` and `api_key` query parameters (including
+/// percent-encoded parameter names) from a URL while preserving non-secret
+/// segments verbatim.
 pub fn scrub_url_query_api_key(url: &mut Url) {
     let Some(query) = url.query() else {
         return;
@@ -80,9 +82,30 @@ mod tests {
     fn scrub_query_api_key_removes_key_segments() {
         assert_eq!(scrub_query_api_key("key=secret"), "");
         assert_eq!(scrub_query_api_key("KEY=secret"), "");
+        assert_eq!(scrub_query_api_key("api_key=secret"), "");
+        assert_eq!(scrub_query_api_key("API_KEY=secret"), "");
         assert_eq!(scrub_query_api_key("foo=1&key=secret&bar=2"), "foo=1&bar=2");
+        assert_eq!(
+            scrub_query_api_key("foo=1&api_key=secret&bar=2"),
+            "foo=1&bar=2"
+        );
+        assert_eq!(
+            scrub_query_api_key("foo=1&key=s1&api_key=s2&bar=2"),
+            "foo=1&bar=2"
+        );
         assert_eq!(scrub_query_api_key("key"), "");
+        assert_eq!(scrub_query_api_key("api_key"), "");
+        assert_eq!(scrub_query_api_key("%61pi_key=secret"), "");
+        assert_eq!(scrub_query_api_key("%6bey=secret"), "");
+        assert_eq!(
+            scrub_query_api_key("foo=a%20b&%61pi_key=s1&%6bey=s2&%66oo=bar&API%5FKEY=s3&%4B%45%59"),
+            "foo=a%20b&%66oo=bar"
+        );
         assert!(matches!(scrub_query_api_key("foo=1"), Cow::Borrowed(_)));
+        assert!(matches!(
+            scrub_query_api_key("foo=a%20b&%66oo=bar"),
+            Cow::Borrowed(_)
+        ));
     }
 
     #[test]
@@ -91,9 +114,31 @@ mod tests {
         scrub_url_query_api_key(&mut url);
         assert_eq!(url.as_str(), "https://example.com/path?keep=1");
 
+        let mut url_with_api_key =
+            Url::parse("https://example.com/path?api_key=secret&keep=1").expect("url");
+        scrub_url_query_api_key(&mut url_with_api_key);
+        assert_eq!(url_with_api_key.as_str(), "https://example.com/path?keep=1");
+
         let mut only_key = Url::parse("https://example.com/path?KEY=secret").expect("url");
         scrub_url_query_api_key(&mut only_key);
         assert_eq!(only_key.as_str(), "https://example.com/path");
+
+        let mut only_api_key = Url::parse("https://example.com/path?API_KEY=secret").expect("url");
+        scrub_url_query_api_key(&mut only_api_key);
+        assert_eq!(only_api_key.as_str(), "https://example.com/path");
+
+        let mut encoded_api_key =
+            Url::parse("https://example.com/path?%61pi_key=secret&keep=a%20b").expect("url");
+        scrub_url_query_api_key(&mut encoded_api_key);
+        assert_eq!(
+            encoded_api_key.as_str(),
+            "https://example.com/path?keep=a%20b"
+        );
+
+        let mut encoded_only_key =
+            Url::parse("https://example.com/path?%6bey=secret").expect("url");
+        scrub_url_query_api_key(&mut encoded_only_key);
+        assert_eq!(encoded_only_key.as_str(), "https://example.com/path");
     }
 
     fn built(base: &str, path: &str, query: Option<&str>) -> String {

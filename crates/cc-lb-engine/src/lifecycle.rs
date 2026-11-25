@@ -561,7 +561,7 @@ impl Lifecycle {
     }
 
     /// Allocate observation state without recording a successful upgrade as a turn.
-    pub(crate) fn websocket_observer(&self, path: &str) -> (Option<LifecycleContext>, String) {
+    pub fn websocket_observer(&self, path: &str) -> (Option<LifecycleContext>, String) {
         let request_id = next_request_id();
         let observer = self.event_bus.as_ref().map(|bus| {
             let observer = LifecycleContext::new(request_id.clone(), Arc::clone(bus), &self.clock);
@@ -1934,6 +1934,23 @@ impl Lifecycle {
         };
         let kind = principal_kind_lite(cached.principal_kind());
         observer.emit_authentication_completed(principal_id.to_owned(), kind);
+    }
+
+    /// Emit `RequestStarted` (if not already emitted), the durable
+    /// `LifecycleEvent::AuthCompleted` event carrying principal/key/timing
+    /// metadata, and the metrics-only `AuthenticationCompleted` event for an
+    /// authenticated request that terminates locally outside `Lifecycle::handle`.
+    pub fn record_local_auth_succeeded(
+        &self,
+        auth: &crate::authn_rail::Authenticated,
+        observer: &LifecycleContext,
+    ) {
+        observer.emit_request_started(false);
+        observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
+            event_id: observer.event_id().to_owned(),
+            result: Ok(self.websocket_auth_info(auth)),
+        });
+        self.record_authentication_completed(auth, observer);
     }
 
     /// Handle a request that has already been authenticated. `auth` is the
