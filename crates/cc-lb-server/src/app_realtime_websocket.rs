@@ -270,9 +270,7 @@ pub(super) async fn codex_backend_root_handler(
         }
     };
     if let Some(observer) = observer.as_ref() {
-        state
-            .lifecycle
-            .record_authentication_completed(&auth, observer);
+        state.lifecycle.record_local_auth_succeeded(&auth, observer);
         observer.terminate_local(TerminalClassification::OPERATION_NOT_SUPPORTED);
     }
 

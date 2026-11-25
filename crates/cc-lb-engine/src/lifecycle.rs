@@ -1936,6 +1936,23 @@ impl Lifecycle {
         observer.emit_authentication_completed(principal_id.to_owned(), kind);
     }
 
+    /// Emit `RequestStarted` (if not already emitted), the durable
+    /// `LifecycleEvent::AuthCompleted` event carrying principal/key/timing
+    /// metadata, and the metrics-only `AuthenticationCompleted` event for an
+    /// authenticated request that terminates locally outside `Lifecycle::handle`.
+    pub fn record_local_auth_succeeded(
+        &self,
+        auth: &crate::authn_rail::Authenticated,
+        observer: &LifecycleContext,
+    ) {
+        observer.emit_request_started(false);
+        observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
+            event_id: observer.event_id().to_owned(),
+            result: Ok(self.websocket_auth_info(auth)),
+        });
+        self.record_authentication_completed(auth, observer);
+    }
+
     /// Handle a request that has already been authenticated. `auth` is the
     /// proof: callers must obtain it from [`Lifecycle::authenticate`] before
     /// the request body is read.

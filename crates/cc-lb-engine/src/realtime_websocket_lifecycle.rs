@@ -918,6 +918,29 @@ mod tests {
                 true,
                 "wss://api.openai.com/v1/realtime?intent=quicksilver",
             ),
+            (
+                "/v1/realtime",
+                Some(
+                    "api_key=caller-api-secret&model=gpt-realtime&API_KEY=upper-api-secret&intent=quicksilver",
+                ),
+                Some("gpt-realtime"),
+                false,
+                "wss://api.openai.com/v1/realtime?model=gpt-realtime&intent=quicksilver",
+            ),
+            (
+                "/v1/live",
+                Some("api_key=only-api-secret"),
+                None,
+                false,
+                "wss://api.openai.com/v1/live",
+            ),
+            (
+                "/v1/realtime",
+                Some("intent=quicksilver&api_key=caller-api-secret&key=caller-secret"),
+                None,
+                true,
+                "wss://api.openai.com/v1/realtime?intent=quicksilver",
+            ),
         ] {
             let observation = lifecycle.begin_realtime_websocket(&auth, path);
             let session = lifecycle
@@ -941,6 +964,9 @@ mod tests {
                 !session.url.as_str().contains("caller-secret")
                     && !session.url.as_str().contains("upper-secret")
                     && !session.url.as_str().contains("only-secret")
+                    && !session.url.as_str().contains("caller-api-secret")
+                    && !session.url.as_str().contains("upper-api-secret")
+                    && !session.url.as_str().contains("only-api-secret")
             );
         }
     }

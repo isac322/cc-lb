@@ -2733,6 +2733,8 @@ async fn codex_backend_root_non_ws_unauthenticated_persists_request_event() {
         unauth_row.error_code.as_deref(),
         Some("authentication_failed")
     );
+    assert!(unauth_row.principal_id.is_none());
+    assert!(unauth_row.key_id.is_none());
     assert!(unauth_row.upstream_id.is_none());
 
     let valid_row = &rows[1].1;
@@ -2741,6 +2743,12 @@ async fn codex_backend_root_non_ws_unauthenticated_persists_request_event() {
         valid_row.error_code.as_deref(),
         Some("operation_not_supported")
     );
+    assert_eq!(valid_row.principal_id.as_deref(), Some(TEST_PRINCIPAL));
+    assert_eq!(
+        valid_row.key_id.as_deref(),
+        Some(TEST_KEY.key_id.as_str())
+    );
+    assert!(valid_row.auth_ms.is_some());
     assert!(valid_row.upstream_id.is_none());
 
     task.abort();
