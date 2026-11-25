@@ -891,7 +891,10 @@ pub(super) fn anthropic_family_cache_pricing_summary(model: &str) -> Option<Cach
         cache_creation_1h_micros_per_million: Some(
             cc_lb_pricing::cache_creation_1h_micros_from_input(input_micros_per_million),
         ),
-        cache_read_micros_per_million: Some(cache_read_micros_from_input(input_micros_per_million)),
+        cache_read_micros_per_million: Some(anthropic_family_cache_read_micros_from_input(
+            model,
+            input_micros_per_million,
+        )),
     })
 }
 
@@ -908,14 +911,17 @@ pub(super) fn anthropic_family_cache_pricing_summary(model: &str) -> Option<Cach
 /// (retrieved 2026-07-27).
 pub(super) fn anthropic_family_input_micros_per_million(model: &str) -> Option<u64> {
     const FABLE_AND_MYTHOS: u64 = 10_000_000;
+    const OPUS_5_5: u64 = 4_000_000;
     const OPUS_CURRENT: u64 = 5_000_000;
     const OPUS_LEGACY: u64 = 15_000_000;
+    const SONNET_5_5: u64 = 2_000_000;
     const SONNET_STANDARD: u64 = 3_000_000;
+    const HAIKU_5_5: u64 = 100_000;
     const HAIKU_CURRENT: u64 = 1_000_000;
     const HAIKU_LEGACY: u64 = 800_000;
 
     // Most specific first.
-    const PREFIXES: [(&str, u64); 14] = [
+    const PREFIXES: [(&str, u64); 17] = [
         ("claude-fable", FABLE_AND_MYTHOS),
         ("claude-mythos", FABLE_AND_MYTHOS),
         ("claude-opus-4-1", OPUS_LEGACY),
@@ -923,6 +929,7 @@ pub(super) fn anthropic_family_input_micros_per_million(model: &str) -> Option<u
         ("claude-opus-4-6", OPUS_CURRENT),
         ("claude-opus-4-7", OPUS_CURRENT),
         ("claude-opus-4-8", OPUS_CURRENT),
+        ("claude-opus-5-5", OPUS_5_5),
         ("claude-opus-5", OPUS_CURRENT),
         // Bare `claude-opus-4` (no minor) is the retired original at legacy pricing. It must come
         // after every `claude-opus-4-N` arm above.
@@ -931,11 +938,13 @@ pub(super) fn anthropic_family_input_micros_per_million(model: &str) -> Option<u
         // lose cache pricing entirely, disabling cache-value scoring for that model; inheriting
         // current pricing is the cheaper wrong answer.
         ("claude-opus", OPUS_CURRENT),
+        ("claude-sonnet-5-5", SONNET_5_5),
         ("claude-sonnet-5", SONNET_STANDARD),
         ("claude-sonnet", SONNET_STANDARD),
         // Haiku 3.5 is addressed as `claude-3-5-haiku-*`; `claude-haiku-3-5` is not an id
         // Anthropic emits.
         ("claude-3-5-haiku", HAIKU_LEGACY),
+        ("claude-haiku-5-5", HAIKU_5_5),
         ("claude-haiku", HAIKU_CURRENT),
     ];
 
@@ -955,6 +964,16 @@ pub(super) fn cache_read_micros_from_input(input_micros: u64) -> u64 {
     (u128::from(input_micros) / 10)
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+fn anthropic_family_cache_read_micros_from_input(model: &str, input_micros: u64) -> u64 {
+    if model.starts_with("claude-opus-5-5") || model.starts_with("claude-sonnet-5-5") {
+        (u128::from(input_micros) / 20)
+            .try_into()
+            .unwrap_or(u64::MAX)
+    } else {
+        cache_read_micros_from_input(input_micros)
+    }
 }
 
 pub(super) fn saturating_u64_to_u32(value: u64) -> u32 {
@@ -2247,6 +2266,29 @@ mod cache_score_tests {
             Some(20_000_000)
         );
         assert_eq!(pricing.cache_read_micros_per_million, Some(1_000_000));
+    }
+
+    #[test]
+    fn anthropic_family_cache_pricing_fallback_covers_claude_5_5() {
+        for (model, input, write_5m, write_1h, read) in [
+            ("claude-opus-5-5", 4_000_000, 5_000_000, 8_000_000, 200_000),
+            (
+                "claude-sonnet-5-5",
+                2_000_000,
+                2_500_000,
+                4_000_000,
+                100_000,
+            ),
+            ("claude-haiku-5-5", 100_000, 125_000, 200_000, 10_000),
+        ] {
+            let pricing = anthropic_family_cache_pricing_summary(model)
+                .unwrap_or_else(|| panic!("{model} fallback exists"));
+            assert_eq!(pricing.status, "known");
+            assert_eq!(pricing.input_micros_per_million, Some(input));
+            assert_eq!(pricing.cache_creation_5m_micros_per_million, Some(write_5m));
+            assert_eq!(pricing.cache_creation_1h_micros_per_million, Some(write_1h));
+            assert_eq!(pricing.cache_read_micros_per_million, Some(read));
+        }
     }
 
     #[test]

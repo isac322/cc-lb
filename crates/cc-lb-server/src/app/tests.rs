@@ -1105,6 +1105,14 @@ fn default_fallback_contains_current_anthropic_pricing() {
             50_000_000,
         ),
         (
+            "claude-opus-5-5",
+            4_000_000,
+            5_000_000,
+            8_000_000,
+            200_000,
+            20_000_000,
+        ),
+        (
             "claude-opus-5",
             5_000_000,
             6_250_000,
@@ -1145,6 +1153,14 @@ fn default_fallback_contains_current_anthropic_pricing() {
             25_000_000,
         ),
         (
+            "claude-sonnet-5-5",
+            2_000_000,
+            2_500_000,
+            4_000_000,
+            100_000,
+            10_000_000,
+        ),
+        (
             "claude-sonnet-5",
             3_000_000,
             3_750_000,
@@ -1167,6 +1183,14 @@ fn default_fallback_contains_current_anthropic_pricing() {
             6_000_000,
             300_000,
             15_000_000,
+        ),
+        (
+            "claude-haiku-5-5",
+            100_000,
+            125_000,
+            200_000,
+            10_000,
+            500_000,
         ),
         (
             "claude-haiku-4-5",

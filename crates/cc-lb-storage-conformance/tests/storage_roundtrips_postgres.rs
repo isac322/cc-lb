@@ -101,10 +101,10 @@ impl ConformanceBackend for PostgresConformanceBackend {
                  WHERE NOT EXISTS (SELECT 1 FROM wasm_registry_v2 r \
                                    WHERE r.sha256 = wasm_blobs_v2.sha256); \
                  DELETE FROM plan_tier_ratio_history_v1 \
-                 WHERE provenance != 'migration:0069_plan_tier_history'; \
+                 WHERE provenance NOT IN ('migration:0069_plan_tier_history', 'migration:0177_plan_tier_free'); \
                  UPDATE plan_tier_ratio_history_v1 \
                  SET effective_to_unix_millis = NULL \
-                 WHERE provenance = 'migration:0069_plan_tier_history'; \
+                 WHERE provenance IN ('migration:0069_plan_tier_history', 'migration:0177_plan_tier_free'); \
                  UPDATE api_key_usage_writers_v1 \
                  SET writer_epoch = '00000000-0000-0000-0000-000000000000', \
                      lease_until_unix_secs = 9223372036854775807, last_flush_id = NULL;",

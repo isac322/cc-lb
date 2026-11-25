@@ -59,6 +59,7 @@ scenario!(seeded_catalog_visible, |storage| async move {
             .find(|row| row.tier_key == tier)
             .map(|row| row.pro_relative_ratio)
     };
+    ensure!(ratio_of("free") == Some(0.2), "free seed = 0.2");
     ensure!(ratio_of("pro") == Some(1.0), "pro seed = 1.0");
     ensure!(
         ratio_of("team_standard") == Some(1.25),
@@ -80,6 +81,15 @@ scenario!(seeded_catalog_visible, |storage| async move {
 
 scenario!(upstream_tier_scd2, |storage| async move {
     let id = Uuid::from_u128(0x1111);
+    storage
+        .append_upstream_plan_tier(&upstream_record(
+            id,
+            Some("free"),
+            TierResolutionSource::Builtin,
+            Some(0.2),
+            500,
+        ))
+        .await?;
     storage
         .append_upstream_plan_tier(&upstream_record(
             id,
