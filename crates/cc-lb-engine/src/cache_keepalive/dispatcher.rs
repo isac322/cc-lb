@@ -729,8 +729,27 @@ fn classify_success_body_with_surface(
                 DispatchOutcome::CacheMiss { finalization }
             }
         }
-        Err(source) => DispatchOutcome::Error(source.to_string()),
+        Err(source) => DispatchOutcome::Error(format_json_parse_error(&source)),
     }
+}
+
+fn format_json_parse_error(source: &sonic_rs::Error) -> String {
+    let category = if source.is_eof() {
+        "eof"
+    } else if source.is_syntax() {
+        "syntax"
+    } else if source.is_unmatched_type() || source.is_not_found() {
+        "data"
+    } else if source.is_io() {
+        "io"
+    } else {
+        "invalid"
+    };
+    format!(
+        "malformed keep-alive JSON response (category={category}, line={}, column={})",
+        source.line(),
+        source.column()
+    )
 }
 
 #[cfg(test)]
