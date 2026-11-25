@@ -148,4 +148,26 @@ fn provider_aware_resolution_preserves_native_ids_and_diagnostics() {
             "claude-future-threshold-model"
         )]
     );
+
+    for model in [
+        "claude-fable-5-1",
+        "claude-fable-5-2",
+        "claude-mythos-5-1",
+        "claude-mythos-5-2",
+    ] {
+        let (canonical, warnings) =
+            capture_warnings(|| canonical_model_id(Provider::Anthropic, model));
+        assert_eq!(canonical, model);
+        assert!(
+            warnings.is_empty(),
+            "{model} canonical_model_id emitted warnings: {warnings:?}"
+        );
+
+        let (threshold, warnings) = capture_warnings(|| cache_threshold_tokens(model));
+        assert_eq!(threshold, 512);
+        assert!(
+            warnings.is_empty(),
+            "{model} cache_threshold_tokens emitted warnings: {warnings:?}"
+        );
+    }
 }
