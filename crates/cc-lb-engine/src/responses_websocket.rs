@@ -206,15 +206,9 @@ pub(crate) struct WebSocketIngress<'a> {
 
 pub(crate) enum WsUnknownReasoningPlan {
     None,
-    /// Multi-upstream pool with unestablished reasoning: stripped upfront before dispatch.
-    StrippedUpfront {
-        body: Arc<Value>,
-        frame: Bytes,
-    },
-    /// Single eligible upstream with unestablished reasoning: send verbatim first;
-    /// bind `unknown_keys` on success, or retry once stripping all reasoning on
-    /// HTTP-400 `invalid_encrypted_content` before any response frame is emitted.
-    RetryStripAll {
+    /// Unestablished encrypted reasoning deferred to gateway dispatch so session
+    /// pinning decides between upfront stripping (>1 candidate) and retry-on-400 (<=1).
+    Unestablished {
         unknown_keys: Vec<UpstreamAffinityKey>,
     },
     /// Resolved owner with unmatched pending reasoning digests: send verbatim first;
@@ -294,6 +288,7 @@ pub struct WebSocketDispatch {
     /// or steering-successor turn.
     pub control: bool,
     pub prefer_api_key_on_final_attempt: bool,
+    pub has_explicit_affinity: bool,
 }
 
 #[derive(Default)]
@@ -661,6 +656,8 @@ struct Turn {
     unknown_reasoning_retry: Option<WsUnknownReasoningRetry>,
     unknown_reasoning_retried: bool,
     pending_affinity_keys: Vec<UpstreamAffinityKey>,
+    unestablished_unknown_keys: Option<Vec<UpstreamAffinityKey>>,
+    started_with_oauth_candidate: bool,
     all_candidates_oauth: bool,
     admitted_session_upstream: Option<Uuid>,
 }
@@ -1089,21 +1086,20 @@ impl ResponsesWebSocketGateway {
             )
             .await
             .map_err(|error| error.with_stream(lane.clone()))?;
-        let (body, frame, unknown_reasoning_retry, pending_affinity_keys) = match std::mem::replace(
+        let (
+            body,
+            frame,
+            unknown_reasoning_retry,
+            pending_affinity_keys,
+            unestablished_unknown_keys,
+        ) = match std::mem::replace(
             &mut prepared.unknown_reasoning_plan,
             WsUnknownReasoningPlan::None,
         ) {
-            WsUnknownReasoningPlan::None => (body, frame, None, Vec::new()),
-            WsUnknownReasoningPlan::StrippedUpfront {
-                body: stripped_body,
-                frame: stripped_frame,
-            } => (stripped_body, stripped_frame, None, Vec::new()),
-            WsUnknownReasoningPlan::RetryStripAll { unknown_keys } => (
-                body,
-                frame,
-                Some(WsUnknownReasoningRetry::All),
-                unknown_keys,
-            ),
+            WsUnknownReasoningPlan::None => (body, frame, None, Vec::new(), None),
+            WsUnknownReasoningPlan::Unestablished { unknown_keys } => {
+                (body, frame, None, Vec::new(), Some(unknown_keys))
+            }
             WsUnknownReasoningPlan::RetryStripPending {
                 pending_digests,
                 pending_keys,
@@ -1112,6 +1108,7 @@ impl ResponsesWebSocketGateway {
                 frame,
                 Some(WsUnknownReasoningRetry::Pending(pending_digests)),
                 pending_keys,
+                None,
             ),
         };
         let actual_charge = frame
@@ -1198,6 +1195,8 @@ impl ResponsesWebSocketGateway {
                 unknown_reasoning_retry,
                 unknown_reasoning_retried: false,
                 pending_affinity_keys,
+                unestablished_unknown_keys,
+                started_with_oauth_candidate: false,
                 all_candidates_oauth,
                 admitted_session_upstream: self.session_upstream,
             },
@@ -1312,6 +1311,7 @@ impl ResponsesWebSocketGateway {
                 stream_id: lane,
                 control: false,
                 prefer_api_key_on_final_attempt: false,
+                has_explicit_affinity: false,
             }));
         }
         let body = owner.body.clone();
@@ -1409,6 +1409,8 @@ impl ResponsesWebSocketGateway {
                 unknown_reasoning_retry: None,
                 unknown_reasoning_retried: false,
                 pending_affinity_keys: Vec::new(),
+                unestablished_unknown_keys: None,
+                started_with_oauth_candidate: false,
                 all_candidates_oauth,
                 admitted_session_upstream: self.session_upstream,
             },
@@ -1488,16 +1490,96 @@ impl ResponsesWebSocketGateway {
             stream_id: owner.lane,
             control: true,
             prefer_api_key_on_final_attempt: false,
+            has_explicit_affinity: false,
         }))
     }
 
+    fn apply_unestablished_reasoning(
+        &mut self,
+        turn_id: u64,
+        candidate_count: usize,
+    ) -> Option<Bytes> {
+        let unknown_keys = {
+            let turn = self.turns.get_mut(&turn_id)?;
+            turn.unestablished_unknown_keys.take()?
+        };
+        if candidate_count > 1 {
+            let (old_dynamic, stripped_body, stripped_frame) = {
+                let turn = self.turns.get(&turn_id)?;
+                let stripped_body = strip_openai_reasoning_encrypted_items(&turn.body, None)?;
+                let stripped_bytes = serde_json::to_vec(&stripped_body).ok()?;
+                let stripped_frame = Bytes::from(stripped_bytes);
+                let old_dynamic = turn
+                    .frame
+                    .len()
+                    .saturating_add(json_owned_bytes(&turn.body))
+                    .saturating_add(
+                        turn.plugin_request
+                            .as_ref()
+                            .map_or(0, |(_, req)| req.frame.len()),
+                    );
+                (old_dynamic, Arc::new(stripped_body), stripped_frame)
+            };
+            let new_dynamic = stripped_frame
+                .len()
+                .saturating_add(json_owned_bytes(&stripped_body));
+            if new_dynamic
+                <= self
+                    .byte_cap
+                    .saturating_sub(self.used_bytes)
+                    .saturating_add(old_dynamic)
+            {
+                let turn = self.turns.get_mut(&turn_id).expect("turn exists");
+                self.used_bytes = self
+                    .used_bytes
+                    .saturating_sub(old_dynamic)
+                    .saturating_add(new_dynamic);
+                turn.charged_bytes = turn
+                    .charged_bytes
+                    .saturating_sub(old_dynamic)
+                    .saturating_add(new_dynamic);
+                turn.body = stripped_body;
+                turn.frame = stripped_frame.clone();
+                turn.plugin_request = None;
+                return Some(stripped_frame);
+            }
+            None
+        } else {
+            let turn = self.turns.get_mut(&turn_id).expect("turn exists");
+            turn.unknown_reasoning_retry = Some(WsUnknownReasoningRetry::All);
+            turn.pending_affinity_keys = unknown_keys;
+            None
+        }
+    }
+
+    /// Resolve any deferred unestablished encrypted-reasoning plan once the
+    /// final candidate pool size is known (after session pinning).
+    pub fn finalize_dispatch_reasoning(
+        &mut self,
+        dispatch: &mut WebSocketDispatch,
+        candidate_count: usize,
+    ) {
+        if dispatch.control {
+            return;
+        }
+        if let Some(stripped_frame) =
+            self.apply_unestablished_reasoning(dispatch.turn_id, candidate_count)
+        {
+            dispatch.frame = stripped_frame;
+        }
+    }
+
     fn dispatch(&mut self, turn_id: u64) -> Option<WebSocketDispatch> {
-        let should_reapply_pin = {
+        let (should_reapply_pin, turn_lane, has_explicit_affinity) = {
             let turn = self.turns.get(&turn_id)?;
-            self.session_oauth
-                && turn.pinned.is_none()
-                && !turn.prepared.has_explicit_affinity
-                && turn.admitted_session_upstream.is_none()
+            (
+                self.session_oauth
+                    && turn.pinned.is_none()
+                    && !turn.prepared.has_explicit_affinity
+                    && turn.admitted_session_upstream.is_none(),
+                turn.lane.clone(),
+                turn.prepared.has_explicit_affinity,
+            )
         };
         let session_owner = should_reapply_pin
             .then_some(self.session_upstream)
@@ -1506,29 +1588,51 @@ impl ResponsesWebSocketGateway {
             self.lifecycle
                 .websocket_candidate_for_upstream(owner, self.codex_backend)
         });
-        let turn = self.turns.get_mut(&turn_id)?;
-        let mut candidates = std::mem::take(&mut turn.prepared.candidates);
-        if let Some(owner) = session_owner {
-            let existing_pos = candidates
-                .iter()
-                .position(|candidate| candidate.upstream_id == owner);
-            let owner_cand = existing_pos
-                .map(|pos| candidates.remove(pos))
-                .or(owner_fallback);
-            if let Some(ref owner_cand) = owner_cand {
-                turn.candidate_oauth
-                    .insert(owner, owner_cand.socket_per_lane);
-                turn.initial_selected_upstream_id = Some(owner);
-            }
-            if !is_prewarm_body(&turn.body) {
-                candidates.clear();
-                if let Some(owner_cand) = owner_cand {
-                    candidates.push(owner_cand);
+        let (candidates, current_starts_with_oauth) = {
+            let turn = self.turns.get_mut(&turn_id)?;
+            let mut candidates = std::mem::take(&mut turn.prepared.candidates);
+            if let Some(owner) = session_owner {
+                let existing_pos = candidates
+                    .iter()
+                    .position(|candidate| candidate.upstream_id == owner);
+                let owner_cand = existing_pos
+                    .map(|pos| candidates.remove(pos))
+                    .or(owner_fallback);
+                if let Some(ref owner_cand) = owner_cand {
+                    turn.candidate_oauth
+                        .insert(owner, owner_cand.socket_per_lane);
+                    turn.initial_selected_upstream_id = Some(owner);
                 }
-            } else if let Some(owner_cand) = owner_cand {
-                candidates.insert(0, owner_cand);
+                if !is_prewarm_body(&turn.body) {
+                    candidates.clear();
+                    if let Some(owner_cand) = owner_cand {
+                        candidates.push(owner_cand);
+                    }
+                } else if let Some(owner_cand) = owner_cand {
+                    candidates.insert(0, owner_cand);
+                }
             }
+            let starts_with_oauth = candidates.first().is_some_and(|c| !c.is_api_key);
+            turn.started_with_oauth_candidate = starts_with_oauth;
+            (candidates, starts_with_oauth)
+        };
+        let defer_for_other_oauth_owner = current_starts_with_oauth
+            && self.session_upstream.is_none()
+            && !has_explicit_affinity
+            && self.turns.iter().any(|(other_id, other)| {
+                *other_id != turn_id
+                    && other.lane != turn_lane
+                    && self
+                        .lanes
+                        .get(&other.lane)
+                        .is_some_and(|l| l.active == Some(*other_id))
+                    && other.upstream_id.is_none()
+                    && other.started_with_oauth_candidate
+            });
+        if !defer_for_other_oauth_owner {
+            self.apply_unestablished_reasoning(turn_id, candidates.len());
         }
+        let turn = self.turns.get(&turn_id)?;
         let prefer_api_key_on_final_attempt = !self.codex_backend && turn.pinned.is_none();
         Some(WebSocketDispatch {
             turn_id,
@@ -1538,6 +1642,7 @@ impl ResponsesWebSocketGateway {
             stream_id: turn.lane.clone(),
             control: false,
             prefer_api_key_on_final_attempt,
+            has_explicit_affinity,
         })
     }
 
@@ -2164,6 +2269,7 @@ impl ResponsesWebSocketGateway {
                 stream_id: turn.lane.clone(),
                 control: false,
                 prefer_api_key_on_final_attempt: false,
+                has_explicit_affinity: false,
             });
         }
         ready
@@ -3059,6 +3165,7 @@ impl ResponsesWebSocketGateway {
                         stream_id: lane,
                         control: false,
                         prefer_api_key_on_final_attempt: false,
+                        has_explicit_affinity: false,
                     };
                     return Ok(WebSocketEventResult {
                         forward: false,
@@ -4736,6 +4843,8 @@ pub(crate) mod tests {
                 unknown_reasoning_retry: None,
                 unknown_reasoning_retried: false,
                 pending_affinity_keys: Vec::new(),
+                unestablished_unknown_keys: None,
+                started_with_oauth_candidate: false,
                 all_candidates_oauth: false,
                 admitted_session_upstream: None,
             },
@@ -5383,6 +5492,8 @@ pub(crate) mod tests {
                     unknown_reasoning_retry: None,
                     unknown_reasoning_retried: false,
                     pending_affinity_keys: Vec::new(),
+                    unestablished_unknown_keys: None,
+                    started_with_oauth_candidate: false,
                     all_candidates_oauth: false,
                     admitted_session_upstream: None,
                 },
@@ -6382,6 +6493,8 @@ pub(crate) mod tests {
             unknown_reasoning_retry: None,
             unknown_reasoning_retried: false,
             pending_affinity_keys: Vec::new(),
+            unestablished_unknown_keys: None,
+            started_with_oauth_candidate: false,
             all_candidates_oauth: false,
             admitted_session_upstream: None,
         }
@@ -8941,5 +9054,145 @@ pub(crate) mod tests {
             .validate_candidate_for_send(d2.turn_id, fixture.upstream_b, None, false)
             .await
             .expect("explicit affinity to B must not be overridden by session_upstream A");
+    }
+
+    #[tokio::test]
+    async fn queued_turn_with_unestablished_reasoning_preserves_ciphertext_after_session_pin() {
+        let fixture = PrewarmMultiUpstreamFixture::new().await;
+        let unknown_cipher = "gAAAAAB_unestablished_queued_cipher";
+        let turn_with_reasoning = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "stream_id": "lane-1",
+                "store": false,
+                "input": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_unest",
+                        "summary": [],
+                        "content": [],
+                        "encrypted_content": unknown_cipher
+                    },
+                    {"role": "user", "content": "hi"}
+                ]
+            }))
+            .unwrap(),
+        );
+
+        // Part 1: Unpinned multi-upstream turn without a session pin strips upfront.
+        let mut unpinned_gw = fixture.gateway(fixture.headers.clone());
+        let d_unpinned = unpinned_gw
+            .client_message(fixture.auth.clone(), turn_with_reasoning.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(d_unpinned.candidates.len(), 2);
+        let unpinned_text = std::str::from_utf8(&d_unpinned.frame).unwrap();
+        assert!(
+            !unpinned_text.contains(unknown_cipher),
+            "unpinned multi-candidate turn without session owner must strip upfront: {unpinned_text}"
+        );
+
+        // Part 2: Turn 2 queued before Turn 1 establishes session_upstream must preserve the
+        // original ciphertext verbatim and arm RetryStripAll once pinned to session_upstream A.
+        let mut gateway = fixture.gateway(fixture.headers.clone());
+        let turn1 = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "stream_id": "lane-1",
+                "store": false,
+                "input": [{"role": "user", "content": "first"}]
+            }))
+            .unwrap(),
+        );
+        let d1 = gateway
+            .client_message(fixture.auth.clone(), turn1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            gateway
+                .client_message(fixture.auth.clone(), turn_with_reasoning)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        gateway.assign_connection(d1.turn_id, 1, fixture.upstream_a, "oauth-a");
+        gateway.commit_send_attempt(d1.turn_id);
+        let _ = gateway.sent_with_timings(
+            d1.turn_id,
+            ResponsesDispatchTimings::reused(),
+            std::time::Instant::now(),
+        );
+        let created = serde_json::to_vec(&serde_json::json!({
+            "type": "response.created",
+            "stream_id": "lane-1",
+            "response": {"id": "resp_pin_a", "status": "in_progress", "store": false}
+        }))
+        .unwrap();
+        let _ = gateway
+            .provider_message(1, &Bytes::from(created))
+            .await
+            .unwrap();
+        let completed = serde_json::to_vec(&serde_json::json!({
+            "type": "response.completed",
+            "stream_id": "lane-1",
+            "response": {
+                "id": "resp_pin_a",
+                "status": "completed",
+                "store": false,
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }
+        }))
+        .unwrap();
+        let popped = gateway
+            .provider_message(1, &Bytes::from(completed))
+            .await
+            .unwrap();
+        let d2 = popped
+            .dispatches
+            .into_iter()
+            .find(|dispatch| dispatch.turn_id != d1.turn_id && !dispatch.control)
+            .expect("queued turn 2 pops");
+        assert_eq!(d2.candidates.len(), 1);
+        assert_eq!(d2.candidates[0].upstream_id, fixture.upstream_a);
+        let d2_text = std::str::from_utf8(&d2.frame).unwrap();
+        assert!(
+            d2_text.contains(unknown_cipher),
+            "pinned single-owner queued turn must preserve ciphertext verbatim: {d2_text}"
+        );
+
+        // Sending a 400 invalid_encrypted_content triggers RetryStripAll once on the pinned turn.
+        gateway.assign_connection(d2.turn_id, 1, fixture.upstream_a, "oauth-a");
+        gateway.commit_send_attempt(d2.turn_id);
+        let _ = gateway.sent_with_timings(
+            d2.turn_id,
+            ResponsesDispatchTimings::reused(),
+            std::time::Instant::now(),
+        );
+        let invalid_err = serde_json::to_vec(&serde_json::json!({
+            "type": "error",
+            "status": 400,
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_encrypted_content",
+                "message": "The encrypted content could not be verified."
+            }
+        }))
+        .unwrap();
+        let retry = gateway
+            .provider_message(1, &Bytes::from(invalid_err))
+            .await
+            .unwrap();
+        assert!(!retry.forward);
+        assert_eq!(retry.dispatches.len(), 1);
+        let retry_text = std::str::from_utf8(&retry.dispatches[0].frame).unwrap();
+        assert!(
+            !retry_text.contains(unknown_cipher),
+            "RetryStripAll must strip ciphertext on 400 invalid_encrypted_content: {retry_text}"
+        );
     }
 }

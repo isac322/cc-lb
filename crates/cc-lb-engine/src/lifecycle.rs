@@ -879,12 +879,7 @@ impl Lifecycle {
                         });
                     }
                 })?;
-            let effective_body: Arc<Value> = match &unknown_reasoning_plan {
-                WsUnknownReasoningPlan::StrippedUpfront { body: stripped, .. } => {
-                    Arc::clone(stripped)
-                }
-                _ => Arc::clone(&body),
-            };
+            let effective_body = Arc::clone(&body);
             if let Some(observer) = observer.as_ref() {
                 for error in pipeline_result.internal_errors.drain(..) {
                     observer.record_internal_error(error);
@@ -1443,7 +1438,7 @@ impl Lifecycle {
                 )
             },
         );
-        let mut ctx = RequestContext::builder()
+        let ctx = RequestContext::builder()
             .request_id(request_id)
             .thread_id(identity.thread_id)
             .downstream_headers(downstream_headers)
@@ -1714,26 +1709,10 @@ impl Lifecycle {
                 }
             }
         }
-        let dispatchable_candidates = result.candidates.len() + fallback_candidates.len();
         let plan = match recovery {
             WsUnknownReasoningRecovery::None => WsUnknownReasoningPlan::None,
             WsUnknownReasoningRecovery::Unestablished => {
-                if dispatchable_candidates > 1 {
-                    if let Some(stripped) = strip_openai_reasoning_encrypted_items(body, None)
-                        && let Ok(bytes) = serde_json::to_vec(&stripped)
-                    {
-                        let frame = Bytes::from(bytes);
-                        ctx.body_bytes = frame.clone();
-                        WsUnknownReasoningPlan::StrippedUpfront {
-                            body: Arc::new(stripped),
-                            frame,
-                        }
-                    } else {
-                        WsUnknownReasoningPlan::None
-                    }
-                } else {
-                    WsUnknownReasoningPlan::RetryStripAll { unknown_keys: keys }
-                }
+                WsUnknownReasoningPlan::Unestablished { unknown_keys: keys }
             }
             WsUnknownReasoningRecovery::Pending {
                 pending_digests,
@@ -2111,23 +2090,6 @@ impl Lifecycle {
         };
         let kind = principal_kind_lite(cached.principal_kind());
         observer.emit_authentication_completed(principal_id.to_owned(), kind);
-    }
-
-    /// Emit `RequestStarted` (if not already emitted), the durable
-    /// `LifecycleEvent::AuthCompleted` event carrying principal/key/timing
-    /// metadata, and the metrics-only `AuthenticationCompleted` event for an
-    /// authenticated request that terminates locally outside `Lifecycle::handle`.
-    pub fn record_local_auth_succeeded(
-        &self,
-        auth: &crate::authn_rail::Authenticated,
-        observer: &LifecycleContext,
-    ) {
-        observer.emit_request_started(false);
-        observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
-            event_id: observer.event_id().to_owned(),
-            result: Ok(self.websocket_auth_info(auth)),
-        });
-        self.record_authentication_completed(auth, observer);
     }
 
     /// Handle a request that has already been authenticated. `auth` is the

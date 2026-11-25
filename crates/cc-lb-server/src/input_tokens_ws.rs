@@ -168,20 +168,17 @@ async fn emulate_input_tokens(
     let connection = tokio::time::timeout(connect_timeout, async move {
         let dial_deadline = tokio::time::Instant::now() + connect_timeout;
         let addrs = dns_resolver
-            .resolve_host(&host, port)
+            .resolve_host_progressive(&host, port)
             .await
             .map_err(|err| {
                 tokio_tungstenite::tungstenite::Error::Io(io::Error::other(err.to_string()))
             })?;
-        if addrs.is_empty() {
-            return Err(tokio_tungstenite::tungstenite::Error::Io(io::Error::new(
-                io::ErrorKind::AddrNotAvailable,
-                "DNS resolution returned no socket addresses",
-            )));
-        }
-        let tcp = cc_lb_engine::dns_cache::connect_tcp_with_fallback(&addrs, dial_deadline)
-            .await
-            .map_err(tokio_tungstenite::tungstenite::Error::Io)?;
+        let tcp = cc_lb_engine::dns_cache::connect_tcp_with_progressive_fallback(
+            addrs,
+            Some(dial_deadline),
+        )
+        .await
+        .map_err(tokio_tungstenite::tungstenite::Error::Io)?;
         client_async_tls_with_config(ws_request, tcp, None, None).await
     })
     .await

@@ -209,15 +209,18 @@ async fn connect_provider_websocket_with_permit(
             .trim_end_matches(']')
             .parse::<std::net::IpAddr>()
             .ok();
-        let addrs: Vec<std::net::SocketAddr> = match ip_literal {
+        let addrs = match ip_literal {
             Some(ip) => {
                 connect_timings.dns_ms = Some(0);
-                vec![std::net::SocketAddr::new(ip, port)]
+                cc_lb_engine::dns_cache::ProgressiveSocketAddrs {
+                    initial: vec![std::net::SocketAddr::new(ip, port)],
+                    pending_peer: None,
+                }
             }
             None => {
                 let dns_started = std::time::Instant::now();
                 let resolved = dns_resolver
-                    .resolve_host(&host, port)
+                    .resolve_host_progressive(&host, port)
                     .await
                     .map_err(|err| {
                         tokio_tungstenite::tungstenite::Error::Io(io::Error::other(err.to_string()))
@@ -227,18 +230,13 @@ async fn connect_provider_websocket_with_permit(
                 resolved
             }
         };
-        if addrs.is_empty() {
-            return Err(tokio_tungstenite::tungstenite::Error::Io(
-                std::io::Error::new(
-                    std::io::ErrorKind::AddrNotAvailable,
-                    "DNS resolution returned no socket addresses",
-                ),
-            ));
-        }
         let connect_started = std::time::Instant::now();
-        let tcp = cc_lb_engine::dns_cache::connect_tcp_with_fallback(&addrs, dial_deadline)
-            .await
-            .map_err(tokio_tungstenite::tungstenite::Error::Io)?;
+        let tcp = cc_lb_engine::dns_cache::connect_tcp_with_progressive_fallback(
+            addrs,
+            Some(dial_deadline),
+        )
+        .await
+        .map_err(tokio_tungstenite::tungstenite::Error::Io)?;
         let (stream, response) =
             client_async_tls_with_config(request, tcp, Some(ws_config), None).await?;
         connect_timings.connect_ms = Some(
@@ -758,6 +756,7 @@ async fn advance_one_dispatch(
                 pending.attempts,
                 pending.max_attempts,
             );
+            gateway.finalize_dispatch_reasoning(&mut pending.dispatch, 1 + pending.remaining.len());
             match tokio::time::timeout_at(
                 pending.deadline,
                 gateway.validate_candidate_for_send(
@@ -810,6 +809,7 @@ async fn advance_one_dispatch(
             deferred_for_session_owner.push_back(pending);
             return (Vec::new(), Vec::new());
         }
+        gateway.finalize_dispatch_reasoning(&mut pending.dispatch, 1 + pending.remaining.len());
 
         // Coalesce concurrent shareable API-key lanes onto an in-flight dial instead of
         // opening duplicate sockets and consuming extra bulkhead permits.
@@ -996,7 +996,7 @@ async fn advance_one_dispatch(
                     drop(permit);
                     return ConnectAttemptOutcome {
                         connection_id,
-                        result: Err(ConnectAttemptError::Dial(WebSocketError::new(
+                        result: Err(ConnectAttemptError::Prepare(WebSocketError::new(
                             504,
                             "upstream_unavailable",
                             "provider WebSocket connection timed out",
@@ -1274,19 +1274,21 @@ async fn handle_connect_outcome(
                 errors.extend(errs);
                 continue;
             }
-            deferred
-                .remaining
-                .retain(|candidate| candidate.upstream_id == owner_id);
-            if deferred.remaining.is_empty() {
-                deferred.last_error = Some(WebSocketError::new(
-                    503,
-                    "upstream_affinity_unavailable",
-                    "The session is pinned to another OAuth account",
-                ));
-                let (ready, errs) = finish_failed_dispatch(gateway, deferred).await;
-                dispatches.extend(ready);
-                errors.extend(errs);
-                continue;
+            if !deferred.dispatch.has_explicit_affinity {
+                deferred
+                    .remaining
+                    .retain(|candidate| candidate.upstream_id == owner_id);
+                if deferred.remaining.is_empty() {
+                    deferred.last_error = Some(WebSocketError::new(
+                        503,
+                        "upstream_affinity_unavailable",
+                        "The session is pinned to another OAuth account",
+                    ));
+                    let (ready, errs) = finish_failed_dispatch(gateway, deferred).await;
+                    dispatches.extend(ready);
+                    errors.extend(errs);
+                    continue;
+                }
             }
             resumed.push_back(deferred);
         }
@@ -2103,5 +2105,236 @@ where
         _ = &mut body => false,
         _ = client_closed.cancelled() => false,
         _ = &mut drain_wait => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn responses_websocket_prepare_timeout_isolates_coalesced_waiter() {
+        use cc_lb_upstream::{
+            ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer,
+            SignerError, SignerFactory, SigningCapability, UpstreamError,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        #[derive(Clone)]
+        struct TimeoutFirstSignerFactory {
+            calls: Arc<AtomicUsize>,
+            first_started: Arc<tokio::sync::Notify>,
+        }
+
+        struct TestWsSigner;
+
+        #[async_trait::async_trait]
+        impl Signer for TestWsSigner {
+            async fn sign(
+                &self,
+                shaped: ShapedRequest,
+                capability: &mut SigningCapability,
+            ) -> Result<SignedRequest, SignerError> {
+                Ok(SignedRequest::from_shaped(shaped, capability))
+            }
+
+            async fn on_unauthorized(&self, _error: &UpstreamError) -> RetryDecision {
+                RetryDecision::Fail
+            }
+        }
+
+        impl ApiKeyAwareSignerFactory for TimeoutFirstSignerFactory {
+            fn with_router_choice(
+                &self,
+                _router_chosen_upstream_name: String,
+            ) -> Arc<dyn SignerFactory> {
+                Arc::new(self.clone())
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl SignerFactory for TimeoutFirstSignerFactory {
+            async fn build(
+                &self,
+                _upstream: &cc_lb_domain::Upstream,
+            ) -> Result<Arc<dyn Signer>, SignerError> {
+                if self.calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                    self.first_started.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                Ok(Arc::new(TestWsSigner))
+            }
+        }
+
+        let (sent_tx, mut sent_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let accept_count = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test upstream");
+        let addr = listener.local_addr().unwrap();
+        let accepts = Arc::clone(&accept_count);
+        let up_task = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                accepts.fetch_add(1, AtomicOrdering::SeqCst);
+                let tx = sent_tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(mut ws) = tokio_tungstenite::accept_async(socket).await
+                        && let Some(Ok(UpstreamMessage::Text(text))) = ws.next().await
+                    {
+                        let _ = tx.send(text.to_string());
+                    }
+                });
+            }
+        });
+
+        let up = crate::app::tests::websocket_upstream(
+            1,
+            "openai-prepare-timeout",
+            url::Url::parse(&format!("http://{addr}/")).unwrap(),
+        );
+        let first_started = Arc::new(tokio::sync::Notify::new());
+        let signer_factory = Arc::new(TimeoutFirstSignerFactory {
+            calls: Arc::new(AtomicUsize::new(0)),
+            first_started: Arc::clone(&first_started),
+        });
+        let state = crate::app::tests::websocket_test_state(
+            vec![up.clone()],
+            cc_lb_domain::TerminalStrategy::FirstPick,
+            DrainController::new(),
+            signer_factory,
+            Arc::new(crate::app::tests::FixtureKeyStore),
+            vec!["*".to_owned()],
+        )
+        .await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_str(crate::app::tests::TEST_KEY.plaintext.as_str()).unwrap(),
+        );
+        let auth = state.lifecycle.authenticate(&headers).await.unwrap();
+        let mut gateway = ResponsesWebSocketGateway::new(
+            state.lifecycle.clone(),
+            &auth,
+            headers,
+            state.body_caps.messages,
+            8,
+        );
+        let d1 = gateway
+            .client_message(
+                auth.clone(),
+                Bytes::from_static(
+                    br#"{"type":"response.create","model":"gpt-4.1","stream_id":"lane-1","store":false,"input":[]}"#,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let d2 = gateway
+            .client_message(
+                auth,
+                Bytes::from_static(
+                    br#"{"type":"response.create","model":"gpt-5","stream_id":"lane-2","store":false,"input":[]}"#,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let (events, _rx) = tokio::sync::mpsc::channel(16);
+        let mut connections = HashMap::new();
+        let mut next_connection_id = 1;
+        let mut pending_connects = HashMap::new();
+        let mut connect_tasks = tokio::task::JoinSet::new();
+        let mut deferred = VecDeque::new();
+
+        // Start Lane 1 with a tight 80ms prepare timeout so prepare_job.run() times out.
+        let (r1, e1) = advance_one_dispatch(
+            &mut gateway,
+            PendingDispatchState::new(d1, Duration::from_millis(80), Duration::from_millis(80), 1),
+            &state,
+            &mut connections,
+            &events,
+            &mut next_connection_id,
+            8,
+            &mut pending_connects,
+            &mut connect_tasks,
+            &mut deferred,
+        )
+        .await;
+        assert!(r1.is_empty() && e1.is_empty());
+        tokio::time::timeout(Duration::from_secs(2), first_started.notified())
+            .await
+            .expect("lane-1 entered prepare_job.run()");
+
+        // Coalesce Lane 2 (with plenty of budget) onto Lane 1's PendingConnect.
+        let (r2, e2) = advance_one_dispatch(
+            &mut gateway,
+            PendingDispatchState::new(d2, Duration::from_secs(5), Duration::from_secs(5), 1),
+            &state,
+            &mut connections,
+            &events,
+            &mut next_connection_id,
+            8,
+            &mut pending_connects,
+            &mut connect_tasks,
+            &mut deferred,
+        )
+        .await;
+        assert!(r2.is_empty() && e2.is_empty());
+        assert_eq!(pending_connects.values().next().unwrap().waiters.len(), 1);
+
+        // Wait for Lane 1's prepare_job.run() timeout outcome; verify ConnectAttemptError::Prepare
+        // fails only Lane 1 (504) while restoring candidate to Lane 2 and re-dispatching it cleanly.
+        let mut ready = VecDeque::new();
+        let mut errs = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline
+            && (!pending_connects.is_empty() || !connect_tasks.is_empty())
+        {
+            let outcome = tokio::time::timeout(Duration::from_secs(2), connect_tasks.join_next())
+                .await
+                .expect("connect task completes")
+                .expect("some connect task")
+                .expect("join ok");
+            let new_errs = handle_connect_outcome(
+                &mut gateway,
+                outcome,
+                &state,
+                &mut connections,
+                &events,
+                &mut next_connection_id,
+                8,
+                &mut pending_connects,
+                &mut connect_tasks,
+                &mut deferred,
+                &mut ready,
+            )
+            .await;
+            errs.extend(new_errs);
+        }
+
+        assert_eq!(errs.len(), 1, "only timed-out lane-1 must error: {errs:?}");
+        assert_eq!(errs[0].status, 504);
+        assert_eq!(errs[0].stream_id.as_deref(), Some("lane-1"));
+        assert!(
+            ready.is_empty(),
+            "direct lane-2 dispatch does not queue follow-ups: {ready:?}"
+        );
+        assert_eq!(
+            connections.len(),
+            1,
+            "lane-2 must establish its own connection"
+        );
+        assert_eq!(accept_count.load(AtomicOrdering::SeqCst), 1);
+        let sent_frame = tokio::time::timeout(Duration::from_secs(2), sent_rx.recv())
+            .await
+            .expect("lane-2 frame delivered to upstream")
+            .expect("frame present");
+        assert!(
+            sent_frame.contains("\"lane-2\""),
+            "expected lane-2 frame on upstream socket, got {sent_frame}"
+        );
+        up_task.abort();
     }
 }

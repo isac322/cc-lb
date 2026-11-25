@@ -181,13 +181,13 @@ fn assert_measured(value: Option<f64>, field: &str) -> f64 {
 
 const TEST_PRINCIPAL: &str = "principal-test";
 
-struct TestKey {
-    plaintext: String,
+pub(super) struct TestKey {
+    pub(super) plaintext: String,
     key_id: String,
     record: StoredApiKeyRecord,
 }
 
-static TEST_KEY: LazyLock<TestKey> = LazyLock::new(|| {
+pub(super) static TEST_KEY: LazyLock<TestKey> = LazyLock::new(|| {
     let generated = secret::generate_new();
     TestKey {
         plaintext: generated.plaintext.expose().to_owned(),
@@ -206,7 +206,7 @@ static TEST_KEY: LazyLock<TestKey> = LazyLock::new(|| {
 
 /// In-memory `ManagedKeyStore` resolving exactly the fixture key for
 /// `TEST_PRINCIPAL` (mirrors the engine `InMemoryManagedKeyStore`).
-struct FixtureKeyStore;
+pub(super) struct FixtureKeyStore;
 
 #[async_trait]
 impl ManagedKeyStore for FixtureKeyStore {
@@ -1875,7 +1875,7 @@ impl Signer for PendingWebSocketSigner {
     }
 }
 
-fn websocket_upstream(id: u128, name: &str, base_url: Url) -> UpstreamRecord {
+pub(super) fn websocket_upstream(id: u128, name: &str, base_url: Url) -> UpstreamRecord {
     UpstreamRecord {
         id: Uuid::from_u128(id),
         name: name.to_owned(),
@@ -1989,7 +1989,7 @@ async fn websocket_test_router_with_signer_and_allowed_models(
     proxy_router(state, 30)
 }
 
-async fn websocket_test_state(
+pub(super) async fn websocket_test_state(
     records: Vec<UpstreamRecord>,
     terminal: TerminalStrategy,
     drain_controller: DrainController,
@@ -6010,10 +6010,13 @@ async fn responses_websocket_concurrent_initial_oauth_lanes_pin_to_single_accoun
             .expect("both OAuth lanes complete")
             .unwrap()
             .unwrap();
-        if let UpstreamMessage::Text(text) = msg
-            && text.contains("\"response.completed\"")
-        {
-            completed += 1;
+        if let UpstreamMessage::Text(text) = msg {
+            if text.contains("\"type\":\"error\"") {
+                panic!("unexpected error frame while awaiting OAuth lanes: {text}");
+            }
+            if text.contains("\"response.completed\"") {
+                completed += 1;
+            }
         }
     }
     assert_eq!(
@@ -6643,4 +6646,526 @@ async fn responses_websocket_coalesced_prepare_failure_only_fails_affected_turn(
     let _ = client.close(None).await;
     proxy_task.abort();
     up_task.abort();
+}
+
+#[tokio::test]
+async fn responses_websocket_deferred_explicit_affinity_preserves_target_upstream() {
+    use std::sync::atomic::AtomicUsize;
+
+    let a_hits = Arc::new(AtomicUsize::new(0));
+    let b_hits = Arc::new(AtomicUsize::new(0));
+    let accepted_first_a = Arc::new(tokio::sync::Notify::new());
+    let release_first_a = Arc::new(tokio::sync::Notify::new());
+
+    let listener_a = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind oauth-a");
+    let addr_a = listener_a.local_addr().unwrap();
+    let a_hits_task = Arc::clone(&a_hits);
+    let accepted_task = Arc::clone(&accepted_first_a);
+    let release_task = Arc::clone(&release_first_a);
+    let task_a = tokio::spawn(async move {
+        loop {
+            let Ok((socket, _)) = listener_a.accept().await else {
+                break;
+            };
+            let hit = a_hits_task.fetch_add(1, Ordering::SeqCst);
+            if hit == 0 {
+                accepted_task.notify_one();
+                release_task.notified().await;
+            }
+            tokio::spawn(async move {
+                let Ok(mut ws) = accept_async(socket).await else {
+                    return;
+                };
+                if let Some(Ok(_)) = ws.next().await {
+                    let _ = ws
+                        .send(UpstreamMessage::Text(
+                            format!(
+                                r#"{{"type":"response.created","stream_id":"lane-1","response":{{"id":"resp_a_{hit}","store":false}}}}"#
+                            )
+                            .into(),
+                        ))
+                        .await;
+                    let _ = ws
+                        .send(UpstreamMessage::Text(
+                            format!(
+                                r#"{{"type":"response.completed","stream_id":"lane-1","response":{{"id":"resp_a_{hit}","store":false,"usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+                            )
+                            .into(),
+                        ))
+                        .await;
+                }
+            });
+        }
+    });
+
+    let listener_b = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind oauth-b");
+    let addr_b = listener_b.local_addr().unwrap();
+    let b_hits_task = Arc::clone(&b_hits);
+    let task_b = tokio::spawn(async move {
+        while let Ok((socket, _)) = listener_b.accept().await {
+            let hit = b_hits_task.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let Ok(mut ws) = accept_async(socket).await else {
+                    return;
+                };
+                if let Some(Ok(_)) = ws.next().await {
+                    let _ = ws
+                        .send(UpstreamMessage::Text(
+                            format!(
+                                r#"{{"type":"response.created","stream_id":"lane-2","response":{{"id":"resp_b_{hit}","store":false}}}}"#
+                            )
+                            .into(),
+                        ))
+                        .await;
+                    let _ = ws
+                        .send(UpstreamMessage::Text(
+                            format!(
+                                r#"{{"type":"response.completed","stream_id":"lane-2","response":{{"id":"resp_b_{hit}","store":false,"usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+                            )
+                            .into(),
+                        ))
+                        .await;
+                }
+            });
+        }
+    });
+
+    let mut up_a = websocket_upstream(
+        1,
+        "oauth-a-explicit",
+        Url::parse(&format!("http://{addr_a}/")).unwrap(),
+    );
+    up_a.kind = UpstreamKind::OpenaiOauth;
+    let mut up_b = websocket_upstream(
+        2,
+        "oauth-b-explicit",
+        Url::parse(&format!("http://{addr_b}/")).unwrap(),
+    );
+    up_b.kind = UpstreamKind::OpenaiOauth;
+
+    let temp_dir = tempfile::tempdir().expect("tempdir for affinity sqlite");
+    let db_path = temp_dir.path().join("affinity.sqlite");
+    let db_url = format!("sqlite://{}", db_path.display());
+
+    let up_a_id = up_a.id;
+    let up_b_id = up_b.id;
+    let state = websocket_test_state_with_affinity_store(
+        vec![up_a, up_b],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+        Some(db_url),
+    )
+    .await;
+
+    let owned_cipher = "gAAAAAB_durable_b_owned_cipher";
+    let key = {
+        use sha2::Digest as _;
+        cc_lb_storage_api::UpstreamAffinityKey {
+            principal_id: TEST_PRINCIPAL.to_owned(),
+            provider: "openai".to_owned(),
+            kind: cc_lb_storage_api::UpstreamAffinityKind::OpenaiResponseId,
+            value_sha256: sha2::Sha256::digest(owned_cipher.as_bytes()).into(),
+        }
+    };
+    let now_secs = cc_lb_clock::unix_secs(state.clock.now());
+    state
+        .storage
+        .bind_upstream_affinities(
+            &[cc_lb_storage_api::UpstreamAffinityBinding {
+                key,
+                upstream_id: up_b_id,
+                owner_epoch: 0,
+                observed_at_unix_secs: now_secs,
+                expires_at_unix_secs: Some(now_secs + 3600),
+            }],
+            now_secs,
+            3600,
+        )
+        .await
+        .expect("seed durable affinity to oauth-b");
+
+    let (proxy_address, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let (mut client, _) = connect_async(websocket_request(proxy_address))
+        .await
+        .expect("client WS connects");
+
+    // Lane 1 starts initial OAuth handshake on oauth-a (first pick).
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-5","stream_id":"lane-1","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), accepted_first_a.notified())
+        .await
+        .expect("lane-1 dials oauth-a");
+
+    // Lane 2 has durable explicit affinity to oauth-b; while deferred behind Lane 1's handshake,
+    // releasing Lane 1's handshake to oauth-a must preserve Lane 2's explicit target oauth-b.
+    client
+        .send(UpstreamMessage::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "stream_id": "lane-2",
+                "store": false,
+                "input": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_durable_b",
+                        "summary": [],
+                        "content": [],
+                        "encrypted_content": owned_cipher
+                    },
+                    {"role": "user", "content": "hi"}
+                ]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    client
+        .send(UpstreamMessage::Text(r#"{"type":"invalid.sync"}"#.into()))
+        .await
+        .unwrap();
+    let sync_reply = tokio::time::timeout(Duration::from_secs(2), client.next())
+        .await
+        .expect("sync sentinel after lane-2 deferral")
+        .unwrap()
+        .unwrap();
+    let sync_text = sync_reply.to_text().unwrap();
+    assert!(
+        sync_text.contains("\"invalid_request_error\"") && sync_text.contains("invalid.sync"),
+        "expected invalid.sync reply, got: {sync_text}"
+    );
+    assert_eq!(b_hits.load(Ordering::SeqCst), 0);
+
+    release_first_a.notify_one();
+    let mut completed = 0usize;
+    while completed < 2 {
+        let msg = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("both explicit and session lanes complete")
+            .unwrap()
+            .unwrap();
+        if let UpstreamMessage::Text(text) = msg {
+            if text.contains("\"upstream_affinity_unavailable\"")
+                || text.contains("\"type\":\"error\"")
+            {
+                panic!("explicit affinity deferred lane must not fail: {text}");
+            }
+            if text.contains("\"response.completed\"") {
+                completed += 1;
+            }
+        }
+    }
+    assert_eq!(a_hits.load(Ordering::SeqCst), 1, "lane-1 dials oauth-a");
+    assert_eq!(b_hits.load(Ordering::SeqCst), 1, "lane-2 dials oauth-b");
+    let _ = up_a_id;
+
+    let _ = client.close(None).await;
+    proxy_task.abort();
+    task_a.abort();
+    task_b.abort();
+}
+
+#[tokio::test]
+async fn responses_websocket_deferred_unestablished_reasoning_preserves_ciphertext() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+    let a_hits = Arc::new(AtomicUsize::new(0));
+    let b_hits = Arc::new(AtomicUsize::new(0));
+    let lane2_saw_verbatim_first = Arc::new(AtomicBool::new(false));
+    let accepted_first_a = Arc::new(tokio::sync::Notify::new());
+    let release_first_a = Arc::new(tokio::sync::Notify::new());
+    let deferred_cipher = "gAAAAAB_deferred_lane2_cipher";
+
+    let listener_a = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind oauth-a");
+    let addr_a = listener_a.local_addr().unwrap();
+    let a_hits_task = Arc::clone(&a_hits);
+    let accepted_task = Arc::clone(&accepted_first_a);
+    let release_task = Arc::clone(&release_first_a);
+    let verbatim_task = Arc::clone(&lane2_saw_verbatim_first);
+    let task_a = tokio::spawn(async move {
+        loop {
+            let Ok((socket, _)) = listener_a.accept().await else {
+                break;
+            };
+            let hit = a_hits_task.fetch_add(1, Ordering::SeqCst);
+            if hit == 0 {
+                accepted_task.notify_one();
+                release_task.notified().await;
+            }
+            let verbatim_conn = Arc::clone(&verbatim_task);
+            tokio::spawn(async move {
+                let Ok(mut ws) = accept_async(socket).await else {
+                    return;
+                };
+                while let Some(Ok(msg)) = ws.next().await {
+                    if let UpstreamMessage::Text(req_text) = msg {
+                        let req_stream = if hit == 0 { "lane-1" } else { "lane-2" };
+                        if req_text.contains(deferred_cipher) {
+                            verbatim_conn.store(true, Ordering::SeqCst);
+                            let _ = ws
+                                .send(UpstreamMessage::Text(
+                                    r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"invalid_encrypted_content","message":"cannot verify encrypted reasoning"}}"#.into(),
+                                ))
+                                .await;
+                            continue;
+                        }
+                        let _ = ws
+                            .send(UpstreamMessage::Text(
+                                format!(
+                                    r#"{{"type":"response.created","stream_id":"{req_stream}","response":{{"id":"resp_a_{hit}_{req_stream}","store":false}}}}"#
+                                )
+                                .into(),
+                            ))
+                            .await;
+                        let _ = ws
+                            .send(UpstreamMessage::Text(
+                                format!(
+                                    r#"{{"type":"response.completed","stream_id":"{req_stream}","response":{{"id":"resp_a_{hit}_{req_stream}","store":false,"usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+                                )
+                                .into(),
+                            ))
+                            .await;
+                    }
+                }
+            });
+        }
+    });
+
+    let listener_b = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind oauth-b");
+    let addr_b = listener_b.local_addr().unwrap();
+    let b_hits_task = Arc::clone(&b_hits);
+    let task_b = tokio::spawn(async move {
+        while let Ok((socket, _)) = listener_b.accept().await {
+            b_hits_task.fetch_add(1, Ordering::SeqCst);
+            drop(socket);
+        }
+    });
+
+    let mut up_a = websocket_upstream(
+        1,
+        "oauth-a-reason",
+        Url::parse(&format!("http://{addr_a}/")).unwrap(),
+    );
+    up_a.kind = UpstreamKind::OpenaiOauth;
+    let mut up_b = websocket_upstream(
+        2,
+        "oauth-b-reason",
+        Url::parse(&format!("http://{addr_b}/")).unwrap(),
+    );
+    up_b.kind = UpstreamKind::OpenaiOauth;
+
+    #[derive(Default)]
+    struct SwapQuotaCache {
+        snapshots: Mutex<HashMap<Uuid, Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot>>>,
+    }
+
+    impl cc_lb_control::SubscriptionQuotaCacheLike for SwapQuotaCache {
+        fn upsert_observation(&self, _record: &cc_lb_storage_api::SubscriptionQuotaSample) {}
+
+        fn snapshot_for_upstream(
+            &self,
+            upstream_id: Uuid,
+            _now_unix_millis: u64,
+            _max_staleness_secs: u64,
+        ) -> Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot> {
+            self.snapshots
+                .lock()
+                .expect("swap quota cache lock")
+                .get(&upstream_id)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    let temp_dir = tempfile::tempdir().expect("tempdir for unestablished reasoning sqlite");
+    let db_path = temp_dir.path().join("unestablished-reasoning.sqlite");
+    let db_url = format!("sqlite://{}", db_path.display());
+
+    let up_a_id = up_a.id;
+    let up_b_id = up_b.id;
+    let state = websocket_test_state_with_affinity_store(
+        vec![up_a, up_b],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+        Some(db_url),
+    )
+    .await;
+    let now_secs = cc_lb_clock::unix_secs(state.clock.now());
+    let quota_snapshot =
+        |window: &str, utilization: f64| cc_lb_domain::SubscriptionQuotaCandidateSnapshot {
+            window: window.to_owned(),
+            state: cc_lb_domain::SubscriptionQuotaDataState::Fresh,
+            source: Some("oauth-reason-test".to_owned()),
+            utilization: Some(utilization),
+            status: Some("allowed".to_owned()),
+            resets_at_unix_secs: Some(now_secs + 10_000),
+            surpassed_threshold: None,
+            representative_claim: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            credits: None,
+            observed_at_unix_millis: Some(now_secs * 1_000),
+            max_staleness_secs: 60,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+        };
+    let quota_cache = Arc::new(SwapQuotaCache::default());
+    {
+        let mut guard = quota_cache.snapshots.lock().expect("swap quota cache lock");
+        guard.insert(
+            up_a_id,
+            vec![quota_snapshot("5h", 0.10), quota_snapshot("7d", 0.10)],
+        );
+        guard.insert(
+            up_b_id,
+            vec![quota_snapshot("5h", 0.80), quota_snapshot("7d", 0.80)],
+        );
+    }
+    let filter: Arc<dyn cc_lb_routing::FilterPlugin> = Arc::new(
+        cc_lb_routing_eval::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::with_clock(
+            state.clock.clone(),
+        ),
+    );
+    let pipeline = Arc::new(RouterPipelineCache {
+        user_filters: vec![filter],
+        terminal: TerminalStrategy::FirstPick,
+        instantiation_error: None,
+        provider_filters: None,
+    });
+    let principal_view = Arc::new(PrincipalView::for_tests(
+        TEST_PRINCIPAL,
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
+        HashMap::from([(
+            TEST_PRINCIPAL.to_owned(),
+            (Some(pipeline), DialectCache::Inherit),
+        )]),
+    ));
+    let initial_view = state.dynamic_view.load();
+    state.dynamic_view.store(
+        cc_lb_control::DynamicViewBuilder::from_view(&initial_view)
+            .principal_view(principal_view)
+            .subscription_quota_cache(quota_cache.clone())
+            .subscription_quota_routing_max_staleness_secs(60)
+            .build(),
+    );
+
+    let (proxy_address, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let (mut client, _) = connect_async(websocket_request(proxy_address))
+        .await
+        .expect("client WS connects");
+
+    // Lane 1 begins initial OAuth handshake on oauth-a.
+    client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-5","stream_id":"lane-1","store":false,"input":[]}"#.into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), accepted_first_a.notified())
+        .await
+        .expect("lane-1 dials oauth-a");
+
+    // Swap quota so Lane 2 initially picks [oauth-b, oauth-a] at admit time before pinning to oauth-a.
+    {
+        let mut guard = quota_cache.snapshots.lock().expect("swap quota cache lock");
+        guard.insert(
+            up_a_id,
+            vec![quota_snapshot("5h", 0.80), quota_snapshot("7d", 0.80)],
+        );
+        guard.insert(
+            up_b_id,
+            vec![quota_snapshot("5h", 0.10), quota_snapshot("7d", 0.10)],
+        );
+    }
+    client
+        .send(UpstreamMessage::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "stream_id": "lane-2",
+                "store": false,
+                "input": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_deferred",
+                        "summary": [],
+                        "content": [],
+                        "encrypted_content": deferred_cipher
+                    },
+                    {"role": "user", "content": "hi"}
+                ]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    client
+        .send(UpstreamMessage::Text(r#"{"type":"invalid.sync"}"#.into()))
+        .await
+        .unwrap();
+    let sync_reply = tokio::time::timeout(Duration::from_secs(2), client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let sync_text = sync_reply.to_text().unwrap();
+    assert!(
+        sync_text.contains("\"invalid_request_error\""),
+        "expected invalid.sync reply, got: {sync_text}"
+    );
+
+    release_first_a.notify_one();
+    let mut completed = 0usize;
+    while completed < 2 {
+        let msg = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("both OAuth lanes complete")
+            .unwrap()
+            .unwrap();
+        if let UpstreamMessage::Text(text) = msg {
+            if text.contains("\"type\":\"error\"") {
+                panic!("unexpected error frame while awaiting OAuth lanes: {text}");
+            }
+            if text.contains("\"response.completed\"") {
+                completed += 1;
+            }
+        }
+    }
+    assert!(
+        lane2_saw_verbatim_first.load(Ordering::SeqCst),
+        "pinned deferred lane-2 must send original encrypted_content verbatim first and strip only after 400"
+    );
+    assert_eq!(a_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(b_hits.load(Ordering::SeqCst), 0);
+
+    let _ = client.close(None).await;
+    proxy_task.abort();
+    task_a.abort();
+    task_b.abort();
 }
