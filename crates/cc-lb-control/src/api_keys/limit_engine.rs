@@ -300,6 +300,18 @@ struct ReservedAmount {
     kind: LimitKind,
     window_sec: u64,
     amount: i64,
+    bucket_start: u64,
+}
+
+impl ReservedAmount {
+    fn is_live_at(&self, now_sec: u64) -> bool {
+        self.bucket_start.saturating_add(self.window_sec) > now_sec
+    }
+}
+
+fn rolling_bucket_start(now_sec: u64, window_sec: u64) -> u64 {
+    let bucket_width = durable_bucket_width(window_sec).unwrap_or(window_sec.max(1));
+    now_sec - now_sec % bucket_width
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -364,8 +376,7 @@ impl RingCounter {
     }
 
     pub fn record(&mut self, now_sec: u64, delta: i64) {
-        let bucket_width = durable_bucket_width(self.window_sec).unwrap_or(self.window_sec.max(1));
-        let bucket_start = now_sec - now_sec % bucket_width;
+        let bucket_start = rolling_bucket_start(now_sec, self.window_sec);
         match self.buckets.back().copied() {
             None => self.buckets.push_back((bucket_start, delta)),
             Some((last_start, _)) if last_start == bucket_start => {
@@ -389,6 +400,23 @@ impl RingCounter {
             }
         }
         self.evict_old(now_sec);
+    }
+
+    fn remove_from_bucket(&mut self, bucket_start: u64, amount: i64, now_sec: u64) {
+        self.evict_old(now_sec);
+        if bucket_start.saturating_add(self.window_sec) <= now_sec {
+            return;
+        }
+        if let Some(index) = self
+            .buckets
+            .iter()
+            .position(|(existing_start, _)| *existing_start == bucket_start)
+        {
+            self.buckets[index].1 = self.buckets[index].1.saturating_sub(amount);
+            if self.buckets[index].1 == 0 {
+                self.buckets.remove(index);
+            }
+        }
     }
 
     fn oldest_bucket_sec(&mut self, now_sec: u64) -> Option<u64> {
@@ -917,6 +945,7 @@ impl LimitEngine {
                         kind: limit.kind,
                         window_sec: limit.window_secs,
                         amount: *amount,
+                        bucket_start: rolling_bucket_start(now_sec, limit.window_secs),
                     });
                 }
             }
@@ -1091,12 +1120,13 @@ impl LimitEngine {
                 {
                     let remote = self.inner.remote_rolling.read();
                     for ((limit, new_amount), cap) in plan.planned_rolling.iter().zip(caps.iter()) {
-                        let old_amount = res
+                        let live_old_amount = res
                             .reserved
                             .iter()
                             .find(|r| r.kind == limit.kind && r.window_sec == limit.window_secs)
+                            .filter(|r| r.is_live_at(plan.now_sec))
                             .map_or(0, |r| r.amount);
-                        let delta = new_amount.saturating_sub(old_amount);
+                        let delta = new_amount.saturating_sub(live_old_amount);
                         if delta > 0 {
                             let key = (res.key_id.clone(), limit.kind, limit.window_secs);
                             let local = rolling.get(&key).map_or(0, |c| c.total_at(plan.now_sec));
@@ -1109,34 +1139,35 @@ impl LimitEngine {
                     }
                 }
                 for old in &res.reserved {
-                    if !plan.planned_rolling.iter().any(|(limit, _)| {
-                        limit.kind == old.kind && limit.window_secs == old.window_sec
-                    }) {
-                        record_amount_locked(
-                            &mut rolling,
-                            &res.key_id,
-                            old.kind,
-                            old.window_sec,
-                            -old.amount,
-                            plan.now_sec,
-                        );
+                    if old.is_live_at(plan.now_sec)
+                        && !plan.planned_rolling.iter().any(|(limit, _)| {
+                            limit.kind == old.kind && limit.window_secs == old.window_sec
+                        })
+                    {
+                        remove_reserved_bucket_locked(&mut rolling, &res.key_id, old, plan.now_sec);
                     }
                 }
                 let mut next_reserved = Vec::with_capacity(plan.planned_rolling.len());
                 for (limit, new_amount) in &plan.planned_rolling {
-                    let old_amount = res
+                    let live_old = res
                         .reserved
                         .iter()
                         .find(|r| r.kind == limit.kind && r.window_sec == limit.window_secs)
-                        .map_or(0, |r| r.amount);
-                    let delta = new_amount.saturating_sub(old_amount);
-                    if delta != 0 {
+                        .filter(|r| r.is_live_at(plan.now_sec));
+                    if let Some(old) = live_old {
+                        if old.amount == *new_amount {
+                            next_reserved.push(old.clone());
+                            continue;
+                        }
+                        remove_reserved_bucket_locked(&mut rolling, &res.key_id, old, plan.now_sec);
+                    }
+                    if *new_amount != 0 {
                         record_amount_locked(
                             &mut rolling,
                             &res.key_id,
                             limit.kind,
                             limit.window_secs,
-                            delta,
+                            *new_amount,
                             plan.now_sec,
                         );
                     }
@@ -1144,6 +1175,7 @@ impl LimitEngine {
                         kind: limit.kind,
                         window_sec: limit.window_secs,
                         amount: *new_amount,
+                        bucket_start: rolling_bucket_start(plan.now_sec, limit.window_secs),
                     });
                 }
                 res.reserved = next_reserved;
@@ -1270,14 +1302,7 @@ impl LimitEngine {
             {
                 let mut rolling = self.inner.rolling.write();
                 for amount in &record.reserved {
-                    record_amount_locked(
-                        &mut rolling,
-                        &record.key_id,
-                        amount.kind,
-                        amount.window_sec,
-                        -amount.amount,
-                        now_sec,
-                    );
+                    remove_reserved_bucket_locked(&mut rolling, &record.key_id, amount, now_sec);
                 }
             }
             concurrent_guards
@@ -1292,14 +1317,7 @@ impl LimitEngine {
         {
             let mut rolling = self.inner.rolling.write();
             for amount in &record.reserved {
-                record_amount_locked(
-                    &mut rolling,
-                    &record.key_id,
-                    amount.kind,
-                    amount.window_sec,
-                    -amount.amount,
-                    now_sec,
-                );
+                remove_reserved_bucket_locked(&mut rolling, &record.key_id, amount, now_sec);
             }
         }
         drop(concurrent_guards);
@@ -1563,6 +1581,21 @@ fn record_amount_locked(
         .entry((key_id.to_owned(), kind, window_sec))
         .or_insert_with(|| RingCounter::new(window_sec))
         .record(now_sec, delta);
+}
+
+fn remove_reserved_bucket_locked(
+    rolling: &mut HashMap<RollingKey, RingCounter>,
+    key_id: &str,
+    reserved: &ReservedAmount,
+    now_sec: u64,
+) {
+    if !reserved.is_live_at(now_sec) {
+        return;
+    }
+    if let Some(counter) = rolling.get_mut(&(key_id.to_owned(), reserved.kind, reserved.window_sec))
+    {
+        counter.remove_from_bucket(reserved.bucket_start, reserved.amount, now_sec);
+    }
 }
 
 fn add_usage(aggregate: &mut ApiKeyUsage, usage: ApiKeyUsage) {
@@ -2312,14 +2345,7 @@ impl Drop for Reservation {
             {
                 let mut rolling = engine.rolling.write();
                 for amount in &record.reserved {
-                    record_amount_locked(
-                        &mut rolling,
-                        &record.key_id,
-                        amount.kind,
-                        amount.window_sec,
-                        -amount.amount,
-                        now_sec,
-                    );
+                    remove_reserved_bucket_locked(&mut rolling, &record.key_id, amount, now_sec);
                 }
             }
             concurrent_guards
@@ -5512,6 +5538,176 @@ mod tests {
                 Some(100),
             ),
             Ok(false)
+        );
+    }
+
+    #[test]
+    fn resize_reservation_after_bucket_expiry_checks_full_amount_and_never_credits_new_window() {
+        let concurrency = Arc::new(KeyConcurrencyManager::new());
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let engine = LimitEngine::new(concurrency, clock.clone());
+        let view = PrincipalView::for_tests(
+            "principal-resize-expiry",
+            true,
+            vec!["gpt-5".to_owned()],
+            vec![
+                Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 10,
+                },
+                Limit {
+                    kind: LimitKind::TotalTokens,
+                    window_secs: 60,
+                    cap_micros: 1_000,
+                },
+                Limit {
+                    kind: LimitKind::CostUsd,
+                    window_secs: 60,
+                    cap_micros: 500,
+                },
+            ],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            key_hash_b64: "resize-expiry-key".to_owned(),
+            ..Default::default()
+        };
+
+        // 1. Reserve baseline hold at t0 (300 TotalTokens = 200 in + 100 out, 100 CostUsd, 1 Request).
+        let baseline = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-resize-expiry",
+                "gpt-5",
+                Some(100),
+                200,
+                Some(100),
+            )
+            .expect("baseline admission succeeds");
+        let t0 = unix_secs(clock.now());
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t0),
+            300
+        );
+
+        // 2. Advance past the 60s rolling bucket so baseline's original bucket expires.
+        clock.advance_secs(60);
+        let t1 = unix_secs(clock.now());
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            0
+        );
+
+        // Another request consumes 800/1000 TotalTokens in the fresh window.
+        let other = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-resize-expiry",
+                "gpt-5",
+                Some(100),
+                700,
+                Some(50),
+            )
+            .expect("other request admission succeeds");
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            800
+        );
+
+        // 3. Resizing UP from expired 300 to 400 (200+200) must check full 400 against 800+400 > 1000
+        // rather than subtracting expired 300 (`delta=100` -> 900 <= 1000).
+        assert_eq!(
+            engine.resize_reservation_estimates_by_id(
+                &view,
+                &record,
+                "principal-resize-expiry",
+                baseline.id(),
+                "gpt-5",
+                Some(200),
+                200,
+                Some(100),
+            ),
+            Err(RejectReason::TokenRateLimit {
+                kind: LimitKind::TotalTokens,
+            })
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            800,
+            "rejected cross-window resize must not mutate live rolling totals"
+        );
+
+        // 4. Resizing DOWN from expired 300 to 100 (50+50) must re-admit full +100 into t1 (total 900),
+        // rather than crediting -200 into the new window.
+        assert_eq!(
+            engine.resize_reservation_estimates_by_id(
+                &view,
+                &record,
+                "principal-resize-expiry",
+                baseline.id(),
+                "gpt-5",
+                Some(50),
+                50,
+                Some(40),
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            900
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::CostUsd, 60, t1),
+            90
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::Requests, 60, t1),
+            2
+        );
+
+        // 5. In-window resize replaces the live t1 bucket cleanly without double counting.
+        assert_eq!(
+            engine.resize_reservation_estimates_by_id(
+                &view,
+                &record,
+                "principal-resize-expiry",
+                baseline.id(),
+                "gpt-5",
+                Some(25),
+                25,
+                Some(20),
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            850
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::CostUsd, 60, t1),
+            70
+        );
+
+        // 6. Dropping `other` in-window removes its live 800 hold leaving only baseline's 50;
+        // then advancing past t1 and dropping `baseline` does not make the next window negative.
+        drop(other);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            50
+        );
+        clock.advance_secs(60);
+        let t2 = unix_secs(clock.now());
+        drop(baseline);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t2),
+            0
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::CostUsd, 60, t2),
+            0
         );
     }
 }
