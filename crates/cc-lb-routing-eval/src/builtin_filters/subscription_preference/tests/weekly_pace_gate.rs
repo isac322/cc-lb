@@ -8,6 +8,7 @@ fn assess_for_model(candidate: &UpstreamCandidate, model: &str) -> (f64, f64) {
         0,
         relevant_base_windows(model),
         &FilterConfig::default(),
+        T0_MILLIS,
     )
     .expect("candidate is assessable");
     (

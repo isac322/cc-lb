@@ -287,6 +287,70 @@ async fn retry_class_service_none_uses_jittered_backoff_and_preserves_passthroug
     }
 }
 
+#[tokio::test]
+async fn retry_class_service_routes_retryable_errors_to_backoff_and_dead_letter() {
+    for class in [RetryClass::Maintenance, RetryClass::Adaptive] {
+        let within_budget: BoxDynError = Box::new(SchedulerError::Job("transient boom".to_owned()));
+        let outcome = retry_result(class, 0, true, 13, Err(within_budget))
+            .await
+            .expect("retryable handler error should convert to backoff retry");
+        assert_eq!(
+            outcome,
+            JobOutcome::Retry {
+                delay: class.next_delay_with_seed(1, 13),
+            }
+        );
+
+        let exhausted: BoxDynError = Box::new(SchedulerError::JobTimeout {
+            job_kind: "upstream_warmup",
+            timeout: Duration::from_secs(60),
+        });
+        let err = retry_result(
+            class,
+            class.policy().max_attempts(),
+            true,
+            13,
+            Err(exhausted),
+        )
+        .await
+        .expect_err("exhausted retryable error should fail with RetriesExhausted");
+        assert!(
+            matches!(
+                err.downcast_ref::<SchedulerError>(),
+                Some(SchedulerError::RetriesExhausted { category: "job_timeout", summary })
+                    if summary.contains("upstream_warmup")
+            ),
+            "expected RetriesExhausted(job_timeout), got: {err}"
+        );
+
+        let no_retry: BoxDynError = Box::new(SchedulerError::Job(
+            "https://api.example.com/v1?token=raw-secret Bearer topsecret sk-ant-api03-abcdefg\nline2"
+                .to_owned(),
+        ));
+        let err = retry_result(class, 0, false, 13, Err(no_retry))
+            .await
+            .expect_err("allows_retry=false should fail with sanitized RetriesExhausted");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("retries exhausted (job_error):"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("raw-secret"), "{rendered}");
+        assert!(!rendered.contains("topsecret"), "{rendered}");
+        assert!(!rendered.contains("abcdefg"), "{rendered}");
+        assert!(!rendered.contains('\n'), "{rendered}");
+
+        let fatal: BoxDynError = Box::new(SchedulerError::InvalidRetryDelay);
+        let err = retry_result(class, 0, true, 13, Err(fatal))
+            .await
+            .expect_err("InvalidRetryDelay must bypass retry conversion");
+        assert!(matches!(
+            err.downcast_ref::<SchedulerError>(),
+            Some(SchedulerError::InvalidRetryDelay)
+        ));
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 256, failure_persistence: None, ..Default::default() })]
 

@@ -334,7 +334,11 @@ where
                 Err(err) => {
                     let killed = err.downcast_ref::<AbortError>().is_some()
                         || err.downcast_ref::<SchedulerError>().is_some_and(|error| {
-                            matches!(error, SchedulerError::InvalidRetryDelay)
+                            matches!(
+                                error,
+                                SchedulerError::InvalidRetryDelay
+                                    | SchedulerError::RetriesExhausted { .. }
+                            )
                         });
                     (
                         if killed { "Killed" } else { "Failed" },
@@ -476,6 +480,9 @@ impl OutcomePool {
                     let run_at = sqlite_retry_run_at_secs(now, delay);
                     sqlx::query("UPDATE Jobs SET status = 'Pending', attempts = ?4, last_result = ?5, run_at = ?6, lock_by = NULL, lock_at = NULL, done_at = NULL WHERE id = ?1 AND lock_by = ?2 AND attempts = ?3 AND status IN ('Queued', 'Running')")
                         .bind(task_id).bind(lock_by).bind(pre_attempt).bind(post_attempt).bind(last_result).bind(run_at).execute(pool).await?
+                } else if status == "Failed" {
+                    sqlx::query("UPDATE Jobs SET status = 'Failed', attempts = ?4, last_result = ?5, lock_by = NULL, lock_at = NULL, done_at = NULL WHERE id = ?1 AND lock_by = ?2 AND attempts = ?3 AND status IN ('Queued', 'Running')")
+                        .bind(task_id).bind(lock_by).bind(pre_attempt).bind(post_attempt).bind(last_result).execute(pool).await?
                 } else {
                     sqlx::query("UPDATE Jobs SET status = ?6, attempts = ?4, last_result = ?5, done_at = strftime('%s', 'now') WHERE id = ?1 AND lock_by = ?2 AND attempts = ?3 AND status IN ('Queued', 'Running')")
                         .bind(task_id).bind(lock_by).bind(pre_attempt).bind(post_attempt).bind(last_result).bind(status).execute(pool).await?
@@ -489,6 +496,9 @@ impl OutcomePool {
                 let result = if let Some(delay) = delay {
                     sqlx::query("UPDATE apalis.jobs SET status = 'Pending', attempts = $4, last_result = $5::jsonb, run_at = now() + make_interval(secs => $6::double precision), lock_by = NULL, lock_at = NULL, done_at = NULL WHERE id = $1 AND lock_by = $2 AND attempts = $3 AND status IN ('Queued', 'Running')")
                         .bind(task_id).bind(lock_by).bind(pre_attempt).bind(post_attempt).bind(last_result).bind(delay.as_secs_f64()).execute(pool).await?
+                } else if status == "Failed" {
+                    sqlx::query("UPDATE apalis.jobs SET status = 'Failed', attempts = $4, last_result = $5::jsonb, lock_by = NULL, lock_at = NULL, done_at = NULL WHERE id = $1 AND lock_by = $2 AND attempts = $3 AND status IN ('Queued', 'Running')")
+                        .bind(task_id).bind(lock_by).bind(pre_attempt).bind(post_attempt).bind(last_result).execute(pool).await?
                 } else {
                     sqlx::query("UPDATE apalis.jobs SET status = $6, attempts = $4, last_result = $5::jsonb, done_at = now() WHERE id = $1 AND lock_by = $2 AND attempts = $3 AND status IN ('Queued', 'Running')")
                         .bind(task_id).bind(lock_by).bind(pre_attempt).bind(post_attempt).bind(last_result).bind(status).execute(pool).await?

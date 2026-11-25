@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-use apalis_core::backend::Filter;
 use cc_lb_storage_api::WarmupLane;
 use uuid::Uuid;
 
@@ -8,7 +7,7 @@ use crate::error::{Result, SchedulerError};
 use crate::jobs::oauth_refresh::OAuthRefreshJob;
 use crate::jobs::warmup::UpstreamWarmupJob;
 use crate::worker::{
-    AdaptiveJob, AdaptiveTaskKeyState, SchedulerBackend, SchedulerPushTask, TaskStatus,
+    AdaptiveJob, AdaptiveTaskKeyState, Filter, SchedulerBackend, SchedulerPushTask, TaskStatus,
 };
 
 const PAGE_SIZE: u32 = 500;
@@ -241,16 +240,14 @@ async fn active_entity_ids(
     backend: &SchedulerBackend,
     kind: WatchdogEntityKind,
 ) -> Result<HashSet<Uuid>> {
-    let mut active = HashSet::new();
-    scan_active_adaptive_tasks(backend, |task| {
-        if let Some(key) = task.idempotency_key.as_deref()
-            && let Some(upstream_id) = parse_entity_uuid(kind, key)
-        {
-            active.insert(upstream_id);
-        }
-    })
-    .await?;
-    Ok(active)
+    let prefix = format!("adaptive:{}:", kind.as_key_part());
+    let keys = backend
+        .list_active_adaptive_idempotency_keys_by_prefix(&prefix)
+        .await?;
+    Ok(keys
+        .into_iter()
+        .filter_map(|key| parse_entity_uuid(kind, &key))
+        .collect())
 }
 
 fn parse_entity_uuid(kind: WatchdogEntityKind, idempotency_key: &str) -> Option<Uuid> {

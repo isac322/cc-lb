@@ -3,14 +3,57 @@ use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
 use std::time::Instant;
 
+use apalis_core::error::BoxDynError;
 use apalis_core::task::Task;
 use tower::{Layer, Service};
 
+use crate::error::SchedulerError;
 use crate::retry::JobOutcome;
 use crate::scheduler_metrics;
 use crate::worker::{AdaptiveJob, CronJob};
 
 type MetricsFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+
+pub trait MetricsErrorClassify {
+    fn is_retries_exhausted(&self) -> bool;
+}
+
+impl MetricsErrorClassify for BoxDynError {
+    fn is_retries_exhausted(&self) -> bool {
+        self.downcast_ref::<SchedulerError>()
+            .is_some_and(|err| matches!(err, SchedulerError::RetriesExhausted { .. }))
+    }
+}
+
+impl MetricsErrorClassify for SchedulerError {
+    fn is_retries_exhausted(&self) -> bool {
+        matches!(self, Self::RetriesExhausted { .. })
+    }
+}
+
+impl MetricsErrorClassify for std::convert::Infallible {
+    fn is_retries_exhausted(&self) -> bool {
+        false
+    }
+}
+
+impl MetricsErrorClassify for std::io::Error {
+    fn is_retries_exhausted(&self) -> bool {
+        false
+    }
+}
+
+impl MetricsErrorClassify for String {
+    fn is_retries_exhausted(&self) -> bool {
+        false
+    }
+}
+
+impl MetricsErrorClassify for &'static str {
+    fn is_retries_exhausted(&self) -> bool {
+        false
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobOutcomeStatus {
@@ -110,6 +153,7 @@ impl<S, P> Service<P> for SchedulerMetricsService<S>
 where
     P: SchedulerMetricPayload + Send + 'static,
     S: Service<P, Response = JobOutcome>,
+    S::Error: MetricsErrorClassify,
     S::Future: Send + 'static,
 {
     type Response = S::Response;
@@ -146,10 +190,18 @@ where
                     Ok(outcome)
                 }
                 Err(error) => {
-                    scheduler_metrics::record_scheduler_job_status(
-                        job_type,
-                        JobOutcomeStatus::Panicked.as_str(),
-                    );
+                    if error.is_retries_exhausted() {
+                        scheduler_metrics::record_scheduler_job_status(
+                            job_type,
+                            JobOutcomeStatus::Retry.as_str(),
+                        );
+                        scheduler_metrics::record_scheduler_failure(job_type, 1);
+                    } else {
+                        scheduler_metrics::record_scheduler_job_status(
+                            job_type,
+                            JobOutcomeStatus::Panicked.as_str(),
+                        );
+                    }
                     scheduler_metrics::record_scheduler_job_duration(
                         job_type,
                         started_at.elapsed(),

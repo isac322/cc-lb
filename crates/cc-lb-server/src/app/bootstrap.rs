@@ -649,15 +649,9 @@ pub(super) async fn build_runtime_with_storage_core(
         websocket_bulkheads,
         websocket_bulkhead_config,
     ) = dispatcher(&config, clock.clone());
-    let replica_identity = {
-        match replica::load_or_create_replica_id(&data_dir) {
-            Ok(id) => Some(cc_lb_domain::ReplicaIdentity { id }),
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to load or create replica ID; proceeding without it");
-                None
-            }
-        }
-    };
+    let replica_identity = Some(cc_lb_domain::ReplicaIdentity {
+        id: replica::load_or_create_replica_id_or_ephemeral(&data_dir),
+    });
 
     let stores = Arc::new(DynamicStores {
         upstreams: storage_for_dynamic.clone(),

@@ -4,7 +4,7 @@ use crate::scheduler_dispatch::time::now_unix_millis;
 use crate::warmup::execute::{
     WarmupAttemptExecution, WarmupAttemptExecutionResult, execute_warmup_attempt,
 };
-use cc_lb_clock::unix_secs;
+use cc_lb_clock::{Clock, unix_millis, unix_secs};
 use cc_lb_control::WarmupWindowVerifier;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
@@ -37,6 +37,13 @@ use support::{
 };
 
 use super::SchedulerDispatch;
+
+fn clock_secs_and_millis(clock: &dyn Clock) -> Option<(i64, u64)> {
+    let now = clock.now();
+    let secs = i64::try_from(unix_secs(now)).ok()?;
+    let millis = unix_millis(now).min(u128::from(u64::MAX)) as u64;
+    Some((secs, millis))
+}
 
 impl SchedulerDispatch {
     pub(super) async fn dispatch_warmup(
@@ -90,7 +97,7 @@ impl SchedulerDispatch {
             .await;
             return Ok(JobOutcome::Skip);
         }
-        match self.quota_preflight_decision(&upstream, job.lane) {
+        match self.quota_preflight_decision(&upstream, job.lane).await {
             WarmupQuotaPreflightDecision::ActiveWindow { cycle_key } => {
                 self.record_warmup_window_already_active(
                     &upstream,
@@ -143,7 +150,7 @@ impl SchedulerDispatch {
             .await
     }
 
-    fn quota_preflight_decision(
+    async fn quota_preflight_decision(
         &self,
         upstream: &UpstreamRecord,
         lane: WarmupLane,
@@ -151,14 +158,39 @@ impl SchedulerDispatch {
         let view = self.dynamic_view.load();
         let max_staleness_secs = view.subscription_quota_routing_max_staleness_secs;
         drop(view);
-        let snapshots = self.subscription_quota_cache.snapshot_for_upstream(
-            upstream.id,
-            now_unix_millis(&*self.clock),
-            max_staleness_secs,
-        );
-        let Ok(now_unix_secs) = now_unix_secs_i64(&*self.clock) else {
+        let Some((now_unix_secs, now_unix_millis)) = clock_secs_and_millis(&*self.clock) else {
             return WarmupQuotaPreflightDecision::Unknown;
         };
+        let snapshots = self.subscription_quota_cache.snapshot_for_upstream(
+            upstream.id,
+            now_unix_millis,
+            max_staleness_secs,
+        );
+        let decision =
+            quota_preflight_decision_from_snapshots(upstream.kind, lane, &snapshots, now_unix_secs);
+        if decision != WarmupQuotaPreflightDecision::Unknown {
+            return decision;
+        }
+        if let Err(error) = self
+            .subscription_quota_cache
+            .hydrate_from_store_unless_raced(&self.stores, &[upstream.id])
+            .await
+        {
+            tracing::warn!(
+                upstream_id = %upstream.id,
+                %error,
+                "warmup quota preflight DB hydration failed; falling back to unknown",
+            );
+            return WarmupQuotaPreflightDecision::Unknown;
+        }
+        let Some((now_unix_secs, now_unix_millis)) = clock_secs_and_millis(&*self.clock) else {
+            return WarmupQuotaPreflightDecision::Unknown;
+        };
+        let snapshots = self.subscription_quota_cache.snapshot_for_upstream(
+            upstream.id,
+            now_unix_millis,
+            max_staleness_secs,
+        );
         quota_preflight_decision_from_snapshots(upstream.kind, lane, &snapshots, now_unix_secs)
     }
 
@@ -336,9 +368,17 @@ impl SchedulerDispatch {
                 }
                 Ok(JobOutcome::Done)
             }
-            WarmupAttemptOutcome::TransientFailure(_) => Err(SchedulerError::Job(
-                transient_attempt_error(&final_attempt, record.http_status),
-            )),
+            WarmupAttemptOutcome::TransientFailure(_) => {
+                let detail = transient_attempt_error(&final_attempt, record.http_status);
+                tracing::warn!(
+                    upstream_id = %upstream.id,
+                    lane = ?job.lane,
+                    http_status = record.http_status,
+                    detail = %detail,
+                    "warmup transient failure; rescheduling via RetryClass",
+                );
+                Ok(JobOutcome::Retry { delay: None })
+            }
             WarmupAttemptOutcome::PermanentFailure(reason) => {
                 if matches!(
                     window_check.as_ref(),

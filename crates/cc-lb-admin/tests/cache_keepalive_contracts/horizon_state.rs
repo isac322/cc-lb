@@ -18,17 +18,44 @@ use super::{
     fixtures::{cache_keepalive_decision, cache_keepalive_replace_request, principal_create_body},
     keepalive_detail_uri,
 };
-use crate::config_admin_common::{app, authed_json, test_state_with_clock};
+use crate::config_admin_common::{
+    app, authed_json, temp_storage_with_clock, test_state_with_clock,
+};
+
+async fn create_clocked_sqlite_principal_id() -> (
+    tempfile::TempDir,
+    Arc<cc_lb_storage_sqlite::SqliteStorage>,
+    cc_lb_admin::AdminState,
+    String,
+) {
+    let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(NOW_UNIX_SECS));
+    let (directory, storage) = temp_storage_with_clock(clock.clone()).await;
+    let state = test_state_with_clock(Config::default(), Some(storage.clone()), clock);
+    let (status, _, principal, _) = authed_json(
+        app(state.clone()),
+        "POST",
+        "/admin/v1/principals",
+        Some(principal_create_body()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "principal: {principal}");
+    (
+        directory,
+        storage,
+        state,
+        principal["id"].as_str().unwrap().to_owned(),
+    )
+}
 
 #[tokio::test]
 async fn selected_horizon_state_matrix_sqlite() {
-    let (_directory, storage, state, principal_id) = super::create_principal_id().await;
+    let (_directory, storage, state, principal_id) = create_clocked_sqlite_principal_id().await;
     selected_horizon_state_matrix(storage.as_ref(), &state, &principal_id).await;
 }
 
 #[tokio::test]
 async fn overdue_active_paid_renewal_http_sqlite() {
-    let (_directory, storage, state, _) = super::create_principal_id().await;
+    let (_directory, storage, state, _) = create_clocked_sqlite_principal_id().await;
     current_follow_up_evidence_matrix(storage.as_ref(), &state, true).await;
 }
 #[tokio::test]
@@ -218,8 +245,13 @@ async fn selected_horizon_state_matrix(
             Some(8 * 86_400),
         ),
     ] {
+        let anchor = if id == "incomplete" {
+            NOW_UNIX_SECS - 180
+        } else {
+            NOW_UNIX_SECS
+        };
         let mut request =
-            cache_keepalive_replace_request(principal, id, NOW_UNIX_SECS, NOW_UNIX_SECS + 300);
+            cache_keepalive_replace_request(principal, id, anchor, NOW_UNIX_SECS + 300);
         request.display_reason = "agent-in-turn".to_owned();
         let mut record = storage
             .replace_from_real_request_fenced(&request, None)
@@ -245,14 +277,10 @@ async fn selected_horizon_state_matrix(
             }
         }
         if id == "in-request" || id == "incomplete" {
-            let wall_now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
             let start = if id == "in-request" {
-                wall_now
+                NOW_UNIX_SECS
             } else {
-                wall_now - 120
+                NOW_UNIX_SECS - 120
             };
             assert!(
                 storage
@@ -555,12 +583,7 @@ async fn current_follow_up_evidence_matrix(
     state: &cc_lb_admin::AdminState,
     overdue_active_only: bool,
 ) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let mut state = state.clone();
-    state.clock = Arc::new(TestClock::new_at_secs(now));
+    let now = cc_lb_clock::unix_secs(state.clock.now());
     for (id, marker_age, renewal_age, expected_state, pending) in [
         ("fresh-paid-request", 0, Some(100), "in_request", true),
         ("expired-marker-live-cache", 120, Some(100), "expired", true),
@@ -653,7 +676,7 @@ async fn current_follow_up_evidence_matrix(
             );
         }
         let list = get(
-            &state,
+            state,
             &format!("/admin/v1/principals/{principal}/cache-keepalive?limit=10"),
         )
         .await;
@@ -669,7 +692,7 @@ async fn current_follow_up_evidence_matrix(
             },
             "{id}: {list}"
         );
-        let detail = get(&state, &keepalive_detail_uri(principal, id)).await;
+        let detail = get(state, &keepalive_detail_uri(principal, id)).await;
         assert_eq!(detail["state"], expected_state, "{id}: {detail}");
         assert_eq!(detail["is_active"], active);
         assert_eq!(detail["is_last_pending"], pending);
@@ -734,7 +757,7 @@ async fn current_follow_up_evidence_matrix(
                 cycle_anchor_ms: None,
             };
             seed_cycle_turn(storage, principal, id, source, now, None, vec![unknown]).await;
-            let detail = get(&state, &keepalive_detail_uri(principal, id)).await;
+            let detail = get(state, &keepalive_detail_uri(principal, id)).await;
             assert_eq!(detail["total_renewals_current_cycle"], 2);
             assert_eq!(detail["retained_renewals"], 3);
             assert_eq!(detail["turns"][0]["pending"], false);
@@ -743,7 +766,7 @@ async fn current_follow_up_evidence_matrix(
             assert_eq!(detail["follow_up_outcomes"]["pending"], 1);
             assert_eq!(detail["follow_up_outcomes"]["unknown"], 1);
             let list = get(
-                &state,
+                state,
                 &format!("/admin/v1/principals/{principal}/cache-keepalive?limit=10"),
             )
             .await;

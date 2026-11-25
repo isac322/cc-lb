@@ -223,7 +223,9 @@ fn lifecycle(
 
 fn principal_view() -> Arc<PrincipalView> {
     let pipeline = Arc::new(RouterPipelineCache {
-        user_filters: vec![Arc::new(SubscriptionPreferenceFilter::new())],
+        user_filters: vec![Arc::new(SubscriptionPreferenceFilter::with_clock(
+            Arc::new(cc_lb_clock::TestClock::new_at_secs(NOW)),
+        ))],
         terminal: TerminalStrategy::FirstPick,
         instantiation_error: None,
         provider_filters: None,

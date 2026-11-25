@@ -1247,6 +1247,7 @@ version = "2.2.1"
 dependencies = [
  "blake3",
  "bytes",
+ "cc-lb-clock",
  "cc-lb-domain",
  "cc-lb-provider-spi",
  "cc-lb-providers",

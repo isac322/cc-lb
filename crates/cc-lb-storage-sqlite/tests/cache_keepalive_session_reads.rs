@@ -3706,3 +3706,150 @@ async fn activity_anchor_uses_full_cycle_and_earliest_usable_snapshot_for_source
         );
     }
 }
+
+#[tokio::test]
+async fn clock_drives_in_request_expiry_and_sessions_last_5m() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_099));
+    let storage = super::common::templated_sqlite_storage(
+        &temp_dir.path().join("clock-in-request.sqlite"),
+        clock.clone(),
+    )
+    .await
+    .expect("initialize sqlite");
+
+    let replace = request("clock-in-request", 1_000, "agent-in-turn");
+    storage
+        .replace_from_real_request_fenced(&replace, None)
+        .await
+        .expect("insert active session");
+    sqlx::query(
+        "UPDATE cache_keepalive_sessions
+         SET status = 'terminal',
+             terminal_reason = 'cancelled',
+             cancel_reason = 'new_request',
+             running_since_unix_secs = 1050,
+             run_at = 1100,
+             last_message_at_ms = 1000000
+         WHERE session_key_hash = ?",
+    )
+    .bind(&replace.session_key_hash)
+    .execute(storage.pool())
+    .await
+    .expect("mark new_request cancel");
+
+    let in_request_query = cc_lb_storage_api::CacheKeepaliveSessionListQuery {
+        principal_id: PRINCIPAL_ID.to_owned(),
+        horizon_start_ms: None,
+        filter: cc_lb_storage_api::CacheKeepaliveSessionFilter::InRequest,
+        cursor: None,
+        limit: 10,
+    };
+    let expired_query = cc_lb_storage_api::CacheKeepaliveSessionListQuery {
+        principal_id: PRINCIPAL_ID.to_owned(),
+        horizon_start_ms: None,
+        filter: cc_lb_storage_api::CacheKeepaliveSessionFilter::Expired,
+        cursor: None,
+        limit: 10,
+    };
+
+    let page_before = storage
+        .list_cache_keepalive_sessions(&in_request_query)
+        .await
+        .expect("list in_request before deadline");
+    assert_eq!(page_before.rows.len(), 1);
+    assert!(!page_before.rows[0].request_incomplete);
+    assert!(
+        storage
+            .list_cache_keepalive_sessions(&expired_query)
+            .await
+            .expect("list expired before deadline")
+            .rows
+            .is_empty()
+    );
+    assert_eq!(
+        storage
+            .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 900_000, None)
+            .await
+            .expect("summary before deadline")
+            .sessions_last_5m,
+        1
+    );
+
+    clock.advance_secs(1);
+    assert!(
+        storage
+            .list_cache_keepalive_sessions(&in_request_query)
+            .await
+            .expect("list in_request after deadline")
+            .rows
+            .is_empty()
+    );
+    let expired_after = storage
+        .list_cache_keepalive_sessions(&expired_query)
+        .await
+        .expect("list expired after deadline");
+    assert_eq!(expired_after.rows.len(), 1);
+    assert!(expired_after.rows[0].request_incomplete);
+    let item = storage
+        .get_cache_keepalive_list_item(PRINCIPAL_ID, &replace.session_key_hash)
+        .await
+        .expect("get list item after deadline")
+        .expect("session list item present");
+    assert!(item.request_incomplete);
+    assert_eq!(
+        storage
+            .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 900_000, None)
+            .await
+            .expect("summary after deadline")
+            .sessions_last_5m,
+        0
+    );
+}
+
+#[tokio::test]
+async fn clock_drives_pending_to_observed_at_open_until_millisecond_boundary() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let clock = Arc::new(cc_lb_clock::TestClock::new_at(
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_569_999),
+    ));
+    let storage = super::common::templated_sqlite_storage(
+        &temp_dir.path().join("clock-open-until.sqlite"),
+        clock.clone(),
+    )
+    .await
+    .expect("initialize sqlite");
+
+    let cycle = Uuid::from_u128(99_301);
+    let mut replace = request("clock-open-until", 1_000, "agent-in-turn");
+    replace.cycle_id = cycle;
+    storage
+        .replace_from_real_request_fenced(&replace, None)
+        .await
+        .expect("insert active session");
+
+    let mut projection =
+        economics_projection("clock-open-until-renewal", Some(cycle), 1_270, "hit", 6_000);
+    projection.evidence[0].session_key_hash = Some(replace.session_key_hash.clone());
+    projection.evidence[0].cycle_anchor_ms = Some(970_000);
+    storage
+        .append_request_event_with_projections(
+            &event("clock-open-until-renewal", 1_270),
+            &projection,
+        )
+        .await
+        .expect("append renewal projection");
+
+    let before = storage
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
+        .await
+        .expect("summary at open_until_ms - 1");
+    assert_eq!(before.evidence_status, "pending");
+
+    clock.advance(std::time::Duration::from_millis(1));
+    let after = storage
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
+        .await
+        .expect("summary at open_until_ms");
+    assert_eq!(after.evidence_status, "observed");
+}

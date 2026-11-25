@@ -216,22 +216,31 @@ impl SchedulerDispatch {
         &self,
         job: OAuthUsagePollCronJob,
     ) -> SchedulerResult<JobOutcome> {
-        let upstream_ids = self.list_oauth_usage_poll_upstream_ids().await?;
+        const OAUTH_USAGE_POLL_CONCURRENCY: usize = 8;
+        use futures_util::StreamExt as _;
+
+        let mut upstream_ids = self.list_oauth_usage_poll_upstream_ids().await?;
         let total = upstream_ids.len();
         let traceparent = job.traceparent.as_deref();
-        let throttle_backoff_secs = self
+        let poll_interval_secs = self
             .config
             .scheduler
             .recurring_jobs
             .get("oauth_usage_poll")
             .map(|cfg| cfg.interval_secs.max(1))
-            .unwrap_or(60)
-            .saturating_mul(2);
-        // Poll upstreams concurrently so one slow/hanging upstream cannot
-        // consume the shared 60s tick budget and starve the rest (the prior
-        // sequential loop did exactly that). Per-call/job timeouts unchanged.
-        let results = futures_util::future::join_all(upstream_ids.into_iter().map(
-            |upstream_id| async move {
+            .unwrap_or(60);
+        let throttle_backoff_secs = poll_interval_secs.saturating_mul(2);
+        rotate_oauth_usage_poll_ids(
+            &mut upstream_ids,
+            job.tick_unix_secs,
+            poll_interval_secs,
+            &self.oauth_usage_poll_rotation,
+            OAUTH_USAGE_POLL_CONCURRENCY,
+        );
+        // Bound concurrent polls across upstreams (matching api_key_usage::POLL_CONCURRENCY)
+        // while rotating the starting slice per tick so slow upstreams never starve the tail.
+        let results: Vec<_> = futures_util::stream::iter(upstream_ids)
+            .map(|upstream_id| async move {
                 (
                     upstream_id,
                     self.poll_and_record_oauth_usage(
@@ -241,9 +250,10 @@ impl SchedulerDispatch {
                     )
                     .await,
                 )
-            },
-        ))
-        .await;
+            })
+            .buffer_unordered(OAUTH_USAGE_POLL_CONCURRENCY)
+            .collect()
+            .await;
         let mut stats = OAuthUsagePollTickStats::default();
         for (upstream_id, result) in results {
             match result {
@@ -501,5 +511,66 @@ impl OAuthUsagePollOutcomeLabel {
             OAuthUsagePollObservation::NetworkFailure { .. } => Self::NetworkFailure,
             OAuthUsagePollObservation::Skip => Self::Skipped,
         }
+    }
+}
+
+fn rotate_oauth_usage_poll_ids(
+    upstream_ids: &mut [Uuid],
+    tick_unix_secs: u64,
+    interval_secs: u64,
+    rotation_state: &parking_lot::Mutex<(Option<u64>, usize)>,
+    concurrency: usize,
+) {
+    if upstream_ids.len() <= 1 || concurrency == 0 {
+        return;
+    }
+    let tick_step = usize::try_from(tick_unix_secs / interval_secs.max(1)).unwrap_or(0);
+    let same_tick_seq = {
+        let mut guard = rotation_state.lock();
+        if guard.0 == Some(tick_unix_secs) {
+            guard.1 = guard.1.wrapping_add(1);
+            guard.1
+        } else {
+            *guard = (Some(tick_unix_secs), 0);
+            0
+        }
+    };
+    let offset = tick_step
+        .wrapping_add(same_tick_seq)
+        .wrapping_mul(concurrency)
+        % upstream_ids.len();
+    upstream_ids.rotate_left(offset);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rotate_oauth_usage_poll_ids;
+    use parking_lot::Mutex;
+    use std::collections::HashSet;
+    use uuid::Uuid;
+
+    #[test]
+    fn oauth_usage_poll_rotation_advances_tail_upstreams_to_first_wave() {
+        let ids: Vec<Uuid> = (1_u128..=17).map(Uuid::from_u128).collect();
+        let state = Mutex::new((None, 0));
+        let mut first_wave_seen = HashSet::new();
+
+        for tick in [0_u64, 60, 120] {
+            let mut slice = ids.clone();
+            rotate_oauth_usage_poll_ids(&mut slice, tick, 60, &state, 8);
+            first_wave_seen.extend(slice.iter().take(8).copied());
+        }
+        assert_eq!(
+            first_wave_seen.len(),
+            ids.len(),
+            "all 17 upstreams must reach the first wave within ceil(17/8)=3 ticks"
+        );
+
+        let mut a = ids.clone();
+        let mut b = ids.clone();
+        let same_tick_state = Mutex::new((None, 0));
+        rotate_oauth_usage_poll_ids(&mut a, 1_800_000_000, 60, &same_tick_state, 8);
+        rotate_oauth_usage_poll_ids(&mut b, 1_800_000_000, 60, &same_tick_state, 8);
+        assert_ne!(a[0], b[0]);
     }
 }

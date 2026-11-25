@@ -369,9 +369,9 @@ mod sqlite {
                 let workers = Workers::start(&backend, ctx, queue, 1).await?;
                 let (expected, attempts) = match case {
                     0..=2 => ("Done", 1),
-                    3..=4 => ("Pending", 1),
+                    3..=4 | 8 => ("Pending", 1),
                     5..=7 => ("Killed", 1),
-                    _ => ("Failed", 3),
+                    _ => ("Killed", 1),
                 };
                 let row = settled(&pool, "matrix", expected, attempts).await?;
                 if expected == "Pending" {
@@ -391,6 +391,46 @@ mod sqlite {
                 }
                 workers.stop().await?;
             }
+        }
+        {
+            let (pool, backend) = database().await?;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let observed = calls.clone();
+            let ctx = context(Arc::new(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Err(SchedulerError::Job("transient handler failure".to_owned()))
+            }));
+            let key = "handler-error-exhaustion";
+            enqueue(&backend, CRON_QUEUE, key, Uuid::new_v4(), None).await?;
+            let workers = Workers::start(&backend, ctx, CRON_QUEUE, 1).await?;
+
+            // RetryClass::Maintenance allows 1 retry (2 total attempts): attempt 1 schedules Pending.
+            let pending = settled(&pool, key, "Pending", 1).await?;
+            pending.assert_pending();
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+            due(&pool, key).await?;
+
+            // Attempt 2 exhausts RetryClass::Maintenance -> Killed with sanitized failure summary.
+            let killed = settled(&pool, key, "Killed", 2).await?;
+            killed.assert_killed();
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            let persisted: serde_json::Value = serde_json::from_str(
+                killed
+                    .last_result
+                    .as_deref()
+                    .context("persisted dead letter result")?,
+            )?;
+            let err_summary = persisted
+                .get("Err")
+                .and_then(serde_json::Value::as_str)
+                .context("persisted Err summary")?;
+            assert!(
+                err_summary.contains("retries exhausted (job_error)")
+                    && err_summary.contains("transient handler failure"),
+                "unexpected persisted retry exhaustion summary: {persisted}"
+            );
+            workers.stop().await?;
         }
         for delay in [Some(Duration::from_secs(30)), None, Some(Duration::ZERO)] {
             let (pool, backend) = database().await?;
@@ -1106,6 +1146,83 @@ mod sqlite {
         })
     }
 
+    #[test]
+    fn sqlite_metrics_record_retries_exhausted_as_terminal_failure_not_panic() -> Result<()> {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                scheduler_metrics::touch_scheduler_metric_handles();
+                let (pool, backend) = database().await?;
+                enqueue(
+                    &backend,
+                    CRON_QUEUE,
+                    "metrics-exhausted",
+                    Uuid::new_v4(),
+                    None,
+                )
+                .await?;
+                let ctx = context(Arc::new(|| {
+                    Err(SchedulerError::JobTimeout {
+                        job_kind: "cron:apalis_housekeeping",
+                        timeout: Duration::from_secs(60),
+                    })
+                }));
+
+                // Attempt 1 enters retry backoff; due() schedules attempt 2 immediately.
+                let workers = Workers::start(&backend, ctx.clone(), CRON_QUEUE, 1).await?;
+                settled(&pool, "metrics-exhausted", "Pending", 1).await?;
+                workers.stop().await?;
+
+                due(&pool, "metrics-exhausted").await?;
+                let workers = Workers::start(&backend, ctx, CRON_QUEUE, 1).await?;
+                let row = settled(&pool, "metrics-exhausted", "Killed", 2).await?;
+                workers.stop().await?;
+                assert!(
+                    row.last_result
+                        .as_deref()
+                        .is_some_and(|raw| raw.contains("retries exhausted (job_timeout)")),
+                    "expected RetriesExhausted summary, got {:?}",
+                    row.last_result
+                );
+
+                let rendered = handle.render();
+                let job = "cron:apalis_housekeeping";
+                assert_eq!(
+                    counter(
+                        &rendered,
+                        scheduler_metrics::JOBS_TOTAL,
+                        &[("job_type", job), ("status", "panicked")]
+                    ),
+                    0.0,
+                    "{rendered}"
+                );
+                assert_eq!(
+                    counter(
+                        &rendered,
+                        scheduler_metrics::JOBS_TOTAL,
+                        &[("job_type", job), ("status", "retry")]
+                    ),
+                    2.0,
+                    "{rendered}"
+                );
+                assert_eq!(
+                    counter(
+                        &rendered,
+                        scheduler_metrics::FAILURES_TOTAL,
+                        &[("job_type", job)]
+                    ),
+                    1.0,
+                    "{rendered}"
+                );
+                Ok(())
+            })
+        })
+    }
+
     #[tokio::test]
     async fn sqlite_housekeeping_retains_killed_for_dlq_window_and_preserves_pending_retry()
     -> Result<()> {
@@ -1554,9 +1671,9 @@ mod postgres {
                 async move {
                     let (expected, attempts) = match case {
                         0 => ("Done", 1),
-                        1 => ("Pending", 1),
+                        1 | 4 => ("Pending", 1),
                         2..=3 => ("Killed", 1),
-                        _ => ("Failed", 3),
+                        _ => ("Killed", 1),
                     };
                     settled(pool, &format!("postgres-matrix-{case}"), expected, attempts).await
                 }
@@ -1565,6 +1682,7 @@ mod postgres {
             states[1].assert_pending();
             states[2].assert_killed();
             states[3].assert_killed();
+            states[4].assert_pending();
             workers.stop().await?;
 
             sqlx::query(

@@ -61,6 +61,7 @@
 //! - Stale + `rejected` + future reset: hard negative (rejection still live).
 //! - Stale + `rejected` + past reset: unknown (rejection expired).
 
+use cc_lb_clock::{ClockHandle, SystemClock, unix_millis};
 use cc_lb_domain::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, CachePricingSummary,
     Principal, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, UpstreamCandidate,
@@ -68,6 +69,8 @@ use cc_lb_domain::{
 };
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RoutingContext};
 use std::cmp::Ordering;
+use std::fmt;
+use std::sync::Arc;
 use uuid::Uuid;
 
 // -- Reason strings surfaced on FilterOutput.reason (log/audit surface). -----
@@ -147,12 +150,31 @@ impl Default for FilterConfig {
 
 // -- Public plugin type. ----------------------------------------------------
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SubscriptionPreferenceFilter;
+#[derive(Clone)]
+pub struct SubscriptionPreferenceFilter {
+    clock: ClockHandle,
+}
+
+impl fmt::Debug for SubscriptionPreferenceFilter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SubscriptionPreferenceFilter")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for SubscriptionPreferenceFilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl SubscriptionPreferenceFilter {
     pub fn new() -> Self {
-        Self
+        Self::with_clock(Arc::new(SystemClock))
+    }
+
+    pub fn with_clock(clock: ClockHandle) -> Self {
+        Self { clock }
     }
 }
 
@@ -164,7 +186,8 @@ impl FilterPlugin for SubscriptionPreferenceFilter {
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
         let config = FilterConfig::default();
-        Ok(evaluate(ctx, candidates, &config))
+        let now_unix_millis = u64::try_from(unix_millis(self.clock.now())).unwrap_or(u64::MAX);
+        Ok(evaluate(ctx, candidates, &config, now_unix_millis))
     }
 
     fn plugin_id(&self) -> Uuid {
@@ -182,6 +205,7 @@ fn evaluate(
     ctx: &RoutingContext,
     candidates: &[UpstreamCandidate],
     config: &FilterConfig,
+    now_unix_millis: u64,
 ) -> FilterOutput {
     let canonical_model = ctx.canonical_model_id.as_str();
     // Preserve the original Anthropic scope even for mixed-provider inputs.
@@ -227,7 +251,9 @@ fn evaluate(
             continue;
         }
         let base_windows = subscription_base_windows(candidate.kind, canonical_model);
-        if let Some(assessment) = assess_candidate(candidate, index, base_windows, config) {
+        if let Some(assessment) =
+            assess_candidate(candidate, index, base_windows, config, now_unix_millis)
+        {
             buckets[assessment.tier as usize].push(assessment);
         }
     }
@@ -396,13 +422,18 @@ fn relevant_base_windows(canonical_model: &str) -> &'static [&'static str] {
 /// Whether the filter's own assessment proves this OAuth candidate unusable
 /// (base quota exhausted with no usable overage). Failover uses it so a
 /// retry never revives an account the filter already knows is exhausted.
-pub fn subscription_hard_blocked(canonical_model: &str, candidate: &UpstreamCandidate) -> bool {
+pub fn subscription_hard_blocked(
+    canonical_model: &str,
+    candidate: &UpstreamCandidate,
+    now_unix_millis: u64,
+) -> bool {
     candidate.kind.credential_kind() == cc_lb_domain::CredentialKind::Oauth
         && assess_candidate(
             candidate,
             0,
             subscription_base_windows(candidate.kind, canonical_model),
             &FilterConfig::default(),
+            now_unix_millis,
         )
         .is_none()
 }
@@ -501,8 +532,9 @@ fn assess_candidate<'a>(
     original_index: usize,
     base_windows: &[&'static str],
     config: &FilterConfig,
+    now_unix_millis: u64,
 ) -> Option<Assessment<'a>> {
-    let now_secs = candidate_estimated_now(candidate);
+    let now_secs = now_unix_millis / 1_000;
 
     let mut positive_count = 0u32;
     let mut warning_positive_count = 0u32;
@@ -565,7 +597,7 @@ fn assess_candidate<'a>(
         weekly_smoothmax(shared_weekly_pressure, model_scoped_weekly_pressure);
     let base_urgency = weighted_smoothmax(five_hour_pressure, effective_weekly_pressure);
 
-    let overage = assess_overage(candidate, config, now_secs);
+    let overage = assess_overage(candidate, config, now_unix_millis);
     let base_proven_blocked = hard_negative_count > 0 || overage.base_exhausted_hint;
 
     let (tier, quota_urgency_5h, quota_urgency_7d, quota_urgency_combined, overage_urgency) =
@@ -834,7 +866,7 @@ fn utilization_signal(util: Option<f64>) -> BaseSignal {
 fn assess_overage(
     candidate: &UpstreamCandidate,
     config: &FilterConfig,
-    now_secs: u64,
+    now_unix_millis: u64,
 ) -> OverageAssessment {
     let overage_snap = find_snapshot(candidate, WINDOW_OVERAGE);
     let unified_snap = find_snapshot(candidate, WINDOW_UNIFIED);
@@ -849,14 +881,8 @@ fn assess_overage(
             .iter()
             .flatten()
             .any(|snapshot| snapshot.credits.is_some());
-    let credit_flag = |field, restrictive| {
-        select_credit_flag(
-            all_snapshots,
-            field,
-            restrictive,
-            now_secs.saturating_mul(1_000),
-        )
-    };
+    let credit_flag =
+        |field, restrictive| select_credit_flag(all_snapshots, field, restrictive, now_unix_millis);
     let has_credits = credit_flag(
         |credits: &cc_lb_domain::SubscriptionQuotaCredits| {
             (credits.has_credits, credits.observations.has_credits)
@@ -1006,20 +1032,6 @@ fn find_snapshot<'a>(
         .subscription_quotas
         .iter()
         .find(|s| s.window == window)
-}
-
-/// Estimate the wall clock for reset-comparison purposes. Both the candidate
-/// observation and the freshest snapshot observation are lower bounds on the
-/// real clock; taking the max minimises the window in which a long-since-
-/// reset quota still appears rejected.
-fn candidate_estimated_now(candidate: &UpstreamCandidate) -> u64 {
-    let snap_max = candidate
-        .subscription_quotas
-        .iter()
-        .filter_map(|s| s.observed_at_unix_millis.map(|m| m / 1_000))
-        .max()
-        .unwrap_or(0);
-    candidate.observed_at_unix_secs.max(snap_max)
 }
 
 // -- Cost-first selection. ---------------------------------------------------

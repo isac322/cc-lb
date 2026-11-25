@@ -4,6 +4,7 @@ use super::{
 };
 use crate::{SqliteStorage, map_sqlx_error};
 use async_trait::async_trait;
+use cc_lb_clock::{unix_millis, unix_secs};
 use cc_lb_storage_api::{
     CacheKeepaliveSessionCursor, CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery,
     CacheKeepaliveSessionPage, CacheKeepaliveSessionReadStore, CacheKeepaliveTurnRecord,
@@ -80,12 +81,21 @@ macro_rules! cycle_anchors_sql {
     };
 }
 
-// The timestamp distinguishes provisional markers from legacy final cancellations.
 const REQUEST_MARKER_SQL: &str = "(status = 'terminal' AND terminal_reason = 'cancelled' AND COALESCE(cancel_reason, '') = 'new_request' AND running_since_unix_secs IS NOT NULL)";
-const REQUEST_FRESH_SQL: &str = "(status = 'terminal' AND terminal_reason = 'cancelled' AND COALESCE(cancel_reason, '') = 'new_request' AND running_since_unix_secs IS NOT NULL AND run_at > CAST(strftime('%s', 'now') AS INTEGER))";
-const REQUEST_INCOMPLETE_SQL: &str = "(status = 'terminal' AND terminal_reason = 'cancelled' AND COALESCE(cancel_reason, '') = 'new_request' AND running_since_unix_secs IS NOT NULL AND run_at <= CAST(strftime('%s', 'now') AS INTEGER))";
 
-const SESSION_ENTRY_SELECT: &str = "
+fn push_request_fresh(builder: &mut QueryBuilder<Sqlite>, now_secs: i64) {
+    builder.push("(status = 'terminal' AND terminal_reason = 'cancelled' AND COALESCE(cancel_reason, '') = 'new_request' AND running_since_unix_secs IS NOT NULL AND run_at > ");
+    builder.push_bind(now_secs);
+    builder.push(")");
+}
+
+fn push_request_incomplete(builder: &mut QueryBuilder<Sqlite>, now_secs: i64) {
+    builder.push("(status = 'terminal' AND terminal_reason = 'cancelled' AND COALESCE(cancel_reason, '') = 'new_request' AND running_since_unix_secs IS NOT NULL AND run_at <= ");
+    builder.push_bind(now_secs);
+    builder.push(")");
+}
+
+const SESSION_ENTRY_SELECT_HEAD: &str = "
 SELECT
     'session' AS entry_source,
     'session:' || session_key_hash AS entry_id,
@@ -99,25 +109,29 @@ SELECT
     refresh_count,
     CASE WHEN status = 'terminal' AND terminal_reason = 'cancelled'
           AND cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL
-          AND run_at > CAST(strftime('%s', 'now') AS INTEGER)
+          AND run_at > ";
+const SESSION_ENTRY_SELECT_AFTER_STATUS: &str = "
          THEN 'in_request' ELSE status END AS status,
     CASE WHEN status = 'terminal' AND terminal_reason = 'cancelled'
           AND cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL
          THEN NULL ELSE enqueue_state END AS enqueue_state,
     CASE WHEN status = 'terminal' AND terminal_reason = 'cancelled'
           AND cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL
-         THEN CASE WHEN run_at > CAST(strftime('%s', 'now') AS INTEGER) THEN NULL ELSE 'stale' END
+         THEN CASE WHEN run_at > ";
+const SESSION_ENTRY_SELECT_AFTER_TERM_REASON: &str = " THEN NULL ELSE 'stale' END
          ELSE terminal_reason END AS terminal_reason,
     CASE WHEN status = 'terminal' AND terminal_reason = 'cancelled'
           AND cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL
          THEN NULL ELSE cancel_reason END AS cancel_reason,
     (status = 'terminal' AND terminal_reason = 'cancelled'
      AND COALESCE(cancel_reason, '') = 'new_request' AND running_since_unix_secs IS NOT NULL
-     AND run_at <= CAST(strftime('%s', 'now') AS INTEGER)) AS request_incomplete,
+     AND run_at <= ";
+const SESSION_ENTRY_SELECT_AFTER_INCOMPLETE: &str = ") AS request_incomplete,
     NULL AS decision,
     CASE WHEN status = 'terminal' AND terminal_reason = 'cancelled'
           AND cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL
-         THEN CASE WHEN run_at > CAST(strftime('%s', 'now') AS INTEGER)
+         THEN CASE WHEN run_at > ";
+const SESSION_ENTRY_SELECT_TAIL: &str = "
                    THEN 'In request'
                    ELSE 'Request did not complete before its deadline' END
          ELSE CASE terminal_reason
@@ -367,8 +381,22 @@ fn push_cancelled_without_turns(builder: &mut QueryBuilder<Sqlite>, horizon_star
     builder.push(")");
 }
 
-fn push_session_entry_select(builder: &mut QueryBuilder<Sqlite>, horizon_start_ms: Option<i64>) {
-    builder.push(SESSION_ENTRY_SELECT).push(", ");
+fn push_session_entry_select(
+    builder: &mut QueryBuilder<Sqlite>,
+    horizon_start_ms: Option<i64>,
+    now_secs: i64,
+) {
+    builder
+        .push(SESSION_ENTRY_SELECT_HEAD)
+        .push_bind(now_secs)
+        .push(SESSION_ENTRY_SELECT_AFTER_STATUS)
+        .push_bind(now_secs)
+        .push(SESSION_ENTRY_SELECT_AFTER_TERM_REASON)
+        .push_bind(now_secs)
+        .push(SESSION_ENTRY_SELECT_AFTER_INCOMPLETE)
+        .push_bind(now_secs)
+        .push(SESSION_ENTRY_SELECT_TAIL)
+        .push(", ");
     push_renewal_in_horizon(builder, horizon_start_ms);
     builder.push(" AS has_renewal_in_horizon");
 }
@@ -437,6 +465,11 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             })
             .transpose()?;
         let branch_limit = i64::from(query.limit.saturating_add(1));
+        let now_secs = u64_to_i64(
+            unix_secs(self.clock().now()),
+            "cache_keepalive_now_secs",
+            "value exceeds i64::MAX",
+        )?;
 
         let include_sessions = true;
         let include_decisions = matches!(
@@ -453,6 +486,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                 &mut builder,
                 query,
                 horizon_start_ms,
+                now_secs,
                 cursor_last_message_at_ms,
                 branch_limit,
             );
@@ -517,8 +551,13 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         principal_id: &str,
         id: &str,
     ) -> StorageResult<Option<cc_lb_storage_api::CacheKeepaliveSessionListItem>> {
+        let now_secs = u64_to_i64(
+            unix_secs(self.clock().now()),
+            "cache_keepalive_now_secs",
+            "value exceeds i64::MAX",
+        )?;
         let mut builder = QueryBuilder::<Sqlite>::new("WITH candidates AS (");
-        push_session_entry_select(&mut builder, None);
+        push_session_entry_select(&mut builder, None, now_secs);
         builder
             .push(" FROM ")
             .push(SESSION_WITH_PURGED_TURNS_SQL)
@@ -817,12 +856,23 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             "cache_keepalive_summary_cutoff_ms",
             "value exceeds i64::MAX",
         )?;
+        let now = self.clock().now();
+        let now_secs = u64_to_i64(
+            unix_secs(now),
+            "cache_keepalive_summary_now_secs",
+            "value exceeds i64::MAX",
+        )?;
+        let now_millis = u64_to_i64(
+            u64::try_from(unix_millis(now)).unwrap_or(u64::MAX),
+            "cache_keepalive_summary_now_millis",
+            "value exceeds i64::MAX",
+        )?;
         let row = sqlx::query(
             "SELECT
                 (SELECT COUNT(*) FROM cache_keepalive_sessions WHERE principal_id = ? AND status = 'active') AS renewing_now,
                 ((SELECT COUNT(*) FROM cache_keepalive_sessions WHERE principal_id = ? AND last_message_at_ms >= ?
                     AND (status <> 'terminal' OR COALESCE(terminal_reason, '') <> 'cancelled'
-                        OR (cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL AND run_at > CAST(strftime('%s', 'now') AS INTEGER))
+                        OR (cancel_reason = 'new_request' AND running_since_unix_secs IS NOT NULL AND run_at > ?)
                         OR EXISTS (
                         SELECT 1 FROM cache_keepalive_turns t_recent
                         WHERE t_recent.principal_id = cache_keepalive_sessions.principal_id
@@ -881,6 +931,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         .bind(principal_id)
         .bind(principal_id)
         .bind(cutoff_ms)
+        .bind(now_secs)
         .bind(horizon_start_ms)
         .bind(horizon_start_ms)
         .bind(principal_id)
@@ -932,7 +983,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                 message: "negative cache keepalive observed evidence count".to_owned(),
             })?;
         let group_rows = sqlx::query(concat!(
-            "WITH params AS (SELECT ? AS principal_id, ? AS horizon_start_ms),
+            "WITH params AS (SELECT ? AS principal_id, ? AS horizon_start_ms, ? AS now_millis),
              eligible AS (
                 SELECT e.*, COALESCE(e.cycle_id, 'legacy:' || COALESCE(e.event_ref, e.evidence_id)) AS cycle_key
                 FROM cache_keepalive_evidence e
@@ -1010,7 +1061,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             cc_lb_storage_api::cache_keepalive_ttl_millis_sql!("m.ttl"),
             " THEN 'not_needed'
                             WHEN m.follow_up_start_ms IS NOT NULL THEN 'saved'
-                            WHEN CAST(strftime('%s', 'now') AS INTEGER) * 1000 < c.open_until_ms THEN 'pending'
+                            WHEN (SELECT now_millis FROM params) < c.open_until_ms THEN 'pending'
                             ELSE 'no_follow_up' END AS outcome,
                        m.in_horizon,
                        MIN(COALESCE(m.follow_up_tokens, 0), COALESCE(m.kept_tokens, 0)) AS avoided_tokens,
@@ -1028,6 +1079,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         ))
         .bind(principal_id)
         .bind(horizon_start_ms)
+        .bind(now_millis)
         .fetch_all(self.pool())
         .await
         .map_err(map_sqlx_error)?;
@@ -1237,10 +1289,11 @@ fn push_session_branch(
     builder: &mut QueryBuilder<Sqlite>,
     query: &CacheKeepaliveSessionListQuery,
     horizon_start_ms: Option<i64>,
+    now_secs: i64,
     cursor_last_message_at_ms: Option<i64>,
     limit: i64,
 ) {
-    push_session_entry_select(builder, horizon_start_ms);
+    push_session_entry_select(builder, horizon_start_ms, now_secs);
     builder
         .push(" FROM ")
         .push(SESSION_WITH_PURGED_TURNS_SQL)
@@ -1257,7 +1310,7 @@ fn push_session_branch(
         CacheKeepaliveSessionFilter::All | CacheKeepaliveSessionFilter::Error => {}
         CacheKeepaliveSessionFilter::Visible | CacheKeepaliveSessionFilter::Tracked => {
             builder.push(" AND (");
-            builder.push(REQUEST_FRESH_SQL);
+            push_request_fresh(builder, now_secs);
             builder.push(" OR NOT ");
             push_cancelled_without_turns(builder, horizon_start_ms);
             builder.push(")");
@@ -1270,7 +1323,7 @@ fn push_session_branch(
         }
         CacheKeepaliveSessionFilter::InRequest => {
             builder.push(" AND ");
-            builder.push(REQUEST_FRESH_SQL);
+            push_request_fresh(builder, now_secs);
         }
         CacheKeepaliveSessionFilter::Capped => {
             builder.push(
@@ -1290,7 +1343,7 @@ fn push_session_branch(
         }
         CacheKeepaliveSessionFilter::Expired => {
             builder.push(" AND (terminal_reason IN ('expired', 'cache_miss') OR ");
-            builder.push(REQUEST_INCOMPLETE_SQL);
+            push_request_incomplete(builder, now_secs);
             builder.push(")");
         }
         CacheKeepaliveSessionFilter::NotTracked => {

@@ -79,13 +79,15 @@ fn built_candidate_cache_score_drives_subscription_preference_component_route() 
         0
     );
 
-    let output = SubscriptionPreferenceFilter::new()
-        .filter(
-            &ctx(body, breakpoints, thread_id),
-            &plugin_principal(),
-            &candidates,
-        )
-        .expect("subscription preference filter succeeds");
+    let output = SubscriptionPreferenceFilter::with_clock(std::sync::Arc::new(
+        cc_lb_clock::TestClock::new_at_secs(TEST_QUOTA_NOW_SECS),
+    ))
+    .filter(
+        &ctx(body, breakpoints, thread_id),
+        &plugin_principal(),
+        &candidates,
+    )
+    .expect("subscription preference filter succeeds");
     let trace = output
         .subscription_preference
         .expect("subscription preference trace present");
@@ -192,13 +194,15 @@ fn moved_cache_control_keeps_warm_upstream_routed_by_cache_hash() {
         "deep warm prefix must drive a non-zero predicted cache read"
     );
 
-    let output = SubscriptionPreferenceFilter::new()
-        .filter(
-            &ctx(turn_two, turn_two_breakpoints, thread_id),
-            &plugin_principal(),
-            &candidates,
-        )
-        .expect("subscription preference filter succeeds");
+    let output = SubscriptionPreferenceFilter::with_clock(std::sync::Arc::new(
+        cc_lb_clock::TestClock::new_at_secs(TEST_QUOTA_NOW_SECS),
+    ))
+    .filter(
+        &ctx(turn_two, turn_two_breakpoints, thread_id),
+        &plugin_principal(),
+        &candidates,
+    )
+    .expect("subscription preference filter succeeds");
     let trace = output
         .subscription_preference
         .expect("subscription preference trace present");

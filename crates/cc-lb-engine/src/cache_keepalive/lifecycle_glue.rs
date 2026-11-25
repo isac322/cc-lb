@@ -850,9 +850,18 @@ impl LifecycleKeepalive {
             }
             return CompletionDisposition::Handled(CancelReason::ZeroTokenRenewalUnsupported);
         }
+        let upstream_kind = view
+            .upstreams_snapshot()
+            .iter()
+            .find(|upstream| upstream.id == upstream_id)
+            .map(|upstream| upstream.kind);
         let snapshot_url = if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
         {
-            KEEPALIVE_OPENAI_SNAPSHOT_URL
+            if upstream_kind == Some(cc_lb_storage_api::upstream::UpstreamKind::OpenaiOauth) {
+                KEEPALIVE_OPENAI_OAUTH_SNAPSHOT_URL
+            } else {
+                KEEPALIVE_OPENAI_SNAPSHOT_URL
+            }
         } else {
             KEEPALIVE_SNAPSHOT_URL
         };
@@ -862,13 +871,7 @@ impl LifecycleKeepalive {
                 RequestSnapshot::capture_openai(
                     url,
                     http::Method::POST,
-                    keepalive_forward_headers(
-                        downstream_headers,
-                        view.upstreams_snapshot()
-                            .iter()
-                            .find(|upstream| upstream.id == upstream_id)
-                            .map(|upstream| upstream.kind),
-                    ),
+                    keepalive_forward_headers(downstream_headers, upstream_kind),
                     shaped_body,
                     upstream_id,
                     ttl,
@@ -1670,6 +1673,7 @@ fn cache_keepalive_principal_uuid(principal_id: &str) -> Uuid {
 
 const KEEPALIVE_SNAPSHOT_URL: &str = "https://api.anthropic.com/v1/messages";
 const KEEPALIVE_OPENAI_SNAPSHOT_URL: &str = "https://api.openai.com/v1/responses";
+const KEEPALIVE_OPENAI_OAUTH_SNAPSHOT_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
 #[cfg(test)]
 mod tests {

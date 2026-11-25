@@ -1763,7 +1763,8 @@ async fn oauth_keepalive_provider_errors_never_publish_success_shaped_usage()
             panic!("non-200 provider response must remain an error");
         };
         assert!(reason.contains(&format!("status={}", status.as_u16())));
-        assert!(reason.contains("provider failure"));
+        assert!(reason.contains("type=api_error"));
+        assert!(!reason.contains("provider failure"));
         assert!(
             fixture.observations.records.lock().is_empty(),
             "{status} must not publish even when its body contains affirmative usage"
@@ -1821,4 +1822,120 @@ async fn keepalive_dispatch_timeout_has_distinct_error() {
         panic!("expected timeout error");
     };
     assert_eq!(error, "renewal timed out after 30s");
+}
+
+#[tokio::test]
+async fn anthropic_gzip_response_decompresses_once_for_classification_and_observation() {
+    use std::io::Write as _;
+
+    struct GzipHttp {
+        body: Bytes,
+    }
+
+    #[async_trait::async_trait]
+    impl UpstreamDispatch for GzipHttp {
+        async fn dispatch(
+            &self,
+            _request: cc_lb_upstream::SignedRequest,
+        ) -> Result<Response<crate::lifecycle::Body>, crate::lifecycle::DispatchError> {
+            let mut response = Response::new(crate::lifecycle::Body::from(self.body.clone()));
+            *response.status_mut() = StatusCode::OK;
+            response.headers_mut().insert(
+                http::header::CONTENT_ENCODING,
+                http::HeaderValue::from_static("gzip"),
+            );
+            Ok(response)
+        }
+    }
+
+    let plain =
+        br#"{"usage":{"cache_read_input_tokens":1200,"cache_creation_input_tokens":0,"input_tokens":25,"output_tokens":4}}"#;
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(plain).unwrap();
+    let gz_bytes = Bytes::from(gz.finish().unwrap());
+
+    let fixture = keepalive_observation_fixture(StatusCode::OK, plain).expect("keepalive fixture");
+    let dispatcher = AnthropicKeepaliveDispatcher::new(
+        fixture.dispatcher.dynamic_view.clone(),
+        fixture.dispatcher.upstream_store.clone(),
+        Arc::new(GzipHttp { body: gz_bytes }),
+        Arc::new(cc_lb_clock::SystemClock),
+    );
+    let outcome = dispatcher
+        .dispatch(
+            &fixture.snapshot,
+            KeepaliveDispatchContext::new(None, "gzip-anthropic".to_owned(), u64::MAX),
+        )
+        .await;
+    let DispatchOutcome::CacheHit { finalization, .. } = outcome else {
+        panic!("gzipped 200 Anthropic response must classify as CacheHit");
+    };
+    assert_eq!(finalization.usage.cache_read_input_tokens, 1200);
+    assert!(
+        !fixture.observations.records.lock().is_empty(),
+        "decompressed body must publish keepalive prompt cache observations"
+    );
+}
+
+#[tokio::test]
+async fn anthropic_malformed_gzip_200_omits_response_text_from_error() {
+    use std::io::Write as _;
+
+    struct MalformedGzipHttp {
+        body: Bytes,
+    }
+
+    #[async_trait::async_trait]
+    impl UpstreamDispatch for MalformedGzipHttp {
+        async fn dispatch(
+            &self,
+            _request: cc_lb_upstream::SignedRequest,
+        ) -> Result<Response<crate::lifecycle::Body>, crate::lifecycle::DispatchError> {
+            let mut response = Response::new(crate::lifecycle::Body::from(self.body.clone()));
+            *response.status_mut() = StatusCode::OK;
+            response.headers_mut().insert(
+                http::header::CONTENT_ENCODING,
+                http::HeaderValue::from_static("gzip"),
+            );
+            Ok(response)
+        }
+    }
+
+    let plain = br#"{"usage": broken-synthetic-prompt-leak-token}"#;
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(plain).unwrap();
+    let gz_bytes = Bytes::from(gz.finish().unwrap());
+
+    let fixture = keepalive_observation_fixture(StatusCode::OK, plain).expect("keepalive fixture");
+    let dispatcher = AnthropicKeepaliveDispatcher::new(
+        fixture.dispatcher.dynamic_view.clone(),
+        fixture.dispatcher.upstream_store.clone(),
+        Arc::new(MalformedGzipHttp { body: gz_bytes }),
+        Arc::new(cc_lb_clock::SystemClock),
+    );
+    let outcome = dispatcher
+        .dispatch(
+            &fixture.snapshot,
+            KeepaliveDispatchContext::new(None, "malformed-gzip-anthropic".to_owned(), u64::MAX),
+        )
+        .await;
+    let DispatchOutcome::Error(error) = outcome else {
+        panic!("malformed gzipped 200 Anthropic response must return DispatchOutcome::Error");
+    };
+    assert!(
+        error.contains("malformed keep-alive JSON response"),
+        "expected fixed/category diagnostic, got: {error}"
+    );
+    assert!(
+        error.contains("category=") && error.contains("line=") && error.contains("column="),
+        "expected structured error category and position, got: {error}"
+    );
+    assert!(
+        !error.contains("broken-synthetic-prompt-leak-token"),
+        "parse error must never include decoded response text: {error}"
+    );
+    assert!(
+        fixture.observations.records.lock().is_empty(),
+        "malformed 200 response must not publish cache observations"
+    );
 }

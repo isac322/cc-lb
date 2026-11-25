@@ -29,6 +29,7 @@ fn fable_pressure_uses_nested_weekly_smoothmax() {
         0,
         relevant_base_windows(FABLE_MODEL),
         &FilterConfig::default(),
+        T0_MILLIS,
     )
     .expect("Fable candidate is assessable");
     let shared_weekly = 0.613_409_262_276_148_f64;
@@ -70,6 +71,7 @@ fn zero_fable_pressure_degenerates_to_shared_weekly_pressure() {
         0,
         relevant_base_windows(FABLE_MODEL),
         &FilterConfig::default(),
+        T0_MILLIS,
     )
     .expect("Fable candidate is assessable");
 

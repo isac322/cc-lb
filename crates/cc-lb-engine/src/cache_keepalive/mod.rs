@@ -21,7 +21,7 @@ mod scheduler;
 mod session_key;
 
 pub use classifier::{HeuristicClassifier, TurnDecision};
-pub use dispatcher::AnthropicKeepaliveDispatcher;
+pub use dispatcher::{AnthropicKeepaliveDispatcher, resolve_keepalive_url};
 pub use lifecycle_glue::{
     CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
     CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest,

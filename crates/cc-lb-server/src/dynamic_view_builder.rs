@@ -22,6 +22,7 @@ use cc_lb_vertex_auth::{
     BearerSource, TokenRegistry, TokenSource, TokenTransport, parse_credential,
     vertex_credential_aad,
 };
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -69,10 +70,36 @@ fn vertex_token_transport() -> Arc<dyn TokenTransport> {
 }
 
 #[derive(Clone)]
+pub struct SharedSignerState {
+    pub(crate) refresh_locks: cc_lb_signer_anthropic_oauth::RefreshLocks,
+    pub(crate) anthropic_forced_generations: cc_lb_signer_anthropic_oauth::ForcedRefreshGenerations,
+    pub(crate) subscription_signer_states:
+        Arc<RwLock<HashMap<Uuid, Arc<RwLock<SubscriptionSignerState>>>>>,
+}
+
+impl Default for SharedSignerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SharedSignerState {
+    pub fn new() -> Self {
+        Self {
+            refresh_locks: cc_lb_signer_anthropic_oauth::new_refresh_locks(),
+            anthropic_forced_generations:
+                cc_lb_signer_anthropic_oauth::new_forced_refresh_generations(),
+            subscription_signer_states: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct VertexState {
     pub(crate) token_registry: Arc<TokenRegistry>,
     pub(crate) token_transport: Arc<dyn TokenTransport>,
     pub(crate) status_sink: Arc<VertexStatusSink>,
+    pub(crate) shared_signer_state: Arc<SharedSignerState>,
 }
 
 impl VertexState {
@@ -81,6 +108,7 @@ impl VertexState {
             token_registry: Arc::new(TokenRegistry::new()),
             token_transport: vertex_token_transport(),
             status_sink: Arc::new(VertexStatusSink::new(store)),
+            shared_signer_state: Arc::new(SharedSignerState::new()),
         }
     }
 }
@@ -250,8 +278,16 @@ pub async fn build_dynamic_view(
         updated_at_unix_secs: unix_secs(clock.now()),
     }));
     let principals = list_principals(stores).await?;
-    let (principal_chains, registered_slot_keys) =
-        build_principal_chains(stores, runtime, data_dir, &principals, &upstreams, &aead).await?;
+    let (principal_chains, registered_slot_keys) = build_principal_chains(
+        stores,
+        runtime,
+        data_dir,
+        &principals,
+        &upstreams,
+        &aead,
+        &clock,
+    )
+    .await?;
     // RFC-0001 gap-analysis #1: sweep any runtime slot whose key is
     // no longer referenced by the freshly-built view. Must run AFTER
     // build_principal_chains succeeds so we don't tear down slots the
@@ -602,6 +638,7 @@ async fn build_principal_chains(
     principals: &[PrincipalRecord],
     upstreams: &[UpstreamRecord],
     aead: &AeadService,
+    clock: &cc_lb_clock::ClockHandle,
 ) -> Result<
     (
         HashMap<String, PrincipalRoutingArtifacts>,
@@ -661,6 +698,7 @@ async fn build_principal_chains(
                 runtime,
                 data_dir,
                 registry: &registry,
+                clock,
             },
             principal,
             router_entries,
@@ -760,6 +798,23 @@ async fn build_principal_chains(
 
         chains.insert(principal.name.clone(), (router, dialect));
     }
+    for upstream in upstreams {
+        if !upstream.enabled || upstream.deleted_at_unix_secs.is_some() {
+            continue;
+        }
+        let Some(plugin_ref) = upstream.warmup_dialect_plugin.as_ref() else {
+            continue;
+        };
+        let Some(registry_entry) = registry.get(&plugin_ref.wasm_registry_id) else {
+            continue;
+        };
+        if !registry_entry_unsupported_slot(registry_entry, PluginSlotKind::Shape) {
+            registered_slot_keys.insert(crate::warmup::dialect::warmup_dialect_slot_key(
+                registry_entry.sha256,
+                &registry_entry.name,
+            ));
+        }
+    }
     Ok((chains, registered_slot_keys))
 }
 
@@ -858,6 +913,7 @@ struct RouterPipelineBuildContext<'a> {
     runtime: &'a Arc<WasmtimeRuntime>,
     data_dir: &'a Path,
     registry: &'a HashMap<Uuid, WasmRegistryEntry>,
+    clock: &'a cc_lb_clock::ClockHandle,
 }
 
 async fn build_router_pipeline(
@@ -872,6 +928,7 @@ async fn build_router_pipeline(
         runtime,
         data_dir,
         registry,
+        clock,
     } = context;
     if router_entries.is_empty() {
         return Ok(None);
@@ -914,7 +971,8 @@ async fn build_router_pipeline(
         };
         if registry_entry.is_builtin {
             if registry_entry.id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
-                let filter: Arc<dyn FilterPlugin> = Arc::new(SubscriptionPreferenceFilter::new());
+                let filter: Arc<dyn FilterPlugin> =
+                    Arc::new(SubscriptionPreferenceFilter::with_clock(clock.clone()));
                 for provider in providers {
                     provider_filters
                         .get_mut(*provider)
@@ -1217,10 +1275,15 @@ impl DbCompositeSignerFactory {
             upstream_store,
             aead,
             lazy_refresher,
-            refresh_locks: cc_lb_signer_anthropic_oauth::new_refresh_locks(),
-            anthropic_forced_generations:
-                cc_lb_signer_anthropic_oauth::new_forced_refresh_generations(),
-            subscription_signer_states: Arc::new(RwLock::new(HashMap::new())),
+            refresh_locks: vertex_state.shared_signer_state.refresh_locks.clone(),
+            anthropic_forced_generations: vertex_state
+                .shared_signer_state
+                .anthropic_forced_generations
+                .clone(),
+            subscription_signer_states: vertex_state
+                .shared_signer_state
+                .subscription_signer_states
+                .clone(),
             router_chosen_upstream_name: None,
             clock,
             gemini_config: Arc::new(oauth_configs.0),
@@ -1249,6 +1312,137 @@ impl DbCompositeSignerFactory {
             token_transport: self.token_transport.clone(),
             vertex_sources: self.vertex_sources.clone(),
             vertex_status_sink: self.vertex_status_sink.clone(),
+        }
+    }
+    fn reconcile_subscription_signer_state(
+        &self,
+        shared: &Arc<RwLock<SubscriptionSignerState>>,
+        record: &UpstreamRecord,
+        tokens: &cc_lb_aead::OAuthTokenBundle,
+        signer: Arc<dyn Signer>,
+    ) -> Result<(), SignerError> {
+        let mut guard = shared.write();
+        let token_is_newer = record.oauth_token_generation > guard.oauth_token_generation;
+        let target_is_newer = record.revision > guard.spec_revision
+            || (record.revision == guard.spec_revision && record.base_url != guard.base_url);
+        if record.revision < guard.spec_revision {
+            if token_is_newer {
+                let mut monotonic_record = record.clone();
+                monotonic_record.revision = guard.spec_revision;
+                monotonic_record.base_url = guard.base_url.clone();
+                guard.signer = build_subscription_signer_with_policy(
+                    &monotonic_record,
+                    tokens,
+                    self.clock.clone(),
+                    Some(&self.gemini_config),
+                    Some(&self.antigravity_config),
+                    true,
+                )?;
+                let previous = std::mem::replace(
+                    &mut guard.access_token,
+                    secrecy::SecretString::new(tokens.access_token.clone().into_boxed_str()),
+                );
+                if previous.expose_secret() != tokens.access_token.as_str()
+                    && !guard
+                        .historical_access_tokens
+                        .iter()
+                        .any(|item| item.expose_secret() == previous.expose_secret())
+                {
+                    guard.historical_access_tokens.push(previous);
+                }
+                guard.expires_at_unix_secs = tokens.expires_at_unix_secs;
+                guard.forced_refresh_generation = None;
+                guard.oauth_token_generation = record.oauth_token_generation;
+                guard.oauth_profile = tokens.oauth_profile;
+                guard.project_id = tokens.project_id.clone();
+                guard.account_id = tokens.account_id.clone();
+                guard.never_refresh = tokens.never_refresh;
+            }
+        } else if token_is_newer {
+            guard.signer = signer;
+            let previous = std::mem::replace(
+                &mut guard.access_token,
+                secrecy::SecretString::new(tokens.access_token.clone().into_boxed_str()),
+            );
+            if previous.expose_secret() != tokens.access_token.as_str()
+                && !guard
+                    .historical_access_tokens
+                    .iter()
+                    .any(|item| item.expose_secret() == previous.expose_secret())
+            {
+                guard.historical_access_tokens.push(previous);
+            }
+            guard.expires_at_unix_secs = tokens.expires_at_unix_secs;
+            guard.forced_refresh_generation = None;
+            guard.oauth_token_generation = record.oauth_token_generation;
+            guard.spec_revision = record.revision;
+            guard.base_url = record.base_url.clone();
+            guard.oauth_profile = tokens.oauth_profile;
+            guard.project_id = tokens.project_id.clone();
+            guard.account_id = tokens.account_id.clone();
+            guard.never_refresh = tokens.never_refresh;
+        } else if target_is_newer {
+            if record.oauth_token_generation == guard.oauth_token_generation {
+                guard.signer = signer;
+            } else {
+                let newer_tokens = cc_lb_aead::OAuthTokenBundle {
+                    oauth_profile: guard.oauth_profile,
+                    access_token: guard.access_token.expose_secret().to_owned(),
+                    refresh_token: String::new(),
+                    expires_at_unix_secs: guard.expires_at_unix_secs,
+                    refresh_token_expires_at_unix_secs: None,
+                    account_id: guard.account_id.clone(),
+                    project_id: guard.project_id.clone(),
+                    scopes: Vec::new(),
+                    never_refresh: guard.never_refresh,
+                };
+                guard.signer = build_subscription_signer_with_policy(
+                    record,
+                    &newer_tokens,
+                    self.clock.clone(),
+                    Some(&self.gemini_config),
+                    Some(&self.antigravity_config),
+                    true,
+                )?;
+            }
+            guard.spec_revision = record.revision;
+            guard.base_url = record.base_url.clone();
+        }
+        Ok(())
+    }
+
+    fn insert_or_reconcile_subscription_signer_state(
+        &self,
+        record: &UpstreamRecord,
+        tokens: &cc_lb_aead::OAuthTokenBundle,
+        signer: Arc<dyn Signer>,
+    ) -> Result<Arc<RwLock<SubscriptionSignerState>>, SignerError> {
+        let mut states = self.subscription_signer_states.write();
+        match states.entry(record.id) {
+            Entry::Vacant(entry) => Ok(entry
+                .insert(Arc::new(RwLock::new(SubscriptionSignerState {
+                    signer,
+                    access_token: secrecy::SecretString::new(
+                        tokens.access_token.clone().into_boxed_str(),
+                    ),
+                    historical_access_tokens: Vec::new(),
+                    expires_at_unix_secs: tokens.expires_at_unix_secs,
+                    forced_refresh_generation: None,
+                    oauth_token_generation: record.oauth_token_generation,
+                    spec_revision: record.revision,
+                    base_url: record.base_url.clone(),
+                    oauth_profile: tokens.oauth_profile,
+                    project_id: tokens.project_id.clone(),
+                    account_id: tokens.account_id.clone(),
+                    never_refresh: tokens.never_refresh,
+                })))
+                .clone()),
+            Entry::Occupied(entry) => {
+                let shared = entry.get().clone();
+                drop(states);
+                self.reconcile_subscription_signer_state(&shared, record, tokens, signer)?;
+                Ok(shared)
+            }
         }
     }
 }
@@ -1363,24 +1557,14 @@ impl SignerFactory for DbCompositeSignerFactory {
                             .get(&record.id)
                             .cloned();
                         if let Some(shared) = existing {
+                            self.reconcile_subscription_signer_state(
+                                &shared, record, &tokens, signer,
+                            )?;
                             shared
                         } else {
-                            let initial_signer = signer;
-                            let mut states = self.subscription_signer_states.write();
-                            states
-                                .entry(record.id)
-                                .or_insert_with(|| {
-                                    Arc::new(RwLock::new(SubscriptionSignerState {
-                                        signer: initial_signer,
-                                        access_token: secrecy::SecretString::new(
-                                            tokens.access_token.clone().into_boxed_str(),
-                                        ),
-                                        historical_access_tokens: Vec::new(),
-                                        expires_at_unix_secs: tokens.expires_at_unix_secs,
-                                        forced_refresh_generation: None,
-                                    }))
-                                })
-                                .clone()
+                            self.insert_or_reconcile_subscription_signer_state(
+                                record, &tokens, signer,
+                            )?
                         }
                     };
                     let attempted_access_token = RwLock::new(secrecy::SecretString::new(
@@ -1732,12 +1916,19 @@ impl Signer for PersistedRefreshedSubscriptionSigner {
     }
 }
 
-struct SubscriptionSignerState {
+pub(crate) struct SubscriptionSignerState {
     signer: Arc<dyn Signer>,
     access_token: secrecy::SecretString,
     historical_access_tokens: Vec<secrecy::SecretString>,
     expires_at_unix_secs: u64,
     forced_refresh_generation: Option<u64>,
+    oauth_token_generation: u64,
+    spec_revision: u64,
+    base_url: Option<url::Url>,
+    oauth_profile: cc_lb_aead::GeminiOAuthProfile,
+    project_id: Option<String>,
+    account_id: Option<String>,
+    never_refresh: bool,
 }
 
 fn scrub_secret_owned(secret: &str, text: &str) -> Option<String> {
@@ -1839,10 +2030,90 @@ impl RefreshingSubscriptionSigner {
     fn update_state(
         &self,
         signer: Arc<dyn Signer>,
+        record: &UpstreamRecord,
         tokens: &cc_lb_aead::OAuthTokenBundle,
         forced_refresh_generation: Option<u64>,
-    ) -> Arc<dyn Signer> {
+        oauth_token_generation: u64,
+    ) -> Result<Arc<dyn Signer>, SignerError> {
         let mut state = self.state.write();
+        let target_is_older = record.revision < state.spec_revision;
+        let target_is_newer = record.revision > state.spec_revision
+            || (record.revision == state.spec_revision && record.base_url != state.base_url);
+        let token_is_older = oauth_token_generation < state.oauth_token_generation;
+        if target_is_older
+            && (token_is_older
+                || (oauth_token_generation == state.oauth_token_generation
+                    && tokens.access_token.as_str() == state.access_token.expose_secret()))
+        {
+            return Ok(state.signer.clone());
+        }
+
+        if target_is_older {
+            // Preserve the newer installed target endpoint while adopting newer tokens.
+            let mut monotonic_record = record.clone();
+            monotonic_record.revision = state.spec_revision;
+            monotonic_record.base_url = state.base_url.clone();
+            let rebuilt = build_subscription_signer_with_policy(
+                &monotonic_record,
+                tokens,
+                self.clock.clone(),
+                Some(&self.gemini_config),
+                Some(&self.antigravity_config),
+                true,
+            )?;
+            state.signer = rebuilt.clone();
+            let previous_access_token = std::mem::replace(
+                &mut state.access_token,
+                secrecy::SecretString::new(tokens.access_token.clone().into_boxed_str()),
+            );
+            if previous_access_token.expose_secret() != tokens.access_token.as_str()
+                && !state.historical_access_tokens.iter().any(|existing| {
+                    existing.expose_secret() == previous_access_token.expose_secret()
+                })
+            {
+                state.historical_access_tokens.push(previous_access_token);
+            }
+            state.expires_at_unix_secs = tokens.expires_at_unix_secs;
+            state.forced_refresh_generation = forced_refresh_generation;
+            state.oauth_token_generation = oauth_token_generation;
+            state.oauth_profile = tokens.oauth_profile;
+            state.project_id = tokens.project_id.clone();
+            state.account_id = tokens.account_id.clone();
+            state.never_refresh = tokens.never_refresh;
+            return Ok(rebuilt);
+        }
+
+        if token_is_older {
+            if !target_is_newer {
+                return Ok(state.signer.clone());
+            }
+            // Newer target revision arrived with an older token generation: preserve newer token
+            // material while rebuilding the signer against the newer target endpoint.
+            let newer_tokens = cc_lb_aead::OAuthTokenBundle {
+                oauth_profile: state.oauth_profile,
+                access_token: state.access_token.expose_secret().to_owned(),
+                refresh_token: String::new(),
+                expires_at_unix_secs: state.expires_at_unix_secs,
+                refresh_token_expires_at_unix_secs: None,
+                account_id: state.account_id.clone(),
+                project_id: state.project_id.clone(),
+                scopes: Vec::new(),
+                never_refresh: state.never_refresh,
+            };
+            let rebuilt = build_subscription_signer_with_policy(
+                record,
+                &newer_tokens,
+                self.clock.clone(),
+                Some(&self.gemini_config),
+                Some(&self.antigravity_config),
+                true,
+            )?;
+            state.signer = rebuilt.clone();
+            state.spec_revision = record.revision;
+            state.base_url = record.base_url.clone();
+            return Ok(rebuilt);
+        }
+
         state.signer = signer.clone();
         let previous_access_token = std::mem::replace(
             &mut state.access_token,
@@ -1858,7 +2129,14 @@ impl RefreshingSubscriptionSigner {
         }
         state.expires_at_unix_secs = tokens.expires_at_unix_secs;
         state.forced_refresh_generation = forced_refresh_generation;
-        signer
+        state.oauth_token_generation = oauth_token_generation;
+        state.spec_revision = record.revision;
+        state.base_url = record.base_url.clone();
+        state.oauth_profile = tokens.oauth_profile;
+        state.project_id = tokens.project_id.clone();
+        state.account_id = tokens.account_id.clone();
+        state.never_refresh = tokens.never_refresh;
+        Ok(signer)
     }
 
     fn set_attempted_access_token(&self, access_token: &str) {
@@ -1884,17 +2162,26 @@ impl RefreshingSubscriptionSigner {
         if usable {
             let stored_token_is_newer =
                 tokens.access_token.as_str() != self.attempted_access_token.read().expose_secret();
-            let (state_matches_stored, state_is_usable, current_signer, state_forced_generation) = {
+            let (
+                state_matches_stored,
+                state_is_usable,
+                current_signer,
+                state_forced_generation,
+                state_target_matches,
+            ) = {
                 let state = self.state.read();
                 (
                     tokens.access_token.as_str() == state.access_token.expose_secret(),
                     state.expires_at_unix_secs > unix_secs(self.clock.now()).saturating_add(30),
                     state.signer.clone(),
                     state.forced_refresh_generation,
+                    record.revision < state.spec_revision
+                        || (record.revision == state.spec_revision
+                            && record.base_url == state.base_url),
                 )
             };
             if stored_token_is_newer {
-                if state_matches_stored {
+                if state_matches_stored && state_target_matches {
                     self.set_attempted_access_token(&tokens.access_token);
                     let forced = state_forced_generation
                         .filter(|generation| *generation == record.oauth_token_generation);
@@ -1909,11 +2196,41 @@ impl RefreshingSubscriptionSigner {
                     true,
                 )?;
                 self.set_attempted_access_token(&tokens.access_token);
-                return Ok((self.update_state(signer, &tokens, None), None));
+                return Ok((
+                    self.update_state(
+                        signer,
+                        &record,
+                        &tokens,
+                        None,
+                        record.oauth_token_generation,
+                    )?,
+                    None,
+                ));
             }
             if !force && state_is_usable {
+                if state_target_matches {
+                    self.set_attempted_access_token(&tokens.access_token);
+                    return Ok((current_signer, None));
+                }
+                let signer = build_subscription_signer_with_policy(
+                    &record,
+                    &tokens,
+                    self.clock.clone(),
+                    Some(&self.gemini_config),
+                    Some(&self.antigravity_config),
+                    true,
+                )?;
                 self.set_attempted_access_token(&tokens.access_token);
-                return Ok((current_signer, None));
+                return Ok((
+                    self.update_state(
+                        signer,
+                        &record,
+                        &tokens,
+                        None,
+                        record.oauth_token_generation,
+                    )?,
+                    None,
+                ));
             }
         }
         self.refresh_handle
@@ -1939,7 +2256,13 @@ impl RefreshingSubscriptionSigner {
         let forced_generation = force.then_some(record.oauth_token_generation);
         self.set_attempted_access_token(&tokens.access_token);
         Ok((
-            self.update_state(signer, &tokens, forced_generation),
+            self.update_state(
+                signer,
+                &record,
+                &tokens,
+                forced_generation,
+                record.oauth_token_generation,
+            )?,
             forced_generation,
         ))
     }
@@ -2464,6 +2787,7 @@ mod tests {
                 .await;
         attach_dual_role_provider(&storage, principal.id, registry, PluginSlotKind::Shape).await;
         let aead = AeadService::from_master_key([19; 32]);
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
         let mut previous_keys = None;
         for _ in 0..2 {
             let (chains, keys) = build_principal_chains(
@@ -2473,6 +2797,7 @@ mod tests {
                 std::slice::from_ref(&principal),
                 std::slice::from_ref(&upstream),
                 &aead,
+                &clock,
             )
             .await
             .expect("dual-role build");
@@ -2518,6 +2843,7 @@ mod tests {
             attach_dual_role_provider(&storage, principal.id, registry, PluginSlotKind::Router)
                 .await;
         let aead = AeadService::from_master_key([19; 32]);
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
         let (chains, filter_keys) = build_principal_chains(
             &stores,
             &runtime,
@@ -2525,6 +2851,7 @@ mod tests {
             std::slice::from_ref(&principal),
             std::slice::from_ref(&upstream),
             &aead,
+            &clock,
         )
         .await
         .expect("filter-only build");
@@ -2543,6 +2870,7 @@ mod tests {
                 std::slice::from_ref(&principal),
                 std::slice::from_ref(&upstream),
                 &aead,
+                &clock,
             )
             .await
             .expect("filter then shape build");
@@ -2591,6 +2919,7 @@ mod tests {
                     .await;
             let principals = [principal, sibling];
             let aead = AeadService::from_master_key([19; 32]);
+            let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
             let (chains, original_keys) = build_principal_chains(
                 &stores,
                 &runtime,
@@ -2598,6 +2927,7 @@ mod tests {
                 &principals,
                 std::slice::from_ref(&upstream),
                 &aead,
+                &clock,
             )
             .await
             .expect("initial detach build");
@@ -2631,6 +2961,7 @@ mod tests {
                 &principals,
                 std::slice::from_ref(&upstream),
                 &aead,
+                &clock,
             )
             .await
             .expect("post-detach build");
@@ -2823,6 +3154,7 @@ mod tests {
             .await
             .expect("response chain entry");
         let upstreams = [anthropic, openai];
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
         let (chains, _) = build_principal_chains(
             &stores,
             &runtime,
@@ -2830,6 +3162,7 @@ mod tests {
             std::slice::from_ref(&principal),
             &upstreams,
             &AeadService::from_master_key([19; 32]),
+            &clock,
         )
         .await
         .expect("real principal chains");
@@ -3074,6 +3407,7 @@ mod tests {
         let gemini_id = gemini.id;
         let principals = vec![openai_principal, gemini_principal, noop_principal];
         let upstreams = vec![anthropic, openai, gemini];
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
         let (chains, _) = build_principal_chains(
             &stores,
             &runtime,
@@ -3081,6 +3415,7 @@ mod tests {
             &principals,
             &upstreams,
             &AeadService::from_master_key([19; 32]),
+            &clock,
         )
         .await
         .expect("frame principal chains");
@@ -3494,6 +3829,7 @@ mod tests {
             .map(|entry| (entry.id, entry))
             .collect();
 
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
         let mut slot_keys = HashSet::new();
         let pipeline = build_router_pipeline(
             RouterPipelineBuildContext {
@@ -3501,6 +3837,7 @@ mod tests {
                 runtime: &runtime,
                 data_dir: dir.path(),
                 registry: &registry,
+                clock: &clock,
             },
             &principal,
             router_entries,
@@ -5983,5 +6320,382 @@ mod tests {
                 std::borrow::Cow::Borrowed("clean upstream error")
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn shared_subscription_signer_state_invalidates_on_base_url_change_without_generation_bump()
+     {
+        let (_dir, storage) = storage_fixture(49).await;
+        let aead = Arc::new(AeadService::from_master_key([19; 32]));
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let mut tokens = expired_tokens();
+        tokens.access_token = "gemini-tok-gen1".to_owned();
+        tokens.expires_at_unix_secs = 1_900_000_000;
+        let record_v1 = oauth_record(
+            &storage,
+            &aead,
+            "gemini-target-change",
+            UpstreamKind::GeminiOauth,
+            tokens,
+            Some("http://old-target.invalid/gateway/v1internal"),
+        )
+        .await;
+        let handle: Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle> =
+            Arc::new(DynamicRefreshHandle {
+                storage: storage.clone(),
+                aead: aead.clone(),
+                refreshed_access_token: "gemini-tok-gen2".to_owned(),
+                calls: AtomicUsize::new(0),
+                fail: false,
+                gate: None,
+            });
+        let vertex_state = Arc::new(VertexState::new(storage.clone()));
+        let make_factory = |rec: UpstreamRecord| {
+            DbCompositeSignerFactory::new_with_vertex_state(
+                vec![rec.clone()],
+                storage.clone(),
+                aead.clone(),
+                Some(handle.clone()),
+                clock.clone(),
+                (Default::default(), Default::default()),
+                (vertex_state.clone(), Arc::new(HashMap::new())),
+            )
+            .with_router_choice_state(rec.name)
+        };
+        let gemini_req = |catalog: bool| {
+            let mut shaped = shaped_request();
+            shaped.set_url(
+                if catalog {
+                    "https://generativelanguage.googleapis.com/v1beta/models"
+                } else {
+                    "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro:generateContent"
+                }
+                .parse()
+                .expect("url"),
+            );
+            if catalog {
+                shaped.set_method(http::Method::GET);
+                shaped.set_body(bytes::Bytes::new());
+            } else {
+                shaped.set_body(bytes::Bytes::from_static(br#"{"contents":[]}"#));
+            }
+            shaped
+        };
+
+        let upstream = Upstream::GeminiDirect { base_url: None };
+        let factory_v1 = make_factory(record_v1.clone());
+        let signer_v1 = factory_v1.build(&upstream).await.expect("v1 signer");
+        let signed_v1_content = cc_lb_upstream::sign_request(signer_v1.as_ref(), gemini_req(false))
+            .await
+            .expect("sign v1 content");
+        let signed_v1_catalog = cc_lb_upstream::sign_request(signer_v1.as_ref(), gemini_req(true))
+            .await
+            .expect("sign v1 catalog");
+        assert!(
+            signed_v1_content
+                .url()
+                .as_str()
+                .starts_with("http://old-target.invalid/gateway/v1internal:generateContent")
+        );
+        assert!(
+            signed_v1_catalog
+                .url()
+                .as_str()
+                .starts_with("http://old-target.invalid/gateway/v1internal:fetchAvailableModels")
+        );
+
+        // Spec update changes base_url (advancing revision) while oauth_token_generation is unchanged.
+        let record_v2 = UpstreamStore::update(
+            storage.as_ref(),
+            record_v1.id,
+            record_v1.revision,
+            UpstreamUpdate {
+                base_url: Some(Some(
+                    "http://new-target.invalid/custom/v1internal"
+                        .parse()
+                        .expect("new url"),
+                )),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("update base_url");
+        assert_eq!(
+            record_v2.oauth_token_generation,
+            record_v1.oauth_token_generation
+        );
+        assert!(record_v2.revision > record_v1.revision);
+
+        let factory_v2 = make_factory(record_v2.clone());
+        let signer_v2 = factory_v2.build(&upstream).await.expect("v2 signer");
+        let signed_v2_content = cc_lb_upstream::sign_request(signer_v2.as_ref(), gemini_req(false))
+            .await
+            .expect("sign v2 content");
+        let signed_v2_catalog = cc_lb_upstream::sign_request(signer_v2.as_ref(), gemini_req(true))
+            .await
+            .expect("sign v2 catalog");
+        assert!(
+            signed_v2_content
+                .url()
+                .as_str()
+                .starts_with("http://new-target.invalid/custom/v1internal:generateContent")
+        );
+        assert!(
+            signed_v2_catalog
+                .url()
+                .as_str()
+                .starts_with("http://new-target.invalid/custom/v1internal:fetchAvailableModels")
+        );
+
+        // Even when shared state already holds a newer rotated token, a stale-generation spec
+        // rebuild with a newer base_url preserves the newer token AND switches the target endpoints.
+        if let Some(shared) = vertex_state
+            .shared_signer_state
+            .subscription_signer_states
+            .read()
+            .get(&record_v2.id)
+            .cloned()
+        {
+            let mut guard = shared.write();
+            guard.oauth_token_generation = record_v2.oauth_token_generation + 1;
+            guard.access_token = secrecy::SecretString::new("gemini-tok-gen2".to_owned().into());
+        }
+        let mut record_v3 = record_v2.clone();
+        record_v3.revision += 1;
+        record_v3.base_url = Some(
+            "http://third-target.invalid/edge/v1internal"
+                .parse()
+                .expect("third url"),
+        );
+        let factory_v3 = make_factory(record_v3.clone());
+        let signer_v3 = factory_v3.build(&upstream).await.expect("v3 signer");
+        let signed_v3_content = cc_lb_upstream::sign_request(signer_v3.as_ref(), gemini_req(false))
+            .await
+            .expect("sign v3 content");
+        assert!(
+            signed_v3_content
+                .url()
+                .as_str()
+                .starts_with("http://third-target.invalid/edge/v1internal:generateContent")
+        );
+        assert_eq!(
+            signed_v3_content.headers().get(http::header::AUTHORIZATION),
+            Some(&http::HeaderValue::from_static("Bearer gemini-tok-gen2"))
+        );
+
+        // An overlapping request holding the older factory_v1 must never downgrade shared state
+        // back to v1's base_url or spec_revision once revision 3 has been installed.
+        let signer_v1_late = factory_v1
+            .build(&upstream)
+            .await
+            .expect("stale v1 signer build");
+        let signed_v1_late =
+            cc_lb_upstream::sign_request(signer_v1_late.as_ref(), gemini_req(false))
+                .await
+                .expect("sign with late v1 signer");
+        assert!(
+            signed_v1_late
+                .url()
+                .as_str()
+                .starts_with("http://third-target.invalid/edge/v1internal:generateContent"),
+            "late v1 build must not regress URL: {}",
+            signed_v1_late.url()
+        );
+        let signed_v3_after = cc_lb_upstream::sign_request(signer_v3.as_ref(), gemini_req(false))
+            .await
+            .expect("re-sign v3 content after stale v1 build");
+        assert!(
+            signed_v3_after
+                .url()
+                .as_str()
+                .starts_with("http://third-target.invalid/edge/v1internal:generateContent"),
+            "v3 signer must retain v3 endpoint after stale v1 build: {}",
+            signed_v3_after.url()
+        );
+        assert_eq!(
+            signed_v3_after.headers().get(http::header::AUTHORIZATION),
+            Some(&http::HeaderValue::from_static("Bearer gemini-tok-gen2"))
+        );
+
+        // Likewise, RefreshingSubscriptionSigner::update_state must keep target revision
+        // monotonic when called with an older record revision.
+        let (_, record_v1_tokens) =
+            cc_lb_storage_api::UpstreamStore::get_by_id(&*storage, record_v1.id)
+                .await
+                .expect("load record")
+                .expect("record exists")
+                .oauth_credentials
+                .expect("creds")
+                .decrypt(&aead, record_v1.id.as_bytes())
+                .map(|t| (record_v1.id, t))
+                .expect("decrypt");
+        let stale_refresh_handle = RefreshingSubscriptionSigner {
+            state: vertex_state
+                .shared_signer_state
+                .subscription_signer_states
+                .read()
+                .get(&record_v3.id)
+                .expect("shared state exists")
+                .clone(),
+            store: storage.clone(),
+            aead: aead.clone(),
+            record: record_v1.clone(),
+            clock: clock.clone(),
+            gemini_config: Default::default(),
+            antigravity_config: Default::default(),
+            refresh_handle: handle.clone(),
+            refresh_locks: Arc::new(Default::default()),
+            attempted_access_token: RwLock::new(secrecy::SecretString::new(
+                "gemini-tok-gen1".to_owned().into_boxed_str(),
+            )),
+        };
+        let returned_signer = stale_refresh_handle
+            .update_state(
+                signer_v1,
+                &record_v1,
+                &record_v1_tokens,
+                None,
+                record_v1.oauth_token_generation,
+            )
+            .expect("monotonic update_state succeeds");
+        let signed_after_stale_refresh =
+            cc_lb_upstream::sign_request(returned_signer.as_ref(), gemini_req(false))
+                .await
+                .expect("sign after stale refresh update_state");
+        assert!(
+            signed_after_stale_refresh
+                .url()
+                .as_str()
+                .starts_with("http://third-target.invalid/edge/v1internal:generateContent"),
+            "stale update_state must not regress v3 target: {}",
+            signed_after_stale_refresh.url()
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_insert_reconciles_newer_spec_revision_when_older_wins_entry() {
+        let (_dir, storage) = storage_fixture(50).await;
+        let aead = Arc::new(AeadService::from_master_key([23; 32]));
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let mut tokens = expired_tokens();
+        tokens.access_token = "gemini-concurrent-tok".to_owned();
+        tokens.expires_at_unix_secs = 1_900_000_000;
+        let record_v1 = oauth_record(
+            &storage,
+            &aead,
+            "gemini-concurrent-insert",
+            UpstreamKind::GeminiOauth,
+            tokens,
+            Some("http://old-race.invalid/gateway/v1internal"),
+        )
+        .await;
+        let handle: Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle> =
+            Arc::new(DynamicRefreshHandle {
+                storage: storage.clone(),
+                aead: aead.clone(),
+                refreshed_access_token: "gemini-concurrent-tok-2".to_owned(),
+                calls: AtomicUsize::new(0),
+                fail: false,
+                gate: None,
+            });
+        let vertex_state = Arc::new(VertexState::new(storage.clone()));
+        let make_factory = |rec: UpstreamRecord| {
+            DbCompositeSignerFactory::new_with_vertex_state(
+                vec![rec.clone()],
+                storage.clone(),
+                aead.clone(),
+                Some(handle.clone()),
+                clock.clone(),
+                (Default::default(), Default::default()),
+                (vertex_state.clone(), Arc::new(HashMap::new())),
+            )
+            .with_router_choice_state(rec.name)
+        };
+        let upstream = Upstream::GeminiDirect { base_url: None };
+
+        // Older view R wins the initial Entry::Vacant insert first.
+        let factory_r1 = make_factory(record_v1.clone());
+        let signer_r1 = factory_r1.build(&upstream).await.expect("r1 signer");
+
+        // Newer view R+1 also observed the initial read miss and now hits Entry::Occupied.
+        let record_v2 = UpstreamStore::update(
+            storage.as_ref(),
+            record_v1.id,
+            record_v1.revision,
+            UpstreamUpdate {
+                base_url: Some(Some(
+                    "http://new-race.invalid/custom/v1internal"
+                        .parse()
+                        .expect("new url"),
+                )),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("update base_url");
+        let tokens_v1 = record_v1
+            .oauth_credentials
+            .as_ref()
+            .expect("v1 creds")
+            .decrypt(&aead, record_v1.id.as_bytes())
+            .expect("decrypt v1");
+        let tokens_v2 = record_v2
+            .oauth_credentials
+            .as_ref()
+            .expect("v2 creds")
+            .decrypt(&aead, record_v2.id.as_bytes())
+            .expect("decrypt v2");
+        let raw_signer_v2 = build_subscription_signer_with_policy(
+            &record_v2,
+            &tokens_v2,
+            clock.clone(),
+            Some(&Default::default()),
+            Some(&Default::default()),
+            true,
+        )
+        .expect("raw v2 signer");
+        let raw_signer_v1 = build_subscription_signer_with_policy(
+            &record_v1,
+            &tokens_v1,
+            clock.clone(),
+            Some(&Default::default()),
+            Some(&Default::default()),
+            true,
+        )
+        .expect("raw v1 signer");
+
+        let factory_r2 = make_factory(record_v2.clone());
+        let state = factory_r2
+            .insert_or_reconcile_subscription_signer_state(&record_v2, &tokens_v2, raw_signer_v2)
+            .expect("occupied miss path reconciles v2");
+        assert_eq!(state.read().spec_revision, record_v2.revision);
+        assert_eq!(state.read().base_url, record_v2.base_url);
+
+        // Even the R1 handle reading the shared state must now sign toward R+1's endpoint.
+        let mut shaped = shaped_request();
+        shaped.set_url(
+            "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro:generateContent"
+                .parse()
+                .expect("url"),
+        );
+        shaped.set_body(bytes::Bytes::from_static(br#"{"contents":[]}"#));
+        let signed = cc_lb_upstream::sign_request(signer_r1.as_ref(), shaped)
+            .await
+            .expect("sign after concurrent occupied reconciliation");
+        assert!(
+            signed
+                .url()
+                .as_str()
+                .starts_with("http://new-race.invalid/custom/v1internal:generateContent"),
+            "concurrent R+1 occupied insert must upgrade shared target URL: {}",
+            signed.url()
+        );
+
+        // A subsequent slower R1 hitting Entry::Occupied must not downgrade R+1.
+        let state_after = factory_r1
+            .insert_or_reconcile_subscription_signer_state(&record_v1, &tokens_v1, raw_signer_v1)
+            .expect("stale occupied miss path stays monotonic");
+        assert_eq!(state_after.read().spec_revision, record_v2.revision);
+        assert_eq!(state_after.read().base_url, record_v2.base_url);
     }
 }

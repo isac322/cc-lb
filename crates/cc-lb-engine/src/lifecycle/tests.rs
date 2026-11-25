@@ -8192,7 +8192,9 @@ async fn responses_websocket_subscription_preference_provides_ordered_fallbacks_
     let first_id = Uuid::from_u128(101);
     let second_id = Uuid::from_u128(102);
     let filter: Arc<dyn FilterPlugin> = Arc::new(
-        crate::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::new(),
+        crate::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::with_clock(
+            Arc::new(cc_lb_clock::TestClock::new_at_secs(NOW_SECS)),
+        ),
     );
     let pipeline = Arc::new(RouterPipelineCache {
         user_filters: vec![filter],
@@ -8410,7 +8412,9 @@ async fn responses_websocket_subscription_preference_keeps_api_key_fallback_rech
     });
 
     let filter: Arc<dyn FilterPlugin> = Arc::new(
-        crate::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::new(),
+        crate::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::with_clock(
+            Arc::new(cc_lb_clock::TestClock::new_at_secs(NOW_SECS)),
+        ),
     );
     let pipeline = Arc::new(RouterPipelineCache {
         user_filters: vec![filter],
@@ -9153,7 +9157,9 @@ async fn responses_websocket_subscription_preference_keeps_multiple_api_keys_rea
     });
 
     let filter: Arc<dyn FilterPlugin> = Arc::new(
-        crate::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::new(),
+        crate::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::with_clock(
+            Arc::new(cc_lb_clock::TestClock::new_at_secs(NOW_SECS)),
+        ),
     );
     let pipeline = Arc::new(RouterPipelineCache {
         user_filters: vec![filter],

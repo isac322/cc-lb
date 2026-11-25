@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use cc_lb_control::anthropic_metadata::{
     CEDAR_EMBER_FENCE_RECOVERY_AFTER_MILLIS, cedar_ember_epoch_meta_key,
-    cedar_ember_fence_started_at_millis, make_metadata_http_client, settled_cedar_ember_epoch,
+    cedar_ember_fence_started_at_millis, settled_cedar_ember_epoch,
 };
 use cc_lb_control::openai_limit_resets::{
     OPENAI_LIMIT_RESET_FENCE_RECOVERY_AFTER_MILLIS, OpenAiLimitResetAuth,
@@ -391,7 +391,7 @@ impl SchedulerDispatch {
         }
         let base = upstream_base_url(upstream)?;
         let inventory = match list_openai_limit_reset_credits(
-            &make_metadata_http_client(),
+            &self.http,
             &base,
             OpenAiLimitResetAuth {
                 access_token: &bundle.access_token,

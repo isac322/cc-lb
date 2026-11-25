@@ -13,8 +13,8 @@ use super::keepalive_support::mock_upstream::MockAnthropic;
 
 const SESSION_ID: &str = "00000000-0000-7000-8000-000000000901";
 const ERROR_BODY: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"injected renewal failure"}}"#;
-const ERROR_BODY_PREFIX: &str =
-    r#"{"type":"error","error":{"type":"invalid_request_error","message":"injected"#;
+const EXPECTED_HTTP_ERROR_TYPE: &str = "type=invalid_request_error";
+const REDACTED_ERROR_MESSAGE: &str = "injected renewal failure";
 #[derive(Clone, Copy, Debug)]
 enum FailureCase {
     Http { status: StatusCode },
@@ -26,7 +26,7 @@ enum FailureCase {
 impl FailureCase {
     fn expected_error(self) -> &'static str {
         match self {
-            Self::Http { .. } => ERROR_BODY_PREFIX,
+            Self::Http { .. } => EXPECTED_HTTP_ERROR_TYPE,
             Self::Transport => "upstream dispatch failed",
             Self::Timeout => "renewal timed out after 1s",
             Self::UpstreamGone => "upstream gone",
@@ -172,6 +172,12 @@ async fn assert_failed_session(harness: &Harness, session_key_hash: &str, case: 
             "error={error}"
         );
     }
+    if matches!(case, FailureCase::Http { .. }) {
+        assert!(
+            !error.contains(REDACTED_ERROR_MESSAGE),
+            "raw provider error message must be redacted: {error}"
+        );
+    }
     assert_eq!(row.status, "terminal");
     assert_eq!(row.terminal_reason.as_deref(), Some("dispatch_error"));
     assert_ne!(row.enqueue_state, "running");
@@ -232,6 +238,11 @@ async fn c7_admin_list_and_detail_expose_c1_error() {
         .unwrap_or_else(|| panic!("failed session missing from admin list: {list}"));
     let list_error = row["error"].as_str().unwrap_or_default();
     assert!(list_error.contains("status=400"), "list row={row}");
+    assert!(
+        list_error.contains(EXPECTED_HTTP_ERROR_TYPE)
+            && !list_error.contains(REDACTED_ERROR_MESSAGE),
+        "list row={row}"
+    );
     let detail_response = harness
         .admin_cache_keepalive_detail(&session_key_hash)
         .await;
@@ -242,6 +253,11 @@ async fn c7_admin_list_and_detail_expose_c1_error() {
         .unwrap_or_else(|error| panic!("admin detail JSON: {error}"));
     let detail_error = detail["error"].as_str().unwrap_or_default();
     assert!(detail_error.contains("status=400"), "detail={detail}");
+    assert!(
+        detail_error.contains(EXPECTED_HTTP_ERROR_TYPE)
+            && !detail_error.contains(REDACTED_ERROR_MESSAGE),
+        "detail={detail}"
+    );
 }
 
 #[tokio::test]
@@ -294,7 +310,11 @@ async fn c6_postgres_http_400_invalid_request_terminalizes_when_available() {
     assert_ne!(terminal.enqueue_state, "running");
     let error = terminal.error.as_deref().unwrap_or_default();
     assert!(error.contains("status=400"), "error={error}");
-    assert!(error.contains(ERROR_BODY_PREFIX), "error={error}");
+    assert!(error.contains(EXPECTED_HTTP_ERROR_TYPE), "error={error}");
+    assert!(
+        !error.contains(REDACTED_ERROR_MESSAGE),
+        "raw provider error message must be redacted: {error}"
+    );
     assert_eq!(harness.count_renewal_rows().await, (0, 0));
     assert_mock_attempt(
         &harness,

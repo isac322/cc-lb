@@ -4158,7 +4158,13 @@ async fn cache_keepalive_dispatch_error_persists_message_and_logs_warning() {
     let fixture = Fixture::new().await;
     fixture.http.return_status(
         StatusCode::BAD_REQUEST,
-        serde_json::json!({"error":"thinking disabled does not accept display"}),
+        serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "thinking disabled does not accept display"
+            }
+        }),
     );
     let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
@@ -4187,13 +4193,14 @@ async fn cache_keepalive_dispatch_error_persists_message_and_logs_warning() {
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
     assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Pending);
     assert!(record.running_since_unix_secs.is_none());
-    let expected_error =
-        r#"status=400 Bad Request body={"error":"thinking disabled does not accept display"}"#;
+    let expected_error = "status=400 Bad Request type=invalid_request_error";
     assert!(
-        record
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains(expected_error))
+        record.error.as_deref().is_some_and(|error| {
+            error.contains(expected_error)
+                && !error.contains("thinking disabled does not accept display")
+        }),
+        "unexpected persisted error={:?}",
+        record.error
     );
     assert_eq!(
         record.terminal_reason,
@@ -4204,7 +4211,8 @@ async fn cache_keepalive_dispatch_error_persists_message_and_logs_warning() {
         event.contains("session_key_hash=session-hash")
             && event.contains("generation=1")
             && event.contains("terminal_reason=dispatch_error")
-            && event.contains("thinking disabled does not accept display")
+            && event.contains(expected_error)
+            && !event.contains("thinking disabled does not accept display")
     }));
 }
 

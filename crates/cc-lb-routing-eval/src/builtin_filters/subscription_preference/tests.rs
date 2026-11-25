@@ -450,7 +450,9 @@ fn stale_rejected_resets_in_past_is_unknown() {
     };
     let alive_id = alive.upstream_id;
     let key = api_key("k", 2);
-    let output = filter_for_model(&[alive, key], MODEL_AGNOSTIC);
+    let output = filter_at(observed_secs)
+        .filter(&ctx(MODEL_AGNOSTIC), &principal(), &[alive, key])
+        .expect("builtin filter cannot fail");
     // Base is Unknown → UnknownProbe tier, still selected over API-key.
     assert_eq!(output.kept_upstream_ids, vec![alive_id]);
     assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
@@ -758,11 +760,22 @@ fn absent_five_hour_is_known_base_like_a_healthy_five_hour_window() {
         ],
     );
     let config = FilterConfig::default();
-    let Some(without) = assess_candidate(&without_five_hour, 0, BASE_WINDOWS.as_slice(), &config)
-    else {
+    let Some(without) = assess_candidate(
+        &without_five_hour,
+        0,
+        BASE_WINDOWS.as_slice(),
+        &config,
+        T0_MILLIS,
+    ) else {
         panic!("explicitly absent five-hour window must remain eligible");
     };
-    let Some(with) = assess_candidate(&with_five_hour, 1, BASE_WINDOWS.as_slice(), &config) else {
+    let Some(with) = assess_candidate(
+        &with_five_hour,
+        1,
+        BASE_WINDOWS.as_slice(),
+        &config,
+        T0_MILLIS,
+    ) else {
         panic!("healthy five-hour control must remain eligible");
     };
     assert_eq!(without.tier, Tier::KnownBase);
@@ -773,7 +786,8 @@ fn absent_five_hour_is_known_base_like_a_healthy_five_hour_window() {
     assert!(without.quota_urgency_combined < with.quota_urgency_combined);
     assert!(!subscription_hard_blocked(
         MODEL_AGNOSTIC,
-        &without_five_hour
+        &without_five_hour,
+        T0_MILLIS
     ));
 
     for candidate in [&without_five_hour, &with_five_hour] {
@@ -817,7 +831,7 @@ fn absent_five_hour_does_not_bypass_exhausted_weekly_windows() {
         }
         let candidate = oauth_at_t0("weekly-exhausted", 1, quotas);
         assert!(
-            subscription_hard_blocked(model, &candidate),
+            subscription_hard_blocked(model, &candidate, T0_MILLIS),
             "absent five-hour window must not bypass {exhausted_window}"
         );
         let fallback = api_key("fallback", 2);
@@ -861,12 +875,17 @@ fn unobserved_or_stale_five_hour_is_not_explicit_absence() {
             0,
             BASE_WINDOWS.as_slice(),
             &FilterConfig::default(),
+            T0_MILLIS,
         ) else {
             panic!("unknown five-hour window with healthy weekly quota stays eligible");
         };
         assert_eq!(assessment.tier, Tier::PartialBase);
         assert_eq!(assessment.quota_urgency_5h, 0.0);
-        assert!(!subscription_hard_blocked(MODEL_AGNOSTIC, &candidate));
+        assert!(!subscription_hard_blocked(
+            MODEL_AGNOSTIC,
+            &candidate,
+            T0_MILLIS
+        ));
         let output = filter_for_model(&[candidate.clone(), api_key("fallback", 2)], MODEL_AGNOSTIC);
         assert_eq!(output.kept_upstream_ids, vec![candidate.upstream_id]);
     }
@@ -889,7 +908,11 @@ fn stale_exhausted_five_hour_keeps_existing_blocking_rules() {
                     .build(),
             ],
         );
-        assert!(subscription_hard_blocked(MODEL_AGNOSTIC, &candidate));
+        assert!(subscription_hard_blocked(
+            MODEL_AGNOSTIC,
+            &candidate,
+            T0_MILLIS
+        ));
         let fallback = api_key("fallback", 2);
         let output = filter_for_model(&[candidate, fallback.clone()], MODEL_AGNOSTIC);
         assert_eq!(output.kept_upstream_ids, vec![fallback.upstream_id]);
@@ -908,7 +931,11 @@ fn five_hour_sample_returning_after_absence_restores_pressure_and_exhaustion() {
         1,
         vec![absent(WINDOW_FIVE_HOUR).build(), weekly.clone()],
     );
-    assert!(!subscription_hard_blocked(MODEL_AGNOSTIC, &candidate));
+    assert!(!subscription_hard_blocked(
+        MODEL_AGNOSTIC,
+        &candidate,
+        T0_MILLIS
+    ));
 
     candidate.subscription_quotas = vec![
         fresh(WINDOW_FIVE_HOUR)
@@ -918,7 +945,11 @@ fn five_hour_sample_returning_after_absence_restores_pressure_and_exhaustion() {
             .build(),
         weekly.clone(),
     ];
-    assert!(subscription_hard_blocked(MODEL_AGNOSTIC, &candidate));
+    assert!(subscription_hard_blocked(
+        MODEL_AGNOSTIC,
+        &candidate,
+        T0_MILLIS
+    ));
     let fallback = api_key("fallback", 2);
     let output = filter_for_model(&[candidate.clone(), fallback.clone()], MODEL_AGNOSTIC);
     assert_eq!(output.kept_upstream_ids, vec![fallback.upstream_id]);
@@ -936,6 +967,7 @@ fn five_hour_sample_returning_after_absence_restores_pressure_and_exhaustion() {
         0,
         BASE_WINDOWS.as_slice(),
         &FilterConfig::default(),
+        T0_MILLIS,
     ) else {
         panic!("returning healthy five-hour sample must be eligible");
     };
@@ -963,6 +995,7 @@ fn unobserved_optional_scoped_window_remains_partial_base() {
         0,
         relevant_base_windows(OPUS_MODEL),
         &FilterConfig::default(),
+        T0_MILLIS,
     )
     .expect("candidate remains assessable");
 
@@ -1075,11 +1108,16 @@ fn model_scoped_weekly_pressure_is_used_without_shared_seven_day() {
         );
         let windows = relevant_base_windows(model);
         let available_assessment =
-            assess_candidate(&available, 0, windows, &FilterConfig::default())
+            assess_candidate(&available, 0, windows, &FilterConfig::default(), T0_MILLIS)
                 .expect("available scoped-weekly candidate is assessable");
-        let nearly_exhausted_assessment =
-            assess_candidate(&nearly_exhausted, 1, windows, &FilterConfig::default())
-                .expect("nearly exhausted scoped-weekly candidate is assessable");
+        let nearly_exhausted_assessment = assess_candidate(
+            &nearly_exhausted,
+            1,
+            windows,
+            &FilterConfig::default(),
+            T0_MILLIS,
+        )
+        .expect("nearly exhausted scoped-weekly candidate is assessable");
 
         assert!(
             available_assessment.quota_urgency_7d > nearly_exhausted_assessment.quota_urgency_7d,
@@ -1147,17 +1185,24 @@ fn quota_pressure_golden_values() {
     let config = FilterConfig::default();
 
     // When: base pressure is assessed for each ADR golden scenario.
-    let five_hour_pressure = assess_candidate(&five_hour, 0, &[WINDOW_FIVE_HOUR], &config)
-        .expect("five-hour candidate is assessable")
-        .quota_urgency_combined;
-    let seven_day_pressure = assess_candidate(&seven_day, 0, &[WINDOW_SEVEN_DAY], &config)
-        .expect("seven-day candidate is assessable")
-        .quota_urgency_combined;
-    let combined_pressure =
-        assess_candidate(&combined, 0, &[WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY], &config)
-            .expect("combined candidate is assessable")
+    let five_hour_pressure =
+        assess_candidate(&five_hour, 0, &[WINDOW_FIVE_HOUR], &config, T0_MILLIS)
+            .expect("five-hour candidate is assessable")
             .quota_urgency_combined;
-    let floor_pressure = assess_candidate(&floor_bound, 0, &[WINDOW_FIVE_HOUR], &config)
+    let seven_day_pressure =
+        assess_candidate(&seven_day, 0, &[WINDOW_SEVEN_DAY], &config, T0_MILLIS)
+            .expect("seven-day candidate is assessable")
+            .quota_urgency_combined;
+    let combined_pressure = assess_candidate(
+        &combined,
+        0,
+        &[WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY],
+        &config,
+        T0_MILLIS,
+    )
+    .expect("combined candidate is assessable")
+    .quota_urgency_combined;
+    let floor_pressure = assess_candidate(&floor_bound, 0, &[WINDOW_FIVE_HOUR], &config, T0_MILLIS)
         .expect("floor-bound candidate is assessable")
         .quota_urgency_combined;
     let weekly_gamma_one_pressure = pressure_from_ratios(
@@ -1204,6 +1249,7 @@ fn assessment_preserves_base_pressure_components() {
         0,
         &[WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY],
         &FilterConfig::default(),
+        T0_MILLIS,
     )
     .expect("base candidate is assessable");
 
@@ -1233,6 +1279,7 @@ fn assessment_preserves_overage_raw_urgency_separately() {
         0,
         &[WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY],
         &FilterConfig::default(),
+        T0_MILLIS,
     )
     .expect("overage candidate is assessable");
 
@@ -1323,10 +1370,10 @@ fn quota_pressure_zero_for_unusable_windows_and_full_utilization() {
 
     // When: every case is reduced to its base-window pressure contribution.
     let pressures = cases.map(|candidate| {
-        assess_candidate(&candidate, 0, &[WINDOW_FIVE_HOUR], &config)
+        assess_candidate(&candidate, 0, &[WINDOW_FIVE_HOUR], &config, T0_MILLIS)
             .map_or(0.0, |assessment| assessment.quota_urgency_combined)
     });
-    let usable_pressure = assess_candidate(&usable, 0, &[WINDOW_FIVE_HOUR], &config)
+    let usable_pressure = assess_candidate(&usable, 0, &[WINDOW_FIVE_HOUR], &config, T0_MILLIS)
         .expect("usable candidate is assessable")
         .quota_urgency_combined;
 
@@ -1357,14 +1404,24 @@ fn quota_pressure_ignores_capacity_ratio() {
     let config = FilterConfig::default();
 
     // When: base pressure is assessed independently for each candidate.
-    let small_pressure =
-        assess_candidate(&small, 0, &[WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY], &config)
-            .expect("small-plan candidate is assessable")
-            .quota_urgency_combined;
-    let large_pressure =
-        assess_candidate(&large, 0, &[WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY], &config)
-            .expect("large-plan candidate is assessable")
-            .quota_urgency_combined;
+    let small_pressure = assess_candidate(
+        &small,
+        0,
+        &[WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY],
+        &config,
+        T0_MILLIS,
+    )
+    .expect("small-plan candidate is assessable")
+    .quota_urgency_combined;
+    let large_pressure = assess_candidate(
+        &large,
+        0,
+        &[WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY],
+        &config,
+        T0_MILLIS,
+    )
+    .expect("large-plan candidate is assessable")
+    .quota_urgency_combined;
 
     // Then: plan capacity cannot alter raw base pressure.
     assert_eq!(small_pressure, large_pressure);
@@ -1931,7 +1988,7 @@ fn overage_non_uniform_urgency_matches_v10() {
         ],
     );
     // When: the filter scores the overage bucket.
-    let output = SubscriptionPreferenceFilter::new()
+    let output = filter_at_t0()
         .filter(
             &ctx_with_request_id(MODEL_AGNOSTIC, "overage-cost-first"),
             &principal(),
@@ -1971,7 +2028,7 @@ fn overage_uniform_tiebreak_matches_cost_first() {
         ],
     );
     // When: the filter scores the overage bucket.
-    let output = SubscriptionPreferenceFilter::new()
+    let output = filter_at_t0()
         .filter(
             &ctx_with_request_id(MODEL_AGNOSTIC, "overage-uniform-cost-first"),
             &principal(),
@@ -2039,7 +2096,7 @@ fn zero_total_weight_uses_upstream_id_tiebreak() {
 fn single_candidate_always_wins() {
     let only = healthy_oauth("only", 1);
     for request_id in 0..50 {
-        let output = SubscriptionPreferenceFilter::new()
+        let output = filter_at_t0()
             .filter(
                 &ctx_with_request_id(MODEL_AGNOSTIC, &format!("req-{request_id}")),
                 &principal(),
@@ -2057,7 +2114,7 @@ fn same_request_id_yields_same_winner_across_calls() {
     let c = healthy_oauth("c", 3);
     let winners: Vec<Uuid> = (0..10)
         .map(|_| {
-            let out = SubscriptionPreferenceFilter::new()
+            let out = filter_at_t0()
                 .filter(
                     &ctx_with_request_id(MODEL_AGNOSTIC, "req-stable"),
                     &principal(),
@@ -2091,7 +2148,7 @@ fn different_request_ids_do_not_change_cost_first_winner() {
         3,
         vec![fresh(WINDOW_FIVE_HOUR).util(0.5).status("allowed").build()],
     );
-    let filter = SubscriptionPreferenceFilter::new();
+    let filter = filter_at_t0();
     let candidates = [a.clone(), b, c];
     assert_eq!(
         filter
@@ -2267,7 +2324,10 @@ fn synthetic_snapshot_four_upstreams_produces_cost_first_winner() {
         example_fourth_snapshot(),
     ];
     let dist = selection_counts(&candidates, MODEL_AGNOSTIC, 2000);
-    let winner = filter_for_model(&candidates, MODEL_AGNOSTIC).kept_upstream_ids[0];
+    let winner = filter_at(synthetic_now_secs())
+        .filter(&ctx(MODEL_AGNOSTIC), &principal(), &candidates)
+        .expect("builtin filter cannot fail")
+        .kept_upstream_ids[0];
     assert_eq!(dist.len(), 1);
     assert_eq!(dist[&winner], 2000);
 }
@@ -2340,7 +2400,7 @@ fn same_thread_id_without_cache_keeps_cost_first_winner_when_request_ids_vary() 
         example_secondary_max_snapshot(),
         example_fourth_snapshot(),
     ];
-    let filter = SubscriptionPreferenceFilter::new();
+    let filter = filter_at(synthetic_now_secs());
     let principal = principal();
     let thread_id = "example-session-id";
     let mut winners: HashMap<Uuid, usize> = HashMap::new();
@@ -2366,7 +2426,7 @@ fn different_request_ids_keep_cost_first_winner() {
         example_secondary_max_snapshot(),
         example_fourth_snapshot(),
     ];
-    let filter = SubscriptionPreferenceFilter::new();
+    let filter = filter_at(synthetic_now_secs());
     let principal = principal();
     let mut winners: HashMap<Uuid, usize> = HashMap::new();
     for i in 0..2000 {
@@ -2388,7 +2448,7 @@ fn missing_thread_id_falls_back_to_request_id() {
     //   proving that removing the thread_id header does not regress the
     //   old behaviour that the previous tests already cover.
     let candidates = vec![healthy_oauth("a", 1), healthy_oauth("b", 2)];
-    let filter = SubscriptionPreferenceFilter::new();
+    let filter = filter_at_t0();
     let principal = principal();
     let ctx = ctx_with_request_id(MODEL_AGNOSTIC, "req-stateless");
     let w1 = *filter
@@ -2417,7 +2477,7 @@ fn unknown_cache_pricing_omits_cache_terms_without_cache_boost() {
     let peer = healthy_oauth_candidate("peer", 2);
 
     // When: subscription-preference scores both candidates.
-    let out = SubscriptionPreferenceFilter::new()
+    let out = filter_at_t0()
         .filter(
             &ctx_with_unknown_cache_pricing(MODEL_AGNOSTIC, "req-unknown-price"),
             &principal(),
@@ -2436,8 +2496,20 @@ fn unknown_cache_pricing_omits_cache_terms_without_cache_boost() {
 // Helpers
 // =============================================================================
 
+const T0_MILLIS: u64 = T0_SECS * 1_000;
+
+fn filter_at(secs: u64) -> SubscriptionPreferenceFilter {
+    SubscriptionPreferenceFilter::with_clock(std::sync::Arc::new(
+        cc_lb_clock::TestClock::new_at_secs(secs),
+    ))
+}
+
+fn filter_at_t0() -> SubscriptionPreferenceFilter {
+    filter_at(T0_SECS)
+}
+
 fn filter_for_model(candidates: &[UpstreamCandidate], canonical_model: &str) -> FilterOutput {
-    SubscriptionPreferenceFilter::new()
+    filter_at_t0()
         .filter(&ctx(canonical_model), &principal(), candidates)
         .expect("builtin filter cannot fail")
 }
@@ -2449,7 +2521,12 @@ fn selection_counts(
     canonical_model: &str,
     trials: usize,
 ) -> HashMap<Uuid, usize> {
-    let filter = SubscriptionPreferenceFilter::new();
+    let clock_secs = candidates
+        .first()
+        .map(|candidate| candidate.observed_at_unix_secs)
+        .filter(|&secs| secs > 0)
+        .unwrap_or(T0_SECS);
+    let filter = filter_at(clock_secs);
     let principal = principal();
     let mut counts: HashMap<Uuid, usize> = HashMap::new();
     for i in 0..trials {
@@ -2738,4 +2815,131 @@ fn blank_snapshot(
         overage_period_monthly_utilization: None,
         upgrade_paths: None,
     }
+}
+
+#[test]
+fn stale_hard_negative_relaxes_and_credit_flag_expires_as_wall_clock_advances() {
+    let clock = std::sync::Arc::new(cc_lb_clock::TestClock::new_at_secs(T0_SECS));
+    let filter = SubscriptionPreferenceFilter::with_clock(clock.clone());
+
+    let stale_reset_expiring = oauth_at_t0(
+        "stale-reset-expiring",
+        1,
+        vec![
+            stale(WINDOW_FIVE_HOUR)
+                .util(1.0)
+                .status("rejected")
+                .reset_at(T0_SECS + 120)
+                .build(),
+            fresh(WINDOW_SEVEN_DAY)
+                .util(0.1)
+                .status("allowed")
+                .reset_at(T0_SECS + SEVEN_DAY_RESET_SECS)
+                .build(),
+        ],
+    );
+    let anthropic_fallback = api_key("anthropic-fallback", 2);
+
+    let before_reset = filter
+        .filter(
+            &ctx(MODEL_AGNOSTIC),
+            &principal(),
+            &[stale_reset_expiring.clone(), anthropic_fallback.clone()],
+        )
+        .expect("builtin filter cannot fail");
+    assert_eq!(
+        before_reset.kept_upstream_ids,
+        vec![anthropic_fallback.upstream_id]
+    );
+
+    clock.advance_secs(121);
+    let after_reset = filter
+        .filter(
+            &ctx(MODEL_AGNOSTIC),
+            &principal(),
+            &[stale_reset_expiring.clone(), anthropic_fallback],
+        )
+        .expect("builtin filter cannot fail");
+    assert_eq!(
+        after_reset.kept_upstream_ids,
+        vec![stale_reset_expiring.upstream_id]
+    );
+    assert_eq!(
+        after_reset
+            .subscription_preference
+            .expect("partial-base trace after reset")
+            .chosen_tier,
+        cc_lb_domain::SubscriptionTier::PartialBase
+    );
+
+    clock.set_unix_secs(T0_SECS);
+    let codex_credits = UpstreamCandidate {
+        kind: UpstreamKind::OpenaiOauth,
+        ..oauth_at_t0(
+            "codex-credits",
+            3,
+            vec![
+                fresh(WINDOW_FIVE_HOUR)
+                    .util(1.0)
+                    .status("rejected")
+                    .reset_at(T0_SECS + 3_600)
+                    .build(),
+                fresh(WINDOW_SEVEN_DAY)
+                    .util(1.0)
+                    .status("rejected")
+                    .reset_at(T0_SECS + SEVEN_DAY_RESET_SECS)
+                    .build(),
+                fresh(WINDOW_OVERAGE)
+                    .credits(cc_lb_domain::SubscriptionQuotaCredits {
+                        has_credits: Some(true),
+                        observations: cc_lb_domain::CreditObservations {
+                            has_credits: Some(cc_lb_domain::CreditObservation {
+                                observed_at_unix_millis: T0_MILLIS,
+                                source: cc_lb_domain::CreditSource::Api,
+                                request_order: None,
+                            }),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                    .build(),
+            ],
+        )
+    };
+    let openai_fallback = UpstreamCandidate {
+        kind: UpstreamKind::OpenaiApiKey,
+        ..api_key("openai-fallback", 4)
+    };
+
+    let fresh_credits = filter
+        .filter(
+            &ctx("gpt-5"),
+            &principal(),
+            &[codex_credits.clone(), openai_fallback.clone()],
+        )
+        .expect("builtin filter cannot fail");
+    assert_eq!(
+        fresh_credits.kept_upstream_ids,
+        vec![codex_credits.upstream_id]
+    );
+    assert_eq!(
+        fresh_credits
+            .subscription_preference
+            .expect("overage trace while credits fresh")
+            .chosen_tier,
+        cc_lb_domain::SubscriptionTier::Overage
+    );
+
+    clock.advance_secs(61);
+    let expired_credits = filter
+        .filter(
+            &ctx("gpt-5"),
+            &principal(),
+            &[codex_credits, openai_fallback.clone()],
+        )
+        .expect("builtin filter cannot fail");
+    assert_eq!(
+        expired_credits.kept_upstream_ids,
+        vec![openai_fallback.upstream_id]
+    );
 }

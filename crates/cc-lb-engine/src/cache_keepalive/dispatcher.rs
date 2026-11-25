@@ -44,7 +44,36 @@ use super::scheduler::{
     RenewalUsage,
 };
 
-const ERROR_BODY_PREFIX_BYTES: usize = 512;
+const ALLOWLISTED_PROVIDER_ERROR_CODES: &[&str] = &[
+    "invalid_request_error",
+    "authentication_error",
+    "permission_error",
+    "not_found_error",
+    "request_too_large",
+    "rate_limit_error",
+    "api_error",
+    "overloaded_error",
+    "server_error",
+    "insufficient_quota",
+    "model_not_found",
+    "context_length_exceeded",
+    "invalid_api_key",
+    "billing_hard_limit_reached",
+    "timeout",
+    "bad_gateway",
+    "service_unavailable",
+    "gateway_timeout",
+    "unauthorized",
+    "forbidden",
+    "invalid_argument",
+    "resource_exhausted",
+    "internal",
+    "unavailable",
+    "deadline_exceeded",
+    "permission_denied",
+    "unauthenticated",
+    "invalid_encrypted_content",
+];
 
 pub struct AnthropicKeepaliveDispatcher {
     dynamic_view: Arc<DynamicViewHolder>,
@@ -160,7 +189,8 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
             Ok(input) => input,
             Err(error) => return DispatchOutcome::Error(error),
         };
-        let observation_plan = keepalive_observation_plan(&keepalive_body, &upstream);
+        let observation_plan =
+            keepalive_observation_plan(&keepalive_body, snapshot.surface.as_deref(), &upstream);
 
         let dispatch_started = Instant::now();
         let deadline = context.dispatch_deadline_unix_secs();
@@ -195,8 +225,25 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
 
         match dispatch_result {
             Ok(Ok((StatusCode::OK, headers, body, cache_anchor_age))) => {
+                let output_budget = body
+                    .len()
+                    .saturating_mul(16)
+                    .clamp(64 * 1024, 4 * 1024 * 1024);
+                let decoded_body = match decode_full_body(&headers, &body, output_budget) {
+                    Ok(Some(decoded)) => decoded,
+                    Ok(None) => {
+                        return DispatchOutcome::Error(
+                            "unsupported Content-Encoding on keep-alive 200 response".to_owned(),
+                        );
+                    }
+                    Err(error) => {
+                        return DispatchOutcome::Error(format!(
+                            "keep-alive response decompression failed: {error}"
+                        ));
+                    }
+                };
                 let outcome = classify_success_body_with_surface(
-                    &body,
+                    decoded_body.as_ref(),
                     cache_anchor_age,
                     dispatch_started.elapsed(),
                     dispatch_start_ms,
@@ -211,15 +258,14 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
                         &self.dynamic_view,
                         snapshot.upstream_id,
                         plan,
-                        &headers,
-                        &body,
+                        decoded_body.as_ref(),
                         dispatch_anchor_unix_secs,
                     );
                 }
                 outcome
             }
-            Ok(Ok((status, _headers, body, _))) => {
-                DispatchOutcome::Error(format!("status={} body={}", status, body_prefix(&body)))
+            Ok(Ok((status, headers, body, _))) => {
+                DispatchOutcome::Error(format_provider_error_summary(status, &headers, &body))
             }
             Ok(Err(source)) => DispatchOutcome::Error(source.to_string()),
             Err(_elapsed) => DispatchOutcome::Error(format!(
@@ -273,30 +319,53 @@ fn keepalive_upstream_supported_for_snapshot(
     }
 }
 
+fn default_base_url_for_upstream(kind: UpstreamKind) -> Option<Url> {
+    cc_lb_providers::builtin_provider_registry()
+        .auth_kind_for_upstream_kind(kind)
+        .and_then(|auth_kind| auth_kind.default_base_url_parsed().ok())
+}
+
 fn direct_upstream(
     snapshot: &RequestSnapshot,
     upstream: &UpstreamRecord,
 ) -> Result<Upstream, String> {
+    let base_url = upstream
+        .base_url
+        .clone()
+        .or_else(|| default_base_url_for_upstream(upstream.kind));
     match (snapshot.surface.as_deref(), upstream.kind) {
         (Some("responses"), UpstreamKind::OpenaiApiKey | UpstreamKind::OpenaiOauth) => {
-            Ok(Upstream::OpenaiDirect {
-                base_url: upstream.base_url.clone(),
-            })
+            Ok(Upstream::OpenaiDirect { base_url })
         }
         (None, UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth) => {
-            Ok(Upstream::AnthropicDirect {
-                base_url: upstream.base_url.clone(),
-            })
+            Ok(Upstream::AnthropicDirect { base_url })
         }
         _ => Err("provider keep-alive request surface does not match upstream".to_owned()),
     }
 }
 
-fn resolve_keepalive_url(
+pub fn resolve_keepalive_url(
     snapshot: &RequestSnapshot,
     upstream: &UpstreamRecord,
 ) -> Result<Url, String> {
-    let mut resolved = if let Some(base_url) = upstream.base_url.as_ref() {
+    let mut resolved = if upstream.kind == UpstreamKind::OpenaiOauth {
+        let mut base = upstream
+            .base_url
+            .clone()
+            .or_else(|| default_base_url_for_upstream(upstream.kind))
+            .unwrap_or_else(|| snapshot.url.clone());
+        let raw_path = snapshot.url.path();
+        let suffix = raw_path
+            .strip_prefix("/v1/")
+            .or_else(|| raw_path.strip_prefix("/backend-api/codex/"))
+            .unwrap_or_else(|| raw_path.trim_start_matches('/'));
+        if !suffix.is_empty() {
+            let joined = format!("{}/{suffix}", base.path().trim_end_matches('/'));
+            base.set_path(&joined);
+        }
+        base.set_query(snapshot.url.query());
+        base
+    } else if let Some(base_url) = upstream.base_url.as_ref() {
         cc_lb_upstream::upstream_request_url(base_url, snapshot.url.path(), snapshot.url.query())
     } else {
         snapshot.url.clone()
@@ -365,8 +434,17 @@ struct KeepaliveObservationPlan {
 
 fn keepalive_observation_plan(
     body: &[u8],
+    surface: Option<&str>,
     upstream: &UpstreamRecord,
 ) -> Option<KeepaliveObservationPlan> {
+    if surface.is_some()
+        || !matches!(
+            upstream.kind,
+            UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth
+        )
+    {
+        return None;
+    }
     let value = sonic_rs::from_slice::<Value>(body).ok()?;
     let canonical_model = value
         .get("model")
@@ -440,16 +518,10 @@ fn publish_keepalive_observation(
     dynamic_view: &DynamicViewHolder,
     upstream_id: uuid::Uuid,
     plan: &KeepaliveObservationPlan,
-    response_headers: &http::HeaderMap,
-    response_body: &[u8],
+    decoded_body: &[u8],
     dispatch_anchor_unix_secs: u64,
 ) {
-    let output_budget = response_body.len().saturating_mul(4).max(1024 * 1024);
-    let Ok(Some(decoded_body)) = decode_full_body(response_headers, response_body, output_budget)
-    else {
-        return;
-    };
-    let Ok(value) = sonic_rs::from_slice::<Value>(decoded_body.as_ref()) else {
+    let Ok(value) = sonic_rs::from_slice::<Value>(decoded_body) else {
         return;
     };
     let usage = observe_non_stream_json_value(&value).usage;
@@ -657,8 +729,27 @@ fn classify_success_body_with_surface(
                 DispatchOutcome::CacheMiss { finalization }
             }
         }
-        Err(source) => DispatchOutcome::Error(source.to_string()),
+        Err(source) => DispatchOutcome::Error(format_json_parse_error(&source)),
     }
+}
+
+fn format_json_parse_error(source: &sonic_rs::Error) -> String {
+    let category = if source.is_eof() {
+        "eof"
+    } else if source.is_syntax() {
+        "syntax"
+    } else if source.is_unmatched_type() || source.is_not_found() {
+        "data"
+    } else if source.is_io() {
+        "io"
+    } else {
+        "invalid"
+    };
+    format!(
+        "malformed keep-alive JSON response (category={category}, line={}, column={})",
+        source.line(),
+        source.column()
+    )
 }
 
 #[cfg(test)]
@@ -680,9 +771,50 @@ fn classify_success_body(
     )
 }
 
-fn body_prefix(body: &[u8]) -> String {
-    let prefix_len = body.len().min(ERROR_BODY_PREFIX_BYTES);
-    String::from_utf8_lossy(&body[..prefix_len]).into_owned()
+fn allowlisted_error_token(raw: Option<&Value>) -> Option<&'static str> {
+    let text = raw?.as_str()?.trim();
+    ALLOWLISTED_PROVIDER_ERROR_CODES
+        .iter()
+        .copied()
+        .find(|allowed| text.eq_ignore_ascii_case(allowed))
+}
+
+fn format_provider_error_summary(
+    status: StatusCode,
+    headers: &http::HeaderMap,
+    body: &[u8],
+) -> String {
+    let output_budget = body
+        .len()
+        .saturating_mul(16)
+        .clamp(64 * 1024, 4 * 1024 * 1024);
+    let decoded_body = decode_full_body(headers, body, output_budget)
+        .ok()
+        .flatten()
+        .unwrap_or(std::borrow::Cow::Borrowed(body));
+    let mut summary = format!("status={status}");
+    if let Ok(parsed) = sonic_rs::from_slice::<Value>(decoded_body.as_ref()) {
+        let err_obj = parsed.get("error").filter(|v| v.is_object());
+        let error_type = allowlisted_error_token(
+            err_obj
+                .and_then(|err| err.get("type").or_else(|| err.get("status")))
+                .or_else(|| parsed.get("type").filter(|v| v.as_str() != Some("error"))),
+        );
+        let error_code = allowlisted_error_token(
+            err_obj
+                .and_then(|err| err.get("code"))
+                .or_else(|| parsed.get("code")),
+        );
+        if let Some(err_type) = error_type {
+            summary.push_str(" type=");
+            summary.push_str(err_type);
+        }
+        if let Some(err_code) = error_code {
+            summary.push_str(" code=");
+            summary.push_str(err_code);
+        }
+    }
+    summary
 }
 
 #[cfg(test)]

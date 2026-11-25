@@ -496,13 +496,18 @@ mod tests {
 
     #[test]
     fn replicas_started_at_different_times_emit_identical_epoch_aligned_ticks() {
-        let config = SchedulerConfig::default();
+        let mut zero_jitter_config = SchedulerConfig::default();
+        zero_jitter_config
+            .recurring_jobs
+            .get_mut("oauth_usage_poll")
+            .expect("oauth_usage_poll config")
+            .jitter_secs = 0;
         let start_a: ClockHandle = std::sync::Arc::new(TestClock::new_at_secs(1_800_000_003));
         let start_b: ClockHandle = std::sync::Arc::new(TestClock::new_at_secs(1_800_000_027));
         let start_c: ClockHandle = std::sync::Arc::new(TestClock::new_at_secs(1_800_000_065));
 
-        let take_ticks = |clock: ClockHandle, name: &str, count: usize| {
-            let mut sched = singleton_cron_specs(&config, clock)
+        let take_ticks = |cfg: &SchedulerConfig, clock: ClockHandle, name: &str, count: usize| {
+            let mut sched = singleton_cron_specs(cfg, clock)
                 .into_iter()
                 .find(|spec| spec.name == name)
                 .expect("cron registration")
@@ -519,9 +524,12 @@ mod tests {
             )
         };
 
-        let (phase_a, ticks_a) = take_ticks(start_a.clone(), "oauth_usage_poll", 4);
-        let (phase_b, ticks_b) = take_ticks(start_b.clone(), "oauth_usage_poll", 4);
-        let (phase_c, ticks_c) = take_ticks(start_c.clone(), "oauth_usage_poll", 3);
+        let (phase_a, ticks_a) =
+            take_ticks(&zero_jitter_config, start_a.clone(), "oauth_usage_poll", 4);
+        let (phase_b, ticks_b) =
+            take_ticks(&zero_jitter_config, start_b.clone(), "oauth_usage_poll", 4);
+        let (phase_c, ticks_c) =
+            take_ticks(&zero_jitter_config, start_c.clone(), "oauth_usage_poll", 3);
         assert_eq!(phase_a, 0);
         assert_eq!(phase_a, phase_b);
         assert_eq!(phase_a, phase_c);
@@ -530,10 +538,31 @@ mod tests {
         // Started in the next 60s window => joins the exact epoch grid on the next tick.
         assert_eq!(&ticks_a[1..], &ticks_c[..3]);
 
+        // Default oauth_usage_poll and pool_quota_snapshot stagger across replicas with distinct
+        // deterministic phases rather than firing simultaneously at :00.
+        let default_config = SchedulerConfig::default();
+        let (oauth_phase_a, oauth_ticks_a) =
+            take_ticks(&default_config, start_a.clone(), "oauth_usage_poll", 3);
+        let (oauth_phase_b, _) =
+            take_ticks(&default_config, start_c.clone(), "oauth_usage_poll", 3);
+        let (snapshot_phase_a, snapshot_ticks_a) =
+            take_ticks(&default_config, start_a.clone(), "pool_quota_snapshot", 3);
+        let (snapshot_phase_b, _) =
+            take_ticks(&default_config, start_c.clone(), "pool_quota_snapshot", 3);
+        assert!(oauth_phase_a > 0 && oauth_phase_a <= 15);
+        assert_eq!(oauth_phase_a, oauth_phase_b);
+        assert!(snapshot_phase_a > 0 && snapshot_phase_a <= 29);
+        assert_eq!(snapshot_phase_a, snapshot_phase_b);
+        assert_ne!(
+            oauth_phase_a, snapshot_phase_a,
+            "60s recurring jobs must not share a phase"
+        );
+        assert_ne!(oauth_ticks_a, snapshot_ticks_a);
+
         // Also verify a job with jitter_secs > 0 (api_key_usage_poll: interval 300s, jitter 15s).
-        let (jitter_a, api_a) = take_ticks(start_a, API_KEY_USAGE_POLL_JOB, 3);
-        let (jitter_b, api_b) = take_ticks(start_b, API_KEY_USAGE_POLL_JOB, 3);
-        let (jitter_c, api_c) = take_ticks(start_c, API_KEY_USAGE_POLL_JOB, 3);
+        let (jitter_a, api_a) = take_ticks(&default_config, start_a, API_KEY_USAGE_POLL_JOB, 3);
+        let (jitter_b, api_b) = take_ticks(&default_config, start_b, API_KEY_USAGE_POLL_JOB, 3);
+        let (jitter_c, api_c) = take_ticks(&default_config, start_c, API_KEY_USAGE_POLL_JOB, 3);
         assert!(jitter_a <= 15);
         assert_eq!(jitter_a, jitter_b);
         assert_eq!(jitter_a, jitter_c);

@@ -28,7 +28,7 @@ use cc_lb_runtime_sync::admin_http::{
 };
 use cc_lb_runtime_sync::aead_key::{AeadKeyError, load_aead_from_env};
 use cc_lb_runtime_sync::build_meta::BuildMeta;
-use cc_lb_runtime_sync::replica::load_or_create_replica_id;
+use cc_lb_runtime_sync::replica::load_or_create_replica_id_or_ephemeral;
 use cc_lb_runtime_sync::storage_factory::{StorageFactoryError, open_storage};
 use cc_lb_runtime_sync::{await_or_abort, resolve_data_dir};
 use cc_lb_scheduler::admin::SchedulerAdminHandle;
@@ -326,13 +326,9 @@ async fn build_admin_app_with_storage_inner(
     startup_config_overrides.split_mode_read_only_config = true;
 
     let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
-    let replica_identity = match load_or_create_replica_id(&data_dir) {
-        Ok(id) => Some(cc_lb_domain::ReplicaIdentity { id }),
-        Err(error) => {
-            tracing::warn!(error = %error, "failed to load or create replica ID; proceeding without it");
-            None
-        }
-    };
+    let replica_identity = Some(cc_lb_domain::ReplicaIdentity {
+        id: load_or_create_replica_id_or_ephemeral(&data_dir),
+    });
 
     let key_store = Arc::new(KeyStore::new(managed_store));
     let in_memory_bus = InMemoryBus::with_capacity(config.event_bus.broadcast_capacity);
