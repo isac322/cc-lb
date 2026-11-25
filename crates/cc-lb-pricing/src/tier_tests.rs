@@ -299,7 +299,7 @@ fn routing_cache_pricing_for_prompt_tokens_applies_threshold_bands_and_requires_
     snapshot.above_tokens_rates.insert(MODEL.to_owned(), bands);
     catalog.install_snapshot(snapshot);
 
-    assert!(catalog.has_threshold_bands(MODEL));
+    assert!(catalog.has_routing_cache_threshold_bands(MODEL, None));
     assert!(
         catalog
             .routing_cache_pricing_for_prompt_tokens(MODEL, None, None)
@@ -347,10 +347,56 @@ fn routing_cache_pricing_for_prompt_tokens_applies_threshold_bands_and_requires_
         Some(UsdPerMillion::from_whole_usd(5))
     );
 
+    // Output-only threshold bands do not affect input/cache pricing, so None resolves base rates.
+    let output_only_catalog = PriceCatalog::new_empty();
+    let mut output_only_snapshot = tier_snapshot(false);
+    output_only_snapshot.above_tokens_rates.insert(
+        MODEL.to_owned(),
+        BTreeMap::from([(
+            200_000,
+            crate::ThresholdBand {
+                default: crate::ThresholdRate {
+                    input_per_million_usd: None,
+                    output_per_million_usd: Some(UsdPerMillion::from_whole_usd(40)),
+                    cache_creation_per_million_usd: None,
+                    cache_read_per_million_usd: None,
+                },
+                by_tier: BTreeMap::from([(
+                    "priority".to_owned(),
+                    crate::ThresholdRate {
+                        input_per_million_usd: Some(UsdPerMillion::from_whole_usd(12)),
+                        output_per_million_usd: None,
+                        cache_creation_per_million_usd: None,
+                        cache_read_per_million_usd: None,
+                    },
+                )]),
+            },
+        )]),
+    );
+    output_only_catalog.install_snapshot(output_only_snapshot);
+    assert!(!output_only_catalog.has_routing_cache_threshold_bands(MODEL, None));
+    assert_eq!(
+        output_only_catalog.routing_cache_pricing_for_prompt_tokens(MODEL, None, None),
+        output_only_catalog.routing_cache_pricing_for_prompt_tokens(MODEL, None, Some(250_000))
+    );
+    assert!(output_only_catalog.has_routing_cache_threshold_bands(MODEL, Some("priority")));
+    assert!(
+        output_only_catalog
+            .routing_cache_pricing_for_prompt_tokens(MODEL, Some("priority"), None)
+            .is_none()
+    );
+    let priority_above = output_only_catalog
+        .routing_cache_pricing_for_prompt_tokens(MODEL, Some("priority"), Some(250_000))
+        .expect("priority tier threshold band resolves above threshold");
+    assert_eq!(
+        priority_above.input_per_million_usd,
+        UsdPerMillion::from_whole_usd(12)
+    );
+
     // Flat models still resolve without a prompt token count.
     let flat_catalog = PriceCatalog::new_empty();
     flat_catalog.install_snapshot(tier_snapshot(true));
-    assert!(!flat_catalog.has_threshold_bands(MODEL));
+    assert!(!flat_catalog.has_routing_cache_threshold_bands(MODEL, Some("priority")));
     assert_eq!(
         flat_catalog.routing_cache_pricing_for_prompt_tokens(MODEL, Some("priority"), None),
         flat_catalog.routing_cache_pricing_for_prompt_tokens(

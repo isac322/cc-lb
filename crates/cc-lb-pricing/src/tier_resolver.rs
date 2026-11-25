@@ -129,3 +129,20 @@ fn fallback_price(base: UsdPerMillion, tier: Option<&str>) -> UsdPerMillion {
         Some(_) | None => base,
     }
 }
+
+pub(crate) fn threshold_bands_affect_input_or_cache(
+    bands: &BTreeMap<u64, ThresholdBand>,
+    tier: Option<&str>,
+) -> bool {
+    bands.values().any(|band| {
+        let rate_affects_input_or_cache = |rate: &crate::ThresholdRate| {
+            rate.input_per_million_usd.is_some()
+                || rate.cache_creation_per_million_usd.is_some()
+                || rate.cache_read_per_million_usd.is_some()
+        };
+        rate_affects_input_or_cache(&band.default)
+            || tier
+                .and_then(|name| band.by_tier.get(name))
+                .is_some_and(rate_affects_input_or_cache)
+    })
+}

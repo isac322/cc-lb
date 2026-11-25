@@ -736,8 +736,9 @@ where
         };
     }
 
+    let snapshot = catalog.current();
     let normalized = cc_lb_pricing::normalize_model_id(model);
-    let native = catalog
+    let native = snapshot
         .native_pricing(model, service_tier)
         .map(native_cache_pricing_from_catalog);
     if matches!(
@@ -749,13 +750,14 @@ where
             ..CachePricingSummary::default()
         };
     }
-    let catalog_has_bands = catalog.has_threshold_bands(model);
+    let catalog_needs_prompt_tokens =
+        snapshot.has_routing_cache_threshold_bands(model, service_tier);
     let mut estimator = Some(estimate_gross_input_tokens);
-    let mut gross_input_tokens = catalog_has_bands
+    let mut gross_input_tokens = catalog_needs_prompt_tokens
         .then(|| estimator.take().and_then(|estimate| estimate()))
         .flatten();
     let pricing =
-        catalog.routing_cache_pricing_for_prompt_tokens(model, service_tier, gross_input_tokens);
+        snapshot.routing_cache_pricing_for_prompt_tokens(model, service_tier, gross_input_tokens);
     let input = pricing.map(|rates| rates.input_per_million_usd.as_micros_usd());
     let cache_creation_5m = pricing.and_then(|rates| {
         rates
@@ -774,7 +776,7 @@ where
     });
     let status = if input.is_some() && cache_creation_5m.is_some() && cache_read.is_some() {
         "known"
-    } else if catalog_has_bands {
+    } else if catalog_needs_prompt_tokens && gross_input_tokens.is_none() {
         "unknown"
     } else {
         if anthropic_family_has_threshold_bands(&normalized)
@@ -2918,6 +2920,179 @@ mod cache_score_tests {
         assert_eq!(summary.input_micros_per_million, Some(100_000));
         assert_eq!(summary.cache_creation_5m_micros_per_million, Some(125_000));
         assert_eq!(summary.cache_read_micros_per_million, Some(10_000));
+    }
+
+    #[test]
+    fn output_only_threshold_bands_and_mid_lookup_swap_preserve_snapshot_consistency() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // 1. Output-only threshold band with complete cache rates -> 0 estimator calls, known base rates.
+        let complete_catalog = PriceCatalog::new_empty();
+        let mut complete_snap = CatalogSnapshot::empty_cost_disabled();
+        complete_snap.status = CatalogStatus::Ok;
+        complete_snap.models.insert(
+            "claude-sonnet-4-5".to_owned(),
+            Pricing {
+                native: None,
+                model: "claude-sonnet-4-5".to_owned(),
+                input_per_million_usd: UsdPerMillion::from_whole_usd(3),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
+                by_tier: BTreeMap::new(),
+            },
+        );
+        complete_snap.cache_creation_per_million_usd.insert(
+            "claude-sonnet-4-5".to_owned(),
+            UsdPerMillion::from_micros_usd(3_750_000),
+        );
+        complete_snap.cache_read_per_million_usd.insert(
+            "claude-sonnet-4-5".to_owned(),
+            UsdPerMillion::from_micros_usd(300_000),
+        );
+        complete_snap.above_tokens_rates.insert(
+            "claude-sonnet-4-5".to_owned(),
+            BTreeMap::from([(
+                200_000,
+                cc_lb_pricing::ThresholdBand {
+                    default: cc_lb_pricing::ThresholdRate {
+                        input_per_million_usd: None,
+                        output_per_million_usd: Some(UsdPerMillion::from_whole_usd(30)),
+                        cache_creation_per_million_usd: None,
+                        cache_read_per_million_usd: None,
+                    },
+                    by_tier: BTreeMap::new(),
+                },
+            )]),
+        );
+        complete_catalog.install_snapshot(complete_snap.clone());
+        let calls = AtomicUsize::new(0);
+        let summary = super::cache_pricing_summary_for_model_with_estimator(
+            complete_catalog.as_ref(),
+            "claude-sonnet-4-5",
+            None,
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Some(250_000)
+            },
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(summary.status, "known");
+        assert_eq!(summary.input_micros_per_million, Some(3_000_000));
+        assert_eq!(
+            summary.cache_creation_5m_micros_per_million,
+            Some(3_750_000)
+        );
+        assert_eq!(summary.cache_read_micros_per_million, Some(300_000));
+
+        // 2. Output-only threshold band with omitted optional cache rates preserves Anthropic fallback.
+        let partial_output_only = PriceCatalog::new_empty();
+        let mut partial_snap = complete_snap.clone();
+        partial_snap.cache_creation_per_million_usd.clear();
+        partial_snap.cache_read_per_million_usd.clear();
+        partial_output_only.install_snapshot(partial_snap);
+        let partial_calls = AtomicUsize::new(0);
+        let partial_summary = super::cache_pricing_summary_for_model_with_estimator(
+            partial_output_only.as_ref(),
+            "claude-sonnet-4-5",
+            None,
+            || {
+                partial_calls.fetch_add(1, Ordering::Relaxed);
+                Some(250_000)
+            },
+        );
+        assert_eq!(partial_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(partial_summary.status, "known");
+        assert_eq!(partial_summary.input_micros_per_million, Some(3_000_000));
+        assert_eq!(
+            partial_summary.cache_creation_5m_micros_per_million,
+            Some(3_750_000)
+        );
+        assert_eq!(partial_summary.cache_read_micros_per_million, Some(300_000));
+
+        // 3. Input-banded catalog entry with omitted cache rates preserves family fallback when count is known.
+        let haiku_partial = PriceCatalog::new_empty();
+        let mut haiku_snap = CatalogSnapshot::empty_cost_disabled();
+        haiku_snap.status = CatalogStatus::Ok;
+        haiku_snap.models.insert(
+            "claude-haiku-5-5".to_owned(),
+            Pricing {
+                native: None,
+                model: "claude-haiku-5-5".to_owned(),
+                input_per_million_usd: UsdPerMillion::from_micros_usd(100_000),
+                output_per_million_usd: UsdPerMillion::from_micros_usd(500_000),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
+                by_tier: BTreeMap::new(),
+            },
+        );
+        let haiku_band = BTreeMap::from([(
+            100_000,
+            cc_lb_pricing::ThresholdBand {
+                default: cc_lb_pricing::ThresholdRate {
+                    input_per_million_usd: Some(UsdPerMillion::from_micros_usd(500_000)),
+                    output_per_million_usd: Some(UsdPerMillion::from_micros_usd(2_500_000)),
+                    cache_creation_per_million_usd: Some(UsdPerMillion::from_micros_usd(625_000)),
+                    cache_read_per_million_usd: Some(UsdPerMillion::from_micros_usd(50_000)),
+                },
+                by_tier: BTreeMap::new(),
+            },
+        )]);
+        haiku_snap
+            .above_tokens_rates
+            .insert("claude-haiku-5-5".to_owned(), haiku_band.clone());
+        haiku_partial.install_snapshot(haiku_snap.clone());
+        let haiku_calls = AtomicUsize::new(0);
+        let haiku_summary = super::cache_pricing_summary_for_model_with_estimator(
+            haiku_partial.as_ref(),
+            "claude-haiku-5-5",
+            None,
+            || {
+                haiku_calls.fetch_add(1, Ordering::Relaxed);
+                Some(120_000)
+            },
+        );
+        assert_eq!(haiku_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(haiku_summary.status, "known");
+        assert_eq!(haiku_summary.input_micros_per_million, Some(500_000));
+        assert_eq!(
+            haiku_summary.cache_creation_5m_micros_per_million,
+            Some(625_000)
+        );
+        assert_eq!(haiku_summary.cache_read_micros_per_million, Some(50_000));
+
+        // 4. Mid-lookup snapshot replacement resolves from the single held initial snapshot.
+        let swap_catalog = PriceCatalog::new_empty();
+        let mut initial_snap = haiku_snap;
+        initial_snap.cache_creation_per_million_usd.insert(
+            "claude-haiku-5-5".to_owned(),
+            UsdPerMillion::from_micros_usd(125_000),
+        );
+        initial_snap.cache_read_per_million_usd.insert(
+            "claude-haiku-5-5".to_owned(),
+            UsdPerMillion::from_micros_usd(10_000),
+        );
+        swap_catalog.install_snapshot(initial_snap);
+        let swap_ref = std::sync::Arc::clone(&swap_catalog);
+        let swap_summary = super::cache_pricing_summary_for_model_with_estimator(
+            swap_catalog.as_ref(),
+            "claude-haiku-5-5",
+            None,
+            || {
+                let mut replacement = CatalogSnapshot::empty_cost_disabled();
+                replacement.payload_hash = "swapped-empty".to_owned();
+                replacement.status = CatalogStatus::Ok;
+                swap_ref.install_snapshot(replacement);
+                Some(120_000)
+            },
+        );
+        assert_eq!(swap_summary.status, "known");
+        assert_eq!(swap_summary.input_micros_per_million, Some(500_000));
+        assert_eq!(
+            swap_summary.cache_creation_5m_micros_per_million,
+            Some(625_000)
+        );
+        assert_eq!(swap_summary.cache_read_micros_per_million, Some(50_000));
     }
 
     #[test]
