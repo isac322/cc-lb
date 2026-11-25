@@ -1793,7 +1793,7 @@ async fn proxy_timeout_middleware_does_not_rewrite_started_streaming_response() 
     );
 }
 
-struct WebSocketTestSignerFactory;
+pub(super) struct WebSocketTestSignerFactory;
 
 impl ApiKeyAwareSignerFactory for WebSocketTestSignerFactory {
     fn with_router_choice(&self, _router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {

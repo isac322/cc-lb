@@ -34,6 +34,7 @@ use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{ManagedKeyStore, RuntimeChangeNotifier, Storage};
 use cc_lb_upstream::SignedRequest;
+use futures_util::stream::FuturesUnordered;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -466,19 +467,11 @@ async fn await_tasks_with_shared_timeout(
     if tasks.is_empty() {
         return;
     }
-    let mut abort_handles = Vec::with_capacity(tasks.len());
-    let mut join_set = tokio::task::JoinSet::new();
-    for task in tasks {
-        abort_handles.push(task.abort_handle());
-        join_set.spawn(async move {
-            let _ = task.await;
-        });
-    }
-    if tokio::time::timeout(budget, async {
-        while join_set.join_next().await.is_some() {}
-    })
-    .await
-    .is_err()
+    let abort_handles: Vec<_> = tasks.iter().map(JoinHandle::abort_handle).collect();
+    let mut pending: FuturesUnordered<_> = tasks.into_iter().collect();
+    if tokio::time::timeout(budget, async { while pending.next().await.is_some() {} })
+        .await
+        .is_err()
     {
         tracing::warn!(
             timeout_secs = budget.as_secs(),
@@ -488,8 +481,7 @@ async fn await_tasks_with_shared_timeout(
         for handle in abort_handles {
             handle.abort();
         }
-        join_set.abort_all();
-        while join_set.join_next().await.is_some() {}
+        while pending.next().await.is_some() {}
     }
 }
 
@@ -1231,13 +1223,7 @@ pub(super) async fn build_runtime_with_storage_core(
         Arc::new(tokio::sync::Mutex::new(Vec::new()));
     {
         // Stop claiming new background scheduler jobs as soon as graceful drain begins.
-        let scheduler_cancel_on_drain = scheduler_cancel.clone();
-        signals.add_drain_start_hook(move || {
-            let scheduler_cancel_on_drain = scheduler_cancel_on_drain.clone();
-            async move {
-                scheduler_cancel_on_drain.cancel();
-            }
-        });
+        signals.add_drain_start_cancel_token(scheduler_cancel.clone());
     }
     {
         // Join active scheduler workers BEFORE draining/shutting down downstream
@@ -2569,5 +2555,39 @@ mod tests {
         .await
         .expect("drain_complete signals");
         drop(app);
+    }
+
+    #[tokio::test]
+    async fn await_tasks_with_shared_timeout_awaits_aborted_original_workers() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let completed = tokio::spawn(async {});
+        let worker_dropped = Arc::new(AtomicBool::new(false));
+        let worker_dropped_flag = DropFlag(Arc::clone(&worker_dropped));
+        let worker_started = Arc::new(tokio::sync::Notify::new());
+        let worker_started_task = Arc::clone(&worker_started);
+        let stalled = tokio::spawn(async move {
+            let _guard = worker_dropped_flag;
+            worker_started_task.notify_one();
+            std::future::pending::<()>().await;
+        });
+        worker_started.notified().await;
+        await_tasks_with_shared_timeout(
+            vec![completed, stalled],
+            Duration::from_millis(25),
+            "test-workers",
+        )
+        .await;
+        assert!(
+            worker_dropped.load(Ordering::Acquire),
+            "original worker Drop guard must complete before await_tasks_with_shared_timeout returns"
+        );
     }
 }

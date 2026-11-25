@@ -152,10 +152,13 @@ impl DrainController {
 
     async fn wait_until_drained(&self) {
         loop {
+            let notified = self.inner.drained.notified();
+            tokio::pin!(notified);
+            let _ = notified.as_mut().enable();
             if self.in_flight() == 0 {
                 return;
             }
-            self.inner.drained.notified().await;
+            notified.await;
         }
     }
 
@@ -426,5 +429,28 @@ mod tests {
             std::future::pending::<()>().await;
         };
         Response::new(Body::from_stream(stream))
+    }
+
+    #[tokio::test]
+    async fn await_drained_does_not_miss_release_after_notified_registration() {
+        let controller = DrainController::new();
+        let guard = controller.try_track().expect("initial guard acquired");
+        controller.trigger();
+
+        let mut drained = Box::pin(controller.await_drained(Duration::from_secs(10)));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            std::future::Future::poll(drained.as_mut(), &mut cx).is_pending(),
+            "await_drained must wait while one guard is held"
+        );
+        // Dropping the last guard immediately after the pending poll must notify the
+        // pre-registered waiter without waiting for the 10 s timeout.
+        drop(guard);
+        assert!(
+            !tokio::time::timeout(Duration::from_secs(2), drained)
+                .await
+                .expect("waiter must wake immediately instead of timing out"),
+            "await_drained must report clean drain"
+        );
     }
 }

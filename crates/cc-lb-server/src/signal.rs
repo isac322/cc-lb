@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 pub type SighupHandler = Arc<dyn Fn() + Send + Sync + 'static>;
 type ShutdownHookFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -39,7 +40,7 @@ struct ShutdownRunner {
     drain: DrainController,
     drain_timeout: Duration,
     shutdown_started: Arc<AtomicBool>,
-    drain_start_hooks: ShutdownHooks,
+    drain_start_tokens: Arc<Mutex<Vec<CancellationToken>>>,
     shutdown_hooks: ShutdownHooks,
 }
 
@@ -65,7 +66,13 @@ impl ShutdownRunner {
     async fn run(self) {
         self.drain.trigger();
         self.shutdown.send_replace(true);
-        self.drain_start_hooks.run_all().await;
+        let tokens = match self.drain_start_tokens.lock() {
+            Ok(tokens) => tokens.clone(),
+            Err(_) => Vec::new(),
+        };
+        for token in tokens {
+            token.cancel();
+        }
 
         // Drain in-flight requests BEFORE running shutdown hooks: the hooks stop
         // background writers (request-event assembler, pricing, logger) that must
@@ -124,14 +131,13 @@ impl SignalHandle {
         self.runner.drain.set_draining(draining);
     }
 
-    pub fn add_drain_start_hook<F, Fut>(&self, hook: F)
-    where
-        F: Fn() -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        self.runner
-            .drain_start_hooks
-            .push(Arc::new(move || Box::pin(hook())));
+    /// Cancel `token` synchronously as soon as graceful drain begins (before
+    /// awaiting in-flight request drain, so slow async callbacks cannot block
+    /// `hooks_started`).
+    pub fn add_drain_start_cancel_token(&self, token: CancellationToken) {
+        if let Ok(mut tokens) = self.runner.drain_start_tokens.lock() {
+            tokens.push(token);
+        }
     }
 
     pub fn add_shutdown_hook<F, Fut>(&self, hook: F)
@@ -161,7 +167,7 @@ pub fn install(
             drain,
             drain_timeout,
             shutdown_started: Arc::new(AtomicBool::new(false)),
-            drain_start_hooks: ShutdownHooks::default(),
+            drain_start_tokens: Arc::new(Mutex::new(Vec::new())),
             shutdown_hooks: ShutdownHooks::default(),
         },
         tasks: SignalTasks::default(),
@@ -387,7 +393,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drain_start_hooks_run_before_drain_completes_and_hooks_started_precedes_shutdown_hooks()
+    async fn drain_start_tokens_cancel_synchronously_before_drain_completes_and_hooks_started_precedes_shutdown_hooks()
      {
         let drain = DrainController::new();
         let guard = drain.try_track().expect("initial guard acquired");
@@ -395,18 +401,8 @@ mod tests {
         let hooks_started_rx = handle.subscribe_hooks_started();
         let drain_complete_rx = handle.subscribe_drain_complete();
 
-        let (drain_hook_tx, drain_hook_rx) = oneshot::channel();
-        let drain_hook_tx = Arc::new(Mutex::new(Some(drain_hook_tx)));
-        handle.add_drain_start_hook(move || {
-            let drain_hook_tx = drain_hook_tx.clone();
-            async move {
-                if let Ok(mut slot) = drain_hook_tx.lock()
-                    && let Some(tx) = slot.take()
-                {
-                    let _ = tx.send(());
-                }
-            }
-        });
+        let drain_cancel = CancellationToken::new();
+        handle.add_drain_start_cancel_token(drain_cancel.clone());
 
         let (shutdown_hook_tx, mut shutdown_hook_rx) = oneshot::channel();
         let saw_hooks_started_in_hook = Arc::new(AtomicBool::new(false));
@@ -428,10 +424,9 @@ mod tests {
         });
 
         handle.start_shutdown();
-        tokio::time::timeout(Duration::from_secs(2), drain_hook_rx)
+        tokio::time::timeout(Duration::from_secs(2), drain_cancel.cancelled())
             .await
-            .expect("drain_start hook runs while request guard is still held")
-            .expect("drain_start hook channel sends");
+            .expect("drain_start cancel token fires while request guard is still held");
         assert!(
             !*hooks_started_rx.borrow(),
             "hooks_started must stay false while drain guard is active"
