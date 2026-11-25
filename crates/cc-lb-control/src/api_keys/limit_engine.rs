@@ -1050,6 +1050,117 @@ impl LimitEngine {
         true
     }
 
+    /// Resize an active reservation's rolling token and cost holds after the
+    /// final request body is settled, while keeping request counts and
+    /// concurrency guards from admission intact. Returns `Ok(false)` if the
+    /// reservation expired or was already reconciled.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resize_reservation_estimates_by_id(
+        &self,
+        view: &PrincipalView,
+        record: &StoredApiKeyRecord,
+        principal_id: &str,
+        id: &str,
+        model: &str,
+        max_tokens: Option<i64>,
+        max_input_estimate: i64,
+        cost_estimate_micros: Option<i64>,
+    ) -> Result<bool, RejectReason> {
+        let plan = self.prepare_reservation_plan(
+            view,
+            record,
+            principal_id,
+            model,
+            max_tokens,
+            max_input_estimate,
+            cost_estimate_micros,
+        )?;
+        let caps = self.compute_admission_caps(
+            plan.durable_usage.as_ref(),
+            &plan.key_id,
+            &plan.planned_rolling,
+            plan.now_sec,
+        );
+        {
+            let mut reservations = self.inner.reservations.lock();
+            let Some(res) = reservations.get_mut(id) else {
+                return Ok(false);
+            };
+            {
+                let mut rolling = self.inner.rolling.write();
+                {
+                    let remote = self.inner.remote_rolling.read();
+                    for ((limit, new_amount), cap) in plan.planned_rolling.iter().zip(caps.iter()) {
+                        let old_amount = res
+                            .reserved
+                            .iter()
+                            .find(|r| r.kind == limit.kind && r.window_sec == limit.window_secs)
+                            .map_or(0, |r| r.amount);
+                        let delta = new_amount.saturating_sub(old_amount);
+                        if delta > 0 {
+                            let key = (res.key_id.clone(), limit.kind, limit.window_secs);
+                            let local = rolling.get(&key).map_or(0, |c| c.total_at(plan.now_sec));
+                            let remote_total =
+                                remote.get(&key).map_or(0, |c| c.total_at(plan.now_sec));
+                            if local.saturating_add(remote_total).saturating_add(delta) > *cap {
+                                return Err(reject_reason_for_limit_kind(limit.kind));
+                            }
+                        }
+                    }
+                }
+                for old in &res.reserved {
+                    if !plan.planned_rolling.iter().any(|(limit, _)| {
+                        limit.kind == old.kind && limit.window_secs == old.window_sec
+                    }) {
+                        record_amount_locked(
+                            &mut rolling,
+                            &res.key_id,
+                            old.kind,
+                            old.window_sec,
+                            -old.amount,
+                            plan.now_sec,
+                        );
+                    }
+                }
+                let mut next_reserved = Vec::with_capacity(plan.planned_rolling.len());
+                for (limit, new_amount) in &plan.planned_rolling {
+                    let old_amount = res
+                        .reserved
+                        .iter()
+                        .find(|r| r.kind == limit.kind && r.window_sec == limit.window_secs)
+                        .map_or(0, |r| r.amount);
+                    let delta = new_amount.saturating_sub(old_amount);
+                    if delta != 0 {
+                        record_amount_locked(
+                            &mut rolling,
+                            &res.key_id,
+                            limit.kind,
+                            limit.window_secs,
+                            delta,
+                            plan.now_sec,
+                        );
+                    }
+                    next_reserved.push(ReservedAmount {
+                        kind: limit.kind,
+                        window_sec: limit.window_secs,
+                        amount: *new_amount,
+                    });
+                }
+                res.reserved = next_reserved;
+                res.admitted_input_estimate = plan.estimated_input_tokens;
+                res.admitted_output_estimate = plan.estimated_output_tokens;
+                res.admitted_cost_estimate_micros = cost_estimate_micros;
+                res.durable_bucket_widths = plan.durable_bucket_widths;
+                res.last_activity_at = Instant::now();
+            }
+        }
+        self.inner.effective_limits.write().insert(
+            (plan.key_id, principal_id.to_owned()),
+            plan.effective_limits,
+        );
+        Ok(true)
+    }
+
     /// Reconcile a reservation by ID.
     ///
     /// Used by the `LimitReconcileSubscriber` to reconcile out of
@@ -5197,5 +5308,210 @@ mod tests {
         .await
         .expect("uncertain error deletes committed hold");
         assert!(store2.committed.lock().is_empty());
+    }
+
+    #[test]
+    fn resize_reservation_estimates_by_id_enforces_caps_atomically_and_preserves_concurrency() {
+        let concurrency = Arc::new(KeyConcurrencyManager::new());
+        let engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
+        let view = PrincipalView::for_tests(
+            "principal-resize",
+            true,
+            vec!["gpt-5".to_owned()],
+            vec![
+                Limit {
+                    kind: LimitKind::Concurrent,
+                    window_secs: 0,
+                    cap_micros: 1,
+                },
+                Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 1,
+                },
+                Limit {
+                    kind: LimitKind::TotalTokens,
+                    window_secs: 60,
+                    cap_micros: 1_000,
+                },
+                Limit {
+                    kind: LimitKind::CostUsd,
+                    window_secs: 60,
+                    cap_micros: 500,
+                },
+            ],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            key_hash_b64: "resize-key".to_owned(),
+            ..Default::default()
+        };
+        let baseline = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-resize",
+                "gpt-5",
+                Some(100),
+                200,
+                Some(100),
+            )
+            .expect("baseline admission succeeds");
+        let now = unix_secs(engine.inner.clock.now());
+        assert_eq!(concurrency.current(&record.key_hash_b64), 1);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::Requests, 60, now),
+            1
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, now),
+            300
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::CostUsd, 60, now),
+            100
+        );
+
+        // Unsatisfiable CostUsd (> 500) must reject atomically without mutating TotalTokens.
+        assert_eq!(
+            engine.resize_reservation_estimates_by_id(
+                &view,
+                &record,
+                "principal-resize",
+                baseline.id(),
+                "gpt-5",
+                Some(100),
+                800,
+                Some(600),
+            ),
+            Err(RejectReason::Unsatisfiable {
+                kind: LimitKind::CostUsd,
+                cap: 500,
+                requested: 600,
+            })
+        );
+        // Rolling-window rejection: simulate existing rolling CostUsd usage pushing delta over cap
+        // even when per-request CostUsd=450 is below 500.
+        {
+            let mut rolling = engine.inner.rolling.write();
+            record_amount_locked(
+                &mut rolling,
+                &record.key_hash_b64,
+                LimitKind::CostUsd,
+                60,
+                100,
+                now,
+            );
+        }
+        assert_eq!(
+            engine.resize_reservation_estimates_by_id(
+                &view,
+                &record,
+                "principal-resize",
+                baseline.id(),
+                "gpt-5",
+                Some(100),
+                800,
+                Some(450),
+            ),
+            Err(RejectReason::CostRateLimit)
+        );
+        {
+            let mut rolling = engine.inner.rolling.write();
+            record_amount_locked(
+                &mut rolling,
+                &record.key_hash_b64,
+                LimitKind::CostUsd,
+                60,
+                -100,
+                now,
+            );
+        }
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, now),
+            300,
+            "failed resize must leave previously reserved TotalTokens unchanged"
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::CostUsd, 60, now),
+            100,
+            "failed resize must leave previously reserved CostUsd unchanged"
+        );
+        assert_eq!(concurrency.current(&record.key_hash_b64), 1);
+
+        // Scaling up within caps succeeds even when Requests=1/1 and Concurrent=1/1 are full.
+        assert_eq!(
+            engine.resize_reservation_estimates_by_id(
+                &view,
+                &record,
+                "principal-resize",
+                baseline.id(),
+                "gpt-5",
+                Some(100),
+                800,
+                Some(400),
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, now),
+            900
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::CostUsd, 60, now),
+            400
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::Requests, 60, now),
+            1
+        );
+        assert_eq!(concurrency.current(&record.key_hash_b64), 1);
+
+        // Scaling back down refunds the token and cost delta.
+        assert_eq!(
+            engine.resize_reservation_estimates_by_id(
+                &view,
+                &record,
+                "principal-resize",
+                baseline.id(),
+                "gpt-5",
+                Some(100),
+                250,
+                Some(120),
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, now),
+            350
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::CostUsd, 60, now),
+            120
+        );
+
+        drop(baseline);
+        assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, now),
+            0
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::CostUsd, 60, now),
+            0
+        );
+        assert_eq!(
+            engine.resize_reservation_estimates_by_id(
+                &view,
+                &record,
+                "principal-resize",
+                "missing-id",
+                "gpt-5",
+                Some(100),
+                200,
+                Some(100),
+            ),
+            Ok(false)
+        );
     }
 }

@@ -542,7 +542,11 @@ async fn send_responses_dispatch(
         return (Vec::new(), Vec::new());
     }
     let upstream_id = connection.upstream_id;
-    gateway.finalize_dispatch_reasoning(&mut dispatch, true);
+    if let Err(error) = gateway.finalize_dispatch_reasoning(&mut dispatch, true) {
+        let error = error.with_stream(dispatch.stream_id.clone());
+        let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
+        return (ready, vec![error]);
+    }
     match tokio::time::timeout_at(
         deadline,
         gateway.validate_candidate_for_send(
@@ -778,7 +782,12 @@ async fn advance_one_dispatch(
             let pinned_to_single_owner = pending.pinned_to_single_owner
                 || (!pending.dispatch.has_explicit_affinity
                     && gateway.session_upstream() == Some(candidate.upstream_id));
-            gateway.finalize_dispatch_reasoning(&mut pending.dispatch, pinned_to_single_owner);
+            if let Err(error) =
+                gateway.finalize_dispatch_reasoning(&mut pending.dispatch, pinned_to_single_owner)
+            {
+                pending.last_error = Some(error.with_stream(pending.dispatch.stream_id.clone()));
+                return finish_failed_dispatch(gateway, pending).await;
+            }
             match tokio::time::timeout_at(
                 pending.deadline,
                 gateway.validate_candidate_for_send(
@@ -834,7 +843,12 @@ async fn advance_one_dispatch(
         let pinned_to_single_owner = pending.pinned_to_single_owner
             || (!pending.dispatch.has_explicit_affinity
                 && gateway.session_upstream() == Some(candidate.upstream_id));
-        gateway.finalize_dispatch_reasoning(&mut pending.dispatch, pinned_to_single_owner);
+        if let Err(error) =
+            gateway.finalize_dispatch_reasoning(&mut pending.dispatch, pinned_to_single_owner)
+        {
+            pending.last_error = Some(error.with_stream(pending.dispatch.stream_id.clone()));
+            return finish_failed_dispatch(gateway, pending).await;
+        }
 
         // Coalesce concurrent shareable API-key lanes onto an in-flight dial instead of
         // opening duplicate sockets and consuming extra bulkhead permits.
@@ -1160,7 +1174,15 @@ async fn handle_connect_outcome(
                 let pinned_to_single_owner = entry.pinned_to_single_owner
                     || (!entry.dispatch.has_explicit_affinity
                         && gateway.session_upstream() == Some(upstream_id));
-                gateway.finalize_dispatch_reasoning(&mut entry.dispatch, pinned_to_single_owner);
+                if let Err(error) =
+                    gateway.finalize_dispatch_reasoning(&mut entry.dispatch, pinned_to_single_owner)
+                {
+                    entry.last_error = Some(error.with_stream(entry.dispatch.stream_id.clone()));
+                    let (ready, errs) = finish_failed_dispatch(gateway, entry).await;
+                    dispatches.extend(ready);
+                    errors.extend(errs);
+                    continue;
+                }
                 match tokio::time::timeout_at(
                     entry.deadline,
                     gateway.validate_candidate_for_send(

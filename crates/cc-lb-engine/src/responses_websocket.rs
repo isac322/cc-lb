@@ -244,6 +244,8 @@ pub(crate) enum WsUnknownReasoningPlan {
 struct DeferredUnestablishedReasoning {
     original_body: Arc<Value>,
     original_frame: Bytes,
+    original_bytes: usize,
+    stripped_extra_bytes: usize,
     unknown_keys: Vec<UpstreamAffinityKey>,
     currently_stripped: bool,
 }
@@ -715,6 +717,9 @@ pub struct PreparedWsConnectJob {
     reject_exhausted: bool,
     expected_principal_id: String,
     expected_key_id: String,
+    reservation_id: Option<String>,
+    deferred_limit_context: Option<DeferredWebSocketLimitContext>,
+    observer: Option<LifecycleContext>,
 }
 
 impl PreparedWsConnectJob {
@@ -761,6 +766,22 @@ impl PreparedWsConnectJob {
                 self.reject_exhausted,
             )
             .await?;
+        if let (Some(deferred_ctx), Some(reservation_id)) = (
+            self.deferred_limit_context.as_ref(),
+            self.reservation_id.as_deref(),
+        ) {
+            self.lifecycle
+                .resize_websocket_deferred_limit(
+                    &auth,
+                    &self.ingress_headers,
+                    deferred_ctx,
+                    self.candidate.upstream_id,
+                    &self.body,
+                    Some(reservation_id),
+                    self.observer.as_ref(),
+                )
+                .await?;
+        }
         let (url, headers, signer, prepare_signer_ms, sign_ms) = self
             .lifecycle
             .sign_websocket_connection_with_signer(
@@ -1136,18 +1157,23 @@ impl ResponsesWebSocketGateway {
                     unknown_keys,
                     None,
                 ),
-                WsUnknownReasoningPlan::DeferredUnestablished { unknown_keys } => (
-                    body.clone(),
-                    frame.clone(),
-                    None,
-                    Vec::new(),
-                    Some(DeferredUnestablishedReasoning {
-                        original_body: body,
-                        original_frame: frame,
-                        unknown_keys,
-                        currently_stripped: false,
-                    }),
-                ),
+                WsUnknownReasoningPlan::DeferredUnestablished { unknown_keys } => {
+                    let original_bytes = frame.len().saturating_add(json_owned_bytes(&body));
+                    (
+                        body.clone(),
+                        frame.clone(),
+                        None,
+                        Vec::new(),
+                        Some(DeferredUnestablishedReasoning {
+                            original_body: body,
+                            original_frame: frame,
+                            original_bytes,
+                            stripped_extra_bytes: 0,
+                            unknown_keys,
+                            currently_stripped: false,
+                        }),
+                    )
+                }
                 WsUnknownReasoningPlan::RetryStripPending {
                     pending_digests,
                     pending_keys,
@@ -1260,7 +1286,13 @@ impl ResponsesWebSocketGateway {
                 .pop_front()
                 .expect("newly queued turn exists");
             lane_state.active = Some(next);
-            Ok(self.dispatch(next))
+            match self.try_dispatch(next) {
+                Ok(dispatched) => Ok(dispatched),
+                Err(error) => {
+                    self.finish_turn(next, Some(&error));
+                    Err(error)
+                }
+            }
         } else {
             Ok(None)
         }
@@ -1546,56 +1578,103 @@ impl ResponsesWebSocketGateway {
         &mut self,
         turn_id: u64,
         pinned_to_single_owner: bool,
-    ) -> Option<Bytes> {
-        let currently_stripped = {
-            let turn = self.turns.get(&turn_id)?;
-            turn.deferred_unestablished.as_ref()?.currently_stripped
+    ) -> Result<Option<Bytes>, WebSocketError> {
+        let Some((currently_stripped, turn_lane)) = self.turns.get(&turn_id).and_then(|turn| {
+            turn.deferred_unestablished
+                .as_ref()
+                .map(|deferred| (deferred.currently_stripped, turn.lane.clone()))
+        }) else {
+            return Ok(None);
         };
         if !pinned_to_single_owner {
             if !currently_stripped {
-                let (stripped_body, stripped_frame) = {
-                    let turn = self.turns.get(&turn_id)?;
-                    let deferred = turn.deferred_unestablished.as_ref()?;
-                    let stripped =
-                        strip_openai_reasoning_encrypted_items(&deferred.original_body, None)?;
-                    let bytes = serde_json::to_vec(&stripped).ok()?;
-                    (Arc::new(stripped), Bytes::from(bytes))
+                let (stripped_body, stripped_frame, stripped_bytes, old_plugin) = {
+                    let Some(turn) = self.turns.get(&turn_id) else {
+                        return Ok(None);
+                    };
+                    let Some(deferred) = turn.deferred_unestablished.as_ref() else {
+                        return Ok(None);
+                    };
+                    let Some(stripped) =
+                        strip_openai_reasoning_encrypted_items(&deferred.original_body, None)
+                    else {
+                        return Ok(None);
+                    };
+                    let Ok(bytes) = serde_json::to_vec(&stripped) else {
+                        return Ok(None);
+                    };
+                    let stripped_body = Arc::new(stripped);
+                    let stripped_frame = Bytes::from(bytes);
+                    let stripped_bytes = stripped_frame
+                        .len()
+                        .saturating_add(json_owned_bytes(&stripped_body));
+                    let old_plugin = turn
+                        .plugin_request
+                        .as_ref()
+                        .map_or(0, |(_, req)| req.frame.len());
+                    (stripped_body, stripped_frame, stripped_bytes, old_plugin)
                 };
-                let turn = self.turns.get_mut(&turn_id)?;
+                if stripped_bytes
+                    > self
+                        .byte_cap
+                        .saturating_sub(self.used_bytes)
+                        .saturating_add(old_plugin)
+                {
+                    return Err(WebSocketError::new(
+                        503,
+                        "overloaded_error",
+                        "Stripped WebSocket frame exceeds the session budget",
+                    )
+                    .with_stream(turn_lane));
+                }
+                let Some(turn) = self.turns.get_mut(&turn_id) else {
+                    return Ok(None);
+                };
                 if let Some((_, req)) = turn.plugin_request.take() {
                     let req_len = req.frame.len();
                     self.used_bytes = self.used_bytes.saturating_sub(req_len);
                     turn.charged_bytes = turn.charged_bytes.saturating_sub(req_len);
                 }
+                self.used_bytes = self.used_bytes.saturating_add(stripped_bytes);
+                turn.charged_bytes = turn.charged_bytes.saturating_add(stripped_bytes);
                 turn.body = stripped_body;
                 turn.frame = stripped_frame;
                 if let Some(deferred) = turn.deferred_unestablished.as_mut() {
                     deferred.currently_stripped = true;
+                    deferred.stripped_extra_bytes = stripped_bytes;
                 }
             }
-            let turn = self.turns.get_mut(&turn_id)?;
+            let Some(turn) = self.turns.get_mut(&turn_id) else {
+                return Ok(None);
+            };
             turn.unknown_reasoning_retry = None;
             turn.pending_affinity_keys.clear();
-            return Some(turn.frame.clone());
+            return Ok(Some(turn.frame.clone()));
         }
-        let turn = self.turns.get_mut(&turn_id)?;
+        let Some(turn) = self.turns.get_mut(&turn_id) else {
+            return Ok(None);
+        };
         if currently_stripped {
-            if let Some((_, req)) = turn.plugin_request.take() {
-                let req_len = req.frame.len();
-                self.used_bytes = self.used_bytes.saturating_sub(req_len);
-                turn.charged_bytes = turn.charged_bytes.saturating_sub(req_len);
-            }
+            let released_plugin = turn
+                .plugin_request
+                .take()
+                .map_or(0, |(_, req)| req.frame.len());
+            let mut stripped_extra = 0;
             if let Some(deferred) = turn.deferred_unestablished.as_mut() {
+                stripped_extra = std::mem::take(&mut deferred.stripped_extra_bytes);
                 turn.body = Arc::clone(&deferred.original_body);
                 turn.frame = deferred.original_frame.clone();
                 deferred.currently_stripped = false;
             }
+            let total_released = released_plugin.saturating_add(stripped_extra);
+            self.used_bytes = self.used_bytes.saturating_sub(total_released);
+            turn.charged_bytes = turn.charged_bytes.saturating_sub(total_released);
         }
         if let Some(deferred) = turn.deferred_unestablished.as_ref() {
             turn.unknown_reasoning_retry = Some(WsUnknownReasoningRetry::All);
             turn.pending_affinity_keys = deferred.unknown_keys.clone();
         }
-        Some(turn.frame.clone())
+        Ok(Some(turn.frame.clone()))
     }
 
     /// Resolve any deferred unestablished encrypted-reasoning plan once the
@@ -1605,28 +1684,44 @@ impl ResponsesWebSocketGateway {
         &mut self,
         dispatch: &mut WebSocketDispatch,
         pinned_to_single_owner: bool,
-    ) {
+    ) -> Result<(), WebSocketError> {
         if dispatch.control {
-            return;
+            return Ok(());
         }
         if let Some(frame) =
-            self.apply_unestablished_reasoning(dispatch.turn_id, pinned_to_single_owner)
+            self.apply_unestablished_reasoning(dispatch.turn_id, pinned_to_single_owner)?
         {
             dispatch.frame = frame;
         }
+        Ok(())
+    }
+
+    fn try_dispatch(&mut self, turn_id: u64) -> Result<Option<WebSocketDispatch>, WebSocketError> {
+        self.dispatch_inner(turn_id, true)
     }
 
     fn dispatch(&mut self, turn_id: u64) -> Option<WebSocketDispatch> {
-        let (should_reapply_pin, turn_lane, has_explicit_affinity) = {
-            let turn = self.turns.get(&turn_id)?;
-            (
-                self.session_oauth
-                    && turn.pinned.is_none()
-                    && !turn.prepared.has_explicit_affinity
-                    && turn.admitted_session_upstream.is_none(),
-                turn.lane.clone(),
-                turn.prepared.has_explicit_affinity,
-            )
+        self.dispatch_inner(turn_id, false).ok().flatten()
+    }
+
+    fn dispatch_inner(
+        &mut self,
+        turn_id: u64,
+        fail_on_budget: bool,
+    ) -> Result<Option<WebSocketDispatch>, WebSocketError> {
+        let Some((should_reapply_pin, turn_lane, has_explicit_affinity)) =
+            self.turns.get(&turn_id).map(|turn| {
+                (
+                    self.session_oauth
+                        && turn.pinned.is_none()
+                        && !turn.prepared.has_explicit_affinity
+                        && turn.admitted_session_upstream.is_none(),
+                    turn.lane.clone(),
+                    turn.prepared.has_explicit_affinity,
+                )
+            })
+        else {
+            return Ok(None);
         };
         let session_owner = should_reapply_pin
             .then_some(self.session_upstream)
@@ -1636,7 +1731,9 @@ impl ResponsesWebSocketGateway {
                 .websocket_candidate_for_upstream(owner, self.codex_backend)
         });
         let (candidates, current_has_any_oauth_candidate) = {
-            let turn = self.turns.get_mut(&turn_id)?;
+            let Some(turn) = self.turns.get_mut(&turn_id) else {
+                return Ok(None);
+            };
             let mut candidates = std::mem::take(&mut turn.prepared.candidates);
             if let Some(owner) = session_owner {
                 let existing_pos = candidates
@@ -1676,14 +1773,23 @@ impl ResponsesWebSocketGateway {
                     && other.upstream_id.is_none()
                     && other.has_any_oauth_candidate
             });
-        if candidates.len() <= 1 {
-            self.apply_unestablished_reasoning(turn_id, true);
+        let reasoning_res = if candidates.len() <= 1 {
+            self.apply_unestablished_reasoning(turn_id, true)
         } else if !defer_for_other_oauth_owner {
-            self.apply_unestablished_reasoning(turn_id, false);
+            self.apply_unestablished_reasoning(turn_id, false)
+        } else {
+            Ok(None)
+        };
+        if let Err(error) = reasoning_res
+            && fail_on_budget
+        {
+            return Err(error);
         }
-        let turn = self.turns.get(&turn_id)?;
+        let Some(turn) = self.turns.get(&turn_id) else {
+            return Ok(None);
+        };
         let prefer_api_key_on_final_attempt = !self.codex_backend && turn.pinned.is_none();
-        Some(WebSocketDispatch {
+        Ok(Some(WebSocketDispatch {
             turn_id,
             frame: turn.frame.clone(),
             connection_id: turn.connection_id,
@@ -1692,7 +1798,7 @@ impl ResponsesWebSocketGateway {
             control: false,
             prefer_api_key_on_final_attempt,
             has_explicit_affinity,
-        })
+        }))
     }
 
     fn reject_exhausted_fallback(turn: &Turn, upstream_id: Uuid) -> bool {
@@ -1780,7 +1886,16 @@ impl ResponsesWebSocketGateway {
         dispatch: &WebSocketDispatch,
         candidate: &WebSocketCandidate,
     ) -> Result<PreparedWsConnectJob, WebSocketError> {
-        let (turn_frame, turn_body, reject_exhausted, expected_principal_id, expected_key_id) = {
+        let (
+            turn_frame,
+            turn_body,
+            reject_exhausted,
+            expected_principal_id,
+            expected_key_id,
+            reservation_id,
+            deferred_limit_context,
+            observer,
+        ) = {
             let turn = self.turns.get(&dispatch.turn_id).ok_or_else(|| {
                 WebSocketError::new(
                     409,
@@ -1806,6 +1921,12 @@ impl ResponsesWebSocketGateway {
                 Self::reject_exhausted_fallback(turn, candidate.upstream_id),
                 turn.prepared.principal_id.clone(),
                 turn.prepared.key_id.clone(),
+                turn.prepared
+                    .reservation
+                    .as_ref()
+                    .map(|reservation| reservation.id().to_owned()),
+                turn.prepared.deferred_limit_context.clone(),
+                turn.prepared.observer.clone(),
             )
         };
         self.prepare_plugin_request(dispatch.turn_id, candidate.upstream_id)?;
@@ -1830,6 +1951,9 @@ impl ResponsesWebSocketGateway {
             reject_exhausted,
             expected_principal_id,
             expected_key_id,
+            reservation_id,
+            deferred_limit_context,
+            observer,
         })
     }
 
@@ -2210,50 +2334,6 @@ impl ResponsesWebSocketGateway {
                 "The admitted response is no longer available",
             )
         })?;
-        if let Some((deferred_ctx, turn_body, observer, lane)) = turn
-            .prepared
-            .deferred_limit_context
-            .as_ref()
-            .filter(|_| turn.prepared.reservation.is_none())
-            .map(|deferred_ctx| {
-                (
-                    deferred_ctx.clone(),
-                    Arc::clone(&turn.body),
-                    turn.prepared.observer.clone(),
-                    turn.lane.clone(),
-                )
-            })
-        {
-            let (reservation, cache_context) = self
-                .lifecycle
-                .reserve_websocket_deferred_limit(
-                    &auth,
-                    &self.headers,
-                    &deferred_ctx,
-                    upstream_id,
-                    &turn_body,
-                    observer.as_ref(),
-                )
-                .await
-                .map_err(|error| error.with_stream(lane))?;
-            let turn = self.turns.get_mut(&turn_id).ok_or_else(|| {
-                WebSocketError::new(
-                    409,
-                    "response_not_found",
-                    "The admitted response is no longer available",
-                )
-            })?;
-            turn.prepared.reservation = reservation;
-            turn.prepared.prompt_cache_observation_context = cache_context;
-            turn.prepared.deferred_limit_context = None;
-        }
-        let turn = self.turns.get(&turn_id).ok_or_else(|| {
-            WebSocketError::new(
-                409,
-                "response_not_found",
-                "The admitted response is no longer available",
-            )
-        })?;
         if turn
             .prepared
             .reservation
@@ -2267,6 +2347,45 @@ impl ResponsesWebSocketGateway {
             )
             .with_stream(turn.lane.clone()));
         }
+        if let Some((deferred_ctx, turn_body, observer, reservation_id, lane)) = turn
+            .prepared
+            .deferred_limit_context
+            .as_ref()
+            .map(|deferred_ctx| {
+                (
+                    deferred_ctx.clone(),
+                    Arc::clone(&turn.body),
+                    turn.prepared.observer.clone(),
+                    turn.prepared
+                        .reservation
+                        .as_ref()
+                        .map(|reservation| reservation.id().to_owned()),
+                    turn.lane.clone(),
+                )
+            })
+        {
+            let cache_context = self
+                .lifecycle
+                .resize_websocket_deferred_limit(
+                    &auth,
+                    &self.headers,
+                    &deferred_ctx,
+                    upstream_id,
+                    &turn_body,
+                    reservation_id.as_deref(),
+                    observer.as_ref(),
+                )
+                .await
+                .map_err(|error| error.with_stream(lane))?;
+            let turn = self.turns.get_mut(&turn_id).ok_or_else(|| {
+                WebSocketError::new(
+                    409,
+                    "response_not_found",
+                    "The admitted response is no longer available",
+                )
+            })?;
+            turn.prepared.prompt_cache_observation_context = cache_context;
+        }
         Ok(())
     }
 
@@ -2277,20 +2396,13 @@ impl ResponsesWebSocketGateway {
         {
             turn.attempted = true;
             turn.attempt_num = turn.attempt_num.saturating_add(1);
+            turn.prepared.deferred_limit_context = None;
             if let Some(deferred) = turn.deferred_unestablished.take()
                 && deferred.currently_stripped
             {
-                let orig = deferred
-                    .original_frame
-                    .len()
-                    .saturating_add(json_owned_bytes(&deferred.original_body));
-                let cur = turn
-                    .frame
-                    .len()
-                    .saturating_add(json_owned_bytes(&turn.body));
-                let delta = orig.saturating_sub(cur);
-                self.used_bytes = self.used_bytes.saturating_sub(delta);
-                turn.charged_bytes = turn.charged_bytes.saturating_sub(delta);
+                let released = deferred.original_bytes;
+                self.used_bytes = self.used_bytes.saturating_sub(released);
+                turn.charged_bytes = turn.charged_bytes.saturating_sub(released);
             }
             if let Some(observer) = turn.prepared.observer.as_ref() {
                 observer.emit_lifecycle(LifecycleEvent::UpstreamAttempt {
@@ -2308,7 +2420,7 @@ impl ResponsesWebSocketGateway {
             .get(&turn_id)
             .is_some_and(|turn| turn.deferred_unestablished.is_some())
         {
-            self.apply_unestablished_reasoning(turn_id, true);
+            self.apply_unestablished_reasoning(turn_id, true)?;
         }
         let Some(turn) = self.turns.get(&turn_id) else {
             return Err(WebSocketError::new(
@@ -9557,9 +9669,17 @@ pub(crate) mod tests {
         assert_eq!(err.code, "limit_rejected");
     }
 
-    #[tokio::test]
-    async fn mixed_api_key_then_oauth_fallback_restores_verbatim_reasoning_when_pinned_to_session_owner()
-     {
+    async fn setup_deferred_ws_fixture(
+        limits: Vec<Limit>,
+    ) -> (
+        Arc<Lifecycle>,
+        crate::Authenticated,
+        HeaderMap,
+        Uuid,
+        Uuid,
+        Uuid,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
         use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
         use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
         use cc_lb_control::api_keys::principal_view::{
@@ -9572,11 +9692,16 @@ pub(crate) mod tests {
             ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer,
             SignerError, SignerFactory, SigningCapability, UpstreamError,
         };
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
-        struct DummySignerFactory;
+        struct DummySignerFactory {
+            build_calls: Arc<AtomicUsize>,
+        }
         impl ApiKeyAwareSignerFactory for DummySignerFactory {
             fn with_router_choice(&self, _name: String) -> Arc<dyn SignerFactory> {
-                Arc::new(Self)
+                Arc::new(Self {
+                    build_calls: Arc::clone(&self.build_calls),
+                })
             }
         }
         #[async_trait::async_trait]
@@ -9585,6 +9710,7 @@ pub(crate) mod tests {
                 &self,
                 _upstream: &cc_lb_domain::Upstream,
             ) -> Result<Arc<dyn Signer>, SignerError> {
+                self.build_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(Arc::new(DummySigner))
             }
         }
@@ -9609,7 +9735,7 @@ pub(crate) mod tests {
                 &self,
                 _request: SignedRequest,
             ) -> Result<http::Response<crate::Body>, crate::DispatchError> {
-                unreachable!("unused dispatcher in mixed fallback reasoning test")
+                unreachable!("unused dispatcher in deferred ws test")
             }
         }
 
@@ -9618,25 +9744,25 @@ pub(crate) mod tests {
         let storage = Arc::new(
             cc_lb_storage_sqlite::open_sqlite("sqlite::memory:", clock.clone())
                 .await
-                .expect("open in-memory mixed fallback test db"),
+                .expect("open in-memory deferred ws test db"),
         );
         storage
             .initialize()
             .await
-            .expect("migrate mixed fallback test db");
+            .expect("migrate deferred ws test db");
         let keys = Arc::new(KeyStore::new(storage));
         let (_record, secret) = keys
             .create(
                 DIRECT_PRINCIPAL,
                 CreateParams {
-                    label: "mixed-fallback-test".to_owned(),
+                    label: "deferred-ws-test".to_owned(),
                     description: None,
                     expires_at_unix_secs: None,
                     limit_overrides: Vec::new(),
                 },
             )
             .await
-            .expect("issue mixed fallback key");
+            .expect("issue deferred ws test key");
         let pipeline = Arc::new(RouterPipelineCache {
             user_filters: Vec::new(),
             terminal: TerminalStrategy::FirstPick,
@@ -9652,11 +9778,7 @@ pub(crate) mod tests {
             DIRECT_PRINCIPAL,
             true,
             vec!["*".to_owned()],
-            vec![Limit {
-                kind: LimitKind::TotalTokens,
-                window_secs: 60,
-                cap_micros: 4_500,
-            }],
+            limits,
             chains,
         ));
         let authn = Arc::new(BuiltinAuthn::new(keys, clock.clone()));
@@ -9667,7 +9789,7 @@ pub(crate) mod tests {
         );
         let auth = crate::authenticate_first(&authn, &headers, &view)
             .await
-            .expect("authenticate mixed fallback caller");
+            .expect("authenticate deferred ws caller");
 
         let api_key_id = Uuid::from_u128(0x1111);
         let oauth_a_id = Uuid::from_u128(0x2222);
@@ -9695,8 +9817,11 @@ pub(crate) mod tests {
                 ..Default::default()
             },
         ];
+        let build_calls = Arc::new(AtomicUsize::new(0));
         let dynamic = DynamicViewBuilder::new(0)
-            .signer_factory(Arc::new(DummySignerFactory))
+            .signer_factory(Arc::new(DummySignerFactory {
+                build_calls: Arc::clone(&build_calls),
+            }))
             .principal_view(view)
             .upstream_records(upstreams)
             .build();
@@ -9719,6 +9844,29 @@ pub(crate) mod tests {
             .with_upstream_affinity_store(affinity_store)
             .with_limit_engine(engine, authn),
         );
+        (
+            lifecycle,
+            auth,
+            headers,
+            api_key_id,
+            oauth_a_id,
+            oauth_b_id,
+            build_calls,
+        )
+    }
+
+    #[tokio::test]
+    async fn mixed_api_key_then_oauth_fallback_restores_verbatim_reasoning_when_pinned_to_session_owner()
+     {
+        use std::sync::atomic::Ordering;
+
+        let (lifecycle, auth, headers, api_key_id, oauth_a_id, _oauth_b_id, build_calls) =
+            setup_deferred_ws_fixture(vec![Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 4_500,
+            }])
+            .await;
 
         let bloated_cipher = format!("gAAAAAB_mixed_owner_{}", "Z".repeat(20_000));
         let reasoning_frame = Bytes::from(
@@ -9741,8 +9889,8 @@ pub(crate) mod tests {
             .unwrap(),
         );
 
-        // Case 1: Mixed [api_key, oauth_a, oauth_b] defers both normalization and limit estimation;
-        // targeting api_key first strips encrypted_content and validates under the 200-token limit.
+        // Case 1: Mixed [api_key, oauth_a, oauth_b] holds a stripped baseline reservation at
+        // admission; targeting api_key first strips encrypted_content and resizes within cap.
         let mut gw = ResponsesWebSocketGateway::new(
             lifecycle.clone(),
             &auth,
@@ -9753,7 +9901,7 @@ pub(crate) mod tests {
         let mut dispatch = gw
             .client_message(auth.clone(), reasoning_frame.clone())
             .await
-            .expect("mixed turn admits before deferred limit estimation")
+            .expect("mixed turn admits with stripped baseline reservation")
             .expect("mixed dispatch returns");
         assert!(dispatch.candidates[0].is_api_key);
         assert!(
@@ -9762,10 +9910,20 @@ pub(crate) mod tests {
                 .unwrap()
                 .prepared
                 .reservation
-                .is_none(),
-            "mixed unpinned turn must defer limit reservation until candidate send decision"
+                .is_some(),
+            "deferred unestablished turn must still hold an active admission reservation"
         );
-        gw.finalize_dispatch_reasoning(&mut dispatch, false);
+        assert!(
+            gw.turns
+                .get(&dispatch.turn_id)
+                .unwrap()
+                .prepared
+                .deferred_limit_context
+                .is_some(),
+            "deferred limit context remains active until send commit"
+        );
+        gw.finalize_dispatch_reasoning(&mut dispatch, false)
+            .expect("budget permits stripped copy");
         assert!(
             !std::str::from_utf8(&dispatch.frame)
                 .unwrap()
@@ -9774,11 +9932,16 @@ pub(crate) mod tests {
         );
         gw.validate_candidate_for_send(dispatch.turn_id, api_key_id, None, true)
             .await
-            .expect("stripped API-key payload must pass deferred 200-token limit");
+            .expect("stripped API-key payload must pass resized limit");
+        gw.fail_dispatch(
+            dispatch.turn_id,
+            &WebSocketError::new(502, "test_cleanup", "cleanup"),
+        )
+        .await;
 
         // Case 2: If API-key attempt failed before commit and session pins to OAuth A,
         // finalizing as single-owner restores the original ciphertext verbatim, arms
-        // RetryStripAll, and computes deferred limit estimation against the restored body.
+        // RetryStripAll, and rejects in PreparedWsConnectJob::run() BEFORE signing/dialing.
         let mut fallback_gw =
             ResponsesWebSocketGateway::new(lifecycle, &auth, headers, 1_024 * 1_024, 16);
         let mut d_fallback = fallback_gw
@@ -9786,13 +9949,17 @@ pub(crate) mod tests {
             .await
             .unwrap()
             .unwrap();
-        fallback_gw.finalize_dispatch_reasoning(&mut d_fallback, false);
+        fallback_gw
+            .finalize_dispatch_reasoning(&mut d_fallback, false)
+            .unwrap();
         assert!(
             !std::str::from_utf8(&d_fallback.frame)
                 .unwrap()
                 .contains(&bloated_cipher)
         );
-        fallback_gw.finalize_dispatch_reasoning(&mut d_fallback, true);
+        fallback_gw
+            .finalize_dispatch_reasoning(&mut d_fallback, true)
+            .unwrap();
         assert!(
             std::str::from_utf8(&d_fallback.frame)
                 .unwrap()
@@ -9807,11 +9974,275 @@ pub(crate) mod tests {
                 .unknown_reasoning_retry,
             Some(WsUnknownReasoningRetry::All)
         ));
+        let oauth_candidate = d_fallback
+            .candidates
+            .iter()
+            .find(|c| c.upstream_id == oauth_a_id)
+            .expect("oauth candidate present")
+            .clone();
+        let prep_job = fallback_gw
+            .begin_connection_prepare(&d_fallback, &oauth_candidate)
+            .expect("begin_connection_prepare succeeds");
+        let prep_err =
+            prep_job.run().await.err().expect(
+                "PreparedWsConnectJob::run must reject oversized restored body before signing",
+            );
+        assert_eq!(prep_err.status, 429);
+        assert_eq!(prep_err.code, "limit_rejected");
+        assert_eq!(
+            build_calls.load(Ordering::SeqCst),
+            0,
+            "limit resize rejection must prevent signer build and provider connect"
+        );
         let err = fallback_gw
             .validate_candidate_for_send(d_fallback.turn_id, oauth_a_id, None, false)
             .await
-            .expect_err("deferred limit estimation on restored verbatim body must hit tight cap");
+            .expect_err("deferred limit resize on restored verbatim body must also hit tight cap");
         assert_eq!(err.status, 429);
         assert_eq!(err.code, "limit_rejected");
+    }
+
+    #[tokio::test]
+    async fn deferred_unestablished_enforces_concurrency_limit_at_admission_before_connect() {
+        use std::sync::atomic::Ordering;
+
+        let (lifecycle, auth, headers, _api_key_id, _oauth_a_id, _oauth_b_id, build_calls) =
+            setup_deferred_ws_fixture(vec![Limit {
+                kind: LimitKind::Concurrent,
+                window_secs: 0,
+                cap_micros: 1,
+            }])
+            .await;
+
+        let frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "store": false,
+                "max_output_tokens": 16,
+                "input": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_conc",
+                        "summary": [],
+                        "content": [],
+                        "encrypted_content": "gAAAAAB_conc_1"
+                    },
+                    {"role": "user", "content": "hi"}
+                ]
+            }))
+            .unwrap(),
+        );
+
+        let mut gw1 = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            1_024 * 1_024,
+            16,
+        );
+        let mut gw2 = ResponsesWebSocketGateway::new(lifecycle, &auth, headers, 1_024 * 1_024, 16);
+
+        let d1 = gw1
+            .client_message(auth.clone(), frame.clone())
+            .await
+            .expect("first deferred turn acquires concurrency slot at admission")
+            .expect("dispatch returned");
+        assert!(
+            gw1.turns
+                .get(&d1.turn_id)
+                .unwrap()
+                .prepared
+                .reservation
+                .is_some()
+        );
+
+        let err = gw2
+            .client_message(auth.clone(), frame.clone())
+            .await
+            .expect_err("second turn must reject at admission while first holds concurrency slot");
+        assert_eq!(err.status, 429);
+        assert_eq!(err.code, "limit_rejected");
+        assert_eq!(
+            build_calls.load(Ordering::SeqCst),
+            0,
+            "admission rejection must happen before any signing or socket connect"
+        );
+
+        gw1.fail_dispatch(
+            d1.turn_id,
+            &WebSocketError::new(502, "test_done", "release slot"),
+        )
+        .await;
+
+        let d2 = gw2
+            .client_message(auth, frame)
+            .await
+            .expect("second turn admits once first releases concurrency slot")
+            .expect("dispatch returned");
+        gw2.fail_dispatch(
+            d2.turn_id,
+            &WebSocketError::new(502, "test_done", "cleanup"),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn deferred_unestablished_charges_both_copies_against_byte_cap_and_releases_on_restore_commit_or_cancel()
+     {
+        let (lifecycle, auth, headers, api_key_id, _oauth_a_id, _oauth_b_id, _build_calls) =
+            setup_deferred_ws_fixture(Vec::new()).await;
+
+        let bloated_cipher = format!("gAAAAAB_byte_cap_{}", "X".repeat(20_000));
+        let make_frame = |stream_id: &str| {
+            Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "type": "response.create",
+                    "stream_id": stream_id,
+                    "model": "gpt-5",
+                    "store": false,
+                    "max_output_tokens": 16,
+                    "input": [
+                        {
+                            "type": "reasoning",
+                            "id": "rs_cap",
+                            "summary": [],
+                            "content": [],
+                            "encrypted_content": bloated_cipher
+                        },
+                        {"role": "user", "content": "hi"}
+                    ]
+                }))
+                .unwrap(),
+            )
+        };
+
+        // Measure exact single-copy, stripped-extra, and dual-copy ledger usage.
+        let mut measure_gw = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            1_024 * 1_024,
+            16,
+        );
+        let peer_frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "stream_id": "lane-peer",
+                "model": "gpt-5",
+                "store": false,
+                "max_output_tokens": 16,
+                "input": [{"role": "user", "content": "hello"}]
+            }))
+            .unwrap(),
+        );
+        let _peer = measure_gw
+            .client_message(auth.clone(), peer_frame.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let peer_bytes = measure_gw.used_bytes;
+        let mut d_measure = measure_gw
+            .client_message(auth.clone(), make_frame("lane-target"))
+            .await
+            .unwrap()
+            .unwrap();
+        // While peer OAuth turn is active, target stays deferred and unstripped at admission.
+        let orig_plus_peer = measure_gw.used_bytes;
+        let orig_only_used = orig_plus_peer - peer_bytes;
+        measure_gw
+            .finalize_dispatch_reasoning(&mut d_measure, false)
+            .unwrap();
+        let both_plus_peer = measure_gw.used_bytes;
+        let stripped_delta = both_plus_peer - orig_plus_peer;
+        assert!(stripped_delta > 0);
+        // Restoring verbatim releases stripped copy, returning to original baseline bytes.
+        measure_gw
+            .finalize_dispatch_reasoning(&mut d_measure, true)
+            .unwrap();
+        assert_eq!(measure_gw.used_bytes, orig_plus_peer);
+
+        // Committing stripped attempt releases original copy while keeping stripped copy charged.
+        measure_gw
+            .finalize_dispatch_reasoning(&mut d_measure, false)
+            .unwrap();
+        assert_eq!(measure_gw.used_bytes, both_plus_peer);
+        let original_copy_bytes = measure_gw
+            .turns
+            .get(&d_measure.turn_id)
+            .unwrap()
+            .deferred_unestablished
+            .as_ref()
+            .unwrap()
+            .original_bytes;
+        measure_gw.assign_connection(d_measure.turn_id, 1, api_key_id, "api-key-primary");
+        measure_gw.commit_send_attempt(d_measure.turn_id);
+        assert_eq!(measure_gw.used_bytes, both_plus_peer - original_copy_bytes);
+
+        // Failing/cancelling turn releases all remaining payload bytes.
+        measure_gw
+            .fail_dispatch(
+                d_measure.turn_id,
+                &WebSocketError::new(502, "test_cancel", "done"),
+            )
+            .await;
+        assert_eq!(measure_gw.used_bytes, peer_bytes);
+
+        // Tight byte_cap allows original copy at admission (while peer holds OAuth deferral)
+        // but rejects finalize_dispatch_reasoning(..., false) with 503 when stripped copy
+        // would push dual-copy memory past byte_cap.
+        let tight_cap = orig_plus_peer + stripped_delta - 1;
+        let mut tight_gw = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            tight_cap,
+            16,
+        );
+        let _peer2 = tight_gw
+            .client_message(auth.clone(), peer_frame)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut d_tight = tight_gw
+            .client_message(auth.clone(), make_frame("lane-target"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tight_gw.used_bytes, orig_plus_peer);
+        let err = tight_gw
+            .finalize_dispatch_reasoning(&mut d_tight, false)
+            .expect_err("dual-copy retention exceeding byte_cap must fail closed");
+        assert_eq!(err.status, 503);
+        assert_eq!(err.code, "overloaded_error");
+        assert_eq!(
+            tight_gw.used_bytes, orig_plus_peer,
+            "failed strip leaves ledger unchanged"
+        );
+        assert!(
+            !tight_gw
+                .turns
+                .get(&d_tight.turn_id)
+                .unwrap()
+                .deferred_unestablished
+                .as_ref()
+                .unwrap()
+                .currently_stripped
+        );
+        tight_gw.fail_dispatch(d_tight.turn_id, &err).await;
+        assert_eq!(tight_gw.used_bytes, peer_bytes);
+
+        // Immediate try_dispatch inside client_message also fails closed if single turn
+        // + dual stripped copy would exceed byte_cap.
+        let single_turn_tight_cap = orig_only_used + stripped_delta - 1;
+        let mut single_tight_gw =
+            ResponsesWebSocketGateway::new(lifecycle, &auth, headers, single_turn_tight_cap, 16);
+        let err = single_tight_gw
+            .client_message(auth, make_frame("lane-target"))
+            .await
+            .expect_err("client_message rejects when immediate dual-copy exceeds byte_cap");
+        assert_eq!(err.status, 503);
+        assert_eq!(err.code, "overloaded_error");
+        assert_eq!(single_tight_gw.used_bytes, 0);
     }
 }

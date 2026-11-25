@@ -989,8 +989,23 @@ impl Lifecycle {
                 unknown_reasoning_plan,
                 WsUnknownReasoningPlan::DeferredUnestablished { .. }
             ) {
+                let baseline_body = strip_openai_reasoning_encrypted_items(&body, None)
+                    .map(Arc::new)
+                    .unwrap_or_else(|| Arc::clone(&effective_body));
+                let reservation = self
+                    .reserve_websocket_limit_for_record(
+                        &view.principal_view,
+                        &ctx,
+                        &principal,
+                        record,
+                        auth.success(),
+                        &baseline_body,
+                        &routed.cache_bundle.cache_breakpoints,
+                        observer.as_ref(),
+                    )
+                    .await?;
                 (
-                    None,
+                    reservation,
                     Some(DeferredWebSocketLimitContext {
                         ctx,
                         principal,
@@ -1253,24 +1268,8 @@ impl Lifecycle {
             .await
         {
             Ok(limit) => limit,
-            Err(LimitRejectionErr { response, info }) => {
-                if let Some(observer) = observer {
-                    observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
-                        event_id: observer.event_id().to_owned(),
-                        decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
-                            reason: info.reason_label.clone(),
-                            subject: info.subject,
-                            request_summary: info.request_summary,
-                            route_summary: info.route_summary,
-                            limit_violation: info.limit_violation,
-                        },
-                    });
-                }
-                return Err(WebSocketError::new(
-                    response.status().as_u16(),
-                    error_codes::LIMIT_REJECTED,
-                    info.reason_label,
-                ));
+            Err(err) => {
+                return Err(Self::limit_rejection_to_ws_error(observer, err));
             }
         };
         let reservation = active_limit
@@ -1300,21 +1299,17 @@ impl Lifecycle {
         Ok(reservation)
     }
 
-    pub(crate) async fn reserve_websocket_deferred_limit(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn resize_websocket_deferred_limit(
         &self,
         auth: &crate::Authenticated,
         headers: &HeaderMap,
         deferred: &DeferredWebSocketLimitContext,
         upstream_id: Uuid,
         effective_body: &Arc<Value>,
+        reservation_id: Option<&str>,
         observer: Option<&LifecycleContext>,
-    ) -> Result<
-        (
-            Option<LimitReservation>,
-            Option<PromptCacheObservationContext>,
-        ),
-        WebSocketError,
-    > {
+    ) -> Result<Option<PromptCacheObservationContext>, WebSocketError> {
         let view = self.dynamic_view.load();
         let record = view
             .upstreams_snapshot()
@@ -1341,19 +1336,60 @@ impl Lifecycle {
                 headers,
             ),
         );
-        let reservation = self
-            .reserve_websocket_limit_for_record(
-                &view.principal_view,
-                &deferred.ctx,
-                &deferred.principal,
-                record,
-                auth.success(),
-                effective_body,
-                &deferred.cache_breakpoints,
+        let (Some(limit_engine), Some(subject_provider), Some(reservation_id)) = (
+            self.limit_engine.as_ref(),
+            self.limit_subject_provider.as_ref(),
+            reservation_id,
+        ) else {
+            return Ok(cache_context);
+        };
+        let Some(subject) = subject_provider
+            .limit_subject(&deferred.ctx, &deferred.principal, auth.success())
+            .await
+        else {
+            return Ok(cache_context);
+        };
+        let body_view = RequestBodyView {
+            parsed: Ok(Arc::clone(effective_body)),
+            json_parse_ms: 0.0,
+        };
+        let limit_request = body_view.limit_request(
+            &deferred.ctx.canonical_model_id,
+            Some(ProviderCapability::OpenaiResponses),
+            &deferred.cache_breakpoints,
+            true,
+        );
+        let (max_input_estimate, _sent_service_tier, _fanout_multiplier, cost_estimate) =
+            self.compute_limit_reservation_inputs(&deferred.ctx, record, &limit_request);
+        match limit_engine.resize_reservation_estimates_by_id(
+            &view.principal_view,
+            &subject.record,
+            &subject.principal_id,
+            reservation_id,
+            &limit_request.model,
+            limit_request.max_tokens,
+            max_input_estimate,
+            cost_estimate,
+        ) {
+            Ok(true) => Ok(cache_context),
+            Ok(false) => Err(WebSocketError::new(
+                503,
+                "reservation_expired",
+                "The queued response reservation is no longer active",
+            )),
+            Err(reason) => Err(Self::limit_rejection_to_ws_error(
                 observer,
-            )
-            .await?;
-        Ok((reservation, cache_context))
+                Self::build_limit_rejection_err(
+                    &view.principal_view,
+                    limit_engine.as_ref(),
+                    &deferred.ctx,
+                    &subject,
+                    record,
+                    &limit_request,
+                    reason,
+                ),
+            )),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4336,6 +4372,151 @@ impl Lifecycle {
         Ok(response)
     }
 
+    fn compute_limit_reservation_inputs(
+        &self,
+        ctx: &RequestContext,
+        upstream_record: &UpstreamRecord,
+        limit_request: &LimitRequest,
+    ) -> (i64, Option<String>, i64, Option<i64>) {
+        let capability = classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope);
+        let fanout_multiplier = admission_fanout_multiplier(
+            upstream_record.kind,
+            capability,
+            limit_request.fanout_multiplier,
+        );
+        let max_input_estimate = limit_request
+            .input_tokens_estimate
+            .saturating_mul(fanout_multiplier);
+        let local_cache_input = limit_request.local_cache_input.map(|mut input| {
+            input.uncached_input_tokens = input
+                .uncached_input_tokens
+                .saturating_mul(fanout_multiplier as u64);
+            input.cache_prefix_5m_tokens = input
+                .cache_prefix_5m_tokens
+                .saturating_mul(fanout_multiplier as u64);
+            input.cache_prefix_1h_tokens = input
+                .cache_prefix_1h_tokens
+                .saturating_mul(fanout_multiplier as u64);
+            input
+        });
+        let sent_service_tier = if ctx.codex_backend {
+            limit_request.service_tier.clone()
+        } else {
+            compat_service_tier_for_upstream(
+                capability.unwrap_or(ProviderCapability::OpenaiResponses),
+                upstream_record.kind,
+                limit_request.service_tier.as_deref(),
+                ctx.openai_oauth_compat.as_ref().is_some_and(|policy| {
+                    policy.service_tier == cc_lb_domain::CoerceOrReject::Coerce
+                }),
+            )
+        };
+        let cost_estimate = if limit_request.model.is_empty() {
+            Some(0)
+        } else {
+            self.limit_cost_estimator.as_ref().and_then(|estimator| {
+                if let Some(input) = local_cache_input {
+                    estimator.estimate_max_with_local_cache_and_images(
+                        &limit_request.model,
+                        input,
+                        limit_request.max_tokens.unwrap_or(0).max(0) as u64,
+                        limit_request.use_image_rates,
+                        sent_service_tier.as_deref(),
+                    )
+                } else {
+                    estimator.estimate_max_with_cache_and_images(
+                        &limit_request.model,
+                        max_input_estimate as u64,
+                        limit_request.max_tokens.unwrap_or(0).max(0) as u64,
+                        limit_request.estimated_cache_tokens,
+                        limit_request.can_cross_cache_cliff,
+                        limit_request.use_image_rates,
+                        sent_service_tier.as_deref(),
+                    )
+                }
+            })
+        };
+        (
+            max_input_estimate,
+            sent_service_tier,
+            fanout_multiplier,
+            cost_estimate,
+        )
+    }
+
+    fn build_limit_rejection_err(
+        view: &PrincipalView,
+        limit_engine: &LimitEngine,
+        ctx: &RequestContext,
+        subject: &AuthLimitSubject,
+        upstream_record: &UpstreamRecord,
+        limit_request: &LimitRequest,
+        reason: RejectReason,
+    ) -> LimitRejectionErr {
+        let limit_violation = limit_violation_name(&reason).map(str::to_owned);
+        let retry_after_seconds = limit_retry_after_secs(reason.clone());
+        let reason_label = "limit_rejected".to_owned();
+        let capability =
+            crate::provider_capability::classify(&ctx.method, &ctx.path, ctx.provider_scope)
+                .unwrap_or(ProviderCapability::AnthropicMessages);
+        let mut response = limit_rejection_response(
+            capability,
+            reason,
+            &limit_request.model,
+            &subject.principal_id,
+            retry_after_seconds,
+        );
+        attach_limit_headers_from_record(
+            response.headers_mut(),
+            limit_engine,
+            capability.provider(),
+            &subject.key_id,
+            &subject.record,
+            view.default_limits(&subject.principal_id),
+        );
+        let info = LimitRejectionInfo {
+            subject: cc_lb_lifecycle::LimitSubject {
+                principal_id: subject.principal_id.clone(),
+                key_id: subject.key_id.clone(),
+            },
+            request_summary: cc_lb_lifecycle::LimitRequestSummary {
+                model: limit_request.model.clone(),
+                path: ctx.path.clone(),
+                method: ctx.method.as_str().to_owned(),
+            },
+            route_summary: cc_lb_lifecycle::RouteSummary {
+                upstream_name: upstream_record.name.clone(),
+            },
+            limit_violation,
+            reason_label,
+        };
+        LimitRejectionErr { response, info }
+    }
+
+    fn limit_rejection_to_ws_error(
+        observer: Option<&LifecycleContext>,
+        err: LimitRejectionErr,
+    ) -> WebSocketError {
+        let LimitRejectionErr { response, info } = err;
+        if let Some(observer) = observer {
+            observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
+                event_id: observer.event_id().to_owned(),
+                decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
+                    reason: info.reason_label.clone(),
+                    subject: info.subject,
+                    request_summary: info.request_summary,
+                    route_summary: info.route_summary,
+                    limit_violation: info.limit_violation,
+                },
+            });
+        }
+        WebSocketError::new(
+            response.status().as_u16(),
+            error_codes::LIMIT_REJECTED,
+            info.reason_label,
+        )
+    }
+
     #[allow(clippy::result_large_err)]
     #[tracing::instrument(
         name = "proxy.reserve_limit",
@@ -4371,66 +4552,8 @@ impl Lifecycle {
             return Ok(None);
         };
         let limit_request = make_limit_request();
-        let fanout_multiplier = admission_fanout_multiplier(
-            upstream_record.kind,
-            classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope),
-            limit_request.fanout_multiplier,
-        );
-        let max_input_estimate = limit_request
-            .input_tokens_estimate
-            .saturating_mul(fanout_multiplier);
-        let local_cache_input = limit_request.local_cache_input.map(|mut input| {
-            input.uncached_input_tokens = input
-                .uncached_input_tokens
-                .saturating_mul(fanout_multiplier as u64);
-            input.cache_prefix_5m_tokens = input
-                .cache_prefix_5m_tokens
-                .saturating_mul(fanout_multiplier as u64);
-            input.cache_prefix_1h_tokens = input
-                .cache_prefix_1h_tokens
-                .saturating_mul(fanout_multiplier as u64);
-            input
-        });
-        let sent_service_tier = if ctx.codex_backend {
-            limit_request.service_tier.clone()
-        } else {
-            compat_service_tier_for_upstream(
-                classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope)
-                    .unwrap_or(ProviderCapability::OpenaiResponses),
-                upstream_record.kind,
-                limit_request.service_tier.as_deref(),
-                ctx.openai_oauth_compat.as_ref().is_some_and(|policy| {
-                    policy.service_tier == cc_lb_domain::CoerceOrReject::Coerce
-                }),
-            )
-        };
-        let cost_estimate = if limit_request.model.is_empty() {
-            Some(0)
-        } else {
-            self.limit_cost_estimator.as_ref().and_then(|estimator| {
-                if let Some(input) = local_cache_input {
-                    estimator.estimate_max_with_local_cache_and_images(
-                        &limit_request.model,
-                        input,
-                        limit_request.max_tokens.unwrap_or(0).max(0) as u64,
-                        limit_request.use_image_rates,
-                        sent_service_tier.as_deref(),
-                    )
-                } else {
-                    let estimated_cache_tokens = limit_request.estimated_cache_tokens;
-                    let can_cross_cache_cliff = limit_request.can_cross_cache_cliff;
-                    estimator.estimate_max_with_cache_and_images(
-                        &limit_request.model,
-                        max_input_estimate as u64,
-                        limit_request.max_tokens.unwrap_or(0).max(0) as u64,
-                        estimated_cache_tokens,
-                        can_cross_cache_cliff,
-                        limit_request.use_image_rates,
-                        sent_service_tier.as_deref(),
-                    )
-                }
-            })
-        };
+        let (max_input_estimate, sent_service_tier, fanout_multiplier, cost_estimate) =
+            self.compute_limit_reservation_inputs(ctx, upstream_record, &limit_request);
 
         match limit_engine
             .reserve_async(
@@ -4455,54 +4578,23 @@ impl Lifecycle {
                 }))
             }
             Err(reason) => {
-                let limit_violation = limit_violation_name(&reason).map(|v| v.to_owned());
+                let err = Self::build_limit_rejection_err(
+                    view,
+                    limit_engine.as_ref(),
+                    ctx,
+                    &subject,
+                    upstream_record,
+                    &limit_request,
+                    reason,
+                );
                 let span = tracing::Span::current();
                 span.record("cc_lb.limit.decision", "rejected");
                 span.record("otel.status_code", "ERROR");
                 span.record("error.type", error_codes::LIMIT_REJECTED);
-                if let Some(violation) = limit_violation.as_deref() {
+                if let Some(violation) = err.info.limit_violation.as_deref() {
                     span.record("cc_lb.limit.violation", violation);
                 }
-                let retry_after_seconds = limit_retry_after_secs(reason.clone());
-                let reason_label = "limit_rejected".to_owned();
-                let capability = crate::provider_capability::classify(
-                    &ctx.method,
-                    &ctx.path,
-                    ctx.provider_scope,
-                )
-                .unwrap_or(ProviderCapability::AnthropicMessages);
-                let mut response = limit_rejection_response(
-                    capability,
-                    reason,
-                    &limit_request.model,
-                    &subject.principal_id,
-                    retry_after_seconds,
-                );
-                attach_limit_headers_from_record(
-                    response.headers_mut(),
-                    limit_engine.as_ref(),
-                    capability.provider(),
-                    &subject.key_id,
-                    &subject.record,
-                    view.default_limits(&subject.principal_id),
-                );
-                let info = LimitRejectionInfo {
-                    subject: cc_lb_lifecycle::LimitSubject {
-                        principal_id: subject.principal_id.clone(),
-                        key_id: subject.key_id.clone(),
-                    },
-                    request_summary: cc_lb_lifecycle::LimitRequestSummary {
-                        model: limit_request.model.clone(),
-                        path: ctx.path.clone(),
-                        method: ctx.method.as_str().to_owned(),
-                    },
-                    route_summary: cc_lb_lifecycle::RouteSummary {
-                        upstream_name: upstream_record.name.clone(),
-                    },
-                    limit_violation,
-                    reason_label,
-                };
-                Err(LimitRejectionErr { response, info })
+                Err(err)
             }
         }
     }
