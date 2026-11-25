@@ -1528,6 +1528,7 @@ struct DbCompositeSignerFactoryInner {
     upstreams: Vec<UpstreamRecord>,
     upstreams_by_name: HashMap<String, usize>,
     prebuilt_static_signers: HashMap<Uuid, Arc<dyn Signer>>,
+    prebuilt_subscription_signers: HashMap<Uuid, (cc_lb_aead::OAuthTokenBundle, Arc<dyn Signer>)>,
     upstream_store: Arc<dyn UpstreamStore>,
     aead: Arc<AeadService>,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
@@ -1592,6 +1593,7 @@ impl DbCompositeSignerFactory {
         let shared = &vertex_state.shared_signer_state;
         let mut upstreams_by_name = HashMap::with_capacity(upstreams.len());
         let mut prebuilt_static_signers = HashMap::new();
+        let mut prebuilt_subscription_signers = HashMap::new();
         for (idx, record) in upstreams.iter().enumerate() {
             upstreams_by_name.entry(record.name.clone()).or_insert(idx);
             match record.kind {
@@ -1623,15 +1625,10 @@ impl DbCompositeSignerFactory {
                         )
                     {
                         if !tokens.never_refresh && lazy_refresher.is_some() {
-                            let _ = reconcile_subscription_signer_state(
-                                &shared.subscription_signer_states,
-                                record,
-                                &tokens,
-                                signer,
-                                &clock,
-                                &gemini_config,
-                                &antigravity_config,
-                            );
+                            // Stage the prebuilt signer per-view instead of mutating shared
+                            // state before view publication, so failed or superseded view builds
+                            // cannot retarget live requests using the active view.
+                            prebuilt_subscription_signers.insert(record.id, (tokens, signer));
                         } else if tokens.never_refresh {
                             prebuilt_static_signers.insert(
                                 record.id,
@@ -1711,6 +1708,7 @@ impl DbCompositeSignerFactory {
                 upstreams,
                 upstreams_by_name,
                 prebuilt_static_signers,
+                prebuilt_subscription_signers,
                 upstream_store,
                 aead,
                 lazy_refresher,
@@ -1747,6 +1745,34 @@ impl DbCompositeSignerFactory {
             .upstreams
             .iter()
             .find(|candidate| self.record_matches(candidate, upstream))
+    }
+
+    fn make_refreshing_subscription_signer(
+        &self,
+        state: Arc<RwLock<SubscriptionSignerState>>,
+        record: &UpstreamRecord,
+        refresh_handle: Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>,
+    ) -> Arc<dyn Signer> {
+        let attempted_access_token = RwLock::new(secrecy::SecretString::new(
+            state
+                .read()
+                .access_token
+                .expose_secret()
+                .to_owned()
+                .into_boxed_str(),
+        ));
+        Arc::new(RefreshingSubscriptionSigner {
+            state,
+            attempted_access_token,
+            record: record.clone(),
+            store: self.inner.upstream_store.clone(),
+            aead: self.inner.aead.clone(),
+            clock: self.inner.clock.clone(),
+            gemini_config: self.inner.gemini_config.clone(),
+            antigravity_config: self.inner.antigravity_config.clone(),
+            refresh_handle,
+            refresh_locks: self.inner.refresh_locks.clone(),
+        })
     }
 
     #[cfg(test)]
@@ -2135,27 +2161,33 @@ impl SignerFactory for DbCompositeSignerFactory {
                         && record.base_url == guard.base_url
                         && record.oauth_token_generation <= guard.oauth_token_generation
                     {
-                        let attempted_access_token = RwLock::new(secrecy::SecretString::new(
-                            guard
-                                .access_token
-                                .expose_secret()
-                                .to_owned()
-                                .into_boxed_str(),
-                        ));
                         drop(guard);
-                        return Ok(Arc::new(RefreshingSubscriptionSigner {
+                        return Ok(self.make_refreshing_subscription_signer(
                             state,
-                            attempted_access_token,
-                            record: record.clone(),
-                            store: self.inner.upstream_store.clone(),
-                            aead: self.inner.aead.clone(),
-                            clock: self.inner.clock.clone(),
-                            gemini_config: self.inner.gemini_config.clone(),
-                            antigravity_config: self.inner.antigravity_config.clone(),
+                            record,
                             refresh_handle,
-                            refresh_locks: self.inner.refresh_locks.clone(),
-                        }));
+                        ));
                     }
+                }
+                if record.oauth_credentials.is_some()
+                    && let Some(refresh_handle) = self.inner.lazy_refresher.clone()
+                    && let Some((prebuilt_tokens, prebuilt_signer)) =
+                        self.inner.prebuilt_subscription_signers.get(&record.id)
+                {
+                    let state = reconcile_subscription_signer_state(
+                        &self.inner.subscription_signer_states,
+                        record,
+                        prebuilt_tokens,
+                        Arc::clone(prebuilt_signer),
+                        &self.inner.clock,
+                        &self.inner.gemini_config,
+                        &self.inner.antigravity_config,
+                    )?;
+                    return Ok(self.make_refreshing_subscription_signer(
+                        state,
+                        record,
+                        refresh_handle,
+                    ));
                 }
                 let encrypted = record.oauth_credentials.as_ref().ok_or_else(|| {
                     SignerError::MissingCredentials {
@@ -2187,26 +2219,7 @@ impl SignerFactory for DbCompositeSignerFactory {
                         &self.inner.gemini_config,
                         &self.inner.antigravity_config,
                     )?;
-                    let attempted_access_token = RwLock::new(secrecy::SecretString::new(
-                        state
-                            .read()
-                            .access_token
-                            .expose_secret()
-                            .to_owned()
-                            .into_boxed_str(),
-                    ));
-                    Ok(Arc::new(RefreshingSubscriptionSigner {
-                        state,
-                        attempted_access_token,
-                        record: record.clone(),
-                        store: self.inner.upstream_store.clone(),
-                        aead: self.inner.aead.clone(),
-                        clock: self.inner.clock.clone(),
-                        gemini_config: self.inner.gemini_config.clone(),
-                        antigravity_config: self.inner.antigravity_config.clone(),
-                        refresh_handle,
-                        refresh_locks: self.inner.refresh_locks.clone(),
-                    }))
+                    Ok(self.make_refreshing_subscription_signer(state, record, refresh_handle))
                 } else if tokens.never_refresh {
                     Ok(Arc::new(PersistedAccessOnlySubscriptionSigner {
                         signer,
@@ -7535,6 +7548,14 @@ mod tests {
         let oai2 = oai_factory.build(&oai_upstream).await.expect("oai2");
         assert!(Arc::ptr_eq(&oai1, &oai2));
 
+        // First active view build populates shared subscription state from prebuilt signer.
+        let gemini_upstream = Upstream::GeminiDirect { base_url: None };
+        let initial_gemini_factory = factory.with_router_choice_state("gemini-fast".to_owned());
+        let _initial_gemini = initial_gemini_factory
+            .build(&gemini_upstream)
+            .await
+            .expect("initial gemini build");
+
         // Rebuild view with the same shared VertexState, revision, base_url, and generation
         // while corrupting ciphertext bytes: build() must hit the shared fast path without AEAD decrypt.
         let mut gemini_corrupt_ciphertext = gemini_rec.clone();
@@ -7552,7 +7573,6 @@ mod tests {
             (vertex_state, Arc::new(HashMap::new())),
         )
         .with_router_choice_state("gemini-fast".to_owned());
-        let gemini_upstream = Upstream::GeminiDirect { base_url: None };
         let gemini_signer = fast_factory
             .build(&gemini_upstream)
             .await
@@ -7570,6 +7590,141 @@ mod tests {
         assert_eq!(
             signed.headers().get(http::header::AUTHORIZATION),
             Some(&http::HeaderValue::from_static("Bearer gemini-tok-fast"))
+        );
+    }
+
+    #[tokio::test]
+    async fn uninstalled_view_build_does_not_mutate_shared_subscription_signer_target() {
+        let (_dir, storage) = storage_fixture(73).await;
+        let aead = Arc::new(AeadService::from_master_key([29; 32]));
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let mut tokens = expired_tokens();
+        tokens.access_token = "gemini-uninstalled-tok".to_owned();
+        tokens.expires_at_unix_secs = 1_900_000_000;
+        let record_v1 = oauth_record(
+            &storage,
+            &aead,
+            "gemini-unpublished",
+            UpstreamKind::GeminiOauth,
+            tokens,
+            Some("http://old-target.invalid/gateway/v1internal"),
+        )
+        .await;
+        let handle: Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle> =
+            Arc::new(DynamicRefreshHandle {
+                storage: storage.clone(),
+                aead: aead.clone(),
+                refreshed_access_token: "unused".to_owned(),
+                calls: AtomicUsize::new(0),
+                fail: false,
+                gate: None,
+            });
+        let vertex_state = Arc::new(VertexState::new(storage.clone()));
+        let make_factory = |rec: UpstreamRecord| {
+            DbCompositeSignerFactory::new_with_vertex_state(
+                vec![rec.clone()],
+                storage.clone(),
+                aead.clone(),
+                Some(handle.clone()),
+                clock.clone(),
+                (Default::default(), Default::default()),
+                (vertex_state.clone(), Arc::new(HashMap::new())),
+            )
+            .with_router_choice_state(rec.name)
+        };
+        let upstream = Upstream::GeminiDirect { base_url: None };
+        let factory_v1 = make_factory(record_v1.clone());
+        let signer_v1 = factory_v1.build(&upstream).await.expect("v1 signer");
+        let mut req_v1 = shaped_request();
+        req_v1.set_url(
+            "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro:generateContent"
+                .parse()
+                .expect("url"),
+        );
+        req_v1.set_body(bytes::Bytes::from_static(br#"{"contents":[]}"#));
+        let signed_v1 = sign_request(signer_v1.as_ref(), req_v1)
+            .await
+            .expect("sign v1");
+        assert!(
+            signed_v1
+                .url()
+                .as_str()
+                .starts_with("http://old-target.invalid/gateway/v1internal:generateContent"),
+            "unexpected initial url: {}",
+            signed_v1.url()
+        );
+
+        let record_v2 = UpstreamStore::update(
+            storage.as_ref(),
+            record_v1.id,
+            record_v1.revision,
+            UpstreamUpdate {
+                base_url: Some(Some(
+                    "http://unpublished-target.invalid/custom/v1internal"
+                        .parse()
+                        .expect("new url"),
+                )),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("update base_url");
+
+        // Prebuilding a candidate view without publishing/invoking it must leave
+        // the live shared state bound to record_v1's target.
+        let discarded_v2 = make_factory(record_v2.clone());
+        drop(discarded_v2);
+        {
+            let shared = vertex_state
+                .shared_signer_state
+                .subscription_signer_states
+                .read()
+                .get(&record_v1.id)
+                .expect("v1 shared state")
+                .clone();
+            let guard = shared.read();
+            assert_eq!(guard.spec_revision, record_v1.revision);
+            assert_eq!(guard.base_url, record_v1.base_url);
+        }
+        let mut req_after_discard = shaped_request();
+        req_after_discard.set_url(
+            "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro:generateContent"
+                .parse()
+                .expect("url"),
+        );
+        req_after_discard.set_body(bytes::Bytes::from_static(br#"{"contents":[]}"#));
+        let signed_after_discard = sign_request(signer_v1.as_ref(), req_after_discard)
+            .await
+            .expect("sign after discarded prebuild");
+        assert!(
+            signed_after_discard
+                .url()
+                .as_str()
+                .starts_with("http://old-target.invalid/gateway/v1internal:generateContent"),
+            "discarded prebuild leaked target change: {}",
+            signed_after_discard.url()
+        );
+
+        // Once the new view actually builds/serves, shared state upgrades to record_v2.
+        let published_v2 = make_factory(record_v2.clone());
+        let signer_v2 = published_v2.build(&upstream).await.expect("v2 signer");
+        let mut req_v2 = shaped_request();
+        req_v2.set_url(
+            "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro:generateContent"
+                .parse()
+                .expect("url"),
+        );
+        req_v2.set_body(bytes::Bytes::from_static(br#"{"contents":[]}"#));
+        let signed_v2 = sign_request(signer_v2.as_ref(), req_v2)
+            .await
+            .expect("sign v2");
+        assert!(
+            signed_v2
+                .url()
+                .as_str()
+                .starts_with("http://unpublished-target.invalid/custom/v1internal:generateContent"),
+            "published view did not upgrade target: {}",
+            signed_v2.url()
         );
     }
 
