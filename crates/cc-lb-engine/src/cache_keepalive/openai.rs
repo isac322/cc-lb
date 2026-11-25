@@ -287,8 +287,11 @@ pub fn eligible_prefix(model: &str, prefix_tokens: u64, lifetime: Option<Lifetim
 
 /// Provider rates are represented as multipliers of ordinary input price.
 pub fn read_multiplier(model: &str) -> f64 {
-    if model.to_ascii_lowercase().contains("gpt-6.1-sol")
-        || model.to_ascii_lowercase().contains("gpt-6.1-terra")
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("gpt-6.1-sol")
+        || lower.contains("gpt-6.1-terra")
+        || lower.contains("gpt-6.2-sol")
+        || lower.contains("gpt-6.2-astra")
     {
         0.05
     } else {
@@ -677,12 +680,28 @@ mod tests {
 
     #[test]
     fn openai_keepalive_read_refresh_cost_break_even() {
+        assert_eq!(read_multiplier("gpt-5.6"), 0.1);
+        assert_eq!(read_multiplier("gpt-6.1-sol"), 0.05);
+        assert_eq!(read_multiplier("gpt-6.2-sol"), 0.05);
+        assert_eq!(read_multiplier("gpt-6.2-astra"), 0.05);
         assert_eq!(
             read_break_even_reads("gpt-5.6", Lifetime::TwelveHours),
             Some(25)
         );
         assert_eq!(
             read_break_even_reads("gpt-6.1-sol", Lifetime::TwelveHours),
+            Some(50)
+        );
+        assert_eq!(
+            read_break_even_reads("gpt-6.2-sol", Lifetime::ThirtyMinutes),
+            Some(25)
+        );
+        assert_eq!(
+            read_break_even_reads("gpt-6.2-sol", Lifetime::TwelveHours),
+            Some(50)
+        );
+        assert_eq!(
+            read_break_even_reads("gpt-6.2-astra", Lifetime::TwelveHours),
             Some(50)
         );
     }
@@ -716,6 +735,26 @@ mod tests {
         ));
         assert!(should_schedule_refresh(
             "gpt-6.1-sol",
+            Lifetime::TwelveHours,
+            50
+        ));
+        assert!(!should_schedule_refresh(
+            "gpt-6.2-sol",
+            Lifetime::TwelveHours,
+            49
+        ));
+        assert!(should_schedule_refresh(
+            "gpt-6.2-sol",
+            Lifetime::TwelveHours,
+            50
+        ));
+        assert!(!should_schedule_refresh(
+            "gpt-6.2-astra",
+            Lifetime::TwelveHours,
+            49
+        ));
+        assert!(should_schedule_refresh(
+            "gpt-6.2-astra",
             Lifetime::TwelveHours,
             50
         ));
