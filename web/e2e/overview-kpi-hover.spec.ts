@@ -1196,6 +1196,50 @@ test.describe('Overview KPI hover', () => {
     await expect(weeklyLegendRow).toBeVisible();
     await expect(weeklyLegendRow).toContainText('7d');
     await expect(weeklyLegendRow).toContainText('35%');
+
+    // Verify the historical 137% (-6d) sample is plotted (not dropped) as a
+    // top-edge clamped segment spanning >75% of the plot and reading 100% used
+    // alongside 7d's 40% historical reading when hovering that earlier point.
+    const fableStrokeColor = await fableLegendRow
+      .locator('[data-slot="window-chip"]')
+      .evaluate((el) => window.getComputedStyle(el).backgroundColor);
+    const fablePlot = await chart.evaluate((container, expectedStroke) => {
+      const grid = container
+        .querySelector('.recharts-cartesian-grid')
+        ?.getBoundingClientRect();
+      const curves = Array.from(
+        container.querySelectorAll('path.recharts-area-curve'),
+      ).filter((node) => {
+        const stroke = window.getComputedStyle(node).stroke;
+        return stroke === expectedStroke;
+      });
+      const curveBox = curves[0]?.getBoundingClientRect();
+      if (!grid || !curveBox) return null;
+      return {
+        gridWidth: grid.width,
+        gridTop: grid.top,
+        gridHeight: grid.height,
+        curveLeft: curveBox.left,
+        curveTop: curveBox.top,
+        curveWidth: curveBox.width,
+      };
+    }, fableStrokeColor);
+    expect(fablePlot).not.toBeNull();
+    expect(fablePlot!.curveWidth / fablePlot!.gridWidth).toBeGreaterThan(0.75);
+    expect(Math.abs(fablePlot!.curveTop - fablePlot!.gridTop)).toBeLessThan(3);
+
+    await page.mouse.move(
+      fablePlot!.curveLeft + 2,
+      fablePlot!.gridTop + fablePlot!.gridHeight / 2,
+    );
+    const tooltipRows = chart.locator('[data-slot="pool-tooltip-row"]');
+    await expect(tooltipRows).toHaveCount(3);
+    await expect(
+      tooltipRows.filter({ hasText: '7d window' }),
+    ).toContainText('40% used');
+    await expect(
+      tooltipRows.filter({ hasText: '7d (Fable) window' }),
+    ).toContainText('100% used');
   });
 
   test('keeps the mobile Overview free of horizontal overflow', async ({

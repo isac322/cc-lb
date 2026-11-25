@@ -355,11 +355,29 @@ async function installRouterPipelineFixtures(
             current_revision: current.revision,
           });
         }
-        const body = request.postDataJSON() as {
-          strategy: 'first-pick' | 'random';
-        };
+        let rawBody: unknown;
+        try {
+          rawBody = request.postDataJSON();
+        } catch {
+          return json(400, { error: 'invalid_json' });
+        }
+        if (
+          typeof rawBody !== 'object' ||
+          rawBody === null ||
+          Array.isArray(rawBody) ||
+          typeof (rawBody as { strategy?: unknown }).strategy !== 'string'
+        ) {
+          return json(422, { error: 'missing_strategy' });
+        }
+        const strategy = (rawBody as { strategy: string }).strategy;
+        if (strategy !== 'first-pick' && strategy !== 'random') {
+          return json(400, {
+            error: 'invalid_router_terminal_strategy',
+            allowed: ['first-pick', 'random'],
+          });
+        }
         const updated = {
-          strategy: body.strategy,
+          strategy,
           revision: current.revision + 1,
         };
         terminalStrategies.set(pid, updated);
@@ -422,7 +440,7 @@ function chainItems(page: Page) {
 }
 
 test.describe('Router Pipeline', () => {
-  test('reorder, terminal toggle, and metadata drawer', async ({
+  test('reorder and metadata drawer', async ({
     page,
   }, testInfo) => {
     await installRouterPipelineFixtures(page);
@@ -511,38 +529,6 @@ test.describe('Router Pipeline', () => {
 
     await drawer.getByRole('button', { name: 'Close' }).click();
     await expect(drawer).not.toBeVisible();
-
-    // Step 6: terminal strategy change to Random + reload + persistence
-    const termGroup = section.getByRole('radiogroup', {
-      name: 'When multiple upstreams qualify, pick',
-    });
-    await expect(
-      termGroup.getByRole('radio', { name: /First eligible/ }),
-    ).toBeChecked();
-    const termRandomLabel = section.locator('label', { hasText: 'Random' });
-    await expect(termRandomLabel).toBeVisible();
-
-    const responsePromise = page.waitForResponse(
-      (response) =>
-        response.url().includes('/router-terminal') &&
-        response.request().method() === 'PUT',
-    );
-    await termRandomLabel.click();
-    await responsePromise;
-
-    await page.reload();
-    await expect(
-      page.getByRole('heading', { name: 'Router', exact: true }),
-    ).toBeVisible();
-    await page.getByRole('tab', { name: 'Advanced' }).click();
-    await expect(
-      routerSection(page)
-        .getByRole('radiogroup', { name: 'When multiple upstreams qualify, pick' })
-        .getByRole('radio', { name: /Random/ }),
-    ).toBeChecked();
-    await page.screenshot({
-      path: testInfo.outputPath('terminal-strategy-random-persisted.png'),
-    });
   });
 
   test('complex chain auto-opens Advanced with disabled Basic', async ({
@@ -646,20 +632,36 @@ test.describe('Router Pipeline', () => {
     });
     await expect(termGroup.getByRole('radio', { name: /Random/ })).toBeChecked();
 
-    const putResponse = page.waitForResponse(
+    const putResponsePromise = page.waitForResponse(
       (response) =>
-        response.url().includes('/router-terminal') &&
+        response.url().includes('/admin/v1/principals/principal-admin/router-terminal') &&
         response.request().method() === 'PUT',
     );
     await section.locator('label', { hasText: 'First eligible' }).click();
-    expect((await putResponse).status()).toBe(200);
+    const putResponse = await putResponsePromise;
+    expect(putResponse.status()).toBe(200);
+    expect(await putResponse.json()).toEqual({
+      strategy: 'first-pick',
+      revision: 2,
+    });
 
     const firstEligibleRadio = termGroup.getByRole('radio', {
       name: /First eligible/,
     });
     await expect(firstEligibleRadio).toBeChecked();
 
+    const reloadGetPromise = page.waitForResponse(
+      (response) =>
+        response.url().includes('/admin/v1/principals/principal-admin/router-terminal') &&
+        response.request().method() === 'GET',
+    );
     await page.reload();
+    const reloadGetResponse = await reloadGetPromise;
+    expect(reloadGetResponse.status()).toBe(200);
+    expect(await reloadGetResponse.json()).toEqual({
+      strategy: 'first-pick',
+      revision: 2,
+    });
     await expect(
       page.getByRole('heading', { name: 'Router', exact: true }),
     ).toBeVisible();
