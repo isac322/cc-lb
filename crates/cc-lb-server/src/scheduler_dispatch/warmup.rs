@@ -485,6 +485,16 @@ impl SchedulerDispatch {
                 holder = %job.holder,
                 action = "split_manual_warmup_expired_before_start",
             );
+            cc_lb_control::record_manual_warmup_expired_before_start(
+                self.storage.as_ref(),
+                job.upstream_id,
+                job.lane,
+                dispatch_now_unix_secs,
+                job.nonce,
+                "manual warmup expired in scheduler queue before a worker started it".to_owned(),
+            )
+            .await
+            .map_err(storage_scheduler_error)?;
             return Ok(JobOutcome::Skip);
         }
         let Some(mut upstream) = UpstreamStore::get_by_id(self.storage.as_ref(), job.upstream_id)

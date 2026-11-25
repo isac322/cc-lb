@@ -78,6 +78,10 @@ pub fn build_router(state: AdminState) -> Router {
         .merge(crate::v1::upstreams::router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
+            admin_mutation_shutdown_gate,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
             require_admin_auth,
         ))
         .layer(middleware::map_response(json_extractor_rejection));
@@ -90,6 +94,28 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/", get(serve_index))
         .route("/{*file}", get(serve_asset));
     router.with_state(state)
+}
+
+async fn admin_mutation_shutdown_gate(
+    axum::extract::State(state): axum::extract::State<AdminState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    let method = request.method();
+    if method == axum::http::Method::GET
+        || method == axum::http::Method::HEAD
+        || method == axum::http::Method::OPTIONS
+    {
+        return next.run(request).await;
+    }
+    let Some(_permit) = state.post_commit_tracker.try_begin_request() else {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(json!({ "error": "server_shutting_down" })),
+        )
+            .into_response();
+    };
+    next.run(request).await
 }
 
 async fn admin_request_middleware(request: Request<Body>, next: Next) -> Response<Body> {

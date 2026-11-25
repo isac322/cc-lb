@@ -579,7 +579,9 @@ async fn dispatch_manual_warmup_records_manual_attempt_and_meta_result() {
     )
     .await
     .expect("load result")
-    .expect("manual warmup result persisted");
+    .expect("manual warmup result persisted")
+    .into_settled()
+    .expect("settled manual warmup result");
     assert_eq!(recorded.nonce, nonce);
     assert_eq!(
         recorded.outcome,
@@ -686,17 +688,24 @@ async fn dispatch_manual_warmup_skips_expired_unstarted_job_before_dispatch() {
         attempts.is_empty(),
         "expired unstarted manual warmup must not record an execution attempt: {attempts:?}"
     );
+    let bridge_result = cc_lb_control::load_manual_warmup_result(
+        fixture.storage.as_ref(),
+        upstream_id,
+        WarmupLane::Primary,
+        nonce,
+    )
+    .await
+    .expect("load result")
+    .expect("expired unstarted manual warmup must record ExpiredBeforeStart bridge result");
     assert!(
-        cc_lb_control::load_manual_warmup_result(
-            fixture.storage.as_ref(),
-            upstream_id,
-            WarmupLane::Primary,
-            nonce,
-        )
-        .await
-        .expect("load result")
-        .is_none(),
-        "expired unstarted manual warmup must not record a bridge result"
+        matches!(
+            bridge_result,
+            cc_lb_control::ManualWarmupBridgeResult::ExpiredBeforeStart {
+                nonce: recorded_nonce,
+                ..
+            } if recorded_nonce == nonce
+        ),
+        "unexpected bridge result: {bridge_result:?}"
     );
 }
 
@@ -829,7 +838,9 @@ async fn run_manual_warmup_429_quota_exhausted_case(close_quota_sink: bool) -> u
     )
     .await
     .expect("read manual warmup result")
-    .expect("manual warmup result must be persisted even when quota sink fails");
+    .expect("manual warmup result must be persisted even when quota sink fails")
+    .into_settled()
+    .expect("settled manual warmup result");
     assert_eq!(
         manual_result.outcome,
         WarmupAttemptOutcome::Skipped(WarmupSkipReason::SevenDayQuotaExhausted)

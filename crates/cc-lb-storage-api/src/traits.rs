@@ -457,6 +457,25 @@ pub trait MetaStore: Send + Sync {
         })
     }
 
+    async fn delete_meta_value(&self, key: &str) -> StorageResult<bool> {
+        let _ = key;
+        Err(StorageError::Fatal {
+            message: "delete_meta_value is not implemented for this storage backend".to_owned(),
+        })
+    }
+
+    async fn list_meta_values_by_prefix(
+        &self,
+        prefix: &str,
+        limit: usize,
+    ) -> StorageResult<Vec<(String, String)>> {
+        let _ = (prefix, limit);
+        Err(StorageError::Fatal {
+            message: "list_meta_values_by_prefix is not implemented for this storage backend"
+                .to_owned(),
+        })
+    }
+
     /// Verifies, without migrating, that every migration embedded in this
     /// binary is recorded as successfully applied with the same checksum.
     /// A missing version or a checksum mismatch returns `Fatal` listing them;

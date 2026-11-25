@@ -1055,6 +1055,122 @@ async fn postgres_get_adaptive_task_statuses_by_key_or_subkey_matches_exact_and_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_cancel_pending_adaptive_task_by_key_transitions_only_unstarted_pending()
+-> Result<()> {
+    with_isolated_database(|pool| async move {
+        let backend = postgres_backend(&pool);
+        let now_secs = unix_secs(SystemClock.now());
+        let pending_key = format!(
+            "split_manual_warmup:{}:primary:{}",
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        );
+        let queued_key = format!(
+            "split_manual_warmup:{}:primary:{}",
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        );
+        let running_key = format!(
+            "split_manual_warmup:{}:primary:{}",
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        );
+        let retried_pending_key = format!(
+            "split_manual_warmup:{}:primary:{}",
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        );
+        for key in [
+            pending_key.clone(),
+            queued_key.clone(),
+            running_key.clone(),
+            retried_pending_key.clone(),
+        ] {
+            backend
+                .push_adaptive_task(SchedulerPushTask {
+                    args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(Uuid::new_v4())),
+                    idempotency_key: Some(key),
+                    run_at_unix_secs: Some(now_secs + 3_600),
+                    max_attempts: Some(1),
+                })
+                .await?;
+        }
+        sqlx::query("UPDATE apalis.jobs SET status = 'Queued' WHERE idempotency_key = $1")
+            .bind(&queued_key)
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            "UPDATE apalis.jobs SET status = 'Running', attempts = 1 WHERE idempotency_key = $1",
+        )
+        .bind(&running_key)
+        .execute(&pool)
+        .await?;
+        sqlx::query("UPDATE apalis.jobs SET attempts = 1 WHERE idempotency_key = $1")
+            .bind(&retried_pending_key)
+            .execute(&pool)
+            .await?;
+
+        ensure!(
+            backend
+                .cancel_pending_adaptive_task_by_key(&pending_key)
+                .await?
+        );
+        ensure!(
+            !backend
+                .cancel_pending_adaptive_task_by_key(&pending_key)
+                .await?
+        );
+        ensure!(
+            !backend
+                .cancel_pending_adaptive_task_by_key(&queued_key)
+                .await?
+        );
+        ensure!(
+            !backend
+                .cancel_pending_adaptive_task_by_key(&running_key)
+                .await?
+        );
+        ensure!(
+            !backend
+                .cancel_pending_adaptive_task_by_key(&retried_pending_key)
+                .await?
+        );
+
+        let pending_status = backend
+            .get_adaptive_task_statuses_by_key(&pending_key)
+            .await?;
+        ensure!(
+            pending_status.len() == 1
+                && pending_status[0].status == cc_lb_scheduler::worker::TaskStatus::Killed,
+            "expected Killed after cancel, got {pending_status:?}"
+        );
+        ensure!(
+            backend
+                .get_adaptive_task_statuses_by_key(&queued_key)
+                .await?[0]
+                .status
+                == cc_lb_scheduler::worker::TaskStatus::Queued
+        );
+        ensure!(
+            backend
+                .get_adaptive_task_statuses_by_key(&running_key)
+                .await?[0]
+                .status
+                == cc_lb_scheduler::worker::TaskStatus::Running
+        );
+        ensure!(
+            backend
+                .get_adaptive_task_statuses_by_key(&retried_pending_key)
+                .await?[0]
+                .status
+                == cc_lb_scheduler::worker::TaskStatus::Pending
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_all_worker_queues_claim_future_run_at_after_idle() -> Result<()> {
     with_isolated_database(|pool| async move {
         let backend = postgres_backend(&pool);

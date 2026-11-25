@@ -86,6 +86,16 @@ impl UsagePruneRunner for StorageHandle {
         retention_days: u64,
         clock: cc_lb_clock::ClockHandle,
     ) -> PruneResult {
+        let now_unix_secs = cc_lb_clock::unix_secs(clock.now());
+        if let Err(error) = cc_lb_control::prune_expired_split_bridge_results(
+            self.storage.as_ref(),
+            now_unix_secs,
+            256,
+        )
+        .await
+        {
+            tracing::warn!(%error, "split bridge expired result prune failed");
+        }
         UsagePruner::new(self.storage.clone(), retention_days, clock)
             .prune_once()
             .await

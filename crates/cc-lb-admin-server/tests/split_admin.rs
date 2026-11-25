@@ -1596,33 +1596,109 @@ mod sqlite_tests {
         );
     }
 
+    struct NoopSplitSignerFactory;
+
+    impl cc_lb_upstream::ApiKeyAwareSignerFactory for NoopSplitSignerFactory {
+        fn with_router_choice(
+            &self,
+            _router_chosen_upstream_name: String,
+        ) -> Arc<dyn cc_lb_upstream::SignerFactory> {
+            Arc::new(NoopSplitSignerFactory)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl cc_lb_upstream::SignerFactory for NoopSplitSignerFactory {
+        async fn build(
+            &self,
+            _upstream: &cc_lb_domain::Upstream,
+        ) -> Result<Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError> {
+            Err(cc_lb_upstream::SignerError::MissingCredentials {
+                reason: "noop".to_owned(),
+            })
+        }
+    }
+
+    fn build_split_warmup_test_router(
+        storage_arc: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+        worker_backend: cc_lb_scheduler::worker::SchedulerBackend,
+        clock: ClockHandle,
+        aead: Arc<AeadService>,
+        cfg: Config,
+        timeout: std::time::Duration,
+    ) -> (axum::Router, cc_lb_control::PostCommitTracker) {
+        let admin_auth = Arc::new(cc_lb_admin::auth::AdminAuthenticator::new(
+            cc_lb_admin::auth::build_providers(&cfg.admin.auth).expect("auth providers"),
+        ));
+        let post_commit_tracker = cc_lb_control::PostCommitTracker::default();
+        let split_manual_warmup = Arc::new(
+            cc_lb_admin_server::split_ports::SplitSchedulerManualWarmup::new(
+                storage_arc.clone(),
+                worker_backend,
+                clock.clone(),
+            )
+            .with_timeout(timeout, std::time::Duration::from_millis(10)),
+        );
+        let dynamic_view = Arc::new(cc_lb_control::DynamicViewHolder::new(
+            cc_lb_control::DynamicViewBuilder::new(0)
+                .signer_factory(Arc::new(NoopSplitSignerFactory))
+                .principal_view(Arc::new(
+                    cc_lb_control::api_keys::principal_view::PrincipalView::from_db(
+                        &[],
+                        std::collections::HashMap::new(),
+                    ),
+                ))
+                .upstream_status_snapshot(
+                    Arc::new(cc_lb_control::UpstreamStatusSnapshot::default()),
+                )
+                .build(),
+        ));
+        let state = cc_lb_admin::AdminState {
+            build: cc_lb_admin::AdminBuildInfo {
+                git_sha: "test",
+                rustc: "test",
+                profile: "test",
+                target: "test",
+            },
+            config_path: None,
+            startup_config_overrides: Default::default(),
+            storage: Some(storage_arc.clone()),
+            key_store: Some(Arc::new(cc_lb_control::api_keys::key_store::KeyStore::new(
+                storage_arc,
+            ))),
+            aead,
+            lifecycle: Some(cc_lb_admin::AdminPorts {
+                warmup: None,
+                subscription_quota_ingestion: None,
+                replica_identity: None,
+                split_manual_warmup: Some(split_manual_warmup),
+            }),
+            lazy_refresher: None,
+            runtime: None,
+            data_dir: cfg.runtime.data_dir.clone(),
+            warmup_dialect_dispatcher: None,
+            warmup_window_verifier: None,
+            limit_reset_usage_refresh: None,
+            dynamic_view,
+            config: Arc::new(cfg),
+            dynamic_view_rebinder: None,
+            scheduler: None,
+            admin_auth,
+            start_time: std::time::Instant::now(),
+            event_bus: None,
+            storage_tail: cc_lb_admin::events::storage_tail_channel(),
+            clock,
+            anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
+                .expect("anthropic org api"),
+            post_commit_tracker: post_commit_tracker.clone(),
+        };
+        (cc_lb_admin::router(state), post_commit_tracker)
+    }
+
     #[tokio::test]
     async fn split_admin_fire_now_reports_503_expired_before_start_and_504_outcome_unknown_with_audit()
      {
         use cc_lb_storage_api::{AuditQueryScope, AuditStore as _};
-
-        struct NoopSplitSignerFactory;
-
-        impl cc_lb_upstream::ApiKeyAwareSignerFactory for NoopSplitSignerFactory {
-            fn with_router_choice(
-                &self,
-                _router_chosen_upstream_name: String,
-            ) -> Arc<dyn cc_lb_upstream::SignerFactory> {
-                Arc::new(NoopSplitSignerFactory)
-            }
-        }
-
-        #[async_trait::async_trait]
-        impl cc_lb_upstream::SignerFactory for NoopSplitSignerFactory {
-            async fn build(
-                &self,
-                _upstream: &cc_lb_domain::Upstream,
-            ) -> Result<Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError> {
-                Err(cc_lb_upstream::SignerError::MissingCredentials {
-                    reason: "noop".to_owned(),
-                })
-            }
-        }
 
         #[allow(unsafe_code)]
         unsafe {
@@ -1632,7 +1708,7 @@ mod sqlite_tests {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let sqlite_path = dir.path().join("storage.sqlite");
         let aead = Arc::new(AeadService::from_master_key([0u8; 32]));
-        let test_clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let test_clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000));
         let clock: ClockHandle = test_clock.clone();
         let database_url = format!("sqlite://{}", sqlite_path.display());
         let storage_arc = Arc::new(
@@ -1707,75 +1783,14 @@ mod sqlite_tests {
             id: "split-test-token".to_owned(),
             token_env: TEST_TOKEN_ENV.to_owned(),
         }];
-        let admin_auth = Arc::new(cc_lb_admin::auth::AdminAuthenticator::new(
-            cc_lb_admin::auth::build_providers(&cfg.admin.auth).expect("auth providers"),
-        ));
-        let post_commit_tracker = cc_lb_control::PostCommitTracker::default();
-        let split_manual_warmup = Arc::new(
-            cc_lb_admin_server::split_ports::SplitSchedulerManualWarmup::new(
-                storage_arc.clone(),
-                worker_backend.clone(),
-                clock.clone(),
-            )
-            .with_timeout(
-                std::time::Duration::from_millis(80),
-                std::time::Duration::from_millis(10),
-            ),
+        let (router, post_commit_tracker) = build_split_warmup_test_router(
+            storage_arc.clone(),
+            worker_backend.clone(),
+            clock.clone(),
+            aead.clone(),
+            cfg.clone(),
+            std::time::Duration::from_millis(80),
         );
-        let dynamic_view = Arc::new(cc_lb_control::DynamicViewHolder::new(
-            cc_lb_control::DynamicViewBuilder::new(0)
-                .signer_factory(Arc::new(NoopSplitSignerFactory))
-                .principal_view(Arc::new(
-                    cc_lb_control::api_keys::principal_view::PrincipalView::from_db(
-                        &[],
-                        std::collections::HashMap::new(),
-                    ),
-                ))
-                .upstream_status_snapshot(
-                    Arc::new(cc_lb_control::UpstreamStatusSnapshot::default()),
-                )
-                .build(),
-        ));
-        let state = cc_lb_admin::AdminState {
-            build: cc_lb_admin::AdminBuildInfo {
-                git_sha: "test",
-                rustc: "test",
-                profile: "test",
-                target: "test",
-            },
-            config_path: None,
-            startup_config_overrides: Default::default(),
-            storage: Some(storage_arc.clone()),
-            key_store: Some(Arc::new(cc_lb_control::api_keys::key_store::KeyStore::new(
-                storage_arc.clone(),
-            ))),
-            aead,
-            lifecycle: Some(cc_lb_admin::AdminPorts {
-                warmup: None,
-                subscription_quota_ingestion: None,
-                replica_identity: None,
-                split_manual_warmup: Some(split_manual_warmup),
-            }),
-            lazy_refresher: None,
-            runtime: None,
-            data_dir: Some(dir.path().to_path_buf()),
-            warmup_dialect_dispatcher: None,
-            warmup_window_verifier: None,
-            limit_reset_usage_refresh: None,
-            dynamic_view,
-            config: Arc::new(cfg),
-            dynamic_view_rebinder: None,
-            scheduler: None,
-            admin_auth,
-            start_time: std::time::Instant::now(),
-            event_bus: None,
-            storage_tail: cc_lb_admin::events::storage_tail_channel(),
-            clock: clock.clone(),
-            anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
-                .expect("anthropic org api"),
-            post_commit_tracker: post_commit_tracker.clone(),
-        };
-        let router = cc_lb_admin::router(state);
 
         // 1. Advance TestClock past expiry while task remains Pending (attempts == 0) -> 503 warmup_expired_before_start + audit row.
         let b_expired = worker_backend.clone();
@@ -1829,8 +1844,27 @@ mod sqlite_tests {
         assert_eq!(body_503["error"], "warmup_expired_before_start");
         expirer.await.expect("expirer done");
 
+        let killed_rows = worker_backend
+            .list_adaptive_tasks(&cc_lb_scheduler::worker::Filter {
+                status: Some(cc_lb_scheduler::worker::TaskStatus::Killed),
+                page: 1,
+                page_size: Some(20),
+            })
+            .await
+            .expect("list killed tasks");
+        assert!(
+            killed_rows.iter().any(|row| {
+                matches!(
+                    &row.args,
+                    cc_lb_scheduler::worker::AdaptiveJob::ManualWarmup(j) if j.upstream_id == upstream_id
+                )
+            }),
+            "503 warmup_expired_before_start must atomically transition Pending(0) row to Killed: {killed_rows:?}"
+        );
+
         // 2. Without clock passing expiry when deadline elapses (indeterminate outcome) -> 504 warmup_outcome_unknown + audit row.
         let resp_504 = router
+            .clone()
             .oneshot(
                 Request::post(format!("/admin/v1/upstreams/{upstream_id}/warmup/fire-now"))
                     .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
@@ -1853,6 +1887,118 @@ mod sqlite_tests {
         assert_eq!(body_504["fired"], false);
         assert_eq!(body_504["error"], "warmup_outcome_unknown");
 
+        // 3. Even if TestClock advances past expiry, a worker-claimed (in-flight Running) job cannot
+        // be atomically cancelled and must report 504 warmup_outcome_unknown, never 503.
+        let prior_nonces: Arc<std::collections::HashSet<Uuid>> = Arc::new(
+            worker_backend
+                .list_adaptive_tasks(&cc_lb_scheduler::worker::Filter {
+                    status: Some(cc_lb_scheduler::worker::TaskStatus::Pending),
+                    page: 1,
+                    page_size: Some(20),
+                })
+                .await
+                .expect("list prior pending")
+                .into_iter()
+                .filter_map(|row| match row.args {
+                    cc_lb_scheduler::worker::AdaptiveJob::ManualWarmup(j) => Some(j.nonce),
+                    _ => None,
+                })
+                .collect(),
+        );
+        let (router_claimed, claimed_tracker) = build_split_warmup_test_router(
+            storage_arc.clone(),
+            worker_backend.clone(),
+            clock.clone(),
+            aead.clone(),
+            cfg,
+            std::time::Duration::from_millis(1500),
+        );
+        let (claimed_tx, claimed_rx) = tokio::sync::oneshot::channel::<()>();
+        let claimed_tx = Arc::new(std::sync::Mutex::new(Some(claimed_tx)));
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+        let advanced_before_response = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancel = tokio_util::sync::CancellationToken::new();
+
+        let adaptive_dispatch: cc_lb_scheduler::worker::AdaptiveDispatchFn = {
+            let claimed_tx = Arc::clone(&claimed_tx);
+            let prior_nonces = Arc::clone(&prior_nonces);
+            Arc::new(move |job| {
+                let claimed_tx = Arc::clone(&claimed_tx);
+                let prior_nonces = Arc::clone(&prior_nonces);
+                let mut release_rx = release_rx.clone();
+                Box::pin(async move {
+                    if let cc_lb_scheduler::worker::AdaptiveJob::ManualWarmup(j) = job
+                        && j.upstream_id == upstream_id
+                        && !prior_nonces.contains(&j.nonce)
+                    {
+                        if let Some(tx) = claimed_tx.lock().expect("claimed_tx").take() {
+                            let _ = tx.send(());
+                        }
+                        let _ = release_rx.wait_for(|released| *released).await;
+                    }
+                    Ok(cc_lb_scheduler::retry::JobOutcome::Skip)
+                })
+            })
+        };
+        let cron_dispatch: cc_lb_scheduler::worker::CronDispatchFn =
+            Arc::new(|_job| Box::pin(async { Ok(cc_lb_scheduler::retry::JobOutcome::Skip) }));
+        let worker_handles = worker_backend
+            .spawn(
+                cc_lb_scheduler::worker::SchedulerCtx::new(
+                    cc_lb_config::SchedulerConfig::default(),
+                    adaptive_dispatch,
+                    cron_dispatch,
+                    clock.clone(),
+                ),
+                worker_cancel.clone(),
+            )
+            .await
+            .expect("spawn scheduler worker");
+
+        let clock_queued = test_clock.clone();
+        let advanced_flag = Arc::clone(&advanced_before_response);
+        let claimed_waiter = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(5), claimed_rx)
+                .await
+                .expect("worker must claim ManualWarmupJob before expiry check")
+                .expect("claimed signal");
+            clock_queued.advance_secs(5);
+            advanced_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let resp_queued_504 = router_claimed
+            .oneshot(
+                Request::post(format!("/admin/v1/upstreams/{upstream_id}/warmup/fire-now"))
+                    .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "lane": "primary" }).to_string()))
+                    .expect("queued 504 request"),
+            )
+            .await
+            .expect("queued 504 response");
+        assert_eq!(resp_queued_504.status(), StatusCode::GATEWAY_TIMEOUT);
+        let body_queued_504: Value = serde_json::from_slice(
+            &resp_queued_504
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("json");
+        assert_eq!(body_queued_504["fired"], false);
+        assert_eq!(body_queued_504["error"], "warmup_outcome_unknown");
+        assert!(
+            advanced_before_response.load(std::sync::atomic::Ordering::SeqCst),
+            "TestClock must advance past expiry while worker holds the claimed job"
+        );
+        let _ = release_tx.send(true);
+        worker_cancel.cancel();
+        claimed_waiter.await.expect("claimed waiter done");
+        for handle in worker_handles {
+            handle.await.expect("worker handle join");
+        }
+
+        claimed_tracker.wait_idle().await;
         post_commit_tracker.wait_idle().await;
         let audits = storage_arc
             .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 20, true)
@@ -1876,11 +2022,183 @@ mod sqlite_tests {
                     .any(|(s, _, subj)| *s == 503 && *subj == Some("split-test-token")),
             "expected 503 audit row attributed to split-test-token actor: {audits:?}"
         );
-        assert!(
+        assert_eq!(
             statuses
                 .iter()
-                .any(|(s, _, subj)| *s == 504 && *subj == Some("split-test-token")),
-            "expected 504 audit row attributed to split-test-token actor: {audits:?}"
+                .filter(|(s, _, subj)| *s == 504 && *subj == Some("split-test-token"))
+                .count(),
+            2,
+            "expected two 504 audit rows attributed to split-test-token actor: {audits:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_admin_fire_now_client_disconnect_after_enqueue_still_audits_actor() {
+        use cc_lb_storage_api::{AuditQueryScope, AuditStore as _};
+
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var(TEST_TOKEN_ENV, TEST_TOKEN);
+        }
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let sqlite_path = dir.path().join("storage.sqlite");
+        let aead = Arc::new(AeadService::from_master_key([0u8; 32]));
+        let clock: ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+        let database_url = format!("sqlite://{}", sqlite_path.display());
+        let storage_arc = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+                .await
+                .expect("open sqlite"),
+        );
+        storage_arc.initialize().await.expect("init sqlite");
+
+        let upstream_id = Uuid::new_v4();
+        let bundle = cc_lb_aead::OAuthTokenBundle {
+            access_token: "access".to_owned(),
+            refresh_token: "refresh".to_owned(),
+            expires_at_unix_secs: 1_900_000_000,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: Some("acct".to_owned()),
+            project_id: None,
+            oauth_profile: cc_lb_aead::GeminiOAuthProfile::default(),
+            scopes: Vec::new(),
+            never_refresh: false,
+        };
+        UpstreamStore::create(
+            storage_arc.as_ref(),
+            UpstreamCreate {
+                id: upstream_id,
+                name: "split-disconnect-audit".to_owned(),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url: Some(
+                    url::Url::parse("https://api.anthropic.com/").expect("valid base url"),
+                ),
+                api_key_ciphertext: None,
+                oauth_tokens: Some(cc_lb_storage_api::OAuthTokensCreate {
+                    tokens: cc_lb_aead::EncryptedOAuthTokens::encrypt(
+                        &aead,
+                        &bundle,
+                        upstream_id.as_bytes(),
+                    )
+                    .expect("encrypt"),
+                    never_refresh: false,
+                }),
+                warmup_enabled: true,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
+            },
+        )
+        .await
+        .expect("create upstream");
+
+        let storage_cfg = StorageConfig::Sqlite {
+            path: sqlite_path.clone(),
+        };
+        let mut cfg = Config {
+            storage: storage_cfg,
+            ..Config::default()
+        };
+        cfg.runtime.data_dir = Some(dir.path().to_path_buf());
+        cfg.admin.auth.providers = vec![AdminAuthProviderConfig::StaticToken {
+            id: "split-test-token".to_owned(),
+            token_env: TEST_TOKEN_ENV.to_owned(),
+        }];
+        let scheduler_backend = cc_lb_scheduler::factory::open_scheduler_storage_with_role(
+            &StorageConfig::Sqlite { path: sqlite_path },
+            &cc_lb_config::SchedulerConfig::default(),
+            cc_lb_scheduler::factory::SchedulerPoolRole::Worker,
+            clock.clone(),
+        )
+        .await
+        .expect("open scheduler backend")
+        .lazy_handle();
+
+        let (router, post_commit_tracker) = build_split_warmup_test_router(
+            storage_arc.clone(),
+            scheduler_backend.clone(),
+            clock,
+            aead,
+            cfg,
+            std::time::Duration::from_secs(5),
+        );
+
+        // Issue HTTP request, drop its future as soon as `ManualWarmupJob` is queued
+        // (simulating client disconnect right after enqueue), then settle via worker.
+        let job = {
+            let req_future = router.oneshot(
+                Request::post(format!("/admin/v1/upstreams/{upstream_id}/warmup/fire-now"))
+                    .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "lane": "primary" }).to_string()))
+                    .expect("fire-now request"),
+            );
+            tokio::pin!(req_future);
+
+            let mut seen_job = None;
+            for _ in 0..200 {
+                tokio::select! {
+                    _ = &mut req_future => panic!("request finished before worker settled"),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                }
+                let tasks = scheduler_backend
+                    .list_adaptive_tasks(&cc_lb_scheduler::worker::Filter {
+                        status: Some(cc_lb_scheduler::worker::TaskStatus::Pending),
+                        page: 1,
+                        page_size: Some(20),
+                    })
+                    .await
+                    .expect("list adaptive tasks");
+                if let Some(job) = tasks.into_iter().find_map(|row| match row.args {
+                    cc_lb_scheduler::worker::AdaptiveJob::ManualWarmup(j)
+                        if j.upstream_id == upstream_id =>
+                    {
+                        Some(j)
+                    }
+                    _ => None,
+                }) {
+                    seen_job = Some(job);
+                    break;
+                }
+            }
+            seen_job.expect("manual warmup job enqueued before disconnect")
+        };
+        let now_secs = cc_lb_clock::unix_secs(std::time::SystemTime::now());
+        cc_lb_control::record_manual_warmup_result(
+            storage_arc.as_ref(),
+            job.upstream_id,
+            job.lane,
+            now_secs,
+            cc_lb_control::ManualWarmupJobResult {
+                nonce: job.nonce,
+                outcome: cc_lb_storage_api::WarmupAttemptOutcome::Success(
+                    cc_lb_storage_api::WarmupSuccessReason::CycleAdvanced,
+                ),
+                cycle_key: Some(job.candidate_cycle_key),
+                error_detail: None,
+                expires_at_unix_secs: now_secs
+                    .saturating_add(cc_lb_control::SPLIT_BRIDGE_RESULT_TTL_SECS),
+            },
+        )
+        .await
+        .expect("record worker result");
+
+        post_commit_tracker.wait_idle().await;
+        let audits = storage_arc
+            .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 20, true)
+            .await
+            .expect("query audit rows");
+        assert!(
+            audits.iter().any(|entry| {
+                entry.admin_action.as_deref() == Some("upstream_warmup_fire_now")
+                    && entry.status == 200
+                    && entry.actor_subject.as_deref() == Some("split-test-token")
+            }),
+            "expected 200 audit row attributed to split-test-token after client disconnect: {audits:?}"
         );
     }
 }

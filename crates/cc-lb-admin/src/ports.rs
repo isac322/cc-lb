@@ -75,6 +75,16 @@ pub trait SubscriptionQuotaIngestionPort: Send + Sync {
     );
 }
 
+#[derive(Debug, Clone)]
+pub struct SplitManualWarmupTicket {
+    pub upstream_id: Uuid,
+    pub lane: WarmupLane,
+    pub nonce: Uuid,
+    pub idempotency_key: String,
+    pub expires_at_unix_secs: u64,
+    pub deadline: tokio::time::Instant,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SplitManualWarmupError {
     #[error("split manual warmup unavailable: {0}")]
@@ -87,11 +97,29 @@ pub enum SplitManualWarmupError {
 
 #[async_trait]
 pub trait SplitManualWarmupPort: Send + Sync {
+    async fn enqueue_manual_warmup(
+        &self,
+        upstream_id: Uuid,
+        lane: WarmupLane,
+        holder: String,
+        candidate_cycle_key: i64,
+    ) -> Result<SplitManualWarmupTicket, SplitManualWarmupError>;
+
+    async fn wait_manual_warmup(
+        &self,
+        ticket: SplitManualWarmupTicket,
+    ) -> Result<cc_lb_control::ManualWarmupJobResult, SplitManualWarmupError>;
+
     async fn fire_manual_warmup(
         &self,
         upstream_id: Uuid,
         lane: WarmupLane,
         holder: String,
         candidate_cycle_key: i64,
-    ) -> Result<cc_lb_control::ManualWarmupJobResult, SplitManualWarmupError>;
+    ) -> Result<cc_lb_control::ManualWarmupJobResult, SplitManualWarmupError> {
+        let ticket = self
+            .enqueue_manual_warmup(upstream_id, lane, holder, candidate_cycle_key)
+            .await?;
+        self.wait_manual_warmup(ticket).await
+    }
 }

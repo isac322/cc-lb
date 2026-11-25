@@ -1672,6 +1672,44 @@ async fn fire_now_upstream_warmup(
                     Err(error) => return Err(error),
                 }
             }
+            FireNowStage::SplitDispatch {
+                split_warmup,
+                holder,
+                candidate_cycle_key,
+            } => {
+                match split_warmup
+                    .enqueue_manual_warmup(upstream_id, lane, holder.clone(), candidate_cycle_key)
+                    .await
+                {
+                    Ok(ticket) => match split_warmup.wait_manual_warmup(ticket).await {
+                        Ok(result) => split_manual_warmup_settled_response(
+                            upstream_id,
+                            lane,
+                            &holder,
+                            candidate_cycle_key,
+                            result,
+                        ),
+                        Err(crate::ports::SplitManualWarmupError::ExpiredBeforeStart(detail)) => {
+                            split_manual_warmup_expired_response(upstream_id, lane, &holder, detail)
+                        }
+                        Err(
+                            crate::ports::SplitManualWarmupError::OutcomeUnknown(detail)
+                            | crate::ports::SplitManualWarmupError::Unavailable(detail),
+                        ) => {
+                            split_manual_warmup_unknown_response(upstream_id, lane, &holder, detail)
+                        }
+                    },
+                    Err(crate::ports::SplitManualWarmupError::Unavailable(_)) => {
+                        return Err(UpstreamError::WarmupUnavailable);
+                    }
+                    Err(crate::ports::SplitManualWarmupError::ExpiredBeforeStart(detail)) => {
+                        split_manual_warmup_expired_response(upstream_id, lane, &holder, detail)
+                    }
+                    Err(crate::ports::SplitManualWarmupError::OutcomeUnknown(detail)) => {
+                        split_manual_warmup_unknown_response(upstream_id, lane, &holder, detail)
+                    }
+                }
+            }
         };
         let status = response.status().as_u16();
         let action = "upstream_warmup_fire_now";
@@ -1707,6 +1745,101 @@ enum FireNowStage {
     /// The dispatch attempt row is committed; quota observations, warmup
     /// status and the response still follow.
     Attempted(FireNowAttempted),
+    /// DB-only split dispatch moves enqueue, bounded bridge wait, and audit
+    /// into `complete_after_commit` so client disconnects still audit outcomes.
+    SplitDispatch {
+        split_warmup: Arc<dyn crate::ports::SplitManualWarmupPort>,
+        holder: String,
+        candidate_cycle_key: i64,
+    },
+}
+
+fn split_manual_warmup_expired_response(
+    upstream_id: Uuid,
+    lane: WarmupLane,
+    holder: &str,
+    detail: String,
+) -> Response {
+    tracing::warn!(
+        target: "warmup",
+        upstream_id = %upstream_id,
+        holder = %holder,
+        error = %detail,
+        action = "split_dispatch_expired_before_start"
+    );
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "fired": false,
+            "lane": lane,
+            "error": "warmup_expired_before_start",
+            "detail": detail,
+        })),
+    )
+        .into_response()
+}
+
+fn split_manual_warmup_unknown_response(
+    upstream_id: Uuid,
+    lane: WarmupLane,
+    holder: &str,
+    detail: String,
+) -> Response {
+    tracing::warn!(
+        target: "warmup",
+        upstream_id = %upstream_id,
+        holder = %holder,
+        error = %detail,
+        action = "split_dispatch_outcome_unknown"
+    );
+    (
+        StatusCode::GATEWAY_TIMEOUT,
+        Json(json!({
+            "fired": false,
+            "lane": lane,
+            "error": "warmup_outcome_unknown",
+            "detail": detail,
+        })),
+    )
+        .into_response()
+}
+
+fn split_manual_warmup_settled_response(
+    upstream_id: Uuid,
+    lane: WarmupLane,
+    holder: &str,
+    candidate_cycle_key: i64,
+    result: cc_lb_control::ManualWarmupJobResult,
+) -> Response {
+    tracing::info!(
+        target: "warmup",
+        upstream_id = %upstream_id,
+        holder = %holder,
+        outcome = ?result.outcome,
+        dispatch_error = result.error_detail.as_deref(),
+        action = "split_dispatch_result"
+    );
+    match result.outcome {
+        WarmupAttemptOutcome::Success(_) => {
+            let response_cycle_key = result.cycle_key.unwrap_or(candidate_cycle_key);
+            Json(FireNowFiredResponse {
+                fired: true,
+                lane,
+                cycle_key: response_cycle_key,
+                outcome: result.outcome,
+            })
+            .into_response()
+        }
+        WarmupAttemptOutcome::PermanentFailure(_) => {
+            fire_now_not_fired_response(StatusCode::BAD_GATEWAY, lane, result.outcome)
+        }
+        WarmupAttemptOutcome::TransientFailure(_) => {
+            fire_now_not_fired_response(StatusCode::SERVICE_UNAVAILABLE, lane, result.outcome)
+        }
+        WarmupAttemptOutcome::Skipped(_) => {
+            fire_now_not_fired_response(StatusCode::ACCEPTED, lane, result.outcome)
+        }
+    }
 }
 
 struct FireNowAttempted {
@@ -1900,87 +2033,11 @@ async fn fire_now_upstream_warmup_inner(
             .and_then(|ports| ports.split_manual_warmup.as_ref())
             .cloned()
     {
-        let result = match split_warmup
-            .fire_manual_warmup(upstream_id, lane, holder.clone(), candidate_cycle_key)
-            .await
-        {
-            Ok(result) => result,
-            Err(crate::ports::SplitManualWarmupError::Unavailable(_)) => {
-                return Err(UpstreamError::WarmupUnavailable);
-            }
-            Err(crate::ports::SplitManualWarmupError::ExpiredBeforeStart(detail)) => {
-                tracing::warn!(
-                    target: "warmup",
-                    upstream_id = %upstream_id,
-                    holder = %holder,
-                    error = %detail,
-                    action = "split_dispatch_expired_before_start"
-                );
-                return Ok(FireNowStage::Finished(
-                    (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        Json(json!({
-                            "fired": false,
-                            "lane": lane,
-                            "error": "warmup_expired_before_start",
-                            "detail": detail,
-                        })),
-                    )
-                        .into_response(),
-                ));
-            }
-            Err(crate::ports::SplitManualWarmupError::OutcomeUnknown(detail)) => {
-                tracing::warn!(
-                    target: "warmup",
-                    upstream_id = %upstream_id,
-                    holder = %holder,
-                    error = %detail,
-                    action = "split_dispatch_outcome_unknown"
-                );
-                return Ok(FireNowStage::Finished(
-                    (
-                        StatusCode::GATEWAY_TIMEOUT,
-                        Json(json!({
-                            "fired": false,
-                            "lane": lane,
-                            "error": "warmup_outcome_unknown",
-                            "detail": detail,
-                        })),
-                    )
-                        .into_response(),
-                ));
-            }
-        };
-        tracing::info!(
-            target: "warmup",
-            upstream_id = %upstream_id,
-            holder = %holder,
-            outcome = ?result.outcome,
-            dispatch_error = result.error_detail.as_deref(),
-            action = "split_dispatch_result"
-        );
-        let response = match result.outcome {
-            WarmupAttemptOutcome::Success(_) => {
-                let response_cycle_key = result.cycle_key.unwrap_or(candidate_cycle_key);
-                Json(FireNowFiredResponse {
-                    fired: true,
-                    lane,
-                    cycle_key: response_cycle_key,
-                    outcome: result.outcome,
-                })
-                .into_response()
-            }
-            WarmupAttemptOutcome::PermanentFailure(_) => {
-                fire_now_not_fired_response(StatusCode::BAD_GATEWAY, lane, result.outcome)
-            }
-            WarmupAttemptOutcome::TransientFailure(_) => {
-                fire_now_not_fired_response(StatusCode::SERVICE_UNAVAILABLE, lane, result.outcome)
-            }
-            WarmupAttemptOutcome::Skipped(_) => {
-                fire_now_not_fired_response(StatusCode::ACCEPTED, lane, result.outcome)
-            }
-        };
-        return Ok(FireNowStage::Finished(response));
+        return Ok(FireNowStage::SplitDispatch {
+            split_warmup,
+            holder,
+            candidate_cycle_key,
+        });
     }
     if upstream.warmup_dialect_plugin.is_some()
         && (state.runtime.is_none()

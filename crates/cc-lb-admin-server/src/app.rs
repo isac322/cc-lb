@@ -135,6 +135,7 @@ impl AdminApp {
                     );
                 }
                 _ = &mut shutdown => {
+                    self.post_commit_tracker.close();
                     let _ = stop_tx.send(true);
                     break;
                 }

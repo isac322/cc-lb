@@ -406,6 +406,7 @@ pub(super) async fn serve_runtime(
         cc_lb_runtime_sync::await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
     }
     if let Some((admin_stop_tx, admin_task, admin_post_commit_tracker)) = admin_handle {
+        admin_post_commit_tracker.close();
         let _ = admin_stop_tx.send(true);
         // `serve_admin_until_shutdown` internally bounds connection draining to
         // `SHUTDOWN_TASK_TIMEOUT` and then aborts + joins all live connections; give the outer
@@ -2773,5 +2774,152 @@ mod tests {
             dropped.load(Ordering::Acquire),
             "hung admin connection handler must be aborted and joined before serve_admin_until_shutdown returns"
         );
+    }
+
+    #[tokio::test]
+    async fn serve_admin_until_shutdown_tracks_http2_mutations_and_rejects_after_close() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tracker = cc_lb_control::PostCommitTracker::default();
+        let handler_entered = Arc::new(tokio::sync::Notify::new());
+        let (release_handler_tx, release_handler_rx) = tokio::sync::oneshot::channel::<()>();
+        let release_handler_rx = Arc::new(tokio::sync::Mutex::new(Some(release_handler_rx)));
+        let (release_post_commit_tx, release_post_commit_rx) =
+            tokio::sync::oneshot::channel::<()>();
+        let release_post_commit_rx =
+            Arc::new(tokio::sync::Mutex::new(Some(release_post_commit_rx)));
+        let post_commit_done = Arc::new(AtomicBool::new(false));
+        let post_commit_blocked_entered = Arc::new(AtomicBool::new(false));
+
+        let tracker_route = tracker.clone();
+        let entered_route = Arc::clone(&handler_entered);
+        let post_commit_done_route = Arc::clone(&post_commit_done);
+        let router = Router::new().route(
+            "/mutate",
+            axum::routing::post(move || {
+                let tracker = tracker_route.clone();
+                let entered = Arc::clone(&entered_route);
+                let release_handler_rx = Arc::clone(&release_handler_rx);
+                let release_post_commit_rx = Arc::clone(&release_post_commit_rx);
+                let post_commit_done = Arc::clone(&post_commit_done_route);
+                async move {
+                    let Some(_permit) = tracker.try_begin_request() else {
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            r#"{"error":"server_shutting_down"}"#,
+                        );
+                    };
+                    entered.notify_one();
+                    if let Some(rx) = release_handler_rx.lock().await.take() {
+                        let _ = rx.await;
+                    }
+                    let rx_pc = release_post_commit_rx.lock().await.take();
+                    tracker.spawn(async move {
+                        if let Some(rx) = rx_pc {
+                            let _ = rx.await;
+                        }
+                        post_commit_done.store(true, Ordering::Release);
+                    });
+                    (StatusCode::OK, "ok")
+                }
+            }),
+        );
+        let tracker_closed_route = tracker.clone();
+        let blocked_flag = Arc::clone(&post_commit_blocked_entered);
+        let router = router.route(
+            "/mutate-second",
+            axum::routing::post(move || {
+                let tracker = tracker_closed_route.clone();
+                let blocked_flag = Arc::clone(&blocked_flag);
+                async move {
+                    let Some(_permit) = tracker.try_begin_request() else {
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            r#"{"error":"server_shutting_down"}"#,
+                        );
+                    };
+                    blocked_flag.store(true, Ordering::Release);
+                    (StatusCode::OK, "unexpected")
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind h2c admin listener");
+        let addr = listener.local_addr().expect("local addr");
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let server_task = tokio::spawn(serve_admin_until_shutdown(
+            listener,
+            router,
+            stop_rx,
+            Duration::from_secs(5),
+        ));
+
+        let client: hyper_util::client::legacy::Client<
+            hyper_util::client::legacy::connect::HttpConnector,
+            Body,
+        > = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+            .http2_only(true)
+            .build_http();
+
+        let uri1: axum::http::Uri = format!("http://{addr}/mutate").parse().expect("uri1");
+        let req1 = Request::post(uri1).body(Body::empty()).expect("h2 req1");
+        let resp1_task = tokio::spawn({
+            let client = client.clone();
+            async move { client.request(req1).await }
+        });
+
+        handler_entered.notified().await;
+        assert_eq!(tracker.in_flight(), 1);
+
+        // Close gate before sending second HTTP/2 request on the multiplexed connection:
+        // must immediately return 503 server_shutting_down without running handler body.
+        tracker.close();
+        let uri2: axum::http::Uri = format!("http://{addr}/mutate-second")
+            .parse()
+            .expect("uri2");
+        let req2 = Request::post(uri2).body(Body::empty()).expect("h2 req2");
+        let resp2 = client.request(req2).await.expect("h2 closed gate response");
+        assert_eq!(resp2.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!post_commit_blocked_entered.load(Ordering::Acquire));
+
+        let _ = stop_tx.send(true);
+        let waiter = tokio::spawn({
+            let tracker = tracker.clone();
+            async move { tracker.wait_idle().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiter.is_finished(),
+            "wait_idle must block while HTTP/2 stream still holds request permit"
+        );
+
+        let _ = release_handler_tx.send(());
+        let resp1 = resp1_task
+            .await
+            .expect("resp1 task join")
+            .expect("resp1 ok");
+        assert_eq!(resp1.status(), StatusCode::OK);
+        drop(resp1);
+        drop(resp2);
+        drop(client);
+
+        server_task
+            .await
+            .expect("admin server task joins")
+            .expect("admin server Ok");
+        assert!(
+            !waiter.is_finished(),
+            "wait_idle must remain blocked for post-commit task even after HTTP/2 server finishes"
+        );
+        assert!(!post_commit_done.load(Ordering::Acquire));
+
+        let _ = release_post_commit_tx.send(());
+        tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("wait_idle finishes once post-commit completes")
+            .expect("waiter joins");
+        assert!(post_commit_done.load(Ordering::Acquire));
     }
 }

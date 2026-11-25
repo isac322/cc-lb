@@ -209,6 +209,34 @@ impl MetaStore for PostgresStorage {
         Ok(result.rows_affected() == 1)
     }
 
+    async fn delete_meta_value(&self, key: &str) -> StorageResult<bool> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        lock_meta_value(&mut tx, key).await?;
+        let result = sqlx::query("DELETE FROM meta WHERE key = $1")
+            .bind(key)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn list_meta_values_by_prefix(
+        &self,
+        prefix: &str,
+        limit: usize,
+    ) -> StorageResult<Vec<(String, String)>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        sqlx::query_as(
+            "SELECT key, value FROM meta WHERE starts_with(key, $1) ORDER BY key ASC LIMIT $2",
+        )
+        .bind(prefix)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
     /// Read-only: never migrates, so an operator CLI pointed at an older or
     /// tampered schema fails instead of rewriting it.
     async fn verify_schema_current(&self) -> StorageResult<()> {
