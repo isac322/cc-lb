@@ -1097,12 +1097,44 @@ fn default_fallback_contains_current_anthropic_pricing() {
             50_000_000,
         ),
         (
+            "claude-fable-5-1",
+            10_000_000,
+            12_500_000,
+            20_000_000,
+            250_000,
+            50_000_000,
+        ),
+        (
+            "claude-fable-5-2",
+            8_000_000,
+            10_000_000,
+            16_000_000,
+            200_000,
+            40_000_000,
+        ),
+        (
             "claude-mythos-5",
             10_000_000,
             12_500_000,
             20_000_000,
             1_000_000,
             50_000_000,
+        ),
+        (
+            "claude-mythos-5-1",
+            10_000_000,
+            12_500_000,
+            20_000_000,
+            250_000,
+            50_000_000,
+        ),
+        (
+            "claude-mythos-5-2",
+            8_000_000,
+            10_000_000,
+            16_000_000,
+            200_000,
+            40_000_000,
         ),
         (
             "claude-opus-5-5",
@@ -1239,7 +1271,7 @@ fn default_fallback_contains_current_anthropic_pricing() {
             .keys()
             .filter(|model| model.starts_with("claude-fable"))
             .count(),
-        1
+        3
     );
     assert!(!snapshot.above_tokens_rates.contains_key("claude-opus-5-5"));
     assert!(
@@ -1247,6 +1279,14 @@ fn default_fallback_contains_current_anthropic_pricing() {
             .above_tokens_rates
             .contains_key("claude-sonnet-5-5")
     );
+    for model in [
+        "claude-fable-5-1",
+        "claude-fable-5-2",
+        "claude-mythos-5-1",
+        "claude-mythos-5-2",
+    ] {
+        assert!(!snapshot.above_tokens_rates.contains_key(model));
+    }
 }
 
 #[test]

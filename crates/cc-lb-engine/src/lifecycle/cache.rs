@@ -955,6 +955,7 @@ pub(super) fn anthropic_family_input_micros_per_million(
     gross_input_tokens: Option<u64>,
 ) -> Option<u64> {
     const FABLE_AND_MYTHOS: u64 = 10_000_000;
+    const FABLE_AND_MYTHOS_5_2: u64 = 8_000_000;
     const OPUS_5_5: u64 = 4_000_000;
     const OPUS_CURRENT: u64 = 5_000_000;
     const OPUS_LEGACY: u64 = 15_000_000;
@@ -975,8 +976,10 @@ pub(super) fn anthropic_family_input_micros_per_million(
     }
 
     // Most specific first.
-    const PREFIXES: [(&str, u64); 16] = [
+    const PREFIXES: [(&str, u64); 18] = [
+        ("claude-fable-5-2", FABLE_AND_MYTHOS_5_2),
         ("claude-fable", FABLE_AND_MYTHOS),
+        ("claude-mythos-5-2", FABLE_AND_MYTHOS_5_2),
         ("claude-mythos", FABLE_AND_MYTHOS),
         ("claude-opus-4-1", OPUS_LEGACY),
         ("claude-opus-4-5", OPUS_CURRENT),
@@ -1020,7 +1023,15 @@ pub(super) fn cache_read_micros_from_input(input_micros: u64) -> u64 {
 }
 
 fn anthropic_family_cache_read_micros_from_input(model: &str, input_micros: u64) -> u64 {
-    if model.starts_with("claude-opus-5-5") || model.starts_with("claude-sonnet-5-5") {
+    if model.starts_with("claude-fable-5-1")
+        || model.starts_with("claude-fable-5-2")
+        || model.starts_with("claude-mythos-5-1")
+        || model.starts_with("claude-mythos-5-2")
+    {
+        (u128::from(input_micros) / 40)
+            .try_into()
+            .unwrap_or(u64::MAX)
+    } else if model.starts_with("claude-opus-5-5") || model.starts_with("claude-sonnet-5-5") {
         (u128::from(input_micros) / 20)
             .try_into()
             .unwrap_or(u64::MAX)
@@ -2319,6 +2330,48 @@ mod cache_score_tests {
             Some(20_000_000)
         );
         assert_eq!(pricing.cache_read_micros_per_million, Some(1_000_000));
+    }
+
+    #[test]
+    fn anthropic_family_cache_pricing_fallback_covers_fable_and_mythos_5_1_and_5_2() {
+        for (model, input, write_5m, write_1h, read) in [
+            (
+                "claude-fable-5-1",
+                10_000_000,
+                12_500_000,
+                20_000_000,
+                250_000,
+            ),
+            (
+                "claude-fable-5-2",
+                8_000_000,
+                10_000_000,
+                16_000_000,
+                200_000,
+            ),
+            (
+                "claude-mythos-5-1",
+                10_000_000,
+                12_500_000,
+                20_000_000,
+                250_000,
+            ),
+            (
+                "claude-mythos-5-2",
+                8_000_000,
+                10_000_000,
+                16_000_000,
+                200_000,
+            ),
+        ] {
+            let pricing = anthropic_family_cache_pricing_summary(model, None)
+                .unwrap_or_else(|| panic!("{model} fallback exists"));
+            assert_eq!(pricing.status, "known");
+            assert_eq!(pricing.input_micros_per_million, Some(input));
+            assert_eq!(pricing.cache_creation_5m_micros_per_million, Some(write_5m));
+            assert_eq!(pricing.cache_creation_1h_micros_per_million, Some(write_1h));
+            assert_eq!(pricing.cache_read_micros_per_million, Some(read));
+        }
     }
 
     #[test]
