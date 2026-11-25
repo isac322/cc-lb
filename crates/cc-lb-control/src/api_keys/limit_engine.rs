@@ -2050,13 +2050,16 @@ fn rebuild_local_usage_after_handoff(
             continue;
         }
         for amount in reserved {
+            if !amount.is_live_at(now_sec) {
+                continue;
+            }
             record_amount_locked(
                 &mut rolling,
                 &key_id,
                 amount.kind,
                 amount.window_sec,
                 amount.amount,
-                now_sec,
+                amount.bucket_start,
             );
         }
     }
@@ -5708,6 +5711,139 @@ mod tests {
         assert_eq!(
             engine.current_total(&record.key_hash_b64, LimitKind::CostUsd, 60, t2),
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_local_usage_after_handoff_preserves_bucket_starts_for_drop_and_skips_expired()
+    {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database_url = format!(
+            "sqlite://{}",
+            directory.path().join("handoff-buckets.sqlite").display()
+        );
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let storage_impl = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+            .await
+            .expect("open sqlite");
+        storage_impl.initialize().await.expect("migrate sqlite");
+        let storage: Arc<dyn Storage> = Arc::new(storage_impl);
+        let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
+        let handle = engine
+            .start_durable_usage_sync(storage.clone())
+            .await
+            .expect("start durable usage");
+        let state = engine
+            .inner
+            .durable_usage
+            .read()
+            .clone()
+            .expect("durable state");
+        handle.shutdown().await;
+
+        let view = PrincipalView::for_tests(
+            "principal-handoff",
+            true,
+            vec!["claude-3-opus".to_owned()],
+            vec![
+                Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 10,
+                },
+                Limit {
+                    kind: LimitKind::TotalTokens,
+                    window_secs: 60,
+                    cap_micros: 1_000,
+                },
+                Limit {
+                    kind: LimitKind::TotalTokens,
+                    window_secs: 3_600,
+                    cap_micros: 10_000,
+                },
+            ],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            key_hash_b64: "handoff-bucket-key".to_owned(),
+            ..StoredApiKeyRecord::default()
+        };
+
+        // 1. Reserve at t0 under 60s (1s buckets) and 3600s (60s buckets).
+        let res1 = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-handoff",
+                "claude-3-opus",
+                Some(100),
+                200,
+                None,
+            )
+            .await
+            .expect("res1 succeeds");
+
+        // Cross a 1s bucket boundary (t1 = t0 + 5), hand off writer, then drop res1:
+        // rebuilt charge must stay at original bucket_start and disappear completely on drop.
+        clock.advance_secs(5);
+        let t1 = unix_secs(clock.now());
+        rebuild_local_usage_after_handoff(&engine, &state, t1);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            300
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 3_600, t1),
+            300
+        );
+        drop(res1);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            0,
+            "dropping active reservation after 1s-bucket-crossing handoff must remove rebuilt 60s hold"
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 3_600, t1),
+            0,
+            "dropping active reservation after handoff must remove rebuilt 3600s hold"
+        );
+
+        // 2. Reserve at t1, advance 65s to t2 (expires 60s hold, crosses 60s bucket boundary inside
+        // still-live 3600s window), hand off writer, and verify expired 60s hold is skipped while
+        // live 3600s hold preserves its original bucket and drops cleanly.
+        let res2 = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-handoff",
+                "claude-3-opus",
+                Some(100),
+                200,
+                None,
+            )
+            .await
+            .expect("res2 succeeds");
+        clock.advance_secs(65);
+        let t2 = unix_secs(clock.now());
+        rebuild_local_usage_after_handoff(&engine, &state, t2);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t2),
+            0,
+            "expired 60s hold must not be resurrected into new window during handoff rebuild"
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 3_600, t2),
+            300
+        );
+        drop(res2);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t2),
+            0
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 3_600, t2),
+            0,
+            "dropping active 3600s hold after 60s-bucket-crossing handoff must leave 0"
         );
     }
 }
