@@ -267,16 +267,32 @@ impl SchedulerBackend {
         let rows: Vec<(String, i32, i32)> = match self {
             #[cfg(feature = "sqlite")]
             Self::Sqlite(sqlite) => {
-                sqlx::query_as(
-                    "SELECT status, attempts, max_attempts FROM Jobs \
-                     WHERE job_type = ?1 \
-                       AND (idempotency_key = ?2 OR substr(idempotency_key, 1, length(?3)) = ?3)",
-                )
-                .bind(ADAPTIVE_QUEUE)
-                .bind(idempotency_key)
-                .bind(&subkey_prefix)
-                .fetch_all(sqlite.pool())
-                .await?
+                // Keep a binary-collated range predicate so SQLite uses `(job_type, idempotency_key)`
+                // for both the exact lookup and the `:` subkey seek instead of scanning via `substr`.
+                if let Some(subkey_upper) = prefix_upper_bound(&subkey_prefix) {
+                    sqlx::query_as(
+                        "SELECT status, attempts, max_attempts FROM Jobs \
+                         WHERE job_type = ?1 \
+                           AND (idempotency_key = ?2 OR (idempotency_key >= ?3 AND idempotency_key < ?4))",
+                    )
+                    .bind(ADAPTIVE_QUEUE)
+                    .bind(idempotency_key)
+                    .bind(&subkey_prefix)
+                    .bind(subkey_upper)
+                    .fetch_all(sqlite.pool())
+                    .await?
+                } else {
+                    sqlx::query_as(
+                        "SELECT status, attempts, max_attempts FROM Jobs \
+                         WHERE job_type = ?1 \
+                           AND (idempotency_key = ?2 OR idempotency_key >= ?3)",
+                    )
+                    .bind(ADAPTIVE_QUEUE)
+                    .bind(idempotency_key)
+                    .bind(&subkey_prefix)
+                    .fetch_all(sqlite.pool())
+                    .await?
+                }
             }
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => {
@@ -1066,6 +1082,36 @@ mod tests {
             .await
             .expect("insert job row");
         }
+
+        let subkey_prefix = format!("{base_key}:");
+        let subkey_upper =
+            super::prefix_upper_bound(&subkey_prefix).expect("colon subkey prefix has upper bound");
+        let plan_rows: Vec<(i32, i32, i32, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN \
+             SELECT status, attempts, max_attempts FROM Jobs \
+             WHERE job_type = ?1 \
+               AND (idempotency_key = ?2 OR (idempotency_key >= ?3 AND idempotency_key < ?4))",
+        )
+        .bind(ADAPTIVE_QUEUE)
+        .bind(&base_key)
+        .bind(&subkey_prefix)
+        .bind(&subkey_upper)
+        .fetch_all(&pool)
+        .await
+        .expect("explain sqlite subkey range query plan");
+        let plan_details = plan_rows
+            .into_iter()
+            .map(|(_, _, _, detail)| detail)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plan_details.contains("idempotency_key=?"),
+            "expected exact idempotency_key index lookup in SQLite query plan: {plan_details}"
+        );
+        assert!(
+            plan_details.contains("idempotency_key>?"),
+            "expected bounded idempotency_key range seek in SQLite query plan: {plan_details}"
+        );
 
         let backend =
             SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(pool, Arc::new(SystemClock)));
