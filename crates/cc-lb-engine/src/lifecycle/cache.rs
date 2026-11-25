@@ -3061,7 +3061,8 @@ mod cache_score_tests {
         );
         assert_eq!(haiku_summary.cache_read_micros_per_million, Some(50_000));
 
-        // 4. Mid-lookup snapshot replacement resolves from the single held initial snapshot.
+        // 4. Mid-lookup snapshot replacement resolves from the single held initial snapshot
+        //    with distinctive initial and replacement rates (both distinct from the compiled fallback).
         let swap_catalog = PriceCatalog::new_empty();
         let mut initial_snap = haiku_snap;
         initial_snap.cache_creation_per_million_usd.insert(
@@ -3072,6 +3073,23 @@ mod cache_score_tests {
             "claude-haiku-5-5".to_owned(),
             UsdPerMillion::from_micros_usd(10_000),
         );
+        initial_snap.above_tokens_rates.insert(
+            "claude-haiku-5-5".to_owned(),
+            BTreeMap::from([(
+                100_000,
+                cc_lb_pricing::ThresholdBand {
+                    default: cc_lb_pricing::ThresholdRate {
+                        input_per_million_usd: Some(UsdPerMillion::from_micros_usd(700_000)),
+                        output_per_million_usd: Some(UsdPerMillion::from_micros_usd(3_500_000)),
+                        cache_creation_per_million_usd: Some(UsdPerMillion::from_micros_usd(
+                            875_000,
+                        )),
+                        cache_read_per_million_usd: Some(UsdPerMillion::from_micros_usd(70_000)),
+                    },
+                    by_tier: BTreeMap::new(),
+                },
+            )]),
+        );
         swap_catalog.install_snapshot(initial_snap);
         let swap_ref = std::sync::Arc::clone(&swap_catalog);
         let swap_summary = super::cache_pricing_summary_for_model_with_estimator(
@@ -3080,19 +3098,39 @@ mod cache_score_tests {
             None,
             || {
                 let mut replacement = CatalogSnapshot::empty_cost_disabled();
-                replacement.payload_hash = "swapped-empty".to_owned();
+                replacement.payload_hash = "swapped-distinct-flat".to_owned();
                 replacement.status = CatalogStatus::Ok;
+                replacement.models.insert(
+                    "claude-haiku-5-5".to_owned(),
+                    Pricing {
+                        native: None,
+                        model: "claude-haiku-5-5".to_owned(),
+                        input_per_million_usd: UsdPerMillion::from_whole_usd(9),
+                        output_per_million_usd: UsdPerMillion::from_whole_usd(45),
+                        input_image_per_million_usd: None,
+                        output_image_per_million_usd: None,
+                        by_tier: BTreeMap::new(),
+                    },
+                );
+                replacement.cache_creation_per_million_usd.insert(
+                    "claude-haiku-5-5".to_owned(),
+                    UsdPerMillion::from_micros_usd(11_250_000),
+                );
+                replacement.cache_read_per_million_usd.insert(
+                    "claude-haiku-5-5".to_owned(),
+                    UsdPerMillion::from_micros_usd(900_000),
+                );
                 swap_ref.install_snapshot(replacement);
                 Some(120_000)
             },
         );
         assert_eq!(swap_summary.status, "known");
-        assert_eq!(swap_summary.input_micros_per_million, Some(500_000));
+        assert_eq!(swap_summary.input_micros_per_million, Some(700_000));
         assert_eq!(
             swap_summary.cache_creation_5m_micros_per_million,
-            Some(625_000)
+            Some(875_000)
         );
-        assert_eq!(swap_summary.cache_read_micros_per_million, Some(50_000));
+        assert_eq!(swap_summary.cache_read_micros_per_million, Some(70_000));
     }
 
     #[test]

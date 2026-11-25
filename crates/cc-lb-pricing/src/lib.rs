@@ -398,8 +398,10 @@ impl CatalogSnapshot {
     }
 
     /// Returns whether `model` in `service_tier` has prompt-token threshold bands
-    /// that can affect input or cache pricing. Output-only threshold bands do not
-    /// require a prompt count for routing or keepalive cache pricing.
+    /// that can affect routing cache pricing (`input_per_million_usd`,
+    /// `cache_creation_per_million_usd`, or `cache_read_per_million_usd`). Output-only
+    /// threshold bands do not require a prompt count for routing cache pricing, whereas
+    /// TTL-specific keepalive pricing uses [`Self::keepalive_cache_rates_for_prompt_tokens`].
     pub fn has_routing_cache_threshold_bands(
         &self,
         model: &str,
@@ -418,6 +420,37 @@ impl CatalogSnapshot {
         })
     }
 
+    fn resolve_base_cache_rates<'a>(
+        &'a self,
+        model: &str,
+        service_tier: Option<&str>,
+    ) -> Option<BaseCacheRates<'a>> {
+        let (model_key, pricing) = self
+            .models
+            .get_key_value(model)
+            .or_else(|| self.models.get_key_value(&normalize_model_id(model)))?;
+        let tier = canonical_service_tier(service_tier);
+        let rate = resolve_tier_rate(pricing, tier.as_deref());
+        let cache_creation_5m_per_million_usd = resolve_optional_price(
+            self.cache_creation_per_million_usd.get(model_key).copied(),
+            self.cache_creation_per_million_usd_by_tier.get(model_key),
+            tier.as_deref(),
+        );
+        let cache_read_per_million_usd = resolve_optional_price(
+            self.cache_read_per_million_usd.get(model_key).copied(),
+            self.cache_read_per_million_usd_by_tier.get(model_key),
+            tier.as_deref(),
+        );
+        Some(BaseCacheRates {
+            model_key,
+            tier,
+            input_per_million_usd: rate.input_per_million_usd,
+            output_per_million_usd: rate.output_per_million_usd,
+            cache_creation_5m_per_million_usd,
+            cache_read_per_million_usd,
+        })
+    }
+
     /// Resolves cache routing prices for `model` and `service_tier`, applying
     /// `above_tokens_rates` for `gross_input_tokens`. If the model defines
     /// input/cache-affecting threshold bands for `service_tier` and
@@ -428,47 +461,136 @@ impl CatalogSnapshot {
         service_tier: Option<&str>,
         gross_input_tokens: Option<u64>,
     ) -> Option<RoutingCachePricing> {
-        let (model_key, pricing) = self
-            .models
-            .get_key_value(model)
-            .or_else(|| self.models.get_key_value(&normalize_model_id(model)))?;
-        let tier = canonical_service_tier(service_tier);
-        let rate = resolve_tier_rate(pricing, tier.as_deref());
-        let mut input_per_million_usd = rate.input_per_million_usd;
-        let mut output_per_million_usd = rate.output_per_million_usd;
-        let mut cache_creation_5m_per_million_usd = resolve_optional_price(
-            self.cache_creation_per_million_usd.get(model_key).copied(),
-            self.cache_creation_per_million_usd_by_tier.get(model_key),
-            tier.as_deref(),
-        );
-        let mut cache_read_per_million_usd = resolve_optional_price(
-            self.cache_read_per_million_usd.get(model_key).copied(),
-            self.cache_read_per_million_usd_by_tier.get(model_key),
-            tier.as_deref(),
-        );
-        if let Some(bands) = self.above_tokens_rates.get(model_key).filter(|bands| {
-            crate::tier_resolver::threshold_bands_affect_input_or_cache(bands, tier.as_deref())
+        let mut base = self.resolve_base_cache_rates(model, service_tier)?;
+        if let Some(bands) = self.above_tokens_rates.get(base.model_key).filter(|bands| {
+            crate::tier_resolver::threshold_bands_affect_input_or_cache(bands, base.tier.as_deref())
         }) {
             let gross_input_tokens = gross_input_tokens?;
             crate::tier_resolver::apply_threshold_bands(
                 Some(bands),
                 gross_input_tokens,
-                tier.as_deref(),
-                &mut input_per_million_usd,
-                &mut output_per_million_usd,
-                Some(&mut cache_creation_5m_per_million_usd),
-                Some(&mut cache_read_per_million_usd),
+                base.tier.as_deref(),
+                &mut base.input_per_million_usd,
+                &mut base.output_per_million_usd,
+                Some(&mut base.cache_creation_5m_per_million_usd),
+                Some(&mut base.cache_read_per_million_usd),
             );
         }
-        let cache_creation_1h_per_million_usd = cache_creation_5m_per_million_usd
-            .map(|_| resolved_cache_creation_1h_price(input_per_million_usd));
+        let cache_creation_1h_per_million_usd = base
+            .cache_creation_5m_per_million_usd
+            .map(|_| resolved_cache_creation_1h_price(base.input_per_million_usd));
         Some(RoutingCachePricing {
-            input_per_million_usd,
-            cache_creation_5m_per_million_usd,
+            input_per_million_usd: base.input_per_million_usd,
+            cache_creation_5m_per_million_usd: base.cache_creation_5m_per_million_usd,
             cache_creation_1h_per_million_usd,
-            cache_read_per_million_usd,
+            cache_read_per_million_usd: base.cache_read_per_million_usd,
         })
     }
+
+    /// Resolves `(write_per_million_usd, read_per_million_usd)` for cache-keepalive
+    /// savings on `model` and `service_tier` at `ttl`, applying `above_tokens_rates`
+    /// when `gross_input_tokens` is known.
+    ///
+    /// When `gross_input_tokens` is `None`, resolves base rates whenever no reachable
+    /// threshold band can change the selected TTL's write rate or the cache-read rate.
+    pub fn keepalive_cache_rates_for_prompt_tokens(
+        &self,
+        model: &str,
+        service_tier: Option<&str>,
+        ttl: cc_lb_storage_api::CacheTtl,
+        gross_input_tokens: Option<u64>,
+    ) -> Option<(UsdPerMillion, UsdPerMillion)> {
+        if !matches!(
+            ttl,
+            cc_lb_storage_api::CacheTtl::Ttl5m | cc_lb_storage_api::CacheTtl::Ttl1h
+        ) {
+            return None;
+        }
+        let mut base = self.resolve_base_cache_rates(model, service_tier)?;
+        if let Some(gross_input_tokens) = gross_input_tokens {
+            crate::tier_resolver::apply_threshold_bands(
+                self.above_tokens_rates.get(base.model_key),
+                gross_input_tokens,
+                base.tier.as_deref(),
+                &mut base.input_per_million_usd,
+                &mut base.output_per_million_usd,
+                Some(&mut base.cache_creation_5m_per_million_usd),
+                Some(&mut base.cache_read_per_million_usd),
+            );
+            return select_keepalive_write_and_read_rates(
+                ttl,
+                base.input_per_million_usd,
+                base.cache_creation_5m_per_million_usd,
+                base.cache_read_per_million_usd,
+            );
+        }
+
+        let base_rates = select_keepalive_write_and_read_rates(
+            ttl,
+            base.input_per_million_usd,
+            base.cache_creation_5m_per_million_usd,
+            base.cache_read_per_million_usd,
+        );
+        if let Some(bands) = self.above_tokens_rates.get(base.model_key) {
+            for (threshold, band) in bands {
+                // `apply_threshold_bands` requires strictly `gross_input_tokens > threshold`,
+                // so a `u64::MAX` threshold is never reachable.
+                if *threshold == u64::MAX {
+                    continue;
+                }
+                let mut band_creation = base.cache_creation_5m_per_million_usd;
+                let mut band_read = base.cache_read_per_million_usd;
+                let mut creation_slot = Some(&mut band_creation);
+                let mut read_slot = Some(&mut band_read);
+                crate::tier_resolver::apply_single_threshold_band(
+                    band,
+                    base.tier.as_deref(),
+                    &mut base.input_per_million_usd,
+                    &mut base.output_per_million_usd,
+                    &mut creation_slot,
+                    &mut read_slot,
+                );
+                base.cache_creation_5m_per_million_usd = band_creation;
+                base.cache_read_per_million_usd = band_read;
+                let band_rates = select_keepalive_write_and_read_rates(
+                    ttl,
+                    base.input_per_million_usd,
+                    base.cache_creation_5m_per_million_usd,
+                    base.cache_read_per_million_usd,
+                );
+                if band_rates != base_rates {
+                    return None;
+                }
+            }
+        }
+        base_rates
+    }
+}
+
+struct BaseCacheRates<'a> {
+    model_key: &'a String,
+    tier: Option<String>,
+    input_per_million_usd: UsdPerMillion,
+    output_per_million_usd: UsdPerMillion,
+    cache_creation_5m_per_million_usd: Option<UsdPerMillion>,
+    cache_read_per_million_usd: Option<UsdPerMillion>,
+}
+
+fn select_keepalive_write_and_read_rates(
+    ttl: cc_lb_storage_api::CacheTtl,
+    input_per_million_usd: UsdPerMillion,
+    cache_creation_5m_per_million_usd: Option<UsdPerMillion>,
+    cache_read_per_million_usd: Option<UsdPerMillion>,
+) -> Option<(UsdPerMillion, UsdPerMillion)> {
+    let write_per_million_usd = match ttl {
+        cc_lb_storage_api::CacheTtl::Ttl5m => cache_creation_5m_per_million_usd?,
+        cc_lb_storage_api::CacheTtl::Ttl1h => cache_creation_5m_per_million_usd
+            .map(|_| resolved_cache_creation_1h_price(input_per_million_usd))?,
+        // OpenAI-specific pricing is not represented by the Anthropic
+        // catalog's cache-creation fields; keep the generic panel truthful.
+        cc_lb_storage_api::CacheTtl::Ttl30m | cc_lb_storage_api::CacheTtl::Ttl12h => return None,
+    };
+    Some((write_per_million_usd, cache_read_per_million_usd?))
 }
 
 pub struct PriceCatalog {
@@ -542,6 +664,27 @@ impl PriceCatalog {
         self.current().routing_cache_pricing_for_prompt_tokens(
             model,
             service_tier,
+            gross_input_tokens,
+        )
+    }
+
+    /// Resolves `(write_per_million_usd, read_per_million_usd)` for cache-keepalive
+    /// savings on `model` and `service_tier` at `ttl`, applying `above_tokens_rates`
+    /// when `gross_input_tokens` is known.
+    ///
+    /// When `gross_input_tokens` is `None`, resolves base rates whenever no reachable
+    /// threshold band can change the selected TTL's write rate or the cache-read rate.
+    pub fn keepalive_cache_rates_for_prompt_tokens(
+        &self,
+        model: &str,
+        service_tier: Option<&str>,
+        ttl: cc_lb_storage_api::CacheTtl,
+        gross_input_tokens: Option<u64>,
+    ) -> Option<(UsdPerMillion, UsdPerMillion)> {
+        self.current().keepalive_cache_rates_for_prompt_tokens(
+            model,
+            service_tier,
+            ttl,
             gross_input_tokens,
         )
     }

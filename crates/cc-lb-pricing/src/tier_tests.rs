@@ -406,3 +406,265 @@ fn routing_cache_pricing_for_prompt_tokens_applies_threshold_bands_and_requires_
         )
     );
 }
+
+#[test]
+fn keepalive_cache_rates_for_prompt_tokens_checks_selected_ttl_sensitivity() {
+    use cc_lb_storage_api::CacheTtl;
+
+    // 1. Input-only band: 5m savings stay computable without a prompt count, while 1h
+    //    depends on input pricing and still requires a count.
+    let input_only_catalog = PriceCatalog::new_empty();
+    let mut input_only_snap = CatalogSnapshot::empty_cost_disabled();
+    input_only_snap.status = CatalogStatus::Ok;
+    input_only_snap.models.insert(
+        MODEL.to_owned(),
+        Pricing {
+            model: MODEL.to_owned(),
+            input_per_million_usd: UsdPerMillion::from_whole_usd(3),
+            output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+            input_image_per_million_usd: None,
+            output_image_per_million_usd: None,
+            by_tier: BTreeMap::new(),
+            native: None,
+        },
+    );
+    input_only_snap
+        .cache_creation_per_million_usd
+        .insert(MODEL.to_owned(), UsdPerMillion::from_micros_usd(3_750_000));
+    input_only_snap
+        .cache_read_per_million_usd
+        .insert(MODEL.to_owned(), UsdPerMillion::from_micros_usd(300_000));
+    input_only_snap.above_tokens_rates.insert(
+        MODEL.to_owned(),
+        BTreeMap::from([(
+            200_000,
+            crate::ThresholdBand {
+                default: crate::ThresholdRate {
+                    input_per_million_usd: Some(UsdPerMillion::from_whole_usd(6)),
+                    output_per_million_usd: None,
+                    cache_creation_per_million_usd: None,
+                    cache_read_per_million_usd: None,
+                },
+                by_tier: BTreeMap::new(),
+            },
+        )]),
+    );
+    input_only_catalog.install_snapshot(input_only_snap);
+
+    let expected_5m = (
+        UsdPerMillion::from_micros_usd(3_750_000),
+        UsdPerMillion::from_micros_usd(300_000),
+    );
+    assert_eq!(
+        input_only_catalog.keepalive_cache_rates_for_prompt_tokens(
+            MODEL,
+            None,
+            CacheTtl::Ttl5m,
+            None
+        ),
+        Some(expected_5m)
+    );
+    assert_eq!(
+        input_only_catalog.keepalive_cache_rates_for_prompt_tokens(
+            MODEL,
+            None,
+            CacheTtl::Ttl5m,
+            Some(200_000),
+        ),
+        Some(expected_5m)
+    );
+    assert_eq!(
+        input_only_catalog.keepalive_cache_rates_for_prompt_tokens(
+            MODEL,
+            None,
+            CacheTtl::Ttl5m,
+            Some(250_000),
+        ),
+        Some(expected_5m)
+    );
+    assert_eq!(
+        input_only_catalog.keepalive_cache_rates_for_prompt_tokens(
+            MODEL,
+            None,
+            CacheTtl::Ttl1h,
+            None
+        ),
+        None
+    );
+    assert_eq!(
+        input_only_catalog.keepalive_cache_rates_for_prompt_tokens(
+            MODEL,
+            None,
+            CacheTtl::Ttl1h,
+            Some(200_000),
+        ),
+        Some((
+            UsdPerMillion::from_whole_usd(6),
+            UsdPerMillion::from_micros_usd(300_000),
+        ))
+    );
+    assert_eq!(
+        input_only_catalog.keepalive_cache_rates_for_prompt_tokens(
+            MODEL,
+            None,
+            CacheTtl::Ttl1h,
+            Some(250_000),
+        ),
+        Some((
+            UsdPerMillion::from_whole_usd(12),
+            UsdPerMillion::from_micros_usd(300_000),
+        ))
+    );
+    assert_eq!(
+        input_only_catalog.keepalive_cache_rates_for_prompt_tokens(
+            MODEL,
+            None,
+            CacheTtl::Ttl30m,
+            Some(250_000),
+        ),
+        None
+    );
+    assert_eq!(
+        input_only_catalog.keepalive_cache_rates_for_prompt_tokens(
+            MODEL,
+            None,
+            CacheTtl::Ttl12h,
+            Some(250_000),
+        ),
+        None
+    );
+
+    // 2. Cache-read-only threshold band gates both 5m and 1h when count is missing.
+    let read_only_catalog = PriceCatalog::new_empty();
+    let mut read_only_snap = tier_snapshot(false);
+    read_only_snap.above_tokens_rates.insert(
+        MODEL.to_owned(),
+        BTreeMap::from([(
+            200_000,
+            crate::ThresholdBand {
+                default: crate::ThresholdRate {
+                    input_per_million_usd: None,
+                    output_per_million_usd: None,
+                    cache_creation_per_million_usd: None,
+                    cache_read_per_million_usd: Some(UsdPerMillion::from_whole_usd(2)),
+                },
+                by_tier: BTreeMap::new(),
+            },
+        )]),
+    );
+    read_only_catalog.install_snapshot(read_only_snap);
+    assert_eq!(
+        read_only_catalog.keepalive_cache_rates_for_prompt_tokens(
+            MODEL,
+            None,
+            CacheTtl::Ttl5m,
+            None
+        ),
+        None
+    );
+    assert_eq!(
+        read_only_catalog.keepalive_cache_rates_for_prompt_tokens(
+            MODEL,
+            None,
+            CacheTtl::Ttl1h,
+            None
+        ),
+        None
+    );
+
+    // 3. Full cache+input threshold band (Haiku-style) requires a count for both 5m and 1h
+    //    and switches strictly above the threshold.
+    let haiku_catalog = PriceCatalog::new_empty();
+    let mut haiku_snap = CatalogSnapshot::empty_cost_disabled();
+    haiku_snap.status = CatalogStatus::Ok;
+    haiku_snap.models.insert(
+        MODEL.to_owned(),
+        Pricing {
+            model: MODEL.to_owned(),
+            input_per_million_usd: UsdPerMillion::from_micros_usd(100_000),
+            output_per_million_usd: UsdPerMillion::from_micros_usd(500_000),
+            input_image_per_million_usd: None,
+            output_image_per_million_usd: None,
+            by_tier: BTreeMap::new(),
+            native: None,
+        },
+    );
+    haiku_snap
+        .cache_creation_per_million_usd
+        .insert(MODEL.to_owned(), UsdPerMillion::from_micros_usd(125_000));
+    haiku_snap
+        .cache_read_per_million_usd
+        .insert(MODEL.to_owned(), UsdPerMillion::from_micros_usd(10_000));
+    haiku_snap.above_tokens_rates.insert(
+        MODEL.to_owned(),
+        BTreeMap::from([(
+            100_000,
+            crate::ThresholdBand {
+                default: crate::ThresholdRate {
+                    input_per_million_usd: Some(UsdPerMillion::from_micros_usd(500_000)),
+                    output_per_million_usd: Some(UsdPerMillion::from_micros_usd(2_500_000)),
+                    cache_creation_per_million_usd: Some(UsdPerMillion::from_micros_usd(625_000)),
+                    cache_read_per_million_usd: Some(UsdPerMillion::from_micros_usd(50_000)),
+                },
+                by_tier: BTreeMap::new(),
+            },
+        )]),
+    );
+    haiku_catalog.install_snapshot(haiku_snap);
+    assert_eq!(
+        haiku_catalog.keepalive_cache_rates_for_prompt_tokens(MODEL, None, CacheTtl::Ttl5m, None),
+        None
+    );
+    assert_eq!(
+        haiku_catalog.keepalive_cache_rates_for_prompt_tokens(MODEL, None, CacheTtl::Ttl1h, None),
+        None
+    );
+    assert_eq!(
+        haiku_catalog.keepalive_cache_rates_for_prompt_tokens(
+            MODEL,
+            None,
+            CacheTtl::Ttl5m,
+            Some(100_000),
+        ),
+        Some((
+            UsdPerMillion::from_micros_usd(125_000),
+            UsdPerMillion::from_micros_usd(10_000),
+        ))
+    );
+    assert_eq!(
+        haiku_catalog.keepalive_cache_rates_for_prompt_tokens(
+            MODEL,
+            None,
+            CacheTtl::Ttl5m,
+            Some(100_001),
+        ),
+        Some((
+            UsdPerMillion::from_micros_usd(625_000),
+            UsdPerMillion::from_micros_usd(50_000),
+        ))
+    );
+    assert_eq!(
+        haiku_catalog.keepalive_cache_rates_for_prompt_tokens(
+            MODEL,
+            None,
+            CacheTtl::Ttl1h,
+            Some(100_000),
+        ),
+        Some((
+            UsdPerMillion::from_micros_usd(200_000),
+            UsdPerMillion::from_micros_usd(10_000),
+        ))
+    );
+    assert_eq!(
+        haiku_catalog.keepalive_cache_rates_for_prompt_tokens(
+            MODEL,
+            None,
+            CacheTtl::Ttl1h,
+            Some(100_001),
+        ),
+        Some((
+            UsdPerMillion::from_micros_usd(1_000_000),
+            UsdPerMillion::from_micros_usd(50_000),
+        ))
+    );
+}

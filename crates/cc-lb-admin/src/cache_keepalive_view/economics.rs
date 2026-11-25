@@ -36,17 +36,10 @@ pub fn rates_from_catalog(
     ttl: CacheTtl,
     gross_prompt_tokens: Option<u64>,
 ) -> Option<CacheKeepalivePnlRates> {
-    let pricing =
-        catalog.routing_cache_pricing_for_prompt_tokens(model, None, gross_prompt_tokens)?;
-    let creation_micros_per_million = match ttl {
-        CacheTtl::Ttl5m => pricing.cache_creation_5m_per_million_usd?,
-        CacheTtl::Ttl1h => pricing.cache_creation_1h_per_million_usd?,
-        // OpenAI-specific pricing is not represented by the Anthropic
-        // catalog's cache-creation fields; keep the generic panel truthful.
-        CacheTtl::Ttl30m | CacheTtl::Ttl12h => return None,
-    }
-    .as_micros_usd();
-    let read_micros_per_million = pricing.cache_read_per_million_usd?.as_micros_usd();
+    let (creation_per_million_usd, read_per_million_usd) =
+        catalog.keepalive_cache_rates_for_prompt_tokens(model, None, ttl, gross_prompt_tokens)?;
+    let creation_micros_per_million = creation_per_million_usd.as_micros_usd();
+    let read_micros_per_million = read_per_million_usd.as_micros_usd();
     Some(CacheKeepalivePnlRates {
         avoided_micros_per_million: creation_micros_per_million
             .checked_sub(read_micros_per_million)?,
