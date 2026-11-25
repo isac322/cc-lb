@@ -26,7 +26,7 @@ impl ResponsesRequestBodyError {
 
     pub(super) fn into_response(self) -> Response<Body> {
         match self {
-            Self::TooLarge => super::body_too_large_response(),
+            Self::TooLarge => super::body_too_large_response(cc_lb_domain::Provider::Openai),
             Self::InvalidEncoding => {
                 let mut response = cc_lb_engine::provider_scope_error_response(
                     cc_lb_domain::Provider::Openai,
@@ -284,5 +284,37 @@ mod tests {
             decode_zstd(&[], usize::MAX),
             Err(ResponsesRequestBodyError::TooLarge)
         );
+    }
+
+    #[tokio::test]
+    async fn too_large_error_formats_openai_413_envelope() {
+        use http_body_util::BodyExt;
+        use serde_json::Value;
+
+        let response = ResponsesRequestBodyError::TooLarge.into_response();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            response.headers()[http::header::CONTENT_TYPE],
+            "application/json; charset=utf-8"
+        );
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("error body should collect")
+            .to_bytes();
+        let parsed: Value = serde_json::from_slice(&body).expect("error body should be valid JSON");
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "error": {
+                    "message": "request body exceeds configured cap",
+                    "type": "body_too_large",
+                    "code": "body_too_large",
+                    "param": null,
+                }
+            })
+        );
+        assert!(parsed.get("type").is_none());
     }
 }

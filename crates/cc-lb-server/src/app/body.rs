@@ -305,7 +305,12 @@ pub(super) async fn lifecycle_handler(
                 observer.set_request_body_timing(body_read_ms, None);
                 observer.terminate_body_too_large(cap as u64);
             }
-            return body_too_large_response();
+            let provider = body_too_large_provider(
+                &parts.method,
+                parts.uri.path(),
+                parts.extensions.get::<ProviderScope>().map(|scope| scope.0),
+            );
+            return body_too_large_response(provider);
         }
         Err(RequestBodyReadError::Read(source)) => {
             body_read_span.record("outcome", "read_error");
@@ -426,8 +431,25 @@ async fn collect_limited_body(
     Ok(combined.map(BytesMut::freeze).or(first).unwrap_or_default())
 }
 
-pub(super) fn body_too_large_response() -> Response<Body> {
-    anthropic_error_response(
+pub(super) fn body_too_large_provider(
+    method: &http::Method,
+    path: &str,
+    provider_scope: Option<cc_lb_domain::Provider>,
+) -> cc_lb_domain::Provider {
+    provider_scope.unwrap_or_else(|| {
+        if *method == http::Method::POST && path == "/v1/responses" {
+            cc_lb_domain::Provider::Openai
+        } else if cc_lb_engine::is_unscoped_gemini_http_route(method, path) {
+            cc_lb_domain::Provider::Gemini
+        } else {
+            cc_lb_domain::Provider::Anthropic
+        }
+    })
+}
+
+pub(super) fn body_too_large_response(provider: cc_lb_domain::Provider) -> Response<Body> {
+    provider_scope_error_response(
+        provider,
         StatusCode::PAYLOAD_TOO_LARGE,
         "body_too_large",
         "request body exceeds configured cap",
@@ -546,4 +568,99 @@ pub(super) async fn lifecycle_middleware(
         }
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Method;
+    use cc_lb_domain::Provider;
+    use http_body_util::BodyExt;
+    use serde_json::Value;
+
+    #[tokio::test]
+    async fn body_too_large_response_formats_provider_native_413_envelopes() {
+        for (provider, expected) in [
+            (
+                Provider::Anthropic,
+                serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "body_too_large",
+                        "message": "request body exceeds configured cap",
+                    },
+                }),
+            ),
+            (
+                Provider::Openai,
+                serde_json::json!({
+                    "error": {
+                        "message": "request body exceeds configured cap",
+                        "type": "body_too_large",
+                        "code": "body_too_large",
+                        "param": null,
+                    },
+                }),
+            ),
+            (
+                Provider::Gemini,
+                serde_json::json!({
+                    "error": {
+                        "code": 413,
+                        "message": "request body exceeds configured cap",
+                        "status": "UNKNOWN",
+                        "type": "body_too_large",
+                    },
+                }),
+            ),
+        ] {
+            let response = body_too_large_response(provider);
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            assert_eq!(
+                response.headers()[axum::http::header::CONTENT_TYPE],
+                "application/json; charset=utf-8"
+            );
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("error body should collect")
+                .to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).expect("error body should be json"),
+                expected,
+                "provider={provider:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn body_too_large_provider_respects_scope_and_unscoped_routes() {
+        for provider in [Provider::Anthropic, Provider::Openai, Provider::Gemini] {
+            assert_eq!(
+                body_too_large_provider(&Method::POST, "/v1/messages", Some(provider)),
+                provider
+            );
+        }
+
+        assert_eq!(
+            body_too_large_provider(&Method::POST, "/v1/responses", None),
+            Provider::Openai
+        );
+        for gemini_path in [
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent",
+            "/v1beta/models/gemini-2.5-pro:countTokens",
+        ] {
+            assert_eq!(
+                body_too_large_provider(&Method::POST, gemini_path, None),
+                Provider::Gemini,
+                "{gemini_path}"
+            );
+        }
+        assert_eq!(
+            body_too_large_provider(&Method::POST, "/v1/messages", None),
+            Provider::Anthropic
+        );
+    }
 }

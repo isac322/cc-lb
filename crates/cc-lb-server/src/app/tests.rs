@@ -789,7 +789,7 @@ fn request_body_caps_select_files_and_messages_independently() {
 #[tokio::test]
 async fn body_too_large_response_reuses_anthropic_error_shape() {
     // Given / When
-    let response = body_too_large_response();
+    let response = body_too_large_response(cc_lb_domain::Provider::Anthropic);
     let status = response.status();
     let content_type = response.headers()[axum::http::header::CONTENT_TYPE].clone();
     let body = response

@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Mutex, MutexGuard, Once};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -15,6 +15,12 @@ use crate::lifecycle::{Body, DispatchError, UpstreamDispatch};
 use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 
 const HALF_OPEN_INITIALIZING: u32 = u32::MAX;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FailureWindowState {
+    last_failure_ts: u64,
+    count: u32,
+}
 
 static REGISTER_CIRCUIT_BREAKER_METRICS: Once = Once::new();
 
@@ -77,8 +83,7 @@ pub struct CircuitBreaker {
     pub upstream_name: String,
     pub config: BreakerRuntimeConfig,
     pub state: ArcSwap<BreakerState>,
-    pub failures: AtomicU32,
-    pub last_failure_ts: AtomicU64,
+    failure_state: Mutex<FailureWindowState>,
     pub last_open_ts: AtomicU64,
     pub half_open_in_flight: AtomicU32,
     clock: Arc<dyn Clock>,
@@ -95,8 +100,7 @@ impl CircuitBreaker {
             upstream_name: upstream_name.into(),
             config,
             state: ArcSwap::from_pointee(BreakerState::Closed),
-            failures: AtomicU32::new(0),
-            last_failure_ts: AtomicU64::new(0),
+            failure_state: Mutex::new(FailureWindowState::default()),
             last_open_ts: AtomicU64::new(0),
             half_open_in_flight: AtomicU32::new(0),
             clock,
@@ -118,7 +122,13 @@ impl CircuitBreaker {
     }
 
     pub fn failure_count(&self) -> u32 {
-        self.failures.load(Ordering::SeqCst)
+        self.lock_failure_state().count
+    }
+
+    fn lock_failure_state(&self) -> MutexGuard<'_, FailureWindowState> {
+        self.failure_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn half_open_in_flight(&self) -> u32 {
@@ -204,24 +214,21 @@ impl CircuitBreaker {
     }
 
     fn increment_failures(&self, now: u64) -> u32 {
-        let last_failure = self.last_failure_ts.load(Ordering::SeqCst);
-        let elapsed = now.saturating_sub(last_failure);
-        let outside_window =
-            self.failure_count() == 0 || elapsed > self.config.failure_window.as_secs();
-        self.last_failure_ts.store(now, Ordering::SeqCst);
+        let window_secs = self.config.failure_window.as_secs();
+        let mut state = self.lock_failure_state();
+        let elapsed = now.saturating_sub(state.last_failure_ts);
+        let outside_window = state.count == 0 || elapsed > window_secs;
         if outside_window {
-            self.failures.store(1, Ordering::SeqCst);
-            1
+            state.count = 1;
         } else {
-            self.failures
-                .fetch_add(1, Ordering::SeqCst)
-                .saturating_add(1)
+            state.count = state.count.saturating_add(1);
         }
+        state.last_failure_ts = now;
+        state.count
     }
 
     fn reset_closed_counters(&self) {
-        self.failures.store(0, Ordering::SeqCst);
-        self.last_failure_ts.store(0, Ordering::SeqCst);
+        *self.lock_failure_state() = FailureWindowState::default();
         self.last_open_ts.store(0, Ordering::SeqCst);
         self.half_open_in_flight.store(0, Ordering::SeqCst);
     }
@@ -535,5 +542,284 @@ mod tests {
         let names = registry.names();
         assert_eq!(names.len(), 5);
         assert!(names.iter().all(|n| n.starts_with("upstream-")));
+    }
+
+    #[test]
+    fn concurrent_increment_failures_from_zero_never_loses_increments() {
+        use std::sync::Barrier;
+
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 50;
+
+        for _ in 0..ROUNDS {
+            let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+            let breaker = CircuitBreaker::new(
+                "concurrent-zero",
+                BreakerRuntimeConfig {
+                    failures_to_open: 100,
+                    failure_window: Duration::from_secs(10),
+                    half_open_after: Duration::from_secs(30),
+                    half_open_max_in_flight: 1,
+                },
+                clock,
+            );
+            let barrier = Arc::new(Barrier::new(THREADS));
+            let mut results: Vec<u32> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..THREADS)
+                    .map(|_| {
+                        let breaker = Arc::clone(&breaker);
+                        let barrier = Arc::clone(&barrier);
+                        scope.spawn(move || {
+                            barrier.wait();
+                            breaker.increment_failures(100)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().expect("worker thread should succeed"))
+                    .collect()
+            });
+            results.sort_unstable();
+            assert_eq!(results, (1..=THREADS as u32).collect::<Vec<_>>());
+            assert_eq!(breaker.failure_count(), THREADS as u32);
+        }
+    }
+
+    #[test]
+    fn concurrent_increment_failures_after_window_expiry_never_loses_increments() {
+        use std::sync::Barrier;
+
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 50;
+
+        for _ in 0..ROUNDS {
+            let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+            let breaker = CircuitBreaker::new(
+                "concurrent-expired",
+                BreakerRuntimeConfig {
+                    failures_to_open: 100,
+                    failure_window: Duration::from_secs(10),
+                    half_open_after: Duration::from_secs(30),
+                    half_open_max_in_flight: 1,
+                },
+                clock,
+            );
+            assert_eq!(breaker.increment_failures(100), 1);
+
+            let barrier = Arc::new(Barrier::new(THREADS));
+            let mut results: Vec<u32> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..THREADS)
+                    .map(|_| {
+                        let breaker = Arc::clone(&breaker);
+                        let barrier = Arc::clone(&barrier);
+                        scope.spawn(move || {
+                            barrier.wait();
+                            breaker.increment_failures(111)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().expect("worker thread should succeed"))
+                    .collect()
+            });
+            results.sort_unstable();
+            assert_eq!(results, (1..=THREADS as u32).collect::<Vec<_>>());
+            assert_eq!(breaker.failure_count(), THREADS as u32);
+        }
+    }
+
+    #[test]
+    fn concurrent_failures_reliably_open_threshold_two_breaker() {
+        use std::sync::Barrier;
+
+        const ROUNDS: usize = 50;
+
+        for after_window_expiry in [false, true] {
+            for _ in 0..ROUNDS {
+                let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+                let breaker = CircuitBreaker::new(
+                    "threshold-two",
+                    BreakerRuntimeConfig {
+                        failures_to_open: 2,
+                        failure_window: Duration::from_secs(10),
+                        half_open_after: Duration::from_secs(30),
+                        half_open_max_in_flight: 1,
+                    },
+                    Arc::clone(&clock) as ClockHandle,
+                );
+                if after_window_expiry {
+                    breaker.permit().expect("closed permit").record_failure();
+                    assert_eq!(breaker.current_state(), BreakerState::Closed);
+                    assert_eq!(breaker.failure_count(), 1);
+                    clock.advance_secs(11);
+                }
+
+                let p1 = breaker.permit().expect("first closed permit");
+                let p2 = breaker.permit().expect("second closed permit");
+                let barrier = Arc::new(Barrier::new(2));
+
+                std::thread::scope(|scope| {
+                    let b1 = Arc::clone(&barrier);
+                    let h1 = scope.spawn(move || {
+                        b1.wait();
+                        p1.record_failure();
+                    });
+                    let b2 = Arc::clone(&barrier);
+                    let h2 = scope.spawn(move || {
+                        b2.wait();
+                        p2.record_failure();
+                    });
+                    h1.join().expect("thread 1 should succeed");
+                    h2.join().expect("thread 2 should succeed");
+                });
+
+                assert_eq!(
+                    breaker.current_state(),
+                    BreakerState::Open,
+                    "after_window_expiry={after_window_expiry}"
+                );
+                assert_eq!(
+                    breaker.failure_count(),
+                    2,
+                    "after_window_expiry={after_window_expiry}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn high_u32_failure_thresholds_and_u64_timestamps_are_preserved() {
+        let large_threshold = 16_777_216_u32;
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+        let breaker = CircuitBreaker::new(
+            "large-threshold",
+            BreakerRuntimeConfig {
+                failures_to_open: large_threshold,
+                failure_window: Duration::from_secs(10),
+                half_open_after: Duration::from_secs(30),
+                half_open_max_in_flight: 1,
+            },
+            Arc::clone(&clock) as ClockHandle,
+        );
+        *breaker.lock_failure_state() = FailureWindowState {
+            last_failure_ts: 100,
+            count: large_threshold - 1,
+        };
+        breaker.permit().expect("closed permit").record_failure();
+        assert_eq!(breaker.failure_count(), large_threshold);
+        assert_eq!(breaker.current_state(), BreakerState::Open);
+
+        let far_future_ts = 1_u64 << 42;
+        let max_clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(far_future_ts));
+        let max_breaker = CircuitBreaker::new(
+            "max-u32-threshold",
+            BreakerRuntimeConfig {
+                failures_to_open: u32::MAX,
+                failure_window: Duration::from_secs(10),
+                half_open_after: Duration::from_secs(30),
+                half_open_max_in_flight: 1,
+            },
+            max_clock,
+        );
+        *max_breaker.lock_failure_state() = FailureWindowState {
+            last_failure_ts: far_future_ts,
+            count: u32::MAX - 1,
+        };
+        max_breaker
+            .permit()
+            .expect("closed permit")
+            .record_failure();
+        assert_eq!(max_breaker.failure_count(), u32::MAX);
+        assert_eq!(max_breaker.current_state(), BreakerState::Open);
+        assert_eq!(max_breaker.increment_failures(far_future_ts), u32::MAX);
+        assert_eq!(max_breaker.increment_failures(u64::MAX - 5), 1);
+        assert_eq!(max_breaker.increment_failures(u64::MAX), 2);
+    }
+
+    #[test]
+    fn failure_window_boundary_and_reset_closed_counters() {
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+        let breaker = CircuitBreaker::new(
+            "window-boundary",
+            BreakerRuntimeConfig {
+                failures_to_open: 5,
+                failure_window: Duration::from_secs(10),
+                half_open_after: Duration::from_secs(30),
+                half_open_max_in_flight: 1,
+            },
+            clock,
+        );
+
+        assert_eq!(breaker.increment_failures(100), 1);
+        assert_eq!(breaker.increment_failures(110), 2);
+        assert_eq!(breaker.increment_failures(121), 1);
+
+        breaker.reset_closed_counters();
+        assert_eq!(breaker.failure_count(), 0);
+        assert_eq!(breaker.increment_failures(121), 1);
+    }
+
+    #[test]
+    fn wall_clock_rollback_updates_last_failure_ts_and_resets_after_window() {
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+        let breaker = CircuitBreaker::new(
+            "clock-rollback-reset",
+            BreakerRuntimeConfig {
+                failures_to_open: 3,
+                failure_window: Duration::from_secs(10),
+                half_open_after: Duration::from_secs(30),
+                half_open_max_in_flight: 1,
+            },
+            Arc::clone(&clock) as ClockHandle,
+        );
+        breaker.permit().expect("permit 1").record_failure();
+        assert_eq!(breaker.failure_count(), 1);
+        assert_eq!(breaker.current_state(), BreakerState::Closed);
+
+        clock.set_unix_secs(80);
+        breaker.permit().expect("permit 2").record_failure();
+        assert_eq!(breaker.failure_count(), 2);
+        assert_eq!(breaker.current_state(), BreakerState::Closed);
+
+        // 11s after the post-correction failure at t=80 exceeds the 10s window and resets count.
+        clock.set_unix_secs(91);
+        breaker.permit().expect("permit 3").record_failure();
+        assert_eq!(breaker.failure_count(), 1);
+        assert_eq!(breaker.current_state(), BreakerState::Closed);
+
+        let boundary_clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+        let boundary_breaker = CircuitBreaker::new(
+            "clock-rollback-boundary",
+            BreakerRuntimeConfig {
+                failures_to_open: 3,
+                failure_window: Duration::from_secs(10),
+                half_open_after: Duration::from_secs(30),
+                half_open_max_in_flight: 1,
+            },
+            Arc::clone(&boundary_clock) as ClockHandle,
+        );
+        boundary_breaker
+            .permit()
+            .expect("boundary permit 1")
+            .record_failure();
+        assert_eq!(boundary_breaker.failure_count(), 1);
+
+        boundary_clock.set_unix_secs(80);
+        boundary_breaker
+            .permit()
+            .expect("boundary permit 2")
+            .record_failure();
+        assert_eq!(boundary_breaker.failure_count(), 2);
+
+        // Exactly 10s after t=80 stays inside the inclusive window and opens at threshold 3.
+        boundary_clock.set_unix_secs(90);
+        boundary_breaker
+            .permit()
+            .expect("boundary permit 3")
+            .record_failure();
+        assert_eq!(boundary_breaker.failure_count(), 3);
+        assert_eq!(boundary_breaker.current_state(), BreakerState::Open);
     }
 }

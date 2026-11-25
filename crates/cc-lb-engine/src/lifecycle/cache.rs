@@ -1729,7 +1729,7 @@ pub(super) fn openai_input_digest_and_visible_tokens(value: &Value) -> (String, 
     let Some(input) = value.get("input") else {
         return (String::new(), 0);
     };
-    let Ok(input_bytes) = sonic_rs::to_vec(input) else {
+    let Ok(input_bytes) = serde_json::to_vec(input) else {
         return (String::new(), 0);
     };
     let visible_tokens = (input_bytes.len() as u64 / 4).min(10_000_000);
@@ -3299,6 +3299,80 @@ mod prompt_cache_token_scope_tests {
         assert_ne!(
             prompt_cache_token_scope(&first),
             prompt_cache_token_scope(&second)
+        );
+    }
+}
+
+#[cfg(test)]
+mod openai_input_digest_tests {
+    use super::*;
+
+    #[test]
+    fn openai_input_digest_is_invariant_to_object_key_order() {
+        let raw_a = r#"{
+            "model": "gpt-5",
+            "input": [
+                {
+                    "role": "user",
+                    "type": "message",
+                    "content": [
+                        {
+                            "text": "hello world",
+                            "type": "input_text",
+                            "meta": {"zeta": 2, "alpha": 1, "nested": {"d": 4, "b": 2}}
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let raw_b = r#"{
+            "input": [
+                {
+                    "content": [
+                        {
+                            "meta": {"nested": {"b": 2, "d": 4}, "alpha": 1, "zeta": 2},
+                            "type": "input_text",
+                            "text": "hello world"
+                        }
+                    ],
+                    "type": "message",
+                    "role": "user"
+                }
+            ],
+            "model": "gpt-5"
+        }"#;
+
+        let sonic_a: Value = sonic_rs::from_str(raw_a).expect("sonic parse raw_a");
+        let sonic_b: Value = sonic_rs::from_str(raw_b).expect("sonic parse raw_b");
+        let serde_a: Value = serde_json::from_str(raw_a).expect("serde parse raw_a");
+        let serde_b: Value = serde_json::from_str(raw_b).expect("serde parse raw_b");
+
+        let canonical_bytes =
+            serde_json::to_vec(serde_a.get("input").expect("input present")).expect("to_vec");
+        let expected_tokens = (canonical_bytes.len() as u64 / 4).min(10_000_000);
+        let expected_digest = Sha256::digest(&canonical_bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+
+        for parsed in [&sonic_a, &sonic_b, &serde_a, &serde_b] {
+            let (digest, tokens) = openai_input_digest_and_visible_tokens(parsed);
+            assert_eq!(digest, expected_digest);
+            assert_eq!(tokens, expected_tokens);
+        }
+
+        assert_eq!(
+            openai_replay_identity(&sonic_a, &HeaderMap::new(), "gpt-5", None, None),
+            openai_replay_identity(&sonic_b, &HeaderMap::new(), "gpt-5", None, None)
+        );
+    }
+
+    #[test]
+    fn openai_input_digest_returns_empty_when_input_missing() {
+        let missing = json!({"model": "gpt-5"});
+        assert_eq!(
+            openai_input_digest_and_visible_tokens(&missing),
+            (String::new(), 0)
         );
     }
 }
