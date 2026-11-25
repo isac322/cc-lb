@@ -219,12 +219,11 @@ impl CircuitBreaker {
         let elapsed = now.saturating_sub(state.last_failure_ts);
         let outside_window = state.count == 0 || elapsed > window_secs;
         if outside_window {
-            state.last_failure_ts = now;
             state.count = 1;
         } else {
-            state.last_failure_ts = state.last_failure_ts.max(now);
             state.count = state.count.saturating_add(1);
         }
+        state.last_failure_ts = now;
         state.count
     }
 
@@ -760,5 +759,67 @@ mod tests {
         breaker.reset_closed_counters();
         assert_eq!(breaker.failure_count(), 0);
         assert_eq!(breaker.increment_failures(121), 1);
+    }
+
+    #[test]
+    fn wall_clock_rollback_updates_last_failure_ts_and_resets_after_window() {
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+        let breaker = CircuitBreaker::new(
+            "clock-rollback-reset",
+            BreakerRuntimeConfig {
+                failures_to_open: 3,
+                failure_window: Duration::from_secs(10),
+                half_open_after: Duration::from_secs(30),
+                half_open_max_in_flight: 1,
+            },
+            Arc::clone(&clock) as ClockHandle,
+        );
+        breaker.permit().expect("permit 1").record_failure();
+        assert_eq!(breaker.failure_count(), 1);
+        assert_eq!(breaker.current_state(), BreakerState::Closed);
+
+        clock.set_unix_secs(80);
+        breaker.permit().expect("permit 2").record_failure();
+        assert_eq!(breaker.failure_count(), 2);
+        assert_eq!(breaker.current_state(), BreakerState::Closed);
+
+        // 11s after the post-correction failure at t=80 exceeds the 10s window and resets count.
+        clock.set_unix_secs(91);
+        breaker.permit().expect("permit 3").record_failure();
+        assert_eq!(breaker.failure_count(), 1);
+        assert_eq!(breaker.current_state(), BreakerState::Closed);
+
+        let boundary_clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+        let boundary_breaker = CircuitBreaker::new(
+            "clock-rollback-boundary",
+            BreakerRuntimeConfig {
+                failures_to_open: 3,
+                failure_window: Duration::from_secs(10),
+                half_open_after: Duration::from_secs(30),
+                half_open_max_in_flight: 1,
+            },
+            Arc::clone(&boundary_clock) as ClockHandle,
+        );
+        boundary_breaker
+            .permit()
+            .expect("boundary permit 1")
+            .record_failure();
+        assert_eq!(boundary_breaker.failure_count(), 1);
+
+        boundary_clock.set_unix_secs(80);
+        boundary_breaker
+            .permit()
+            .expect("boundary permit 2")
+            .record_failure();
+        assert_eq!(boundary_breaker.failure_count(), 2);
+
+        // Exactly 10s after t=80 stays inside the inclusive window and opens at threshold 3.
+        boundary_clock.set_unix_secs(90);
+        boundary_breaker
+            .permit()
+            .expect("boundary permit 3")
+            .record_failure();
+        assert_eq!(boundary_breaker.failure_count(), 3);
+        assert_eq!(boundary_breaker.current_state(), BreakerState::Open);
     }
 }
