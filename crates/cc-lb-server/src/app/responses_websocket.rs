@@ -475,6 +475,7 @@ async fn send_responses_dispatch(
     connections: &mut HashMap<u64, WsProviderConnection>,
     dispatch_timings: cc_lb_engine::responses_websocket::ResponsesDispatchTimings,
     deadline: tokio::time::Instant,
+    drain_controller: &DrainController,
 ) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
     let Some(connection) = connections.get_mut(&connection_id) else {
         let mut result =
@@ -573,6 +574,12 @@ async fn send_responses_dispatch(
             let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
             return (ready, vec![error]);
         }
+    }
+    if drain_controller.is_draining() {
+        let error = WebSocketError::new(503, "draining", "server is draining")
+            .with_stream(dispatch.stream_id);
+        let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
+        return (ready, vec![error]);
     }
     commit_and_send_responses_dispatch(
         gateway,
@@ -721,6 +728,16 @@ async fn finish_failed_dispatch(
     (ready, vec![error])
 }
 
+async fn finish_draining_dispatch(
+    gateway: &mut ResponsesWebSocketGateway,
+    dispatch: WebSocketDispatch,
+) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
+    let error =
+        WebSocketError::new(503, "draining", "server is draining").with_stream(dispatch.stream_id);
+    let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
+    (ready, vec![error])
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn advance_one_dispatch(
     gateway: &mut ResponsesWebSocketGateway,
@@ -734,6 +751,10 @@ async fn advance_one_dispatch(
     connect_tasks: &mut tokio::task::JoinSet<ConnectAttemptOutcome>,
     deferred_for_session_owner: &mut VecDeque<PendingDispatchState>,
 ) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
+    if state.drain_controller.is_draining() && !pending.dispatch.control {
+        return finish_draining_dispatch(gateway, pending.dispatch).await;
+    }
+
     if let Some(connection_id) = pending.dispatch.connection_id {
         return send_responses_dispatch(
             gateway,
@@ -742,6 +763,7 @@ async fn advance_one_dispatch(
             connections,
             cc_lb_engine::responses_websocket::ResponsesDispatchTimings::reused(),
             pending.deadline,
+            &state.drain_controller,
         )
         .await;
     }
@@ -800,6 +822,9 @@ async fn advance_one_dispatch(
             .await
             {
                 Ok(Ok(())) => {
+                    if state.drain_controller.is_draining() {
+                        return finish_draining_dispatch(gateway, pending.dispatch).await;
+                    }
                     return commit_and_send_responses_dispatch(
                         gateway,
                         pending.dispatch,
@@ -810,6 +835,9 @@ async fn advance_one_dispatch(
                     .await;
                 }
                 Ok(Err(error)) => {
+                    if state.drain_controller.is_draining() {
+                        return finish_draining_dispatch(gateway, pending.dispatch).await;
+                    }
                     let fatal = is_fatal_ws_connect_error(&error);
                     pending.last_error = Some(error);
                     if fatal {
@@ -1140,7 +1168,22 @@ async fn handle_connect_outcome(
             candidates.push(pending.primary);
             candidates.extend(pending.waiters);
 
+            if state.drain_controller.is_draining() {
+                for entry in candidates {
+                    let (ready, errs) = finish_draining_dispatch(gateway, entry.dispatch).await;
+                    dispatches.extend(ready);
+                    errors.extend(errs);
+                }
+                return errors;
+            }
+
             for mut entry in candidates {
+                if state.drain_controller.is_draining() {
+                    let (ready, errs) = finish_draining_dispatch(gateway, entry.dispatch).await;
+                    dispatches.extend(ready);
+                    errors.extend(errs);
+                    continue;
+                }
                 let now = tokio::time::Instant::now();
                 if now >= entry.deadline {
                     entry.last_error = Some(WebSocketError::new(
@@ -1195,6 +1238,13 @@ async fn handle_connect_outcome(
                 .await
                 {
                     Ok(Ok(())) => {
+                        if state.drain_controller.is_draining() {
+                            let (ready, errs) =
+                                finish_draining_dispatch(gateway, entry.dispatch).await;
+                            dispatches.extend(ready);
+                            errors.extend(errs);
+                            continue;
+                        }
                         let timings = if let Some(attempt) = pending_attempt.take() {
                             // Register ownership BEFORE spawning the reader so no early provider
                             // frame (such as `codex.rate_limits`) can arrive ahead of registration.
@@ -1242,6 +1292,13 @@ async fn handle_connect_outcome(
                         errors.extend(errs);
                     }
                     Ok(Err(error)) => {
+                        if state.drain_controller.is_draining() {
+                            let (ready, errs) =
+                                finish_draining_dispatch(gateway, entry.dispatch).await;
+                            dispatches.extend(ready);
+                            errors.extend(errs);
+                            continue;
+                        }
                         let fatal = is_fatal_ws_connect_error(&error);
                         entry.last_error = Some(error);
                         if fatal {
@@ -1266,6 +1323,14 @@ async fn handle_connect_outcome(
             }
         }
         Err(ConnectAttemptError::Prepare(error)) => {
+            if state.drain_controller.is_draining() {
+                for entry in std::iter::once(pending.primary).chain(pending.waiters) {
+                    let (ready, errs) = finish_draining_dispatch(gateway, entry.dispatch).await;
+                    dispatches.extend(ready);
+                    errors.extend(errs);
+                }
+                return errors;
+            }
             let now = tokio::time::Instant::now();
             let mut primary = pending.primary;
             primary.last_error = Some(error.clone());
@@ -1297,6 +1362,14 @@ async fn handle_connect_outcome(
             }
         }
         Err(ConnectAttemptError::Dial(error)) => {
+            if state.drain_controller.is_draining() {
+                for entry in std::iter::once(pending.primary).chain(pending.waiters) {
+                    let (ready, errs) = finish_draining_dispatch(gateway, entry.dispatch).await;
+                    dispatches.extend(ready);
+                    errors.extend(errs);
+                }
+                return errors;
+            }
             let now = tokio::time::Instant::now();
             for mut entry in std::iter::once(pending.primary).chain(pending.waiters) {
                 entry.last_error = Some(error.clone());
@@ -1900,6 +1973,7 @@ async fn relay_responses_websocket(
     );
     activity_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    let mut drain_handled = false;
     let body = async {
         'relay: loop {
             let dispatched_any = !dispatches.is_empty();
@@ -1964,7 +2038,54 @@ async fn relay_responses_websocket(
                 .iter()
                 .map(|entry| entry.deadline)
                 .min();
+            if state.drain_controller.is_draining()
+                && !gateway.has_active_turns()
+                && pending_connects.is_empty()
+                && deferred_for_session_owner.is_empty()
+                && dispatches.is_empty()
+            {
+                break 'relay;
+            }
+
             tokio::select! {
+                _ = state.drain_controller.wait_for_draining(), if !drain_handled => {
+                    drain_handled = true;
+                    connect_tasks.abort_all();
+                    while connect_tasks.join_next().await.is_some() {}
+                    for (_, pending) in pending_connects.drain() {
+                        for entry in std::iter::once(pending.primary).chain(pending.waiters) {
+                            let error =
+                                WebSocketError::new(503, "draining", "server is draining")
+                                    .with_stream(entry.dispatch.stream_id);
+                            let ready =
+                                gateway.fail_dispatch(entry.dispatch.turn_id, &error).await;
+                            dispatches.extend(ready);
+                            if downstream_sink
+                                .send(websocket_error_message(&error))
+                                .await
+                                .is_err()
+                            {
+                                break 'relay;
+                            }
+                        }
+                    }
+                    for entry in deferred_for_session_owner.drain(..) {
+                        let error = WebSocketError::new(503, "draining", "server is draining")
+                            .with_stream(entry.dispatch.stream_id);
+                        let ready = gateway.fail_dispatch(entry.dispatch.turn_id, &error).await;
+                        dispatches.extend(ready);
+                        if downstream_sink
+                            .send(websocket_error_message(&error))
+                            .await
+                            .is_err()
+                        {
+                            break 'relay;
+                        }
+                    }
+                    if !gateway.has_active_turns() && dispatches.is_empty() {
+                        break 'relay;
+                    }
+                }
                 _ = activity_heartbeat.tick(), if gateway.has_active_turns() => {
                     gateway.observe_active_turns_heartbeat();
                 }
@@ -2054,6 +2175,30 @@ async fn relay_responses_websocket(
                                     continue;
                                 }
                             };
+                            if state.drain_controller.is_draining()
+                                && let Ok(parsed) = sonic_rs::from_str::<serde_json::Value>(&frame)
+                                && parsed.get("type").and_then(serde_json::Value::as_str)
+                                    == Some("response.create")
+                            {
+                                let stream_id = parsed
+                                    .get("stream_id")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned);
+                                let error = WebSocketError::new(
+                                    503,
+                                    "draining",
+                                    "server is draining",
+                                )
+                                .with_stream(stream_id);
+                                if downstream_sink
+                                    .send(websocket_error_message(&error))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                continue;
+                            }
                             match gateway.client_message(auth, frame.into()).await {
                                 Ok(Some(dispatch)) => dispatches.push_back(dispatch),
                                 Ok(None) => {}
@@ -2107,14 +2252,14 @@ async fn relay_responses_websocket(
             }
         }
     };
-    let draining =
-        run_responses_websocket_until_cancelled(body, &client_closed, &state.drain_controller)
+    let force_closed =
+        run_responses_websocket_until_force_closed(body, &client_closed, &state.drain_controller)
             .await;
 
     connect_tasks.abort_all();
     while connect_tasks.join_next().await.is_some() {}
     pending_connects.clear();
-    if draining {
+    if force_closed || state.drain_controller.is_draining() {
         gateway.drain();
     } else {
         gateway.close();
@@ -2143,6 +2288,7 @@ async fn relay_responses_websocket(
     }
 }
 
+#[cfg(all(test, feature = "admin"))]
 pub(super) async fn run_responses_websocket_until_cancelled<F>(
     body: F,
     client_closed: &CancellationToken,
@@ -2158,6 +2304,24 @@ where
         _ = &mut body => false,
         _ = client_closed.cancelled() => false,
         _ = &mut drain_wait => true,
+    }
+}
+
+async fn run_responses_websocket_until_force_closed<F>(
+    body: F,
+    client_closed: &CancellationToken,
+    drain_controller: &DrainController,
+) -> bool
+where
+    F: Future<Output = ()>,
+{
+    tokio::pin!(body);
+    let force_close_wait = drain_controller.wait_for_force_close();
+    tokio::pin!(force_close_wait);
+    tokio::select! {
+        _ = &mut body => false,
+        _ = client_closed.cancelled() => false,
+        _ = &mut force_close_wait => true,
     }
 }
 

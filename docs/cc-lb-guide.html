@@ -514,7 +514,7 @@ ANTHROPIC_API_KEY=$CC_LB_PROXY_KEY \
         <h3>종료</h3>
         <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 처리 중인 proxy 요청 wait + 종료
 kill -TERM $(pgrep -f &#39;[c]c-lb serve&#39;)</code></pre><button class="copy">복사</button></div>
-        <p><code>SIGTERM</code>은 <code>drain_secs</code>만큼 아직 응답을 만들고 있는 proxy 요청을 기다린 뒤 종료합니다. 이미 시작된 SSE 응답 body는 drain 대기 대상이 아니며, 클라이언트가 재연결해야 합니다. <code>SIGINT</code>(<kbd>Ctrl-C</kbd>)는 즉시 종료입니다.</p>
+        <p><code>SIGTERM</code>과 <code>SIGINT</code>(<kbd>Ctrl-C</kbd>) 모두 <code>drain_secs</code>만큼 아직 응답을 만들고 있는 proxy 요청을 기다린 뒤 graceful drain으로 종료합니다. 이미 시작된 SSE 응답 body는 drain 대기 대상이 아니며, 클라이언트가 재연결해야 합니다.</p>
       </li>
     </ol>
 
@@ -881,7 +881,7 @@ WantedBy=multi-user.target</code></pre><button class="copy">복사</button></div
       <tr><th>신호</th><th>동작</th></tr>
       <tr><td><code>SIGTERM</code></td><td>Graceful drain (응답 생성 중인 proxy 요청만 drain_secs까지 대기, SSE body stream은 클라이언트 재연결)</td></tr>
       <tr><td><code>SIGHUP</code></td><td>TLS 인증서 reload (config 변경은 재시작 필요)</td></tr>
-      <tr><td><code>SIGINT</code> (Ctrl-C)</td><td>즉시 종료 (drain 안 함)</td></tr>
+      <tr><td><code>SIGINT</code> (Ctrl-C)</td><td>Graceful drain (Unix에서도 <code>SIGTERM</code>과 동일하게 동작)</td></tr>
     </table>
 
     <h4>환경변수</h4>

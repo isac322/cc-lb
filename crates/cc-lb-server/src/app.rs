@@ -92,7 +92,7 @@ use responses_websocket::*;
 pub use admin_wiring::{App, build_app, build_app_with_path, build_app_with_storage, run_serve};
 pub use bootstrap::{
     BuildError, ProxyApp, ProxyRole, ProxyServeOptions, ServeError, build_proxy_app_with_storage,
-    open_storage, resolve_data_dir, run_proxy_serve,
+    open_storage, resolve_data_dir, run_proxy_serve, serve_error_exit_code,
 };
 
 #[cfg(feature = "admin")]

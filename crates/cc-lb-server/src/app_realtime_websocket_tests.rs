@@ -2753,3 +2753,118 @@ async fn codex_backend_root_non_ws_unauthenticated_persists_request_event() {
 
     task.abort();
 }
+
+#[tokio::test]
+async fn realtime_websocket_active_relay_survives_drain_trigger_until_completion_or_force_close() {
+    // Part 1: an already-relayed session survives `drain.trigger()` until provider finishes cleanly.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let provider_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let _ = ready_tx.send(());
+        let msg = ws.next().await.unwrap().unwrap();
+        assert_eq!(msg.to_text().unwrap(), "after-drain-client");
+        ws.send(UpstreamMessage::Text("after-drain-provider".into()))
+            .await
+            .unwrap();
+        ws.close(None).await.unwrap();
+    });
+    let drain = DrainController::new();
+    let state = websocket_test_state(
+        vec![websocket_upstream(
+            1,
+            "provider",
+            Url::parse(&format!("http://{address}/")).unwrap(),
+        )],
+        TerminalStrategy::FirstPick,
+        drain.clone(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let (proxy, task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let (mut client, _) =
+        connect_async(realtime_request(proxy, "/openai/v1/realtime?model=gpt-realtime"))
+            .await
+            .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), ready_rx)
+        .await
+        .unwrap()
+        .unwrap();
+
+    drain.trigger();
+    assert_eq!(drain.in_flight(), 1);
+    client
+        .send(UpstreamMessage::Text("after-drain-client".into()))
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.to_text().unwrap(), "after-drain-provider");
+    let _ = tokio::time::timeout(Duration::from_secs(5), client.next()).await;
+    provider_task.await.unwrap();
+    assert!(!drain.await_drained(Duration::from_secs(5)).await);
+    task.abort();
+
+    // Part 2: a stalled active relay survives `drain.trigger()` and closes on `mark_force_closed()`.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let provider_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let _ = ready_tx.send(());
+        while let Some(Ok(frame)) = ws.next().await {
+            if frame.is_text() && ws.send(frame).await.is_err() {
+                break;
+            }
+        }
+    });
+    let drain = DrainController::new();
+    let state = websocket_test_state(
+        vec![websocket_upstream(
+            1,
+            "provider",
+            Url::parse(&format!("http://{address}/")).unwrap(),
+        )],
+        TerminalStrategy::FirstPick,
+        drain.clone(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let (proxy, task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let (mut client, _) =
+        connect_async(realtime_request(proxy, "/openai/v1/realtime?model=gpt-realtime"))
+            .await
+            .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), ready_rx)
+        .await
+        .unwrap()
+        .unwrap();
+
+    drain.trigger();
+    assert_eq!(drain.in_flight(), 1);
+    client
+        .send(UpstreamMessage::Text("still-alive".into()))
+        .await
+        .unwrap();
+    let echoed = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(echoed.to_text().unwrap(), "still-alive");
+
+    assert_eq!(drain.mark_force_closed(), 1);
+    assert!(!drain.await_drained(Duration::from_secs(5)).await);
+    let _ = tokio::time::timeout(Duration::from_secs(5), provider_task).await;
+    task.abort();
+}

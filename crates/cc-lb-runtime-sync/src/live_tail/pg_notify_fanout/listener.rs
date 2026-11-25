@@ -12,6 +12,11 @@ use crate::live_tail::metrics_labels::PgListenerReconnectReason;
 use cc_lb_control::event_bus::{RequestEventBus, RequestEventUpdate};
 
 const QUEUE_USAGE_POLL_INTERVAL: Duration = Duration::from_secs(10);
+const PG_LISTENER_HEALTHY_CONNECTION_THRESHOLD: Duration = Duration::from_secs(5);
+
+fn should_reset_backoff(received_notification: bool, elapsed_since_connect: Duration) -> bool {
+    received_notification || elapsed_since_connect >= PG_LISTENER_HEALTHY_CONNECTION_THRESHOLD
+}
 
 pub struct PgListener {
     pub pg_pool: sqlx::PgPool,
@@ -66,7 +71,13 @@ impl PgListener {
         let mut backoff = make_backoff();
         loop {
             let mut listener = match sqlx::postgres::PgListener::connect_with(&self.pg_pool).await {
-                Ok(listener) => listener,
+                Ok(mut listener) => {
+                    // Disable sqlx's eager reconnect inside `try_recv()` so any dropped
+                    // connection exits the inner loop, releases its pool slot, resets the
+                    // dwell timer, and passes through cancellable exponential backoff.
+                    listener.eager_reconnect(false);
+                    listener
+                }
                 Err(error) => {
                     let reason = PgListenerReconnectReason::ConnectFailed;
                     record_pg_listener_reconnect(reason);
@@ -94,7 +105,8 @@ impl PgListener {
                 }
                 continue;
             }
-            backoff = make_backoff();
+            let connected_at = tokio::time::Instant::now();
+            let mut backoff_reset_for_conn = false;
 
             loop {
                 tokio::select! {
@@ -103,19 +115,48 @@ impl PgListener {
                             return;
                         }
                     }
-                    _ = queue_usage_interval.tick() => record_queue_usage(&self.pg_pool).await,
+                    _ = queue_usage_interval.tick() => {
+                        if !backoff_reset_for_conn
+                            && should_reset_backoff(false, connected_at.elapsed())
+                        {
+                            backoff = make_backoff();
+                            backoff_reset_for_conn = true;
+                        }
+                        record_queue_usage(&self.pg_pool).await;
+                    }
                     notification = listener.try_recv() => {
                         match notification {
-                            Ok(Some(notification)) => self.handle_payload(notification.payload()).await,
-                            Ok(None) => {
-                                let reason = PgListenerReconnectReason::RecvFailed;
-                                record_pg_listener_reconnect(reason);
-                                tracing::warn!(reason = reason.as_str(), "pg notify listener recv connection lost; reconnected");
+                            Ok(Some(notification)) => {
+                                if !backoff_reset_for_conn
+                                    && should_reset_backoff(true, connected_at.elapsed())
+                                {
+                                    backoff = make_backoff();
+                                    backoff_reset_for_conn = true;
+                                }
+                                self.handle_payload(notification.payload()).await;
                             }
-                            Err(error) => {
+                            Ok(None) | Err(_) => {
+                                let error_detail = notification.err();
+                                if !backoff_reset_for_conn
+                                    && should_reset_backoff(false, connected_at.elapsed())
+                                {
+                                    backoff = make_backoff();
+                                }
                                 let reason = PgListenerReconnectReason::RecvFailed;
                                 record_pg_listener_reconnect(reason);
-                                tracing::warn!(%error, reason = reason.as_str(), "pg notify listener recv failed; reconnecting");
+                                let delay = backoff.next().unwrap_or_else(|| Duration::from_secs(5));
+                                if let Some(error) = error_detail {
+                                    tracing::warn!(%error, reason = reason.as_str(), backoff_ms = delay.as_millis(), "pg notify listener recv failed; reconnecting");
+                                } else {
+                                    tracing::warn!(reason = reason.as_str(), backoff_ms = delay.as_millis(), "pg notify listener recv connection closed; reconnecting");
+                                }
+                                drop(listener);
+                                tokio::select! {
+                                    _ = tokio::time::sleep(delay) => {}
+                                    changed = shutdown_rx.changed() => {
+                                        if changed.is_err() || *shutdown_rx.borrow() { return; }
+                                    }
+                                }
                                 break;
                             }
                         }
@@ -163,5 +204,23 @@ mod tests {
 
         assert!(is_local_notification(&payload, "producer-a"));
         assert!(!is_local_notification(&payload, "producer-b"));
+    }
+
+    #[test]
+    fn backoff_resets_only_after_notification_or_healthy_dwell_time() {
+        use std::time::Duration;
+
+        use super::{PG_LISTENER_HEALTHY_CONNECTION_THRESHOLD, should_reset_backoff};
+
+        assert!(!should_reset_backoff(false, Duration::from_millis(0)));
+        assert!(!should_reset_backoff(
+            false,
+            PG_LISTENER_HEALTHY_CONNECTION_THRESHOLD - Duration::from_millis(1)
+        ));
+        assert!(should_reset_backoff(
+            false,
+            PG_LISTENER_HEALTHY_CONNECTION_THRESHOLD
+        ));
+        assert!(should_reset_backoff(true, Duration::from_millis(0)));
     }
 }

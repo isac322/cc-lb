@@ -3,7 +3,9 @@
 use std::process::ExitCode;
 
 use cc_lb_proxy::cli::{Cli, Command, ConfigCommand, resolve_role};
-use cc_lb_server::{BuildError, ProxyServeOptions, ServeError, run_proxy_serve, validate};
+use cc_lb_server::{
+    BuildError, ProxyServeOptions, ServeError, run_proxy_serve, serve_error_exit_code, validate,
+};
 use clap::FromArgMatches;
 
 #[global_allocator]
@@ -47,7 +49,9 @@ fn main() -> ExitCode {
             eprintln!("validation: failed: {error}");
             ExitCode::from(2)
         }
-        Err(RunError::Serve(ServeError::Preflight(error))) => {
+        Err(RunError::Serve(
+            ServeError::Preflight(error) | ServeError::Build(BuildError::Preflight(error)),
+        )) => {
             eprintln!("preflight: failed: {error}");
             ExitCode::from(2)
         }
@@ -71,19 +75,6 @@ fn main() -> ExitCode {
             eprintln!("{error}");
             ExitCode::FAILURE
         }
-    }
-}
-
-fn serve_error_exit_code(error: &ServeError) -> ExitCode {
-    match error {
-        ServeError::Config(_)
-        | ServeError::Preflight(_)
-        | ServeError::Build(
-            BuildError::Config(_)
-            | BuildError::StorageKeyMissing { .. }
-            | BuildError::InvalidStorageKey,
-        ) => ExitCode::from(2),
-        _ => ExitCode::FAILURE,
     }
 }
 

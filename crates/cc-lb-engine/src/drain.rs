@@ -55,6 +55,10 @@ impl DrainController {
         self.inner.drain_started.load(Ordering::Acquire)
     }
 
+    pub fn is_force_closed(&self) -> bool {
+        self.inner.force_marked.load(Ordering::Acquire)
+    }
+
     /// Wait for drain admission to close without polling or allocating a task.
     ///
     /// Register before reading the flag so a concurrent trigger cannot be lost.
@@ -66,6 +70,20 @@ impl DrainController {
             tokio::pin!(notified);
             let _ = notified.as_mut().enable();
             if self.is_draining() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Wait for the graceful-drain force-close deadline without polling or
+    /// allocating a task.
+    pub async fn wait_for_force_close(&self) {
+        loop {
+            let notified = self.inner.drained.notified();
+            tokio::pin!(notified);
+            let _ = notified.as_mut().enable();
+            if self.is_force_closed() {
                 return;
             }
             notified.await;
@@ -96,15 +114,13 @@ impl DrainController {
         }
 
         let remaining = self.in_flight();
-        if remaining == 0 {
-            return 0;
+        if remaining > 0 {
+            let increment = u64::try_from(remaining).unwrap_or(u64::MAX);
+            self.inner
+                .force_closed_total
+                .fetch_add(increment, Ordering::AcqRel);
+            metrics::counter!("cc_lb_drain_force_closed_total").increment(increment);
         }
-
-        let increment = u64::try_from(remaining).unwrap_or(u64::MAX);
-        self.inner
-            .force_closed_total
-            .fetch_add(increment, Ordering::AcqRel);
-        metrics::counter!("cc_lb_drain_force_closed_total").increment(increment);
         self.inner.drained.notify_waiters();
         remaining
     }
@@ -271,6 +287,53 @@ mod tests {
         let already_draining = controller.wait_for_draining();
         tokio::pin!(already_draining);
         assert!(already_draining.as_mut().poll(&mut context).is_ready());
+    }
+
+    #[tokio::test]
+    async fn force_close_waiters_stay_pending_on_drain_trigger_until_mark_force_closed() {
+        use std::task::{Context, Waker};
+
+        let mut context = Context::from_waker(Waker::noop());
+        let controller = DrainController::new();
+        let _guard = controller.try_track().expect("initial admission is open");
+
+        let drain_wait = controller.wait_for_draining();
+        let force_wait = controller.wait_for_force_close();
+        tokio::pin!(drain_wait, force_wait);
+
+        controller.trigger();
+        assert!(drain_wait.as_mut().poll(&mut context).is_ready());
+        assert!(
+            force_wait.as_mut().poll(&mut context).is_pending(),
+            "drain trigger must not wake wait_for_force_close"
+        );
+        assert!(!controller.is_force_closed());
+
+        assert_eq!(controller.mark_force_closed(), 1);
+        assert!(controller.is_force_closed());
+        assert!(force_wait.as_mut().poll(&mut context).is_ready());
+
+        let already_forced = controller.wait_for_force_close();
+        tokio::pin!(already_forced);
+        assert!(already_forced.as_mut().poll(&mut context).is_ready());
+    }
+
+    #[tokio::test]
+    async fn force_close_waiters_wake_when_in_flight_is_zero() {
+        use std::task::{Context, Waker};
+
+        let mut context = Context::from_waker(Waker::noop());
+        let controller = DrainController::new();
+        let force_wait = controller.wait_for_force_close();
+        tokio::pin!(force_wait);
+        assert!(force_wait.as_mut().poll(&mut context).is_pending());
+
+        controller.trigger();
+        assert!(force_wait.as_mut().poll(&mut context).is_pending());
+
+        assert_eq!(controller.mark_force_closed(), 0);
+        assert!(controller.is_force_closed());
+        assert!(force_wait.as_mut().poll(&mut context).is_ready());
     }
 
     #[tokio::test]

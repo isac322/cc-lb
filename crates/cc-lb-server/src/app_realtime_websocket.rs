@@ -863,7 +863,7 @@ async fn relay_realtime_websocket(
     };
     let (termination, diagnostics) = tokio::select! {
         result = relay => result,
-        _ = state.drain_controller.wait_for_draining() => (
+        _ = state.drain_controller.wait_for_force_close() => (
             RealtimeWebSocketTermination::DownstreamCancelled,
             cc_lb_engine::realtime_websocket::RealtimeWebSocketDiagnostics::default(),
         ),
