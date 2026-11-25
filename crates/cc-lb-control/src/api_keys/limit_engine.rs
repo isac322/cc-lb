@@ -412,7 +412,7 @@ impl RingCounter {
             .iter()
             .position(|(existing_start, _)| *existing_start == bucket_start)
         {
-            self.buckets[index].1 = self.buckets[index].1.saturating_sub(amount);
+            self.buckets[index].1 = self.buckets[index].1.saturating_sub(amount).max(0);
             if self.buckets[index].1 == 0 {
                 self.buckets.remove(index);
             }
@@ -2369,23 +2369,25 @@ fn refund_difference_locked(
     for amount in reserved {
         let actual = match amount.kind {
             LimitKind::Requests => 1,
-            LimitKind::InputTokens => actual_input as i64,
-            LimitKind::OutputTokens => actual_output as i64,
-            LimitKind::TotalTokens => actual_input.saturating_add(actual_output) as i64,
+            LimitKind::InputTokens => u64_to_i64_saturating(actual_input),
+            LimitKind::OutputTokens => u64_to_i64_saturating(actual_output),
+            LimitKind::TotalTokens => {
+                u64_to_i64_saturating(actual_input.saturating_add(actual_output))
+            }
             LimitKind::CostUsd => match actual_cost_micros {
                 Some(cost) => cost,
                 None => continue,
             },
             LimitKind::Concurrent => continue,
         };
-        let delta = actual.saturating_sub(amount.amount);
-        if delta != 0 {
+        remove_reserved_bucket_locked(rolling, key_id, amount, now_sec);
+        if actual != 0 {
             record_amount_locked(
                 rolling,
                 key_id,
                 amount.kind,
                 amount.window_sec,
-                delta,
+                actual,
                 now_sec,
             );
         }
@@ -5845,5 +5847,191 @@ mod tests {
             0,
             "dropping active 3600s hold after 60s-bucket-crossing handoff must leave 0"
         );
+
+        // 3. Reserve 300 tokens at t2, advance 65s to t3 so the 60s hold expires while 3600s stays
+        // live, rebuild across handoff, then reconcile 100 actual tokens. Neither window may
+        // retain a -200 negative delta from the expired hold; both must settle at 100 tokens.
+        let res3 = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-handoff",
+                "claude-3-opus",
+                Some(100),
+                200,
+                None,
+            )
+            .await
+            .expect("res3 succeeds");
+        clock.advance_secs(65);
+        let t3 = unix_secs(clock.now());
+        rebuild_local_usage_after_handoff(&engine, &state, t3);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t3),
+            0
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::Requests, 60, t3),
+            0
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 3_600, t3),
+            300
+        );
+
+        engine.reconcile(res3, 40, 60, None);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t3),
+            100,
+            "settling after handoff skipped expired 60s hold must charge actual 100 tokens"
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::Requests, 60, t3),
+            1
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 3_600, t3),
+            100
+        );
+
+        let over_cap = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-handoff",
+                "claude-3-opus",
+                Some(450),
+                500,
+                None,
+            )
+            .await;
+        assert!(
+            matches!(
+                over_cap,
+                Err(RejectReason::TokenRateLimit {
+                    kind: LimitKind::TotalTokens
+                })
+            ),
+            "settled 100-token charge must leave 900 capacity, not grant phantom credit"
+        );
+        let at_cap = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-handoff",
+                "claude-3-opus",
+                Some(400),
+                500,
+                None,
+            )
+            .await
+            .expect("exact remaining 900-token capacity succeeds");
+        drop(at_cap);
+    }
+
+    #[test]
+    fn reconcile_across_bucket_and_expiry_without_handoff_never_credits_window() {
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
+        let view = PrincipalView::for_tests(
+            "principal-reconcile",
+            true,
+            vec!["claude-3-opus".to_owned()],
+            vec![
+                Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 10,
+                },
+                Limit {
+                    kind: LimitKind::TotalTokens,
+                    window_secs: 60,
+                    cap_micros: 1_000,
+                },
+            ],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            key_hash_b64: "reconcile-nohandoff-key".to_owned(),
+            ..StoredApiKeyRecord::default()
+        };
+
+        // (a) Settling a 300-token live hold to 100 tokens after advancing 5s removes the
+        // original bucket instead of recording -200 in the newer bucket, so the settled 100
+        // tokens stay intact once the original bucket expires at t0 + 61.
+        let res_live = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-reconcile",
+                "claude-3-opus",
+                Some(100),
+                200,
+                None,
+            )
+            .expect("res_live succeeds");
+        clock.advance_secs(5);
+        let t1 = unix_secs(clock.now());
+        engine.reconcile(res_live, 40, 60, None);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            100
+        );
+        clock.advance_secs(56);
+        let t_after_t0 = unix_secs(clock.now());
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t_after_t0),
+            100,
+            "settling across 1s bucket boundary must remain 100 after original bucket expires"
+        );
+
+        // (b) Settling an expired 300-token hold without handoff charges 100 without -200 credit.
+        clock.advance_secs(10);
+        let res_exp = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-reconcile",
+                "claude-3-opus",
+                Some(100),
+                200,
+                None,
+            )
+            .expect("res_exp succeeds");
+        clock.advance_secs(65);
+        let t_expired = unix_secs(clock.now());
+        engine.reconcile(res_exp, 40, 60, None);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t_expired),
+            100
+        );
+        assert_eq!(
+            engine
+                .reserve(
+                    &view,
+                    &record,
+                    "principal-reconcile",
+                    "claude-3-opus",
+                    Some(450),
+                    500,
+                    None,
+                )
+                .err(),
+            Some(RejectReason::TokenRateLimit {
+                kind: LimitKind::TotalTokens
+            })
+        );
+        let ok = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-reconcile",
+                "claude-3-opus",
+                Some(400),
+                500,
+                None,
+            )
+            .expect("exact remaining 900 capacity succeeds");
+        drop(ok);
     }
 }
