@@ -365,7 +365,6 @@ pub(super) fn responses_websocket_request(
         .into_client_request()
         .map_err(|error| format!("upstream WebSocket request could not be built: {error}"))?;
     cc_lb_engine::strip_hop_by_hop(&mut upstream_headers);
-    cc_lb_engine::strip_ingress_proxy_headers(&mut upstream_headers);
     for (name, value) in &upstream_headers {
         if name == HOST
             || name == CONTENT_LENGTH

@@ -513,12 +513,10 @@ where
     Ok(Response::from_parts(parts, Body::new(body)))
 }
 
-fn copy_headers(mut source: HeaderMap, target: Option<&mut HeaderMap>) {
+fn copy_headers(source: HeaderMap, target: Option<&mut HeaderMap>) {
     let Some(target) = target else {
         return;
     };
-
-    crate::hop_by_hop::strip_ingress_proxy_headers(&mut source);
 
     // The ordinary Host header is derived from the request URI by the HTTP/1
     // client and replaced by `:authority` on HTTP/2; forwarding the
@@ -1253,5 +1251,78 @@ mod tests {
             "got {chain:?}"
         );
         assert!(chain[1].contains("dns resolution failed"), "got {chain:?}");
+    }
+
+    #[tokio::test]
+    async fn http1_dispatch_preserves_shaped_cloudflare_access_headers() -> TestResult {
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let (headers_tx, mut headers_rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let _ = http1::Builder::new()
+                .serve_connection(
+                    TokioIo::new(stream),
+                    service_fn(move |request: Request<hyper::body::Incoming>| {
+                        let _ = headers_tx.send(request.headers().clone());
+                        async move {
+                            Ok::<_, std::convert::Infallible>(Response::new(Full::new(
+                                Bytes::from_static(b"ok"),
+                            )))
+                        }
+                    }),
+                )
+                .await;
+        });
+
+        let mut downstream_headers = HeaderMap::new();
+        downstream_headers.insert(
+            "cf-access-client-id",
+            http::HeaderValue::from_static("shape-client-id"),
+        );
+        downstream_headers.insert(
+            "cf-access-client-secret",
+            http::HeaderValue::from_static("shape-client-secret"),
+        );
+        let client = build_client(HttpConnector::new(), 1);
+        let base_url = Url::parse(&format!("http://{address}/"))?;
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            dispatch_with_client(
+                &client,
+                signed_request_with_headers(base_url, downstream_headers).await?,
+            ),
+        )
+        .await??;
+        assert_eq!(response.status(), http::StatusCode::OK);
+
+        let observed = tokio::time::timeout(Duration::from_secs(5), headers_rx.recv())
+            .await?
+            .ok_or("server did not observe the request")?;
+        assert_eq!(
+            observed
+                .get("cf-access-client-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("shape-client-id"),
+            "Shape-generated CF-Access-Client-Id must survive outbound dispatch"
+        );
+        assert_eq!(
+            observed
+                .get("cf-access-client-secret")
+                .and_then(|v| v.to_str().ok()),
+            Some("shape-client-secret"),
+            "Shape-generated CF-Access-Client-Secret must survive outbound dispatch"
+        );
+
+        server.abort();
+        let _ = server.await;
+        Ok(())
     }
 }

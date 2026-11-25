@@ -1935,7 +1935,11 @@ impl ResponsesWebSocketGateway {
             .get(&dispatch.turn_id)
             .and_then(|turn| turn.plugin_request.as_ref())
             .map_or_else(
-                || self.headers.clone(),
+                || {
+                    let mut fallback = self.headers.clone();
+                    crate::hop_by_hop::strip_ingress_proxy_headers(&mut fallback);
+                    fallback
+                },
                 |(_, request)| request.headers.clone(),
             );
         Ok(PreparedWsConnectJob {

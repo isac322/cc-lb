@@ -2144,7 +2144,6 @@ impl Lifecycle {
         })?;
         let mut downstream_headers = headers.clone();
         strip_hop_by_hop(&mut downstream_headers);
-        strip_ingress_proxy_headers(&mut downstream_headers);
         let ctx = RequestContext::builder()
             .request_id(next_request_id())
             .downstream_headers(downstream_headers)

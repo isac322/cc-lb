@@ -19,7 +19,7 @@ use rkyv::util::AlignedVec;
 
 use super::{
     access_archived_scoped_or_copy,
-    filter_request::{is_stripped_downstream_header, principal_kind_to_wire},
+    filter_request::{principal_kind_to_wire, project_downstream_headers},
     serialize_with_input_scratch,
 };
 
@@ -483,13 +483,13 @@ fn with_wire_shape_request_v2<R>(
     with_bytes: impl for<'a> FnOnce(&'a [u8]) -> R,
 ) -> Result<R, RkyvError> {
     let principal_kind_str = principal_kind_to_wire(principal);
-    let header_refs: Vec<v2::HeaderRef<'_>> = context
-        .downstream_headers
+    let projected_headers =
+        project_downstream_headers(&context.downstream_headers, cookie_redaction);
+    let header_refs: Vec<v2::HeaderRef<'_>> = projected_headers
         .iter()
-        .filter(|(name, _)| !is_stripped_downstream_header(name.as_str(), cookie_redaction))
         .map(|(name, value)| v2::HeaderRef {
-            name: name.as_str(),
-            value: value.as_bytes(),
+            name,
+            value: value.as_ref(),
         })
         .collect();
     let base_url_str = upstream_base_url(upstream).map(|u| u.to_string());
@@ -1257,5 +1257,86 @@ mod tests {
                 .to_string()
                 .contains("exceeds wire_bounds.output_body_bytes")
         );
+    }
+
+    #[test]
+    fn shape_wire_scrubs_cf_access_cookies_and_strips_ingress_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.10"));
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.10"));
+        headers.append(
+            http::header::COOKIE,
+            HeaderValue::from_static(
+                "theme=dark; CF_Authorization=cf.jwt.secret; CF_AppSession=sess123; keep=yes",
+            ),
+        );
+        headers.append(
+            http::header::COOKIE,
+            HeaderValue::from_static("CF_AppSession=only"),
+        );
+        let context = DialectShapeContext {
+            request_id: "req-shape-cookie".to_owned(),
+            downstream_headers: headers,
+            method: Method::POST,
+            path: "/v1/responses".to_owned(),
+            query: None,
+            body_bytes: Bytes::from_static(b"{}"),
+        };
+        let identity = UpstreamIdentity {
+            provider: Provider::Openai,
+            credential_kind: "openai_api_key".to_owned(),
+            upstream_id: "upstream-shape".to_owned(),
+            name: "openai-primary".to_owned(),
+            base_url: None,
+            gemini_oauth_profile: None,
+            code_assist_project_id: None,
+        };
+
+        with_wire_shape_request_v2(
+            &context,
+            &Upstream::OpenaiDirect { base_url: None },
+            &principal(),
+            &[],
+            &identity,
+            false,
+            |bytes| {
+                let archived =
+                    rkyv::access::<ArchivedShapeRequest, RkyvError>(bytes).expect("shape request");
+                assert!(
+                    archived
+                        .headers
+                        .iter()
+                        .all(|h| !cc_lb_engine::is_ingress_proxy_header_name(&h.name))
+                );
+                let cookies: Vec<&[u8]> = archived
+                    .headers
+                    .iter()
+                    .filter(|h| h.name.eq_ignore_ascii_case("cookie"))
+                    .map(|h| h.value.as_ref())
+                    .collect();
+                assert_eq!(cookies, vec![b"theme=dark; keep=yes".as_slice()]);
+            },
+        )
+        .expect("encode shape request without cookie redaction");
+
+        with_wire_shape_request_v2(
+            &context,
+            &Upstream::OpenaiDirect { base_url: None },
+            &principal(),
+            &[],
+            &identity,
+            true,
+            |bytes| {
+                let archived =
+                    rkyv::access::<ArchivedShapeRequest, RkyvError>(bytes).expect("shape request");
+                assert!(
+                    archived
+                        .headers
+                        .iter()
+                        .all(|h| !h.name.eq_ignore_ascii_case("cookie"))
+                );
+            },
+        )
+        .expect("encode shape request with cookie redaction");
     }
 }

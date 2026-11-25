@@ -113,23 +113,13 @@ fn shape_adapter_when_wasm_passthrough_then_shapes_and_strips_auth_header() {
     assert!(shaped.headers().get(http::header::AUTHORIZATION).is_none());
 }
 
-fn openai_response_header_plugin() -> Vec<u8> {
-    use cc_lb_plugin_wire::schema::WireSchema;
-
-    let output = rkyv::to_bytes::<rkyv::rancor::Error>(
-        &cc_lb_plugin_wire::v2::TransformResponseResult::Replace {
-            status: None,
-            headers: Some(
-                vec![cc_lb_plugin_wire::v2::Header {
-                    name: "x-wasm-transformed".into(),
-                    value: Box::from(*b"1"),
-                }]
-                .into_boxed_slice(),
-            ),
-            body: None,
-        },
-    )
-    .expect("serialize response header transform");
+fn build_single_export_wasm_plugin(
+    export_name: &str,
+    output: &[u8],
+    schema_section: &str,
+    fingerprint: &[u8],
+    manifest_json: &[u8],
+) -> Vec<u8> {
     let data: String = output.iter().map(|byte| format!("\\{byte:02x}")).collect();
     let packed = cc_lb_plugin_wire::schema::pack_ret(16, output.len() as u32);
     let mut wasm = wat::parse_str(format!(
@@ -138,11 +128,11 @@ fn openai_response_header_plugin() -> Vec<u8> {
             (data (i32.const 16) "{data}")
             (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 8192)
             (func (export "cc_lb_free") (param i32 i32 i32))
-            (func (export "cc_lb_transform_response_openai") (param i32 i32) (result i64)
+            (func (export "{export_name}") (param i32 i32) (result i64)
                 i64.const {}))"#,
         packed as i64,
     ))
-    .expect("compile in-memory response transform plugin");
+    .expect("compile in-memory wasm plugin");
 
     fn leb(bytes: &mut Vec<u8>, mut value: usize) {
         loop {
@@ -163,14 +153,33 @@ fn openai_response_header_plugin() -> Vec<u8> {
         leb(bytes, payload.len());
         bytes.extend_from_slice(&payload);
     }
-    section(
-        &mut wasm,
+    section(&mut wasm, schema_section, fingerprint);
+    section(&mut wasm, "cc_lb.plugin.v2", manifest_json);
+    wasm
+}
+
+fn openai_response_header_plugin() -> Vec<u8> {
+    use cc_lb_plugin_wire::schema::WireSchema;
+
+    let output = rkyv::to_bytes::<rkyv::rancor::Error>(
+        &cc_lb_plugin_wire::v2::TransformResponseResult::Replace {
+            status: None,
+            headers: Some(
+                vec![cc_lb_plugin_wire::v2::Header {
+                    name: "x-wasm-transformed".into(),
+                    value: Box::from(*b"1"),
+                }]
+                .into_boxed_slice(),
+            ),
+            body: None,
+        },
+    )
+    .expect("serialize response header transform");
+    build_single_export_wasm_plugin(
+        "cc_lb_transform_response_openai",
+        &output,
         "cc_lb.schema.transform_response.v2",
         &<cc_lb_plugin_wire::v2::TransformResponseRequest as WireSchema>::FINGERPRINT,
-    );
-    section(
-        &mut wasm,
-        "cc_lb.plugin.v2",
         br#"{
             "name":"openai-response-header","version":"1.0.0",
             "description":"OpenAI response header transform","usage":"test",
@@ -178,8 +187,46 @@ fn openai_response_header_plugin() -> Vec<u8> {
                 "wire_version":2,"description":"response","usage":"test","mode":"active"
             }}
         }"#,
-    );
-    wasm
+    )
+}
+
+fn openai_shape_cf_access_plugin(target_url: &str) -> Vec<u8> {
+    use cc_lb_plugin_wire::schema::WireSchema;
+
+    let output = rkyv::to_bytes::<rkyv::rancor::Error>(&cc_lb_plugin_wire::v2::ShapeResponse {
+        url: target_url.into(),
+        method: "POST".into(),
+        headers: vec![
+            cc_lb_plugin_wire::v2::Header {
+                name: "content-type".into(),
+                value: Box::from(*b"application/json"),
+            },
+            cc_lb_plugin_wire::v2::Header {
+                name: "cf-access-client-id".into(),
+                value: Box::from(*b"shape-client-id"),
+            },
+            cc_lb_plugin_wire::v2::Header {
+                name: "cf-access-client-secret".into(),
+                value: Box::from(*b"shape-client-secret"),
+            },
+        ]
+        .into_boxed_slice(),
+        body: Box::from(*br#"{"model":"gpt-4o-mini","input":"shaped"}"#),
+    })
+    .expect("serialize shape response");
+    build_single_export_wasm_plugin(
+        "cc_lb_shape_openai",
+        &output,
+        "cc_lb.schema.shape.v2",
+        &<cc_lb_plugin_wire::v2::ShapeRequest as WireSchema>::FINGERPRINT,
+        br#"{
+            "name":"openai-shape-cf-access","version":"1.0.0",
+            "description":"OpenAI shape plugin emitting upstream CF Access headers","usage":"test",
+            "hooks":{"shape_openai":{
+                "wire_version":2,"description":"shape","usage":"test","mode":"active"
+            }}
+        }"#,
+    )
 }
 
 struct LoopbackServer {
@@ -468,4 +515,206 @@ async fn openai_transform_response_wasm_plugin_relays_chunked_binary_stream_with
         .expect("remaining binary body must finish after release")
         .expect("read remaining binary body");
     assert_eq!(remaining.as_ref(), &[b'B'; 64]);
+}
+
+#[tokio::test]
+async fn openai_shape_wasm_plugin_preserves_emitted_cf_access_headers_upstream() {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use axum::{Json, Router, http::HeaderMap as AxumHeaderMap, routing::post};
+    use cc_lb_aead::AeadService;
+    use cc_lb_config::{Config, StorageConfig};
+    use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+    use cc_lb_storage_api::{
+        MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalCreate,
+        PrincipalKind as StoragePrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore,
+        WasmBlob, WasmRegistryEntryInput, upstream::UpstreamKind,
+    };
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
+    use uuid::Uuid;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let recorded_headers = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let upstream = serve_loopback(Router::new().route(
+        "/v1/responses",
+        post({
+            let recorded_headers = Arc::clone(&recorded_headers);
+            move |headers: AxumHeaderMap| {
+                let recorded_headers = Arc::clone(&recorded_headers);
+                async move {
+                    let collected = headers
+                        .iter()
+                        .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
+                        .collect();
+                    *recorded_headers.lock().expect("headers lock") = collected;
+                    Json(json!({
+                        "id": "resp_shape_cf", "object": "response", "status": "completed",
+                        "output": [],
+                        "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
+                    }))
+                }
+            }
+        }),
+    ))
+    .await;
+
+    let dir = tempfile::tempdir().expect("proxy storage directory");
+    let path = dir.path().join("storage.sqlite");
+    let clock = Arc::new(cc_lb_clock::SystemClock);
+    let storage = Arc::new(
+        cc_lb_storage_sqlite::open_sqlite(&format!("sqlite://{}", path.display()), clock.clone())
+            .await
+            .expect("open proxy storage"),
+    );
+    storage
+        .initialize()
+        .await
+        .expect("initialize proxy storage");
+    let aead = Arc::new(AeadService::from_master_key([0; 32]));
+    let upstream_id = Uuid::new_v4();
+    UpstreamStore::create(
+        storage.as_ref(),
+        UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
+            id: upstream_id,
+            name: "shape-cf-openai".to_owned(),
+            kind: UpstreamKind::OpenaiApiKey,
+            base_url: Some(url::Url::parse(&format!("http://{}/", upstream.addr)).unwrap()),
+            api_key_ciphertext: Some(
+                aead.encrypt(b"sk-openai-shape-cf", upstream_id.as_bytes())
+                    .expect("encrypt upstream API key"),
+            ),
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await
+    .expect("create OpenAI upstream");
+    let principal = PrincipalStore::create(
+        storage.as_ref(),
+        PrincipalCreate {
+            name: "shape-cf-proxy".to_owned(),
+            kind: StoragePrincipalKind::Machine,
+            allowed_models: Vec::new(),
+            allowed_upstreams: vec![upstream_id],
+            default_limits: Vec::new(),
+            cache_keepalive: None,
+            openai_oauth_compat: None,
+        },
+        1,
+    )
+    .await
+    .expect("create proxy principal");
+    let (_, key) = KeyStore::new(storage.clone())
+        .create(
+            &principal.name,
+            CreateParams {
+                label: "shape-cf-test".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("create managed API key");
+    let target_url = format!("http://{}/v1/responses", upstream.addr);
+    let wasm = openai_shape_cf_access_plugin(&target_url);
+    let metadata = cc_lb_runtime_wasmtime::inspect_wasm_agnostic(&wasm)
+        .expect("inspect real shape plugin")
+        .metadata;
+    let (registry, _) = storage
+        .persist_wasm_upload(
+            WasmBlob {
+                sha256: Sha256::digest(&wasm).into(),
+                size_bytes: wasm.len() as u64,
+                bytes: wasm,
+            },
+            WasmRegistryEntryInput {
+                name: metadata.name,
+                version: Some(metadata.version),
+                original_filename: "openai-shape-cf-access.wasm".to_owned(),
+                label: None,
+                uploaded_at_unix_secs: 1,
+                uploaded_by_admin_id: Uuid::nil(),
+                description: metadata.description,
+                usage: metadata.usage,
+                hook_metadata: metadata.hooks,
+                supported_slots: vec![PluginSlotKind::Shape],
+            },
+        )
+        .await
+        .expect("persist shape plugin");
+    storage
+        .insert_chain_entry(PluginChainEntryInput {
+            principal_id: principal.id,
+            slot: PluginSlotKind::Shape,
+            order: 1000,
+            wasm_registry_id: registry.id,
+            config: json!({}),
+        })
+        .await
+        .expect("attach shape plugin");
+
+    let mut config = Config {
+        storage: StorageConfig::Sqlite { path },
+        ..Default::default()
+    };
+    config.runtime.data_dir = Some(dir.path().to_path_buf());
+    config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
+    let app = cc_lb_server::app::build_app_with_storage(
+        config,
+        None,
+        storage.clone(),
+        storage.clone(),
+        aead,
+        clock,
+    )
+    .await
+    .expect("build real proxy app");
+    let proxy = serve_loopback(app.router.clone()).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("HTTP client");
+
+    let response = client
+        .post(format!("http://{}/openai/v1/responses", proxy.addr))
+        .bearer_auth(key.expose())
+        .header("cf-connecting-ip", "203.0.113.10")
+        .header("cf-ray", "123456-ICN")
+        .header("cookie", "CF_Authorization=downstream.jwt")
+        .json(&json!({
+            "model": "gpt-4o-mini", "input": "hi", "stream": false, "max_output_tokens": 8
+        }))
+        .send()
+        .await
+        .expect("HTTP response through shape plugin");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let captured = recorded_headers.lock().expect("headers lock").clone();
+    assert!(
+        captured
+            .iter()
+            .any(|(k, v)| k == "cf-access-client-id" && v == "shape-client-id"),
+        "expected Shape-emitted cf-access-client-id to reach upstream, got {captured:?}"
+    );
+    assert!(
+        captured
+            .iter()
+            .any(|(k, v)| k == "cf-access-client-secret" && v == "shape-client-secret"),
+        "expected Shape-emitted cf-access-client-secret to reach upstream, got {captured:?}"
+    );
+    assert!(
+        captured
+            .iter()
+            .all(|(k, _)| !matches!(k.as_str(), "cf-connecting-ip" | "cf-ray" | "cookie")),
+        "expected downstream ingress headers and CF_Authorization cookie to stay stripped: {captured:?}"
+    );
 }

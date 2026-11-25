@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
@@ -138,10 +139,63 @@ pub fn is_ingress_proxy_header(name: &HeaderName) -> bool {
     is_ingress_proxy_header_name(name.as_str())
 }
 
-fn is_ingress_auth_cookie(crumb: &str) -> bool {
-    let cookie_name = crumb.split_once('=').map_or(crumb, |(name, _)| name).trim();
-    cookie_name.eq_ignore_ascii_case("CF_Authorization")
-        || cookie_name.eq_ignore_ascii_case("CF_AppSession")
+fn trim_ascii_ows(bytes: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = bytes.len();
+    while start < end && matches!(bytes[start], b' ' | b'\t') {
+        start += 1;
+    }
+    while end > start && matches!(bytes[end - 1], b' ' | b'\t') {
+        end -= 1;
+    }
+    &bytes[start..end]
+}
+
+fn is_ingress_auth_cookie_bytes(crumb: &[u8]) -> bool {
+    let raw_name = match crumb.iter().position(|&b| b == b'=') {
+        Some(eq) => &crumb[..eq],
+        None => crumb,
+    };
+    let cookie_name = trim_ascii_ows(raw_name);
+    cookie_name.eq_ignore_ascii_case(b"CF_Authorization")
+        || cookie_name.eq_ignore_ascii_case(b"CF_AppSession")
+}
+
+/// Removes Cloudflare Access session cookies (`CF_Authorization`,
+/// `CF_AppSession`, case-insensitively) from a raw `Cookie` header value
+/// without failing on non-UTF-8 sibling cookie crumbs.
+///
+/// Returns `Some(Cow::Borrowed(raw))` when no Access cookie was present,
+/// `None` when no cookie crumbs remain, or `Some(Cow::Owned(cleaned))`
+/// joining surviving crumbs with `; `.
+pub fn scrub_ingress_auth_cookie_bytes(raw: &[u8]) -> Option<Cow<'_, [u8]>> {
+    let mut kept_crumbs: Vec<&[u8]> = Vec::new();
+    let mut removed_any = false;
+    for part in raw.split(|&b| b == b';') {
+        let trimmed = trim_ascii_ows(part);
+        if trimmed.is_empty() {
+            continue;
+        }
+        if is_ingress_auth_cookie_bytes(trimmed) {
+            removed_any = true;
+        } else {
+            kept_crumbs.push(trimmed);
+        }
+    }
+    if !removed_any {
+        Some(Cow::Borrowed(raw))
+    } else if kept_crumbs.is_empty() {
+        None
+    } else {
+        let mut cleaned = Vec::with_capacity(raw.len());
+        for (idx, crumb) in kept_crumbs.iter().enumerate() {
+            if idx > 0 {
+                cleaned.extend_from_slice(b"; ");
+            }
+            cleaned.extend_from_slice(crumb);
+        }
+        Some(Cow::Owned(cleaned))
+    }
 }
 
 /// Removes ingress proxy/CDN/tunnel headers (such as Cloudflare and Envoy
@@ -164,29 +218,14 @@ pub fn strip_ingress_proxy_headers(headers: &mut HeaderMap) {
 
     let mut kept_cookies = Vec::new();
     for value in headers.get_all(COOKIE) {
-        let Ok(raw) = value.to_str() else {
-            kept_cookies.push(value.clone());
-            continue;
-        };
-        let mut kept_crumbs = Vec::new();
-        let mut removed_any = false;
-        for part in raw.split(';') {
-            let trimmed = part.trim();
-            if trimmed.is_empty() {
-                continue;
+        match scrub_ingress_auth_cookie_bytes(value.as_bytes()) {
+            None => {}
+            Some(Cow::Borrowed(_)) => kept_cookies.push(value.clone()),
+            Some(Cow::Owned(cleaned)) => {
+                if let Ok(cleaned_value) = HeaderValue::from_bytes(&cleaned) {
+                    kept_cookies.push(cleaned_value);
+                }
             }
-            if is_ingress_auth_cookie(trimmed) {
-                removed_any = true;
-            } else {
-                kept_crumbs.push(trimmed);
-            }
-        }
-        if !removed_any {
-            kept_cookies.push(value.clone());
-        } else if !kept_crumbs.is_empty()
-            && let Ok(cleaned) = HeaderValue::from_str(&kept_crumbs.join("; "))
-        {
-            kept_cookies.push(cleaned);
         }
     }
     headers.remove(COOKIE);
@@ -323,5 +362,28 @@ mod tests {
             .map(|v| v.to_str().unwrap())
             .collect();
         assert_eq!(remaining, vec!["theme=dark; foo=bar", "stay=1"]);
+    }
+
+    #[test]
+    fn strip_ingress_proxy_headers_sanitizes_cf_cookies_with_non_utf8_sibling() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            COOKIE,
+            HeaderValue::from_bytes(
+                b"theme=dark; CF_Authorization=secret; raw=\xff; CF_AppSession=sess; keep=1",
+            )
+            .unwrap(),
+        );
+        headers.append(
+            COOKIE,
+            HeaderValue::from_bytes(b"CF_Authorization=only").unwrap(),
+        );
+        strip_ingress_proxy_headers(&mut headers);
+        let remaining: Vec<&[u8]> = headers
+            .get_all(COOKIE)
+            .iter()
+            .map(HeaderValue::as_bytes)
+            .collect();
+        assert_eq!(remaining, vec![b"theme=dark; raw=\xff; keep=1".as_slice()]);
     }
 }

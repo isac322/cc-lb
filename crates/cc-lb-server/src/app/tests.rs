@@ -2222,6 +2222,42 @@ fn websocket_provider_request_preserves_headers_and_refreshes_upgrade_headers() 
     assert!(!request.headers().contains_key(SEC_WEBSOCKET_PROTOCOL));
 }
 
+#[test]
+fn websocket_provider_request_preserves_shaped_cloudflare_access_headers() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        HeaderValue::from_static("Bearer provider-token"),
+    );
+    headers.insert(
+        "cf-access-client-id",
+        HeaderValue::from_static("shape-client-id"),
+    );
+    headers.insert(
+        "cf-access-client-secret",
+        HeaderValue::from_static("shape-client-secret"),
+    );
+    let request = responses_websocket_request(
+        Url::parse("ws://provider.example/v1/responses").expect("provider URL parses"),
+        headers,
+    )
+    .expect("provider handshake request builds");
+    assert_eq!(
+        request
+            .headers()
+            .get("cf-access-client-id")
+            .and_then(|v| v.to_str().ok()),
+        Some("shape-client-id"),
+    );
+    assert_eq!(
+        request
+            .headers()
+            .get("cf-access-client-secret")
+            .and_then(|v| v.to_str().ok()),
+        Some("shape-client-secret"),
+    );
+}
+
 #[tokio::test]
 async fn websocket_pending_send_cancellation_releases_turn_once() {
     use cc_lb_control::api_keys::limit_engine::RejectReason;

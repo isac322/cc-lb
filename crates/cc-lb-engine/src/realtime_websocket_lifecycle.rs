@@ -569,7 +569,6 @@ impl Lifecycle {
             }
             let mut signed_headers = signed.headers().clone();
             strip_hop_by_hop(&mut signed_headers);
-            strip_ingress_proxy_headers(&mut signed_headers);
             // The provider joins a sideband only when its `OpenAI-Alpha` matches
             // the live call, and subscription calls are created with the
             // quicksilver protocol. Public clients never send it; Codex does,

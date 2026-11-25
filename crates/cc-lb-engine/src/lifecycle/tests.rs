@@ -9709,3 +9709,63 @@ async fn realtime_filter_saturation_attaches_retry_after_header() {
         err.provider_headers()
     );
 }
+
+#[tokio::test]
+async fn sign_websocket_connection_preserves_shaped_cf_access_headers() {
+    let up_id = Uuid::from_u128(0xC0DE);
+    let mut record = upstream_record(up_id);
+    record.kind = StorageRecordKind::OpenaiApiKey;
+    record.base_url = Some(Url::parse("https://gateway.example/").expect("test URL parses"));
+    let view = provenance_view(
+        failure_principal_view(
+            "principal-test",
+            (
+                None,
+                cc_lb_control::api_keys::principal_view::DialectCache::Inherit,
+            ),
+        ),
+        Arc::new(TestSignerFactory),
+        vec![record],
+    );
+    let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+    let lifecycle = provenance_lifecycle(view, Arc::new(QueueDispatch::new(Vec::new())), &bus);
+    let req = failure_request(Bytes::new());
+    let auth = lifecycle
+        .authenticate(req.headers())
+        .await
+        .expect("request authenticates");
+    let candidate = WebSocketCandidate {
+        upstream_id: up_id,
+        upstream_name: "gateway".to_owned(),
+        socket_per_lane: false,
+        is_api_key: true,
+    };
+    let mut shaped_headers = HeaderMap::new();
+    shaped_headers.insert(
+        "cf-access-client-id",
+        HeaderValue::from_static("shape-client-id"),
+    );
+    shaped_headers.insert(
+        "cf-access-client-secret",
+        HeaderValue::from_static("shape-client-secret"),
+    );
+
+    let (_url, signed_headers) = lifecycle
+        .sign_websocket_connection(&auth, &shaped_headers, &candidate, None)
+        .await
+        .expect("sign_websocket_connection succeeds");
+    assert_eq!(
+        signed_headers
+            .get("cf-access-client-id")
+            .and_then(|v| v.to_str().ok()),
+        Some("shape-client-id"),
+        "Shape-emitted CF-Access-Client-Id must survive WebSocket signing"
+    );
+    assert_eq!(
+        signed_headers
+            .get("cf-access-client-secret")
+            .and_then(|v| v.to_str().ok()),
+        Some("shape-client-secret"),
+        "Shape-emitted CF-Access-Client-Secret must survive WebSocket signing"
+    );
+}

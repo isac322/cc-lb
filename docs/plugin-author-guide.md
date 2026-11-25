@@ -286,11 +286,31 @@ cc-lb supports two plugin slot kinds. A wasm artifact may implement one or more 
 | `filter` | `cc_lb_filter_{anthropic,openai,gemini}` | `v3::FilterRequest` | `v2::FilterResponse` | Keep or reject upstream candidates. |
 | `shape` | `cc_lb_{shape,transform_response,transform_sse_event,transform_realtime_frame}_{anthropic,openai,gemini}`<br>`cc_lb_shape_envelope_gemini` | `v2::ShapeRequest`<br>`v2::TransformResponseRequest`<br>`v2::TransformSseEventRequest`<br>`v2::TransformRealtimeFrameRequest`<br>`v2::ShapeEnvelopeGeminiRequest` | `v2::ShapeResponse`<br>`v2::TransformResponseResult`<br>`v2::TransformSseEventResult`<br>`v2::TransformRealtimeFrameResult`<br>`v2::ShapeEnvelopeGeminiResponse` | Provider-specific request, response, streaming, and frame processing. |
 
-Before encoding V3 filter requests, the host removes query
-segments whose parameter name is exactly `key`, case-insensitively. Other
-segments retain their order and encoding; names are not percent-decoded.
-An absent query stays absent, and an all-`key` query remains a present empty
-string. Provider credential headers are also removed before dispatch.
+Before encoding V3 filter (`v3::FilterRequest`) and V2 shape (`v2::ShapeRequest`)
+requests, the host removes:
+
+- Query segments whose parameter name is `key`, case-insensitively (other
+  segments retain their order and encoding; names are not percent-decoded; an
+  absent query stays absent and an all-`key` query becomes an empty string).
+- Host/provider credential headers (`authorization`, `x-api-key`,
+  `x-goog-api-key`, `api-key`, `x-openai-actor-authorization`, `host`,
+  `proxy-authorization`).
+- Ingress reverse-proxy, CDN, and tunnel header families (`cf-*`,
+  `x-forwarded-*`, `x-envoy-*`, `cdn-loop`, `forwarded`, `x-real-ip`,
+  `true-client-ip`) — filter and shape hooks receive these headers as absent
+  and must not depend on downstream forwarding metadata.
+- Cookies: when `cookie_redaction = true`, the host omits every `Cookie` header
+  entirely. When `cookie_redaction = false` (default), non-Access cookies stay
+  visible to hooks while Cloudflare Access session cookies (`CF_Authorization`,
+  `CF_AppSession`, matched case-insensitively per cookie crumb) are stripped
+  from each `Cookie` value, and a `Cookie` header whose crumbs were all removed
+  is omitted.
+
+Outbound headers intentionally returned by a V2 shape hook (for example,
+`CF-Access-Client-Id` / `CF-Access-Client-Secret` for a Cloudflare
+Access-protected upstream gateway) are preserved to the upstream transport,
+subject only to shape output filtering (hop-by-hop headers, `host`,
+`content-length`, and host-owned provider credential headers).
 
 Filter example:
 
