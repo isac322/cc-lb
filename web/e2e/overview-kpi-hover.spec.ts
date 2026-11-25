@@ -6,6 +6,7 @@ import type {
   UsageBucket,
 } from '../src/lib/api';
 import type { Theme } from '../src/lib/theme';
+import { activeAnthropicOAuthStatus } from './fixtures/oauthStatus';
 
 const TIMESTAMPS = [
   Date.UTC(2026, 7, 17, 13, 30) / 1000,
@@ -511,12 +512,11 @@ async function installOverviewFixtures(page: Page): Promise<OverviewFixtures> {
         upstreams: [],
       });
     }
-    if (/^\/admin\/v1\/upstreams\/[^/]+\/oauth\/status$/.test(pathname)) {
-      return json(200, {
-        status: 'connected',
-        has_refresh_token: true,
-        expires_at_unix_secs: Math.floor(Date.now() / 1000) + 3600,
-      });
+    const oauthStatusMatch = pathname.match(
+      /^\/admin\/v1\/upstreams\/([^/]+)\/oauth\/status$/,
+    );
+    if (oauthStatusMatch) {
+      return json(200, activeAnthropicOAuthStatus(oauthStatusMatch[1]));
     }
     if (pathname === '/admin/v1/dashboard/summary') {
       summaryRanges.push(url.searchParams.get('range') ?? '');
@@ -746,7 +746,8 @@ async function readTokensTooltipColors(page: Page) {
           rows: rows.map((text) => {
             const row = spans.find((span) => span.textContent?.trim() === text);
             if (!row) throw new Error(`Tokens tooltip has no "${text}" row`);
-            return window.getComputedStyle(row).color;
+            const textSpan = row.querySelector('span');
+            return window.getComputedStyle(textSpan ?? row).color;
           }),
         };
       },

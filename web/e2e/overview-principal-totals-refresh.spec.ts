@@ -4,6 +4,7 @@ import type {
   DashboardUsageResponse,
   UsageBucket,
 } from '../src/lib/api';
+import { activeAnthropicOAuthStatus } from './fixtures/oauthStatus';
 
 const POLL_INTERVAL_MS = 5_000;
 const POLL_UPDATE_TIMEOUT_MS = 2 * POLL_INTERVAL_MS + 1_000;
@@ -286,12 +287,11 @@ async function installOverviewFixtures(
         upstreams: [],
       });
     }
-    if (/^\/admin\/v1\/upstreams\/[^/]+\/oauth\/status$/.test(pathname)) {
-      return json(200, {
-        status: 'connected',
-        has_refresh_token: true,
-        expires_at_unix_secs: Math.floor(Date.now() / 1000) + 3600,
-      });
+    const oauthStatusMatch = pathname.match(
+      /^\/admin\/v1\/upstreams\/([^/]+)\/oauth\/status$/,
+    );
+    if (oauthStatusMatch) {
+      return json(200, activeAnthropicOAuthStatus(oauthStatusMatch[1]));
     }
     if (pathname === '/admin/v1/dashboard/summary') {
       return json(200, summary);

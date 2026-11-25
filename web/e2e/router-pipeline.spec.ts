@@ -30,7 +30,23 @@ type PluginRegistryItem = {
   };
 };
 
-async function installRouterPipelineFixtures(page: Page) {
+function parseIfMatchRevision(header: string | undefined): number | null {
+  if (!header) return null;
+  const trimmed = header.trim();
+  const inner =
+    trimmed.startsWith('W/"') && trimmed.endsWith('"')
+      ? trimmed.slice(3, -1)
+      : trimmed.startsWith('"') && trimmed.endsWith('"')
+        ? trimmed.slice(1, -1)
+        : trimmed;
+  if (!/^\d+$/.test(inner)) return null;
+  return Number.parseInt(inner, 10);
+}
+
+async function installRouterPipelineFixtures(
+  page: Page,
+  options?: { adminTerminalStrategy?: 'first-pick' | 'random' },
+) {
   const plugins: PluginRegistryItem[] = [
     {
       id: 'subscription-preference',
@@ -160,7 +176,10 @@ async function installRouterPipelineFixtures(page: Page) {
     string,
     { strategy: 'first-pick' | 'random'; revision: number }
   >([
-    ['principal-admin', { strategy: 'first-pick', revision: 1 }],
+    [
+      'principal-admin',
+      { strategy: options?.adminTerminalStrategy ?? 'first-pick', revision: 1 },
+    ],
     ['principal-engineering-shared', { strategy: 'first-pick', revision: 1 }],
   ]);
 
@@ -316,19 +335,40 @@ async function installRouterPipelineFixtures(page: Page) {
         revision: 1,
       };
       if (method === 'GET') {
-        return json(200, current);
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          headers: { etag: `W/"${current.revision}"` },
+          body: JSON.stringify(current),
+        });
       }
       if (method === 'PUT') {
+        const expectedRevision = parseIfMatchRevision(
+          request.headers()['if-match'],
+        );
+        if (expectedRevision === null) {
+          return json(428, { error: 'if_match_required' });
+        }
+        if (expectedRevision !== current.revision) {
+          return json(409, {
+            error: 'stale_revision',
+            current_revision: current.revision,
+          });
+        }
         const body = request.postDataJSON() as {
           strategy: 'first-pick' | 'random';
-          expected_revision: number;
         };
         const updated = {
           strategy: body.strategy,
           revision: current.revision + 1,
         };
         terminalStrategies.set(pid, updated);
-        return json(200, updated);
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          headers: { etag: `W/"${updated.revision}"` },
+          body: JSON.stringify(updated),
+        });
       }
     }
 
@@ -421,6 +461,9 @@ test.describe('Router Pipeline', () => {
 
     // Step 4: add second router plugin
     const items = chainItems(page);
+    await expect(
+      items.filter({ hasText: 'subscription-preference' }).first(),
+    ).toBeVisible();
     const initialCount = await items.count();
     await section.getByText('Add filter', { exact: true }).click();
     await page
@@ -470,6 +513,12 @@ test.describe('Router Pipeline', () => {
     await expect(drawer).not.toBeVisible();
 
     // Step 6: terminal strategy change to Random + reload + persistence
+    const termGroup = section.getByRole('radiogroup', {
+      name: 'When multiple upstreams qualify, pick',
+    });
+    await expect(
+      termGroup.getByRole('radio', { name: /First eligible/ }),
+    ).toBeChecked();
     const termRandomLabel = section.locator('label', { hasText: 'Random' });
     await expect(termRandomLabel).toBeVisible();
 
@@ -545,32 +594,39 @@ test.describe('Router Pipeline', () => {
 
     await page.getByRole('tab', { name: 'Advanced' }).click();
 
+    const items = chainItems(page);
+    await expect(
+      items.filter({ hasText: 'subscription-preference' }).first(),
+    ).toBeVisible();
+
     const section = routerSection(page);
     await section.getByText('Add filter', { exact: true }).click();
 
+    const pluginName = 'canary-router';
     const picker = page
       .locator('.glass-strong.w-64 button:not([disabled])')
-      .first();
+      .filter({ hasText: pluginName });
     await expect(picker).toBeVisible();
-    const pluginName = await picker.locator('span.font-medium').textContent();
-
     await picker.click();
 
     await expect(
-      chainItems(page).filter({ hasText: pluginName! }).first(),
+      items.filter({ hasText: 'subscription-preference' }).first(),
     ).toBeVisible();
+    await expect(items.filter({ hasText: pluginName }).first()).toBeVisible();
 
     await section.getByText('Add filter', { exact: true }).click();
 
     const disabledPicker = page
-      .locator('.glass-strong.w-64 button', { hasText: pluginName! })
-      .first();
+      .locator('.glass-strong.w-64 button')
+      .filter({ hasText: pluginName });
     await expect(disabledPicker).toBeDisabled();
     await expect(disabledPicker).toContainText('Already in chain');
   });
 
   test('terminal radio cards reflect strategy change', async ({ page }) => {
-    await installRouterPipelineFixtures(page);
+    await installRouterPipelineFixtures(page, {
+      adminTerminalStrategy: 'random',
+    });
     await page.goto('/principals');
 
     await expect(
@@ -585,11 +641,33 @@ test.describe('Router Pipeline', () => {
     await page.getByRole('tab', { name: 'Advanced' }).click();
 
     const section = routerSection(page);
-    await section.locator('label', { hasText: 'Random' }).click();
+    const termGroup = section.getByRole('radiogroup', {
+      name: 'When multiple upstreams qualify, pick',
+    });
+    await expect(termGroup.getByRole('radio', { name: /Random/ })).toBeChecked();
 
-    const termRandomRadio = section
-      .getByRole('radiogroup', { name: 'When multiple upstreams qualify, pick' })
-      .getByRole('radio', { name: /Random/ });
-    await expect(termRandomRadio).toBeChecked();
+    const putResponse = page.waitForResponse(
+      (response) =>
+        response.url().includes('/router-terminal') &&
+        response.request().method() === 'PUT',
+    );
+    await section.locator('label', { hasText: 'First eligible' }).click();
+    expect((await putResponse).status()).toBe(200);
+
+    const firstEligibleRadio = termGroup.getByRole('radio', {
+      name: /First eligible/,
+    });
+    await expect(firstEligibleRadio).toBeChecked();
+
+    await page.reload();
+    await expect(
+      page.getByRole('heading', { name: 'Router', exact: true }),
+    ).toBeVisible();
+    await page.getByRole('tab', { name: 'Advanced' }).click();
+    await expect(
+      routerSection(page)
+        .getByRole('radiogroup', { name: 'When multiple upstreams qualify, pick' })
+        .getByRole('radio', { name: /First eligible/ }),
+    ).toBeChecked();
   });
 });
