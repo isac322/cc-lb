@@ -184,6 +184,14 @@ mod tests {
     }
 
     #[test]
+    fn claude55_models_are_dateless_canonical_with_512_threshold() {
+        for model in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"] {
+            assert_eq!(canonical_model_id(Provider::Anthropic, model), model);
+            assert_eq!(cache_threshold_tokens(model), 512);
+        }
+    }
+
+    #[test]
     fn threshold_unknown_defaults_to_1024() {
         assert_eq!(cache_threshold_tokens("unknown-future-model"), 1024);
     }

@@ -26,7 +26,7 @@ pub(crate) use self::cache::{
 };
 pub use self::cache::{PromptCacheObservationContext, build_candidates};
 use self::cache::{
-    cache_pricing_summary_for_model, compat_service_tier_for_upstream,
+    cache_pricing_summary_for_model_with_estimator, compat_service_tier_for_upstream,
     fetch_prompt_cache_warm_entries_for_bundles, fetch_provider_native_cache_scores,
     prompt_cache_token_scope, publish_provider_cache_observation,
     request_cache_metadata_from_value_with_analysis_for_capability,
@@ -37,8 +37,9 @@ use self::identity::{
 };
 use self::limits::{
     ActiveLimit, LimitRequest, admission_fanout_multiplier, attach_limit_headers_from_engine,
-    attach_limit_headers_from_record, limit_rejection_response, limit_retry_after_secs,
-    limit_violation_name, use_image_rates_for_admission,
+    attach_limit_headers_from_record, estimate_routing_gross_prompt_tokens,
+    limit_rejection_response, limit_retry_after_secs, limit_violation_name,
+    use_image_rates_for_admission,
 };
 pub(crate) use self::limits::{INPUT_ESTIMATE_MAX_BYTES, INPUT_ESTIMATE_MAX_NODES};
 use self::routing::{
@@ -1319,6 +1320,19 @@ impl Lifecycle {
             Some(ProviderCapability::OpenaiResponses),
         );
         let observed_session_id = identity.observed_session_id;
+        let cache_pricing = cache_pricing_summary_for_model_with_estimator(
+            cc_lb_pricing::global_catalog(),
+            &canonical_model,
+            service_tier,
+            || {
+                estimate_routing_gross_prompt_tokens(
+                    Some(body),
+                    &canonical_model,
+                    Some(ProviderCapability::OpenaiResponses),
+                    &[],
+                )
+            },
+        );
         let mut ctx = RequestContext::builder()
             .request_id(request_id)
             .thread_id(identity.thread_id)
@@ -1330,11 +1344,7 @@ impl Lifecycle {
             .body_bytes(ingress.frame.clone())
             .canonical_model_id(canonical_model.clone())
             .requested_service_tier(service_tier.map(str::to_owned))
-            .cache_pricing(cache_pricing_summary_for_model(
-                cc_lb_pricing::global_catalog(),
-                &canonical_model,
-                service_tier,
-            ))
+            .cache_pricing(cache_pricing)
             .build();
         let principal = Principal {
             id: auth.principal_id().to_owned(),
@@ -2319,10 +2329,18 @@ impl Lifecycle {
         };
         ctx.thread_id = cache_metadata.thread_id.clone();
         ctx.requested_service_tier = cache_metadata.requested_service_tier.clone();
-        ctx.cache_pricing = cache_pricing_summary_for_model(
+        ctx.cache_pricing = cache_pricing_summary_for_model_with_estimator(
             cc_lb_pricing::global_catalog(),
             &ctx.canonical_model_id,
             ctx.requested_service_tier.as_deref(),
+            || {
+                estimate_routing_gross_prompt_tokens(
+                    body_view.value(),
+                    &ctx.canonical_model_id,
+                    Some(request_capability),
+                    &ctx.cache_breakpoints,
+                )
+            },
         );
 
         // Authentication was already recorded before the body-dependent exits

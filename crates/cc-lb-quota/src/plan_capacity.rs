@@ -16,6 +16,7 @@ pub const PRO_CAPACITY_RATIO: f64 = 1.0;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TierKey {
+    Free,
     Pro,
     TeamStandard,
     Max5x,
@@ -26,6 +27,7 @@ pub enum TierKey {
 impl TierKey {
     pub const fn as_str(self) -> &'static str {
         match self {
+            TierKey::Free => "free",
             TierKey::Pro => "pro",
             TierKey::TeamStandard => "team_standard",
             TierKey::Max5x => "max_5x",
@@ -36,6 +38,8 @@ impl TierKey {
 
     pub const fn seed_pro_relative_ratio(self) -> f64 {
         match self {
+            // Anthropic documents Claude Pro as providing at least 5x Free capacity.
+            TierKey::Free => 0.2,
             TierKey::Pro => 1.0,
             TierKey::TeamStandard => 1.25,
             TierKey::Max5x => 5.0,
@@ -67,6 +71,7 @@ impl FromStr for TierKey {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
+            "free" => Ok(TierKey::Free),
             "pro" => Ok(TierKey::Pro),
             "team_standard" => Ok(TierKey::TeamStandard),
             "max_5x" => Ok(TierKey::Max5x),
@@ -140,6 +145,9 @@ pub fn classify_plan_tier(
         || organization_type == "claude_pro"
     {
         return Known(TierKey::Pro);
+    }
+    if organization_type == "claude_free" {
+        return Known(TierKey::Free);
     }
     Unknown
 }

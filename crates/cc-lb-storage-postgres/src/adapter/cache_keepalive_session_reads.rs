@@ -1120,6 +1120,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                        f.prefix_hash,
                        f.session_key_hash AS follow_up_session_key_hash,
                        f.cache_read_input_tokens AS follow_up_cache_read_input_tokens,
+                       f.gross_prompt_tokens AS follow_up_gross_prompt_tokens,
                        f.request_start_ms AS follow_up_request_start_ms,
                        ROW_NUMBER() OVER (
                            PARTITION BY r.cycle_id
@@ -1150,13 +1151,14 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
              selected_follow_ups AS (
                 SELECT cycle_id, principal_id, upstream_id, model, prefix_hash,
                        follow_up_session_key_hash, follow_up_cache_read_input_tokens,
-                       follow_up_request_start_ms
+                       follow_up_gross_prompt_tokens, follow_up_request_start_ms
                 FROM qualifying_follow_ups
                 WHERE follow_up_rn = 1
              ),
              proven AS (
                 SELECT r.*,
                        f.follow_up_request_start_ms,
+                       f.follow_up_gross_prompt_tokens,
                        LEAST(f.follow_up_cache_read_input_tokens, r.kept_tokens) AS avoided_tokens,
                        ROW_NUMBER() OVER (
                            PARTITION BY r.cycle_id
@@ -1192,12 +1194,13 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                 WHERE r.rn = 1
              )
              SELECT r.model, r.ttl, r.saved,
+                    CASE WHEN r.saved THEN r.follow_up_gross_prompt_tokens ELSE NULL END AS follow_up_gross_prompt_tokens,
                     CASE WHEN r.saved THEN SUM(r.avoided_tokens)::BIGINT ELSE 0 END AS avoided_cache_read_tokens,
                     COUNT(*) AS observed_cycles
              FROM outcomes r
              WHERE NOT r.saved OR $2 IS NULL OR r.turn_start_ms >= $2
-             GROUP BY r.model, r.ttl, r.saved, r.avoided_tokens
-             ORDER BY r.model, r.ttl, r.saved, r.avoided_tokens",
+             GROUP BY r.model, r.ttl, r.saved, r.avoided_tokens, follow_up_gross_prompt_tokens
+             ORDER BY r.model, r.ttl, r.saved, r.avoided_tokens, follow_up_gross_prompt_tokens",
         ))
         .bind(principal_id)
         .bind(horizon_start_ms)
@@ -1229,6 +1232,16 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                         .try_get::<String, _>("ttl")
                         .map_err(map_sqlx_error)?,
                 )?,
+                follow_up_gross_prompt_tokens: group_row
+                    .try_get::<Option<i64>, _>("follow_up_gross_prompt_tokens")
+                    .map_err(map_sqlx_error)?
+                    .map(|value| {
+                        u64::try_from(value).map_err(|_| StorageError::Corrupted {
+                            message: "negative cache keepalive follow_up_gross_prompt_tokens"
+                                .to_owned(),
+                        })
+                    })
+                    .transpose()?,
                 avoided_cache_read_tokens: u64::try_from(
                     group_row
                         .try_get::<i64, _>("avoided_cache_read_tokens")
@@ -1366,6 +1379,15 @@ fn postgres_evidence_from_row(
             .map(|value| {
                 u64::try_from(value).map_err(|_| StorageError::Corrupted {
                     message: "negative cache keepalive evidence cache_read_input_tokens".to_owned(),
+                })
+            })
+            .transpose()?,
+        gross_prompt_tokens: row
+            .try_get::<Option<i64>, _>("gross_prompt_tokens")
+            .map_err(map_sqlx_error)?
+            .map(|value| {
+                u64::try_from(value).map_err(|_| StorageError::Corrupted {
+                    message: "negative cache keepalive evidence gross_prompt_tokens".to_owned(),
                 })
             })
             .transpose()?,

@@ -1360,8 +1360,8 @@ async fn insert_keepalive_evidence_in_tx(
     sqlx::query(
         "INSERT INTO cache_keepalive_evidence \
          (evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_fingerprint, prefix_hash, prefix_policy_version, prefix_schema_version,
-          principal_id, upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros, request_ref, event_ref, created_at_ms, session_key_hash, cycle_anchor_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          principal_id, upstream_id, model, ttl, hit_miss, cache_read_input_tokens, gross_prompt_tokens, cost_micros, request_ref, event_ref, created_at_ms, session_key_hash, cycle_anchor_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(evidence_id) DO NOTHING",
     )
     .bind(&row.evidence_id)
@@ -1383,6 +1383,11 @@ async fn insert_keepalive_evidence_in_tx(
     .bind(
         row.cache_read_input_tokens
             .map(|value| u64_to_i64(value, "cache keepalive evidence cache_read_input_tokens"))
+            .transpose()?,
+    )
+    .bind(
+        row.gross_prompt_tokens
+            .map(|value| u64_to_i64(value, "cache keepalive evidence gross_prompt_tokens"))
             .transpose()?,
     )
     .bind(row.cost_micros)

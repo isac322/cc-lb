@@ -2236,6 +2236,7 @@ fn email_local_part(email: &str) -> Option<&str> {
 
 fn short_org_type(org_type: &str) -> Option<&'static str> {
     match org_type {
+        "claude_free" => Some("free"),
         "claude_max" => Some("max"),
         "claude_team" => Some("team"),
         "claude_pro" => Some("pro"),
@@ -3577,6 +3578,17 @@ mod tests {
         assert_eq!(
             suggest_name(&meta, meta.account_email.as_deref()),
             "operator-max-20x"
+        );
+
+        let free_meta = org_meta(
+            Some("Example's Organization"),
+            Some("claude_free"),
+            None,
+            Some("operator@example.com"),
+        );
+        assert_eq!(
+            suggest_name(&free_meta, free_meta.account_email.as_deref()),
+            "operator-free"
         );
     }
 

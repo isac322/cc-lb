@@ -90,6 +90,7 @@ impl SchedulerDispatch {
                 ttl: record.ttl,
                 hit_miss: Some(hit_miss.to_owned()),
                 cache_read_input_tokens: Some(finalization.usage.cache_read_input_tokens),
+                gross_prompt_tokens: None,
                 cost_micros: actual_cost_micros,
                 request_ref: Some(event_id.clone()),
                 event_ref: Some(source_ref_id.to_owned()),

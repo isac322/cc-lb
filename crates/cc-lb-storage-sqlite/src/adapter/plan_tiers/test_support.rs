@@ -24,7 +24,12 @@ pub(super) async fn exercise_plan_tier_store(storage: &SqliteStorage) {
         .list_current_plan_tier_ratios()
         .await
         .expect("list seeded ratios");
-    assert_eq!(seeded.len(), 5);
+    assert_eq!(seeded.len(), 6);
+    assert!(
+        seeded
+            .iter()
+            .any(|record| record.tier_key == "free" && record.pro_relative_ratio == 0.2)
+    );
     assert!(
         seeded
             .iter()
@@ -39,6 +44,16 @@ pub(super) async fn exercise_plan_tier_store(storage: &SqliteStorage) {
     );
 
     let upstream_id = Uuid::from_u128(42);
+    let free_upstream = upstream_record(
+        upstream_id,
+        Some("free"),
+        TierResolutionSource::Builtin,
+        2_000,
+    );
+    storage
+        .append_upstream_plan_tier(&free_upstream)
+        .await
+        .expect("append free upstream");
     let upstream = upstream_record(
         upstream_id,
         Some("max_5x"),

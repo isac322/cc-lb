@@ -75,8 +75,25 @@ fn team_rate_fallback_precedes_unknown_seat_classification() {
 }
 
 #[test]
+fn classifies_free_tier_from_organization_type() {
+    assert_eq!(
+        classify_plan_tier(Some("claude_free"), Some("default_claude_ai"), None),
+        PlanTierClassification::Known(TierKey::Free)
+    );
+    assert_eq!(
+        classify_plan_tier(Some("claude_free"), None, None),
+        PlanTierClassification::Known(TierKey::Free)
+    );
+    assert_eq!(
+        plan_capacity_ratio(Some("claude_free"), Some("default_claude_ai"), None),
+        0.2
+    );
+}
+
+#[test]
 fn tier_strings_and_seed_ratios_are_canonical() {
     let expected = [
+        (TierKey::Free, 0.2),
         (TierKey::Pro, 1.0),
         (TierKey::TeamStandard, 1.25),
         (TierKey::Max5x, 5.0),

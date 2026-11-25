@@ -1001,12 +1001,16 @@ fn activity_turn(
                 .saturating_add(record.cache_creation_input_tokens),
         );
     let ttl = renewal_evidence.map_or(ttl, |renewal| renewal.ttl);
+    let follow_up_gross_prompt_tokens = cycle
+        .as_ref()
+        .and_then(|cycle| cycle.follow_up)
+        .and_then(|follow_up| follow_up.gross_prompt_tokens);
     let pnl = evidence_known
         .then_some(record.cost_micros)
         .flatten()
         .and_then(|spent_micros| {
             let rates = if followed_up {
-                rates_from_catalog(catalog, &record.model, ttl)
+                rates_from_catalog(catalog, &record.model, ttl, follow_up_gross_prompt_tokens)
             } else {
                 Some(economics::CacheKeepalivePnlRates {
                     avoided_micros_per_million: 0,

@@ -1105,6 +1105,14 @@ fn default_fallback_contains_current_anthropic_pricing() {
             50_000_000,
         ),
         (
+            "claude-opus-5-5",
+            4_000_000,
+            5_000_000,
+            8_000_000,
+            200_000,
+            20_000_000,
+        ),
+        (
             "claude-opus-5",
             5_000_000,
             6_250_000,
@@ -1145,6 +1153,14 @@ fn default_fallback_contains_current_anthropic_pricing() {
             25_000_000,
         ),
         (
+            "claude-sonnet-5-5",
+            2_000_000,
+            2_500_000,
+            4_000_000,
+            100_000,
+            10_000_000,
+        ),
+        (
             "claude-sonnet-5",
             3_000_000,
             3_750_000,
@@ -1167,6 +1183,14 @@ fn default_fallback_contains_current_anthropic_pricing() {
             6_000_000,
             300_000,
             15_000_000,
+        ),
+        (
+            "claude-haiku-5-5",
+            100_000,
+            125_000,
+            200_000,
+            10_000,
+            500_000,
         ),
         (
             "claude-haiku-4-5",
@@ -1216,6 +1240,139 @@ fn default_fallback_contains_current_anthropic_pricing() {
             .filter(|model| model.starts_with("claude-fable"))
             .count(),
         1
+    );
+    assert!(!snapshot.above_tokens_rates.contains_key("claude-opus-5-5"));
+    assert!(
+        !snapshot
+            .above_tokens_rates
+            .contains_key("claude-sonnet-5-5")
+    );
+}
+
+#[test]
+fn default_fallback_haiku_5_5_applies_5x_band_above_100k() {
+    let catalog = cc_lb_pricing::PriceCatalog::new_empty();
+    let clock = cc_lb_clock::SystemClock;
+
+    install_default_fallback_if_uninitialized(&catalog, &clock);
+
+    let snapshot = catalog.current();
+    let bands = snapshot
+        .above_tokens_rates
+        .get("claude-haiku-5-5")
+        .expect("claude-haiku-5-5 threshold bands exist");
+    let band = bands
+        .get(&100_000)
+        .expect("claude-haiku-5-5 100k threshold band exists");
+    assert_eq!(
+        band.default
+            .input_per_million_usd
+            .map(cc_lb_pricing::UsdPerMillion::as_micros_usd),
+        Some(500_000)
+    );
+    assert_eq!(
+        band.default
+            .output_per_million_usd
+            .map(cc_lb_pricing::UsdPerMillion::as_micros_usd),
+        Some(2_500_000)
+    );
+    assert_eq!(
+        band.default
+            .cache_creation_per_million_usd
+            .map(cc_lb_pricing::UsdPerMillion::as_micros_usd),
+        Some(625_000)
+    );
+    assert_eq!(
+        band.default
+            .cache_read_per_million_usd
+            .map(cc_lb_pricing::UsdPerMillion::as_micros_usd),
+        Some(50_000)
+    );
+
+    // At 100,000 gross input tokens: base rates ($0.10 in / $0.50 out per MTok).
+    assert_eq!(
+        catalog.estimate_max("claude-haiku-5-5", 100_000, 0, None),
+        Some(10_000)
+    );
+    assert_eq!(
+        catalog.estimate_max("claude-haiku-5-5", 100_000, 1_000_000, None),
+        Some(510_000)
+    );
+
+    // Strictly above 100,000 gross input tokens: 5x rates ($0.50 in / $2.50 out per MTok).
+    assert_eq!(
+        catalog.estimate_max("claude-haiku-5-5", 100_001, 0, None),
+        Some(50_000)
+    );
+    assert_eq!(
+        catalog.estimate_max("claude-haiku-5-5", 120_000, 0, None),
+        Some(60_000)
+    );
+    assert_eq!(
+        catalog.estimate_max("claude-haiku-5-5", 100_001, 1_000_000, None),
+        Some(2_550_000)
+    );
+
+    // Cache-bearing prompts cross the 100,000 threshold based on gross input tokens.
+    assert_eq!(
+        catalog.estimate_max_with_cache("claude-haiku-5-5", 80_000, 0, 20_000, false, None),
+        Some(10_500)
+    );
+    assert_eq!(
+        catalog.estimate_max_with_cache("claude-haiku-5-5", 100_000, 0, 20_000, false, None),
+        Some(62_500)
+    );
+    assert_eq!(
+        catalog.estimate_max_with_local_cache(
+            "claude-haiku-5-5",
+            cc_lb_pricing::LocalCacheInputEstimate {
+                uncached_input_tokens: 0,
+                cache_prefix_5m_tokens: 100_000,
+                cache_prefix_1h_tokens: 0,
+            },
+            0,
+            None,
+        ),
+        Some(12_500)
+    );
+    assert_eq!(
+        catalog.estimate_max_with_local_cache(
+            "claude-haiku-5-5",
+            cc_lb_pricing::LocalCacheInputEstimate {
+                uncached_input_tokens: 1,
+                cache_prefix_5m_tokens: 100_000,
+                cache_prefix_1h_tokens: 0,
+            },
+            0,
+            None,
+        ),
+        Some(62_500)
+    );
+    assert_eq!(
+        catalog.estimate_max_with_local_cache(
+            "claude-haiku-5-5",
+            cc_lb_pricing::LocalCacheInputEstimate {
+                uncached_input_tokens: 0,
+                cache_prefix_5m_tokens: 0,
+                cache_prefix_1h_tokens: 100_000,
+            },
+            0,
+            None,
+        ),
+        Some(20_000)
+    );
+    assert_eq!(
+        catalog.estimate_max_with_local_cache(
+            "claude-haiku-5-5",
+            cc_lb_pricing::LocalCacheInputEstimate {
+                uncached_input_tokens: 1,
+                cache_prefix_5m_tokens: 0,
+                cache_prefix_1h_tokens: 100_000,
+            },
+            0,
+            None,
+        ),
+        Some(100_000)
     );
 }
 

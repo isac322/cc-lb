@@ -188,6 +188,13 @@ async fn list_cache_keepalive(
 fn summary_from_aggregate(
     aggregate: cc_lb_storage_api::CacheKeepaliveSummaryAggregate,
 ) -> view::CacheKeepaliveSummaryResponse {
+    summary_from_aggregate_with_catalog(aggregate, cc_lb_pricing::global_catalog().as_ref())
+}
+
+fn summary_from_aggregate_with_catalog(
+    aggregate: cc_lb_storage_api::CacheKeepaliveSummaryAggregate,
+    catalog: &cc_lb_pricing::PriceCatalog,
+) -> view::CacheKeepaliveSummaryResponse {
     let mut avoided_micros = 0_i64;
     let mut pricing_complete = aggregate.unknown_costs == 0;
     for group in &aggregate.groups {
@@ -195,9 +202,10 @@ fn summary_from_aggregate(
             continue;
         }
         let Some(rates) = rates_from_catalog(
-            cc_lb_pricing::global_catalog().as_ref(),
+            catalog,
             &group.model,
             group.ttl,
+            group.follow_up_gross_prompt_tokens,
         ) else {
             pricing_complete = false;
             continue;

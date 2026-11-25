@@ -85,10 +85,13 @@ impl ProviderAdapter for AnthropicProviderAdapter {
 fn canonical_anthropic_model_id(requested: &str) -> &str {
     match requested {
         "claude-fable-5" => "claude-fable-5",
+        "claude-opus-5-5" => "claude-opus-5-5",
         "claude-opus-5" => "claude-opus-5",
         "claude-mythos-5" => "claude-mythos-5",
         "claude-mythos-preview" => "claude-mythos-preview",
+        "claude-sonnet-5-5" => "claude-sonnet-5-5",
         "claude-sonnet-5" => "claude-sonnet-5",
+        "claude-haiku-5-5" => "claude-haiku-5-5",
         "claude-sonnet-4-6" => "claude-sonnet-4-6",
         "claude-opus-4-6" => "claude-opus-4-6",
         "claude-opus-4-7" => "claude-opus-4-7",
@@ -130,8 +133,9 @@ fn is_dated_model(model: &str) -> bool {
 
 fn anthropic_cache_threshold_tokens(canonical: &str) -> Option<usize> {
     match canonical {
-        // Opus 5 / Fable 5 / Mythos 5: 512
-        "claude-opus-5" | "claude-fable-5" | "claude-mythos-5" => Some(512),
+        // Claude 5.5 (Opus/Sonnet/Haiku) / Opus 5 / Fable 5 / Mythos 5: 512
+        "claude-opus-5-5" | "claude-sonnet-5-5" | "claude-haiku-5-5" | "claude-opus-5"
+        | "claude-fable-5" | "claude-mythos-5" => Some(512),
 
         // Opus 4.8 / Sonnet 5 / Sonnet 4.6 / Sonnet 4.5 / Opus 4.1 / Opus 4 / Sonnet 4: 1024
         "claude-opus-4-8-20250514"
@@ -193,7 +197,28 @@ mod tests {
             adapter.canonical_model_id("claude-haiku-4-5"),
             "claude-haiku-4-5-20251001"
         );
+        assert_eq!(
+            adapter.canonical_model_id("claude-opus-5-5"),
+            "claude-opus-5-5"
+        );
+        assert_eq!(
+            adapter.canonical_model_id("claude-sonnet-5-5"),
+            "claude-sonnet-5-5"
+        );
+        assert_eq!(
+            adapter.canonical_model_id("claude-haiku-5-5"),
+            "claude-haiku-5-5"
+        );
         assert_eq!(adapter.cache_threshold_tokens("claude-opus-5"), Some(512));
+        assert_eq!(adapter.cache_threshold_tokens("claude-opus-5-5"), Some(512));
+        assert_eq!(
+            adapter.cache_threshold_tokens("claude-sonnet-5-5"),
+            Some(512)
+        );
+        assert_eq!(
+            adapter.cache_threshold_tokens("claude-haiku-5-5"),
+            Some(512)
+        );
         assert_eq!(
             adapter.cache_threshold_tokens("claude-sonnet-4-5-20250929"),
             Some(1024)

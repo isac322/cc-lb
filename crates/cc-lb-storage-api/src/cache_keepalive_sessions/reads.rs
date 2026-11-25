@@ -186,6 +186,8 @@ pub struct CacheKeepaliveEvidenceRecord {
     pub ttl: CacheTtl,
     pub hit_miss: Option<String>,
     pub cache_read_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub gross_prompt_tokens: Option<u64>,
     pub cost_micros: Option<i64>,
     pub request_ref: Option<String>,
     pub event_ref: Option<String>,
@@ -203,6 +205,7 @@ pub struct CacheKeepaliveEvidenceRecord {
 pub struct CacheKeepaliveSummaryGroup {
     pub model: String,
     pub ttl: CacheTtl,
+    pub follow_up_gross_prompt_tokens: Option<u64>,
     pub avoided_cache_read_tokens: u64,
     pub renewals: u64,
 }
