@@ -2065,6 +2065,7 @@ async fn relay_responses_websocket(
                 .min();
             if state.drain_controller.is_draining()
                 && !gateway.has_active_turns()
+                && pending_deadline.is_none()
                 && pending_connects.is_empty()
                 && deferred_for_session_owner.is_empty()
                 && dispatches.is_empty()
@@ -2107,7 +2108,10 @@ async fn relay_responses_websocket(
                             break 'relay;
                         }
                     }
-                    if !gateway.has_active_turns() && dispatches.is_empty() {
+                    if !gateway.has_active_turns()
+                        && gateway.next_pending_error_deadline().is_none()
+                        && dispatches.is_empty()
+                    {
                         break 'relay;
                     }
                 }
