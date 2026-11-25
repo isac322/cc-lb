@@ -18,6 +18,7 @@ pub struct CacheKeepaliveEvidenceRow {
     pub ttl: CacheTtl,
     pub hit_miss: Option<String>,
     pub cache_read_input_tokens: Option<u64>,
+    pub gross_prompt_tokens: Option<u64>,
     pub cost_micros: Option<i64>,
     pub request_ref: Option<String>,
     pub event_ref: Option<String>,

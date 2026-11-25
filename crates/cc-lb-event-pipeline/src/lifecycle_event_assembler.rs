@@ -925,6 +925,12 @@ fn follow_up_evidence(
     let Some(request_start_ms) = row.ts_ms else {
         return Vec::new();
     };
+    let gross_prompt_tokens = row.input_tokens.map(|input| {
+        input
+            .saturating_add(cache_read_input_tokens)
+            .saturating_add(row.cache_creation_input_tokens.unwrap_or(0))
+            .saturating_add(row.cache_write_input_tokens.unwrap_or(0))
+    });
     let fingerprint = (!cache_breakpoints.is_empty()).then(|| {
         let mut hasher = Sha256::new();
         hasher.update(b"request-cache-breakpoint-v1");
@@ -991,6 +997,7 @@ fn follow_up_evidence(
                 ttl: cc_lb_storage_api::CacheTtl::from_ttl_str(ttl),
                 hit_miss: Some("hit".to_owned()),
                 cache_read_input_tokens: Some(cache_read_input_tokens),
+                gross_prompt_tokens,
                 cost_micros: row.cost_usd_micros,
                 request_ref: Some(row.request_id.clone()),
                 event_ref: row.source_ref_id.clone().or_else(|| row.event_id.clone()),
@@ -1022,6 +1029,7 @@ fn follow_up_evidence(
                 .unwrap_or(cc_lb_storage_api::CacheTtl::Ttl5m),
             hit_miss: Some("hit".to_owned()),
             cache_read_input_tokens: Some(cache_read_input_tokens),
+            gross_prompt_tokens,
             cost_micros: row.cost_usd_micros,
             request_ref: Some(row.request_id.clone()),
             event_ref: row.source_ref_id.clone().or_else(|| row.event_id.clone()),
@@ -6458,6 +6466,8 @@ mod tests {
             principal_id: Some("principal-1".to_owned()),
             upstream_id: Some(Uuid::from_u128(1)),
             model: Some("claude-sonnet-4-5".to_owned()),
+            input_tokens: Some(25_000),
+            cache_creation_input_tokens: Some(95_000),
             cache_read_input_tokens: Some(100),
             cost_usd_micros: Some(20),
             keepalive_session_key_hash: Some("principal-1/thread:session-1".to_owned()),
@@ -6482,6 +6492,7 @@ mod tests {
                 ttl: cc_lb_storage_api::CacheTtl::Ttl5m,
                 hit_miss: Some("hit".to_owned()),
                 cache_read_input_tokens: Some(100),
+                gross_prompt_tokens: Some(120_100),
                 cost_micros: Some(20),
                 request_ref: Some("req-session".to_owned()),
                 event_ref: Some("source-session".to_owned()),
@@ -6489,6 +6500,9 @@ mod tests {
                 cycle_anchor_ms: None,
             },
         );
+        row.input_tokens = None;
+        let without_input = follow_up_evidence(&row, &[]);
+        assert_eq!(without_input[0].gross_prompt_tokens, None);
         row.cache_read_input_tokens = Some(0);
         assert!(follow_up_evidence(&row, &[]).is_empty());
         row.cache_read_input_tokens = None;
@@ -6819,6 +6833,7 @@ mod keepalive_filter_diagnostics_tests {
                             ttl: cc_lb_storage_api::CacheTtl::Ttl5m,
                             hit_miss: Some("hit".to_owned()),
                             cache_read_input_tokens: Some(10),
+                            gross_prompt_tokens: None,
                             cost_micros: Some(1),
                             request_ref: Some(id.to_owned()),
                             event_ref: Some(id.to_owned()),

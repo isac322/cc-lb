@@ -980,6 +980,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
              matching AS (
                 SELECT r.*, f.request_start_ms AS follow_up_start_ms,
                        f.cache_read_input_tokens AS follow_up_tokens,
+                       f.gross_prompt_tokens AS follow_up_gross_prompt_tokens,
                        c.anchor_ms, c.incomplete,
                        ROW_NUMBER() OVER (
                            PARTITION BY r.principal_id, r.cycle_key
@@ -1012,16 +1013,18 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                             WHEN CAST(strftime('%s', 'now') AS INTEGER) * 1000 < c.open_until_ms THEN 'pending'
                             ELSE 'no_follow_up' END AS outcome,
                        m.in_horizon,
-                       MIN(COALESCE(m.follow_up_tokens, 0), COALESCE(m.kept_tokens, 0)) AS avoided_tokens
+                       MIN(COALESCE(m.follow_up_tokens, 0), COALESCE(m.kept_tokens, 0)) AS avoided_tokens,
+                       m.follow_up_gross_prompt_tokens
                 FROM cycles c LEFT JOIN matching m
                   ON m.principal_id = c.principal_id AND m.cycle_key = c.cycle_key AND m.rn = 1
              )
-             SELECT outcome, model, ttl, SUM(avoided_tokens) AS avoided_cache_read_tokens,
+             SELECT outcome, model, ttl, follow_up_gross_prompt_tokens,
+                    SUM(avoided_tokens) AS avoided_cache_read_tokens,
                     COUNT(*) AS observed_cycles
              FROM outcomes
              WHERE outcome <> 'saved' OR in_horizon
-             GROUP BY outcome, model, ttl, avoided_tokens
-             ORDER BY outcome, model, ttl, avoided_tokens",
+             GROUP BY outcome, model, ttl, avoided_tokens, follow_up_gross_prompt_tokens
+             ORDER BY outcome, model, ttl, avoided_tokens, follow_up_gross_prompt_tokens",
         ))
         .bind(principal_id)
         .bind(horizon_start_ms)
@@ -1060,6 +1063,11 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                     ttl: ttl_from_evidence_db(
                         &row.try_get::<String, _>("ttl").map_err(map_sqlx_error)?,
                     )?,
+                    follow_up_gross_prompt_tokens: row
+                        .try_get::<Option<i64>, _>("follow_up_gross_prompt_tokens")
+                        .map_err(map_sqlx_error)?
+                        .map(i64_to_u64_count)
+                        .transpose()?,
                     avoided_cache_read_tokens: i64_to_u64_count(
                         row.try_get("avoided_cache_read_tokens")
                             .map_err(map_sqlx_error)?,
@@ -1205,6 +1213,11 @@ fn sqlite_evidence_from_row(
         hit_miss: row.try_get("hit_miss").map_err(map_sqlx_error)?,
         cache_read_input_tokens: row
             .try_get::<Option<i64>, _>("cache_read_input_tokens")
+            .map_err(map_sqlx_error)?
+            .map(i64_to_u64_count)
+            .transpose()?,
+        gross_prompt_tokens: row
+            .try_get::<Option<i64>, _>("gross_prompt_tokens")
             .map_err(map_sqlx_error)?
             .map(i64_to_u64_count)
             .transpose()?,

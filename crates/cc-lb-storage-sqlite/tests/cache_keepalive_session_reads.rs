@@ -1469,6 +1469,7 @@ fn economics_projection(
             ttl: CacheTtl::Ttl5m,
             hit_miss: Some(hit_miss.to_owned()),
             cache_read_input_tokens: Some(turn.cache_read_input_tokens),
+            gross_prompt_tokens: None,
             cost_micros: Some(cost_micros),
             request_ref: Some(source_ref_id.to_owned()),
             event_ref: Some(source_ref_id.to_owned()),
@@ -1498,6 +1499,7 @@ fn follow_up_evidence(
         ttl: CacheTtl::Ttl5m,
         hit_miss: Some("hit".to_owned()),
         cache_read_input_tokens: Some(20_000),
+        gross_prompt_tokens: None,
         cost_micros: Some(0),
         request_ref: Some(format!("follow-up-request-{source_ref_id}")),
         event_ref: Some(format!("follow-up-event-{source_ref_id}")),
@@ -3583,6 +3585,90 @@ async fn replacing_session_cannot_change_historical_legacy_anchor_or_outcome() {
                 .all(|row| row.cycle_anchor_ms.is_none())
         );
     }
+}
+
+#[tokio::test]
+async fn summary_aggregate_and_evidence_preserve_follow_up_gross_prompt_tokens() {
+    let (_directory, storage) = storage().await;
+    for (idx, (id, ts, gross_prompt_tokens)) in [
+        ("haiku-above", 1_000_u64, Some(120_000_u64)),
+        ("haiku-below", 1_010_u64, Some(80_000_u64)),
+        ("haiku-legacy", 1_020_u64, None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let cycle_id = Uuid::from_u128(93_000 + idx as u128);
+        let mut projection = economics_projection(id, Some(cycle_id), ts, "hit", 1_000);
+        let turn = projection.turn.as_mut().expect("renewal turn");
+        turn.model = "claude-haiku-5-5".to_owned();
+        turn.cache_read_input_tokens = 20_000;
+        let prefix_hash = format!("prefix-{id}");
+        projection.evidence[0].model = "claude-haiku-5-5".to_owned();
+        projection.evidence[0].cache_read_input_tokens = Some(20_000);
+        projection.evidence[0].prefix_hash = Some(prefix_hash.clone());
+        let mut follow_up = follow_up_evidence(id, ts, "claude-haiku-5-5");
+        follow_up.prefix_hash = Some(prefix_hash);
+        follow_up.gross_prompt_tokens = gross_prompt_tokens;
+        projection.evidence.push(follow_up);
+        storage
+            .append_request_event_with_projections(&event(id, ts), &projection)
+            .await
+            .expect("persist haiku evidence");
+    }
+
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 2_000_000, None)
+        .await
+        .expect("aggregate with gross_prompt_tokens");
+    assert_eq!(aggregate.groups.len(), 3);
+    let mut prompt_buckets: Vec<Option<u64>> = aggregate
+        .groups
+        .iter()
+        .map(|group| {
+            assert_eq!(group.model, "claude-haiku-5-5");
+            assert_eq!(group.renewals, 1);
+            assert_eq!(group.avoided_cache_read_tokens, 20_000);
+            group.follow_up_gross_prompt_tokens
+        })
+        .collect();
+    prompt_buckets.sort();
+    assert_eq!(prompt_buckets, vec![None, Some(80_000), Some(120_000)]);
+
+    let evidence = storage
+        .list_cache_keepalive_evidence_for_activity(
+            PRINCIPAL_ID,
+            &[
+                Uuid::from_u128(93_000),
+                Uuid::from_u128(93_001),
+                Uuid::from_u128(93_002),
+            ],
+            &[],
+            0,
+            2_000_000,
+        )
+        .await
+        .expect("activity evidence preserves gross_prompt_tokens");
+    let mut follow_up_prompts: Vec<(String, Option<u64>)> = evidence
+        .iter()
+        .filter(|row| row.evidence_kind == "follow_up")
+        .map(|row| (row.evidence_id.clone(), row.gross_prompt_tokens))
+        .collect();
+    follow_up_prompts.sort();
+    assert_eq!(
+        follow_up_prompts,
+        vec![
+            ("follow-up-haiku-above".to_owned(), Some(120_000)),
+            ("follow-up-haiku-below".to_owned(), Some(80_000)),
+            ("follow-up-haiku-legacy".to_owned(), None),
+        ]
+    );
+    assert!(
+        evidence
+            .iter()
+            .filter(|row| row.evidence_kind == "renewal")
+            .all(|row| row.gross_prompt_tokens.is_none())
+    );
 }
 
 #[tokio::test]

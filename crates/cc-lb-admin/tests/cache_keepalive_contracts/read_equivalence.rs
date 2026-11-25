@@ -1067,6 +1067,298 @@ async fn cleanup_removes_only_expired_sessions_from_read_surfaces() {
 }
 
 #[test]
+fn haiku_5_5_threshold_band_summary_matches_activity_and_missing_count_stays_null() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::read_equivalence::haiku_5_5_threshold_band_summary_matches_activity_and_missing_count_stays_null";
+
+    if std::env::var("CC_LB_KEEPALIVE_HAIKU_BAND_CHILD").as_deref() == Ok("1") {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build isolated Haiku threshold band runtime")
+            .block_on(assert_haiku_5_5_threshold_band_summary_matches_activity());
+        return;
+    }
+
+    let output =
+        Command::new(std::env::current_exe().expect("current integration test executable"))
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env("CC_LB_KEEPALIVE_HAIKU_BAND_CHILD", "1")
+            .output()
+            .expect("run isolated Haiku threshold band test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains(TEST_NAME) && stdout.contains("1 passed"),
+        "isolated Haiku threshold band test did not execute successfully\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+async fn assert_haiku_5_5_threshold_band_summary_matches_activity() {
+    use cc_lb_storage_api::{
+        CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow, CacheKeepaliveEvidenceRow,
+        CacheKeepaliveTurnRow, CacheTtl, RequestEvent, RequestEventProjections, RequestEventStore,
+    };
+
+    const MODEL: &str = "claude-haiku-5-5";
+    let mut models = HashMap::new();
+    models.insert(
+        MODEL.to_owned(),
+        Pricing {
+            native: None,
+            model: MODEL.to_owned(),
+            input_per_million_usd: UsdPerMillion::from_micros_usd(100_000),
+            output_per_million_usd: UsdPerMillion::from_micros_usd(500_000),
+            input_image_per_million_usd: None,
+            output_image_per_million_usd: None,
+            by_tier: BTreeMap::new(),
+        },
+    );
+    let mut cache_creation_per_million_usd = HashMap::new();
+    cache_creation_per_million_usd
+        .insert(MODEL.to_owned(), UsdPerMillion::from_micros_usd(125_000));
+    let mut cache_read_per_million_usd = HashMap::new();
+    cache_read_per_million_usd.insert(MODEL.to_owned(), UsdPerMillion::from_micros_usd(10_000));
+    let mut bands = BTreeMap::new();
+    bands.insert(
+        100_000,
+        cc_lb_pricing::ThresholdBand {
+            default: cc_lb_pricing::ThresholdRate {
+                input_per_million_usd: Some(UsdPerMillion::from_micros_usd(500_000)),
+                output_per_million_usd: Some(UsdPerMillion::from_micros_usd(2_500_000)),
+                cache_creation_per_million_usd: Some(UsdPerMillion::from_micros_usd(625_000)),
+                cache_read_per_million_usd: Some(UsdPerMillion::from_micros_usd(50_000)),
+            },
+            by_tier: BTreeMap::new(),
+        },
+    );
+    let mut above_tokens_rates = HashMap::new();
+    above_tokens_rates.insert(MODEL.to_owned(), bands);
+    cc_lb_pricing::global_catalog().install_snapshot(CatalogSnapshot {
+        payload_hash: "haiku-contract-threshold".to_owned(),
+        fetched_at_ms: 1,
+        models,
+        raw_json: Vec::new(),
+        cache_creation_per_million_usd,
+        cache_read_per_million_usd,
+        cache_creation_per_million_usd_by_tier: HashMap::new(),
+        cache_read_per_million_usd_by_tier: HashMap::new(),
+        above_tokens_rates,
+        status: CatalogStatus::Ok,
+    });
+
+    let seed_cycle = |storage: std::sync::Arc<cc_lb_storage_sqlite::SqliteStorage>,
+                      principal_id: &str,
+                      session_id: &str,
+                      cycle_id: Uuid,
+                      gross_prompt_tokens: Option<u64>| {
+        let principal_id = principal_id.to_owned();
+        let session_id = session_id.to_owned();
+        async move {
+            let upstream_id = Uuid::from_u128(0xa11ce);
+            let ts = NOW_UNIX_SECS - 100;
+            let source_ref_id = format!("{session_id}:1");
+            let prefix_hash = format!("prefix-{session_id}");
+            let config = CacheKeepaliveConfigSnapshot {
+                refresh_lead_time_5m_secs: 30,
+                refresh_lead_time_1h_secs: 300,
+                max_refreshes_per_session: 12,
+                max_total_duration_secs: 14_400,
+                snapshot_max_bytes: 524_288,
+            };
+            storage
+                .replace_from_real_request_fenced(
+                    &cc_lb_storage_api::CacheKeepaliveReplaceRequest {
+                        session_key_hash: session_id.clone(),
+                        principal_id: principal_id.clone(),
+                        accounting_key_id: None,
+                        upstream_id,
+                        cycle_id,
+                        cache_anchor_at_unix_secs: ts - 270,
+                        ttl: CacheTtl::Ttl5m,
+                        run_at_unix_secs: ts + 270,
+                        expires_at_unix_secs: ts + 300,
+                        encrypted_payload: vec![1],
+                        display_reason: "agent-in-turn".to_owned(),
+                        config_snapshot: config.clone(),
+                        now_unix_secs: ts,
+                    },
+                    None,
+                )
+                .await
+                .expect("seed haiku session");
+            let event = RequestEvent {
+                ts,
+                ts_ms: Some(ts * 1_000),
+                request_id: source_ref_id.clone(),
+                source_kind: Some("renewal".to_owned()),
+                source_ref_id: Some(source_ref_id.clone()),
+                event_id: Some(format!("event-{source_ref_id}")),
+                principal_id: Some(principal_id.clone()),
+                upstream_id: Some(upstream_id),
+                model: Some(MODEL.to_owned()),
+                status: 200,
+                duration_ms: 10,
+                ..RequestEvent::default()
+            };
+            let renewal = CacheKeepaliveEvidenceRow {
+                evidence_id: format!("renewal-{session_id}"),
+                cycle_id: Some(cycle_id),
+                evidence_kind: "renewal".to_owned(),
+                request_start_ms: ts * 1_000,
+                prefix_fingerprint: None,
+                prefix_hash: Some(prefix_hash.clone()),
+                prefix_policy_version: Some("policy".to_owned()),
+                prefix_schema_version: Some("schema".to_owned()),
+                principal_id: principal_id.clone(),
+                upstream_id,
+                model: MODEL.to_owned(),
+                ttl: CacheTtl::Ttl5m,
+                hit_miss: Some("hit".to_owned()),
+                cache_read_input_tokens: Some(20_000),
+                gross_prompt_tokens: None,
+                cost_micros: Some(1_000),
+                request_ref: None,
+                event_ref: Some(source_ref_id.clone()),
+                session_key_hash: Some(session_id.clone()),
+                cycle_anchor_ms: Some((ts - 270) * 1_000),
+            };
+            let follow_up = CacheKeepaliveEvidenceRow {
+                evidence_id: format!("followup-{session_id}"),
+                cycle_id: None,
+                evidence_kind: "follow_up".to_owned(),
+                request_start_ms: (ts + 60) * 1_000,
+                gross_prompt_tokens,
+                cost_micros: None,
+                event_ref: None,
+                cycle_anchor_ms: None,
+                ..renewal.clone()
+            };
+            let projections = RequestEventProjections {
+                turn: Some(CacheKeepaliveTurnRow {
+                    source_ref_id: source_ref_id.clone(),
+                    session_key_hash: session_id.clone(),
+                    principal_id: principal_id.clone(),
+                    accounting_key_id: None,
+                    upstream_id,
+                    cycle_id: Some(cycle_id),
+                    model: MODEL.to_owned(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    cache_creation_input_tokens_5m: 0,
+                    cache_creation_input_tokens_1h: 0,
+                    cache_read_input_tokens: 20_000,
+                    cost_micros: Some(1_000),
+                    hit_miss: "hit".to_owned(),
+                    ts,
+                }),
+                decision: CacheKeepaliveDecisionRow {
+                    source_ref_id,
+                    principal_id: principal_id.clone(),
+                    session_key_hash: Some(session_id),
+                    upstream_id,
+                    decision: "tracked".to_owned(),
+                    reason: "renewal".to_owned(),
+                    error: None,
+                    generation: 1,
+                    ttl: CacheTtl::Ttl5m,
+                    config_snapshot: Some(config),
+                    last_message_at_ms: ts * 1_000,
+                    ts,
+                },
+                evidence: vec![renewal, follow_up],
+            };
+            storage
+                .append_request_event_with_projections(&event, &projections)
+                .await
+                .expect("append haiku keepalive turn");
+        }
+    };
+
+    for (session_id, cycle_num, gross_prompt_tokens, expected_avoided, expected_saved) in [
+        (
+            "haiku-above-100k",
+            94_001_u128,
+            Some(120_000_u64),
+            Some(0.0115),
+            Some(0.0105),
+        ),
+        (
+            "haiku-below-100k",
+            94_002_u128,
+            Some(80_000_u64),
+            Some(0.0023),
+            Some(0.0013),
+        ),
+        ("haiku-missing-prompt", 94_003_u128, None, None, None),
+    ] {
+        let (_directory, storage, state, principal_id) = create_principal_id().await;
+        seed_cycle(
+            storage.clone(),
+            &principal_id,
+            session_id,
+            Uuid::from_u128(cycle_num),
+            gross_prompt_tokens,
+        )
+        .await;
+        let (list_status, list) = get_json(
+            &state,
+            &format!("/admin/v1/principals/{principal_id}/cache-keepalive?horizon=all&limit=10"),
+        )
+        .await;
+        assert_eq!(list_status, StatusCode::OK, "list {session_id}: {list:?}");
+        assert_eq!(
+            list["summary"]["total_avoided"],
+            serde_json::json!(expected_avoided),
+            "summary total_avoided for {session_id}"
+        );
+        assert_eq!(
+            list["summary"]["cost_saved"],
+            serde_json::json!(expected_saved),
+            "summary cost_saved for {session_id}"
+        );
+        assert_eq!(
+            list["rows"][0]["total_avoided"],
+            serde_json::json!(expected_avoided),
+            "row total_avoided for {session_id}"
+        );
+        assert_eq!(
+            list["rows"][0]["net_pnl"],
+            serde_json::json!(expected_saved),
+            "row net_pnl for {session_id}"
+        );
+        let (detail_status, detail) =
+            get_json(&state, &keepalive_detail_uri(&principal_id, session_id)).await;
+        assert_eq!(
+            detail_status,
+            StatusCode::OK,
+            "detail {session_id}: {detail:?}"
+        );
+        assert_eq!(
+            detail["total_avoided"],
+            serde_json::json!(expected_avoided),
+            "detail total_avoided for {session_id}"
+        );
+        assert_eq!(
+            detail["net_pnl"],
+            serde_json::json!(expected_saved),
+            "detail net_pnl for {session_id}"
+        );
+        assert_eq!(
+            detail["turns"][0]["pnl"],
+            serde_json::json!(expected_saved),
+            "detail turn pnl for {session_id}"
+        );
+        assert_eq!(detail["gaps"][0]["ending_kind"], "followup_hit");
+        assert_eq!(
+            detail["gaps"][0]["avoided_usd"],
+            serde_json::json!(expected_avoided),
+            "detail gap avoided_usd for {session_id}"
+        );
+    }
+}
+
+#[test]
 fn unknown_evidence_does_not_fabricate_pnl() {
     const TEST_NAME: &str =
         "cache_keepalive_contracts::read_equivalence::unknown_evidence_does_not_fabricate_pnl";

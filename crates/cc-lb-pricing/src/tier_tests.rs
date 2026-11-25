@@ -278,3 +278,85 @@ fn unknown_tier_falls_back_to_base_when_catalog_has_no_matching_keys() {
     // Given a future unknown tier, when no matching catalog key exists, then base prices are used.
     assert_eq!(total_for(Some("ultra"), false), 19_000_000);
 }
+
+#[test]
+fn routing_cache_pricing_for_prompt_tokens_applies_threshold_bands_and_requires_count() {
+    let catalog = PriceCatalog::new_empty();
+    let mut snapshot = tier_snapshot(false);
+    let mut bands = BTreeMap::new();
+    bands.insert(
+        100_000,
+        crate::ThresholdBand {
+            default: crate::ThresholdRate {
+                input_per_million_usd: Some(UsdPerMillion::from_whole_usd(10)),
+                output_per_million_usd: Some(UsdPerMillion::from_whole_usd(40)),
+                cache_creation_per_million_usd: Some(UsdPerMillion::from_whole_usd(20)),
+                cache_read_per_million_usd: Some(UsdPerMillion::from_whole_usd(5)),
+            },
+            by_tier: BTreeMap::new(),
+        },
+    );
+    snapshot.above_tokens_rates.insert(MODEL.to_owned(), bands);
+    catalog.install_snapshot(snapshot);
+
+    assert!(catalog.has_threshold_bands(MODEL));
+    assert!(
+        catalog
+            .routing_cache_pricing_for_prompt_tokens(MODEL, None, None)
+            .is_none(),
+        "tiered models cannot fabricate base routing rates without a gross prompt token count"
+    );
+
+    let at_boundary = catalog
+        .routing_cache_pricing_for_prompt_tokens(MODEL, None, Some(100_000))
+        .expect("at boundary resolves base band");
+    assert_eq!(
+        at_boundary.input_per_million_usd,
+        UsdPerMillion::from_whole_usd(2)
+    );
+    assert_eq!(
+        at_boundary.cache_creation_5m_per_million_usd,
+        Some(UsdPerMillion::from_whole_usd(4))
+    );
+    assert_eq!(
+        at_boundary.cache_creation_1h_per_million_usd,
+        Some(UsdPerMillion::from_whole_usd(4))
+    );
+    assert_eq!(
+        at_boundary.cache_read_per_million_usd,
+        Some(UsdPerMillion::from_whole_usd(1))
+    );
+
+    let above_boundary = catalog
+        .routing_cache_pricing_for_prompt_tokens(MODEL, None, Some(120_000))
+        .expect("above boundary resolves threshold band");
+    assert_eq!(
+        above_boundary.input_per_million_usd,
+        UsdPerMillion::from_whole_usd(10)
+    );
+    assert_eq!(
+        above_boundary.cache_creation_5m_per_million_usd,
+        Some(UsdPerMillion::from_whole_usd(20))
+    );
+    assert_eq!(
+        above_boundary.cache_creation_1h_per_million_usd,
+        Some(UsdPerMillion::from_whole_usd(20))
+    );
+    assert_eq!(
+        above_boundary.cache_read_per_million_usd,
+        Some(UsdPerMillion::from_whole_usd(5))
+    );
+
+    // Flat models still resolve without a prompt token count.
+    let flat_catalog = PriceCatalog::new_empty();
+    flat_catalog.install_snapshot(tier_snapshot(true));
+    assert!(!flat_catalog.has_threshold_bands(MODEL));
+    assert_eq!(
+        flat_catalog.routing_cache_pricing_for_prompt_tokens(MODEL, Some("priority"), None),
+        flat_catalog.routing_cache_pricing_for_prompt_tokens(
+            MODEL,
+            Some("priority"),
+            Some(120_000)
+        )
+    );
+}

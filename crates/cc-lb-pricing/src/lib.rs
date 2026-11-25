@@ -423,10 +423,40 @@ impl PriceCatalog {
             .and_then(|pricing| pricing.native)
     }
 
+    /// Returns whether the catalog defines any prompt-token threshold bands for
+    /// `model`.
+    pub fn has_threshold_bands(&self, model: &str) -> bool {
+        let snapshot = self.current();
+        let Some((model_key, _)) = snapshot
+            .models
+            .get_key_value(model)
+            .or_else(|| snapshot.models.get_key_value(&normalize_model_id(model)))
+        else {
+            return false;
+        };
+        snapshot
+            .above_tokens_rates
+            .get(model_key)
+            .is_some_and(|bands| !bands.is_empty())
+    }
+
     pub fn routing_cache_pricing(
         &self,
         model: &str,
         service_tier: Option<&str>,
+    ) -> Option<RoutingCachePricing> {
+        self.routing_cache_pricing_for_prompt_tokens(model, service_tier, Some(0))
+    }
+
+    /// Resolves cache routing prices for `model` and `service_tier`, applying
+    /// `above_tokens_rates` for `gross_input_tokens`. If the model defines
+    /// threshold bands and `gross_input_tokens` is `None`, returns `None` rather
+    /// than guessing a base band.
+    pub fn routing_cache_pricing_for_prompt_tokens(
+        &self,
+        model: &str,
+        service_tier: Option<&str>,
+        gross_input_tokens: Option<u64>,
     ) -> Option<RoutingCachePricing> {
         let snapshot = self.current();
         let (model_key, pricing) = snapshot
@@ -435,7 +465,9 @@ impl PriceCatalog {
             .or_else(|| snapshot.models.get_key_value(&normalize_model_id(model)))?;
         let tier = canonical_service_tier(service_tier);
         let rate = resolve_tier_rate(pricing, tier.as_deref());
-        let cache_creation_5m_per_million_usd = resolve_optional_price(
+        let mut input_per_million_usd = rate.input_per_million_usd;
+        let mut output_per_million_usd = rate.output_per_million_usd;
+        let mut cache_creation_5m_per_million_usd = resolve_optional_price(
             snapshot
                 .cache_creation_per_million_usd
                 .get(model_key)
@@ -445,18 +477,31 @@ impl PriceCatalog {
                 .get(model_key),
             tier.as_deref(),
         );
-        let cache_read_per_million_usd = resolve_optional_price(
+        let mut cache_read_per_million_usd = resolve_optional_price(
             snapshot.cache_read_per_million_usd.get(model_key).copied(),
             snapshot.cache_read_per_million_usd_by_tier.get(model_key),
             tier.as_deref(),
         );
-        let cache_creation_1h_per_million_usd = if cache_creation_5m_per_million_usd.is_some() {
-            Some(resolved_cache_creation_1h_price(rate.input_per_million_usd))
-        } else {
-            None
-        };
+        if let Some(bands) = snapshot
+            .above_tokens_rates
+            .get(model_key)
+            .filter(|bands| !bands.is_empty())
+        {
+            let gross_input_tokens = gross_input_tokens?;
+            crate::tier_resolver::apply_threshold_bands(
+                Some(bands),
+                gross_input_tokens,
+                tier.as_deref(),
+                &mut input_per_million_usd,
+                &mut output_per_million_usd,
+                Some(&mut cache_creation_5m_per_million_usd),
+                Some(&mut cache_read_per_million_usd),
+            );
+        }
+        let cache_creation_1h_per_million_usd = cache_creation_5m_per_million_usd
+            .map(|_| resolved_cache_creation_1h_price(input_per_million_usd));
         Some(RoutingCachePricing {
-            input_per_million_usd: rate.input_per_million_usd,
+            input_per_million_usd,
             cache_creation_5m_per_million_usd,
             cache_creation_1h_per_million_usd,
             cache_read_per_million_usd,

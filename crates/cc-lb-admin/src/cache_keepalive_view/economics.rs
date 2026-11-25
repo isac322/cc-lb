@@ -34,8 +34,10 @@ pub fn rates_from_catalog(
     catalog: &PriceCatalog,
     model: &str,
     ttl: CacheTtl,
+    gross_prompt_tokens: Option<u64>,
 ) -> Option<CacheKeepalivePnlRates> {
-    let pricing = catalog.routing_cache_pricing(model, None)?;
+    let pricing =
+        catalog.routing_cache_pricing_for_prompt_tokens(model, None, gross_prompt_tokens)?;
     let creation_micros_per_million = match ttl {
         CacheTtl::Ttl5m => pricing.cache_creation_5m_per_million_usd?,
         CacheTtl::Ttl1h => pricing.cache_creation_1h_per_million_usd?,

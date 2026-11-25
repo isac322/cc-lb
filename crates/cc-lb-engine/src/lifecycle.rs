@@ -37,8 +37,9 @@ use self::identity::{
 };
 use self::limits::{
     ActiveLimit, LimitRequest, admission_fanout_multiplier, attach_limit_headers_from_engine,
-    attach_limit_headers_from_record, limit_rejection_response, limit_retry_after_secs,
-    limit_violation_name, use_image_rates_for_admission,
+    attach_limit_headers_from_record, estimate_routing_gross_prompt_tokens,
+    limit_rejection_response, limit_retry_after_secs, limit_violation_name,
+    use_image_rates_for_admission,
 };
 pub(crate) use self::limits::{INPUT_ESTIMATE_MAX_BYTES, INPUT_ESTIMATE_MAX_NODES};
 use self::routing::{
@@ -1319,6 +1320,12 @@ impl Lifecycle {
             Some(ProviderCapability::OpenaiResponses),
         );
         let observed_session_id = identity.observed_session_id;
+        let routing_gross_prompt_tokens = estimate_routing_gross_prompt_tokens(
+            Some(body),
+            &canonical_model,
+            Some(ProviderCapability::OpenaiResponses),
+            &[],
+        );
         let mut ctx = RequestContext::builder()
             .request_id(request_id)
             .thread_id(identity.thread_id)
@@ -1334,6 +1341,7 @@ impl Lifecycle {
                 cc_lb_pricing::global_catalog(),
                 &canonical_model,
                 service_tier,
+                routing_gross_prompt_tokens,
             ))
             .build();
         let principal = Principal {
@@ -2302,10 +2310,17 @@ impl Lifecycle {
         };
         ctx.thread_id = cache_metadata.thread_id.clone();
         ctx.requested_service_tier = cache_metadata.requested_service_tier.clone();
+        let routing_gross_prompt_tokens = estimate_routing_gross_prompt_tokens(
+            body_view.value(),
+            &ctx.canonical_model_id,
+            Some(request_capability),
+            &ctx.cache_breakpoints,
+        );
         ctx.cache_pricing = cache_pricing_summary_for_model(
             cc_lb_pricing::global_catalog(),
             &ctx.canonical_model_id,
             ctx.requested_service_tier.as_deref(),
+            routing_gross_prompt_tokens,
         );
 
         // Authentication was already recorded before the body-dependent exits

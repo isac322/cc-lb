@@ -159,7 +159,7 @@ fn cache_keepalive_avoided_savings_subtract_follow_up_cache_read_cost() {
                 followed_up: true,
                 pending: false,
             },
-            rates_from_catalog(catalog.as_ref(), "claude-sonnet-4-5", ttl)
+            rates_from_catalog(catalog.as_ref(), "claude-sonnet-4-5", ttl, None)
                 .expect("complete cache pricing"),
         );
         let expected =
@@ -263,8 +263,8 @@ fn cache_keepalive_pnl_uses_catalog_rates_and_exact_surface_formats() {
     );
 
     // When: the server looks up both TTL variants and formats P&L values.
-    let rates_5m = rates_from_catalog(catalog.as_ref(), "claude-sonnet-4-5", CacheTtl::Ttl5m);
-    let rates_1h = rates_from_catalog(catalog.as_ref(), "claude-sonnet-4-5", CacheTtl::Ttl1h);
+    let rates_5m = rates_from_catalog(catalog.as_ref(), "claude-sonnet-4-5", CacheTtl::Ttl5m, None);
+    let rates_1h = rates_from_catalog(catalog.as_ref(), "claude-sonnet-4-5", CacheTtl::Ttl1h, None);
 
     // Then: production derives price rates instead of embedding mock constants in the view model.
     assert_eq!(rates_5m, Some(rates(CACHE_CREATE_5M_MICROS_PER_MILLION)));
@@ -375,7 +375,13 @@ fn unknown_pricing_stays_null_and_summary_skips_it() {
     partial_snapshot.cache_read_per_million_usd.clear();
     partial_catalog.install_snapshot(partial_snapshot);
     assert!(
-        rates_from_catalog(partial_catalog.as_ref(), "partial-model", CacheTtl::Ttl5m).is_none()
+        rates_from_catalog(
+            partial_catalog.as_ref(),
+            "partial-model",
+            CacheTtl::Ttl5m,
+            None,
+        )
+        .is_none()
     );
     let partial_batch = CacheKeepaliveActivityBatch::from_turns(partial_turns, Vec::new());
     let partial_summary = summary_for_items(
@@ -473,6 +479,7 @@ fn catalog_absence_and_replacement_reprice_without_storage_change() {
         ttl: CacheTtl::Ttl5m,
         hit_miss: Some("hit".to_owned()),
         cache_read_input_tokens: Some(20_000),
+        gross_prompt_tokens: None,
         cost_micros: Some(0),
         request_ref: None,
         event_ref: Some("same-stored-turn".to_owned()),
@@ -650,4 +657,197 @@ fn pnl_saturates_then_dollar_converter_returns_invalid_input() {
             if field == "cache_keepalive_pnl"
                 && reason == "amount exceeds the API dollar range"
     ));
+}
+
+fn install_haiku_5_5_threshold_snapshot(catalog: &PriceCatalog) {
+    const MODEL: &str = "claude-haiku-5-5";
+    let mut models = HashMap::new();
+    models.insert(
+        MODEL.to_owned(),
+        Pricing {
+            native: None,
+            model: MODEL.to_owned(),
+            input_per_million_usd: UsdPerMillion::from_micros_usd(100_000),
+            output_per_million_usd: UsdPerMillion::from_micros_usd(500_000),
+            input_image_per_million_usd: None,
+            output_image_per_million_usd: None,
+            by_tier: BTreeMap::new(),
+        },
+    );
+    let mut cache_creation_per_million_usd = HashMap::new();
+    cache_creation_per_million_usd
+        .insert(MODEL.to_owned(), UsdPerMillion::from_micros_usd(125_000));
+    let mut cache_read_per_million_usd = HashMap::new();
+    cache_read_per_million_usd.insert(MODEL.to_owned(), UsdPerMillion::from_micros_usd(10_000));
+    let mut bands = BTreeMap::new();
+    bands.insert(
+        100_000,
+        cc_lb_pricing::ThresholdBand {
+            default: cc_lb_pricing::ThresholdRate {
+                input_per_million_usd: Some(UsdPerMillion::from_micros_usd(500_000)),
+                output_per_million_usd: Some(UsdPerMillion::from_micros_usd(2_500_000)),
+                cache_creation_per_million_usd: Some(UsdPerMillion::from_micros_usd(625_000)),
+                cache_read_per_million_usd: Some(UsdPerMillion::from_micros_usd(50_000)),
+            },
+            by_tier: BTreeMap::new(),
+        },
+    );
+    let mut above_tokens_rates = HashMap::new();
+    above_tokens_rates.insert(MODEL.to_owned(), bands);
+    catalog.install_snapshot(CatalogSnapshot {
+        payload_hash: "haiku-5-5-threshold".to_owned(),
+        fetched_at_ms: 1,
+        models,
+        raw_json: Vec::new(),
+        cache_creation_per_million_usd,
+        cache_read_per_million_usd,
+        cache_creation_per_million_usd_by_tier: HashMap::new(),
+        cache_read_per_million_usd_by_tier: HashMap::new(),
+        above_tokens_rates,
+        status: CatalogStatus::Ok,
+    });
+}
+
+#[test]
+fn haiku_5_5_threshold_band_keepalive_savings_and_missing_count() {
+    const NOW_MS: u64 = 1_730_000_100_000;
+    const MODEL: &str = "claude-haiku-5-5";
+    let catalog = PriceCatalog::new_empty();
+    install_haiku_5_5_threshold_snapshot(catalog.as_ref());
+
+    assert_eq!(
+        super::economics::rates_from_catalog(
+            catalog.as_ref(),
+            MODEL,
+            CacheTtl::Ttl5m,
+            Some(120_000)
+        ),
+        Some(CacheKeepalivePnlRates {
+            avoided_micros_per_million: 575_000,
+        })
+    );
+    assert_eq!(
+        super::economics::rates_from_catalog(
+            catalog.as_ref(),
+            MODEL,
+            CacheTtl::Ttl1h,
+            Some(120_000)
+        ),
+        Some(CacheKeepalivePnlRates {
+            avoided_micros_per_million: 950_000,
+        })
+    );
+    assert_eq!(
+        super::economics::rates_from_catalog(
+            catalog.as_ref(),
+            MODEL,
+            CacheTtl::Ttl5m,
+            Some(80_000)
+        ),
+        Some(CacheKeepalivePnlRates {
+            avoided_micros_per_million: 115_000,
+        })
+    );
+    assert_eq!(
+        super::economics::rates_from_catalog(
+            catalog.as_ref(),
+            MODEL,
+            CacheTtl::Ttl1h,
+            Some(80_000)
+        ),
+        Some(CacheKeepalivePnlRates {
+            avoided_micros_per_million: 190_000,
+        })
+    );
+    assert_eq!(
+        super::economics::rates_from_catalog(catalog.as_ref(), MODEL, CacheTtl::Ttl5m, None),
+        None
+    );
+    assert_eq!(
+        super::economics::rates_from_catalog(catalog.as_ref(), MODEL, CacheTtl::Ttl1h, None),
+        None
+    );
+
+    let session = summary_item(CacheKeepaliveSessionEntrySource::Session, NOW_MS);
+    let mut turn = summary_turn_with("haiku-turn", 100, MODEL, 20_000);
+    turn.cost_micros = Some(1_000);
+    let turns = [turn];
+
+    for (gross_prompt_tokens, expected_avoided, expected_net) in [
+        (Some(120_000), Some(11_500_i64), Some(10_500_i64)),
+        (Some(80_000), Some(2_300_i64), Some(1_300_i64)),
+        (None, None, None),
+    ] {
+        let renewal = CacheKeepaliveEvidenceRecord {
+            evidence_id: "haiku-renewal".to_owned(),
+            cycle_id: Some(Uuid::from_u128(701)),
+            evidence_kind: "renewal".to_owned(),
+            request_start_ms: 100_000,
+            prefix_fingerprint: None,
+            prefix_hash: Some("haiku-prefix".to_owned()),
+            prefix_policy_version: Some("policy".to_owned()),
+            prefix_schema_version: Some("schema".to_owned()),
+            principal_id: "principal".to_owned(),
+            upstream_id: Uuid::nil(),
+            model: MODEL.to_owned(),
+            ttl: CacheTtl::Ttl5m,
+            hit_miss: Some("hit".to_owned()),
+            cache_read_input_tokens: Some(20_000),
+            gross_prompt_tokens: None,
+            cost_micros: Some(1_000),
+            request_ref: None,
+            event_ref: Some("haiku-turn".to_owned()),
+            session_key_hash: Some("session".to_owned()),
+            cycle_anchor_ms: Some(0),
+        };
+        let follow_up = CacheKeepaliveEvidenceRecord {
+            evidence_id: "haiku-followup".to_owned(),
+            cycle_id: None,
+            evidence_kind: "follow_up".to_owned(),
+            request_start_ms: 320_000,
+            gross_prompt_tokens,
+            event_ref: None,
+            cycle_anchor_ms: None,
+            ..renewal.clone()
+        };
+        let evidence = [renewal, follow_up];
+        let activity = derive_activity_view(
+            CacheKeepaliveActivitySource {
+                item: &session,
+                session: None,
+                turns: &turns,
+                evidence: &evidence,
+                now_ms: NOW_MS,
+                horizon_start_ms: None,
+            },
+            catalog.as_ref(),
+        );
+        assert_eq!(
+            activity.turns[0].pnl.map(|pnl| pnl.net_micros),
+            expected_net
+        );
+        if expected_net.is_none() {
+            assert_eq!(activity.turns[0].pnl_display, "-");
+        }
+        assert_eq!(activity.gaps[0].avoided_micros, expected_avoided);
+        assert_eq!(activity.total_avoided_micros, expected_avoided);
+        assert_eq!(activity.pnl.map(|pnl| pnl.net_micros), expected_net);
+
+        let batch = CacheKeepaliveActivityBatch::from_turns(turns.to_vec(), evidence.to_vec());
+        let summary = summary_for_items(
+            catalog.as_ref(),
+            NOW_MS,
+            std::slice::from_ref(&session),
+            &batch,
+        )
+        .expect("haiku summary");
+        assert_eq!(
+            summary.total_avoided,
+            expected_avoided.map(|micros| micros as f64 / 1_000_000.0)
+        );
+        assert_eq!(
+            summary.cost_saved,
+            expected_net.map(|micros| micros as f64 / 1_000_000.0)
+        );
+    }
 }
