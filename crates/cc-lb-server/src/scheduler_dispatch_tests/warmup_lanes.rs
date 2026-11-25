@@ -983,3 +983,190 @@ async fn apalis_housekeeping_prunes_expired_split_bridge_results_when_request_re
         "live bridge result must remain"
     );
 }
+
+#[tokio::test]
+async fn apalis_housekeeping_reaps_stale_running_jobs_before_bounded_bridge_prune_and_enqueues_continuation()
+ {
+    use cc_lb_clock::TestClock;
+    use cc_lb_scheduler::jobs::apalis_housekeeping::ApalisHousekeepingJob;
+    use cc_lb_scheduler::worker::{CronJob, SchedulerBackend};
+    use cc_lb_storage_api::MetaStore as _;
+
+    let fixture = Fixture::new().await;
+    let scheduler_pool = match &fixture.backend.backend {
+        SchedulerBackend::Sqlite(backend) => backend.pool(),
+        #[cfg(feature = "storage-postgres")]
+        SchedulerBackend::Postgres(_) => panic!("fixture must open SQLite scheduler storage"),
+    };
+
+    let now = 1_800_000_000_u64;
+    let stale_lock_at = i64::try_from(now - 300).expect("lock_at fits i64");
+    let now_i64 = i64::try_from(now).expect("now fits i64");
+
+    sqlx::query(
+        "INSERT INTO Workers (id, worker_type, storage_name, layers, last_seen, started_at)
+         VALUES ('dead-worker', 'cron', 'default', '', ?1, ?1)",
+    )
+    .bind(now_i64)
+    .execute(scheduler_pool)
+    .await
+    .expect("seed worker row for lock_by foreign key");
+
+    sqlx::query(
+        "INSERT INTO Jobs (job, id, job_type, status, run_at, lock_by, lock_at, attempts, last_result)
+         VALUES (?1, 'stale-running-1', 'cron', 'Running', ?2, 'dead-worker', ?3, 0, NULL)",
+    )
+    .bind(vec![0_u8])
+    .bind(now_i64)
+    .bind(stale_lock_at)
+    .execute(scheduler_pool)
+    .await
+    .expect("seed first stale Running job");
+
+    let upstream_id = Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("uuid");
+    let mut expired_keys = Vec::with_capacity(70);
+    for idx in 0..70_u128 {
+        let nonce = Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0001 + idx);
+        let key =
+            cc_lb_control::manual_warmup_result_meta_key(upstream_id, WarmupLane::Primary, nonce);
+        let payload = serde_json::to_string(&cc_lb_control::ManualWarmupBridgeResult::Settled(
+            cc_lb_control::ManualWarmupJobResult {
+                nonce,
+                outcome: WarmupAttemptOutcome::Success(
+                    cc_lb_storage_api::WarmupSuccessReason::CycleAdvanced,
+                ),
+                cycle_key: Some(1),
+                error_detail: None,
+                expires_at_unix_secs: now - 60,
+            },
+        ))
+        .expect("serialize expired");
+        fixture
+            .storage
+            .put_meta_value(&key, &payload)
+            .await
+            .expect("seed expired bridge entry");
+        expired_keys.push(key);
+    }
+
+    let mut dispatch = fixture.dispatch_with_config(
+        Arc::new(FailingPusher),
+        cc_lb_config::Config {
+            request_event_retention_days: 0,
+            ..cc_lb_config::Config::default()
+        },
+    );
+    dispatch.clock = Arc::new(TestClock::new_at_secs(now));
+
+    let outcome = dispatch
+        .dispatch_singleton(CronJob::ApalisHousekeeping(ApalisHousekeepingJob::default()))
+        .await
+        .expect("dispatch regular housekeeping");
+    assert_eq!(outcome, JobOutcome::Done);
+
+    // (a) Ordinary stale Running recovery ran BEFORE the bounded bridge sweep.
+    let (status_1, attempts_1): (String, i64) =
+        sqlx::query_as("SELECT status, attempts FROM Jobs WHERE id = 'stale-running-1'")
+            .fetch_one(scheduler_pool)
+            .await
+            .expect("read reaped job");
+    assert_eq!(status_1, "Pending");
+    assert_eq!(attempts_1, 1);
+
+    // (b) Bounded sweep deleted exactly 64 expired keys and left 6 remaining.
+    let mut remaining_after_first = 0_usize;
+    for key in &expired_keys {
+        if fixture
+            .storage
+            .get_meta_value(key)
+            .await
+            .expect("check expired key")
+            .is_some()
+        {
+            remaining_after_first += 1;
+        }
+    }
+    assert_eq!(remaining_after_first, 6);
+
+    // (c) Continuation cron job with split_bridge_prune_cursor was enqueued.
+    let continuations: Vec<(Vec<u8>, String)> = sqlx::query_as(
+        "SELECT job, idempotency_key FROM Jobs
+         WHERE job_type = 'cron'
+           AND status = 'Pending'
+           AND idempotency_key LIKE 'split_bridge_prune_continuation:%'",
+    )
+    .fetch_all(scheduler_pool)
+    .await
+    .expect("query continuation cron jobs");
+    assert_eq!(
+        continuations.len(),
+        1,
+        "expected one continuation cron task"
+    );
+    let continuation_job: CronJob =
+        serde_json::from_slice(&continuations[0].0).expect("decode continuation CronJob");
+    match &continuation_job {
+        CronJob::ApalisHousekeeping(job) => {
+            assert!(
+                job.split_bridge_prune_cursor.is_some(),
+                "continuation job must carry split_bridge_prune_cursor"
+            );
+        }
+        other => panic!("unexpected continuation job: {other:?}"),
+    }
+
+    // Seed a second stale Running job and delete the queued continuation row so we can
+    // assert no second continuation is enqueued and ordinary recovery does not run.
+    sqlx::query(
+        "DELETE FROM Jobs WHERE job_type = 'cron' AND idempotency_key LIKE 'split_bridge_prune_continuation:%'",
+    )
+    .execute(scheduler_pool)
+    .await
+    .expect("clear pending continuation row before direct dispatch");
+    sqlx::query(
+        "INSERT INTO Jobs (job, id, job_type, status, run_at, lock_by, lock_at, attempts, last_result)
+         VALUES (?1, 'stale-running-2', 'cron', 'Running', ?2, 'dead-worker', ?3, 0, NULL)",
+    )
+    .bind(vec![0_u8])
+    .bind(now_i64)
+    .bind(stale_lock_at)
+    .execute(scheduler_pool)
+    .await
+    .expect("seed second stale Running job");
+
+    let cont_outcome = dispatch
+        .dispatch_singleton(continuation_job)
+        .await
+        .expect("dispatch split-bridge continuation");
+    assert_eq!(cont_outcome, JobOutcome::Done);
+
+    // (d) All 6 remaining expired keys were deleted.
+    for key in &expired_keys {
+        assert_eq!(
+            fixture
+                .storage
+                .get_meta_value(key)
+                .await
+                .expect("check expired key after continuation"),
+            None
+        );
+    }
+
+    // (e) No further continuation was enqueued.
+    let remaining_continuations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM Jobs WHERE job_type = 'cron' AND idempotency_key LIKE 'split_bridge_prune_continuation:%'",
+    )
+    .fetch_one(scheduler_pool)
+    .await
+    .expect("count remaining continuation rows");
+    assert_eq!(remaining_continuations, 0);
+
+    // (f) Continuation pass did NOT run ordinary stale-lock recovery.
+    let (status_2, attempts_2): (String, i64) =
+        sqlx::query_as("SELECT status, attempts FROM Jobs WHERE id = 'stale-running-2'")
+            .fetch_one(scheduler_pool)
+            .await
+            .expect("read untouched second stale job");
+    assert_eq!(status_2, "Running");
+    assert_eq!(attempts_2, 0);
+}

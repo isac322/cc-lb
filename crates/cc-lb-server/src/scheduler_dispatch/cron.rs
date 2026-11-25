@@ -1,8 +1,11 @@
+use std::time::Duration;
+
 use cc_lb_clock::unix_secs;
+use cc_lb_control::{SplitBridgePruneBudget, SplitBridgePruneCursor};
 use cc_lb_pricing::LiteLlmLoader;
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::apalis_housekeeping::{
-    ApalisHousekeepingConfig, ApalisHousekeepingJobHandler,
+    ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler,
 };
 use cc_lb_scheduler::jobs::compat::handle_anthropic_compat_refresh_job_with_core_fetcher;
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
@@ -35,6 +38,14 @@ use crate::scheduler_dispatch::outcomes::{
     upstream_affinity_purge_outcome, usage_prune_outcome, usage_rollup_outcome,
 };
 use crate::scheduler_dispatch::storage::{StorageHandle, storage_scheduler_error};
+
+const SPLIT_BRIDGE_SWEEP_MAX_DELETES: usize = 64;
+const SPLIT_BRIDGE_SWEEP_MAX_PAGES: usize = 4;
+const SPLIT_BRIDGE_SWEEP_TIME_BUDGET: Duration = Duration::from_secs(10);
+// Guarantee >=15s headroom below SINGLETON_TIMEOUT (60s) when running inline after housekeeping.
+const SPLIT_BRIDGE_INLINE_HARD_CAP_FROM_START: Duration = Duration::from_secs(45);
+const SPLIT_BRIDGE_CONTINUATION_DELAY_SECS: u64 = 5;
+const SPLIT_BRIDGE_CONTINUATION_MAX_STEPS: u32 = 256;
 
 impl SchedulerDispatch {
     pub(super) async fn dispatch_singleton(&self, job: CronJob) -> SchedulerResult<JobOutcome> {
@@ -108,37 +119,42 @@ impl SchedulerDispatch {
             CronJob::PriceCatalogRefresh(job) => self.dispatch_price_catalog(job).await,
             CronJob::ApalisHousekeeping(job) => {
                 let now_unix_secs = unix_secs(self.clock.now());
-                if let Err(error) = cc_lb_control::prune_expired_split_bridge_results(
-                    self.storage.as_ref(),
-                    now_unix_secs,
-                    256,
-                )
-                .await
-                {
-                    tracing::warn!(%error, "split bridge expired result prune failed");
+                if let Some(cursor) = job.split_bridge_prune_cursor {
+                    self.run_split_bridge_prune_pass(
+                        now_unix_secs,
+                        Some(cursor),
+                        SPLIT_BRIDGE_SWEEP_TIME_BUDGET,
+                        true,
+                    )
+                    .await?;
+                    return Ok(JobOutcome::Done);
                 }
-                match &self.backend {
+                let started = tokio::time::Instant::now();
+                let housekeeping_result = match &self.backend {
                     #[cfg(feature = "storage-sqlite")]
                     SchedulerBackend::Sqlite(sqlite) => {
                         let config =
                             ApalisHousekeepingConfig::new(self.config.scheduler.dlq_retention_days);
-                        apalis_housekeeping_outcome(
-                            ApalisHousekeepingJobHandler::new(sqlite.pool().clone(), config)
-                                .handle(job, now_unix_secs, self.storage.as_ref())
-                                .await,
-                        )
+                        ApalisHousekeepingJobHandler::new(sqlite.pool().clone(), config)
+                            .handle(job, now_unix_secs, self.storage.as_ref())
+                            .await
                     }
                     #[cfg(feature = "storage-postgres")]
                     SchedulerBackend::Postgres(postgres) => {
                         let config =
                             ApalisHousekeepingConfig::new(self.config.scheduler.dlq_retention_days);
-                        apalis_housekeeping_outcome(
-                            ApalisHousekeepingJobHandler::new(postgres.pool().clone(), config)
-                                .handle(job, now_unix_secs, self.storage.as_ref())
-                                .await,
-                        )
+                        ApalisHousekeepingJobHandler::new(postgres.pool().clone(), config)
+                            .handle(job, now_unix_secs, self.storage.as_ref())
+                            .await
                     }
-                }
+                };
+                let time_budget = SPLIT_BRIDGE_INLINE_HARD_CAP_FROM_START
+                    .saturating_sub(started.elapsed())
+                    .min(SPLIT_BRIDGE_SWEEP_TIME_BUDGET);
+                let _ = self
+                    .run_split_bridge_prune_pass(now_unix_secs, None, time_budget, false)
+                    .await;
+                apalis_housekeeping_outcome(housekeeping_result)
             }
             CronJob::WarmupWatchdog(job) => self.handle_warmup_watchdog(job).await,
             CronJob::OAuthRefreshWatchdog(job) => self.handle_oauth_refresh_watchdog(job).await,
@@ -147,6 +163,77 @@ impl SchedulerDispatch {
             CronJob::PoolQuotaSnapshot(job) => self.handle_pool_quota_snapshot(job).await,
             CronJob::ApiKeyUsagePoll(job) => self.handle_api_key_usage_poll(job).await,
         }
+    }
+
+    async fn run_split_bridge_prune_pass(
+        &self,
+        now_unix_secs: u64,
+        cursor: Option<SplitBridgePruneCursor>,
+        time_budget: Duration,
+        propagate_errors: bool,
+    ) -> SchedulerResult<()> {
+        let report = match cc_lb_control::prune_expired_split_bridge_results_budgeted(
+            self.storage.as_ref(),
+            now_unix_secs,
+            cursor,
+            SplitBridgePruneBudget {
+                max_deletes: SPLIT_BRIDGE_SWEEP_MAX_DELETES,
+                max_pages: SPLIT_BRIDGE_SWEEP_MAX_PAGES,
+                time_budget,
+            },
+        )
+        .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                if propagate_errors {
+                    return Err(storage_scheduler_error(error));
+                }
+                tracing::warn!(%error, "split bridge expired result prune failed");
+                return Ok(());
+            }
+        };
+        if let Some(next_cursor) = report.next_cursor {
+            if next_cursor.step > SPLIT_BRIDGE_CONTINUATION_MAX_STEPS {
+                tracing::warn!(
+                    step = next_cursor.step,
+                    max_steps = SPLIT_BRIDGE_CONTINUATION_MAX_STEPS,
+                    "split bridge prune continuation limit reached; deferring remaining entries to next housekeeping tick"
+                );
+                return Ok(());
+            }
+            let run_at =
+                unix_secs(self.clock.now()).saturating_add(SPLIT_BRIDGE_CONTINUATION_DELAY_SECS);
+            let continuation = ApalisHousekeepingJob {
+                traceparent: None,
+                split_bridge_prune_cursor: Some(next_cursor.clone()),
+            };
+            match self
+                .backend
+                .push_cron_task(SchedulerPushTask {
+                    args: CronJob::ApalisHousekeeping(continuation),
+                    idempotency_key: Some(format!(
+                        "split_bridge_prune_continuation:{run_at}:{}",
+                        next_cursor.step
+                    )),
+                    run_at_unix_secs: Some(run_at),
+                    max_attempts: Some(3),
+                })
+                .await
+            {
+                Ok(()) | Err(cc_lb_scheduler::error::SchedulerError::Conflict(_)) => {}
+                Err(error) => {
+                    if propagate_errors {
+                        return Err(error);
+                    }
+                    tracing::warn!(
+                        %error,
+                        "failed to schedule split bridge prune continuation task"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn handle_pool_quota_snapshot(

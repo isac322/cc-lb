@@ -28,6 +28,8 @@ const STALE_LOCK_LAST_RESULT: &str =
 pub struct ApalisHousekeepingJob {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traceparent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_bridge_prune_cursor: Option<cc_lb_control::SplitBridgePruneCursor>,
 }
 
 impl TraceparentCarrier for ApalisHousekeepingJob {

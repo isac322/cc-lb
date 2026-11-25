@@ -1627,11 +1627,7 @@ mod sqlite_tests {
         cfg: Config,
         timeout: std::time::Duration,
     ) -> (axum::Router, cc_lb_control::PostCommitTracker) {
-        let admin_auth = Arc::new(cc_lb_admin::auth::AdminAuthenticator::new(
-            cc_lb_admin::auth::build_providers(&cfg.admin.auth).expect("auth providers"),
-        ));
-        let post_commit_tracker = cc_lb_control::PostCommitTracker::default();
-        let split_manual_warmup = Arc::new(
+        let split_manual_warmup: Arc<dyn cc_lb_admin::ports::SplitManualWarmupPort> = Arc::new(
             cc_lb_admin_server::split_ports::SplitSchedulerManualWarmup::new(
                 storage_arc.clone(),
                 worker_backend,
@@ -1639,6 +1635,20 @@ mod sqlite_tests {
             )
             .with_timeout(timeout, std::time::Duration::from_millis(10)),
         );
+        build_split_warmup_test_router_with_port(storage_arc, clock, aead, cfg, split_manual_warmup)
+    }
+
+    fn build_split_warmup_test_router_with_port(
+        storage_arc: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+        clock: ClockHandle,
+        aead: Arc<AeadService>,
+        cfg: Config,
+        split_manual_warmup: Arc<dyn cc_lb_admin::ports::SplitManualWarmupPort>,
+    ) -> (axum::Router, cc_lb_control::PostCommitTracker) {
+        let admin_auth = Arc::new(cc_lb_admin::auth::AdminAuthenticator::new(
+            cc_lb_admin::auth::build_providers(&cfg.admin.auth).expect("auth providers"),
+        ));
+        let post_commit_tracker = cc_lb_control::PostCommitTracker::default();
         let dynamic_view = Arc::new(cc_lb_control::DynamicViewHolder::new(
             cc_lb_control::DynamicViewBuilder::new(0)
                 .signer_factory(Arc::new(NoopSplitSignerFactory))
@@ -1693,6 +1703,41 @@ mod sqlite_tests {
             post_commit_tracker: post_commit_tracker.clone(),
         };
         (cc_lb_admin::router(state), post_commit_tracker)
+    }
+
+    struct AdvanceClockAfterEnqueuePort {
+        inner: Arc<dyn cc_lb_admin::ports::SplitManualWarmupPort>,
+        clock: Arc<cc_lb_clock::TestClock>,
+        advance_secs: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl cc_lb_admin::ports::SplitManualWarmupPort for AdvanceClockAfterEnqueuePort {
+        async fn enqueue_manual_warmup(
+            &self,
+            upstream_id: Uuid,
+            lane: cc_lb_storage_api::WarmupLane,
+            holder: String,
+            candidate_cycle_key: i64,
+        ) -> Result<
+            cc_lb_admin::ports::SplitManualWarmupTicket,
+            cc_lb_admin::ports::SplitManualWarmupError,
+        > {
+            let ticket = self
+                .inner
+                .enqueue_manual_warmup(upstream_id, lane, holder, candidate_cycle_key)
+                .await?;
+            self.clock.advance_secs(self.advance_secs);
+            Ok(ticket)
+        }
+
+        async fn wait_manual_warmup(
+            &self,
+            ticket: cc_lb_admin::ports::SplitManualWarmupTicket,
+        ) -> Result<cc_lb_control::ManualWarmupJobResult, cc_lb_admin::ports::SplitManualWarmupError>
+        {
+            self.inner.wait_manual_warmup(ticket).await
+        }
     }
 
     #[tokio::test]
@@ -1792,35 +1837,33 @@ mod sqlite_tests {
             std::time::Duration::from_millis(80),
         );
 
-        // 1. Advance TestClock past expiry while task remains Pending (attempts == 0) -> 503 warmup_expired_before_start + audit row.
-        let b_expired = worker_backend.clone();
-        let clock_advance = test_clock.clone();
-        let expirer = tokio::spawn(async move {
-            for _ in 0..100 {
-                let tasks = b_expired
-                    .list_adaptive_tasks(&cc_lb_scheduler::worker::Filter {
-                        status: Some(cc_lb_scheduler::worker::TaskStatus::Pending),
-                        page: 1,
-                        page_size: Some(20),
-                    })
-                    .await
-                    .expect("list");
-                if tasks.iter().any(|row| {
-                    matches!(
-                        &row.args,
-                        cc_lb_scheduler::worker::AdaptiveJob::ManualWarmup(j) if j.upstream_id == upstream_id
+        // 1. Advance TestClock past expiry deterministically right after enqueue while task remains
+        // Pending (attempts == 0) -> 503 warmup_expired_before_start + audit row.
+        let expired_port: Arc<dyn cc_lb_admin::ports::SplitManualWarmupPort> =
+            Arc::new(AdvanceClockAfterEnqueuePort {
+                inner: Arc::new(
+                    cc_lb_admin_server::split_ports::SplitSchedulerManualWarmup::new(
+                        storage_arc.clone(),
+                        worker_backend.clone(),
+                        clock.clone(),
                     )
-                }) {
-                    clock_advance.advance_secs(5);
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-            panic!("expected ManualWarmupJob to be queued");
-        });
+                    .with_timeout(
+                        std::time::Duration::from_secs(5),
+                        std::time::Duration::from_millis(10),
+                    ),
+                ),
+                clock: test_clock.clone(),
+                advance_secs: 6,
+            });
+        let (router_expired, expired_tracker) = build_split_warmup_test_router_with_port(
+            storage_arc.clone(),
+            clock.clone(),
+            aead.clone(),
+            cfg.clone(),
+            expired_port,
+        );
 
-        let resp_503 = router
-            .clone()
+        let resp_503 = router_expired
             .oneshot(
                 Request::post(format!("/admin/v1/upstreams/{upstream_id}/warmup/fire-now"))
                     .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
@@ -1842,7 +1885,6 @@ mod sqlite_tests {
         .expect("json");
         assert_eq!(body_503["fired"], false);
         assert_eq!(body_503["error"], "warmup_expired_before_start");
-        expirer.await.expect("expirer done");
 
         let killed_rows = worker_backend
             .list_adaptive_tasks(&cc_lb_scheduler::worker::Filter {
@@ -1998,6 +2040,7 @@ mod sqlite_tests {
             handle.await.expect("worker handle join");
         }
 
+        expired_tracker.wait_idle().await;
         claimed_tracker.wait_idle().await;
         post_commit_tracker.wait_idle().await;
         let audits = storage_arc

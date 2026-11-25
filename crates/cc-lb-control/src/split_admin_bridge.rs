@@ -12,8 +12,36 @@ pub const SPLIT_BRIDGE_RESULT_TTL_SECS: u64 = 120;
 pub const SPLIT_MANUAL_WARMUP_RESULT_PREFIX: &str = "split_manual_warmup_result:";
 pub const SPLIT_USAGE_REFRESH_RESULT_PREFIX: &str = "split_usage_refresh_result:";
 const SPLIT_BRIDGE_WRITE_PRUNE_BATCH: usize = 64;
-const SPLIT_BRIDGE_PRUNE_PAGE_SIZE: usize = 256;
+const SPLIT_BRIDGE_WRITE_PRUNE_TIME_BUDGET: Duration = Duration::from_millis(250);
+pub const SPLIT_BRIDGE_PRUNE_PAGE_SIZE: usize = 256;
 const SPLIT_BRIDGE_TAKE_DELETE_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Persistent keyset cursor for resuming a budgeted split-bridge expiry sweep.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SplitBridgePruneCursor {
+    #[serde(default)]
+    pub prefix_index: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_key: Option<String>,
+    #[serde(default)]
+    pub step: u32,
+}
+
+/// Hard caps limiting work performed per split-bridge expiry sweep invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SplitBridgePruneBudget {
+    pub max_deletes: usize,
+    pub max_pages: usize,
+    pub time_budget: Duration,
+}
+
+/// Outcome of a single budgeted split-bridge expiry sweep invocation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SplitBridgePruneReport {
+    pub deleted: u64,
+    pub pages_scanned: usize,
+    pub next_cursor: Option<SplitBridgePruneCursor>,
+}
 
 pub fn oauth_refresh_bridge_idempotency_key(upstream_id: Uuid, nonce: Uuid) -> String {
     format!("split_oauth_refresh:{upstream_id}:{nonce}")
@@ -130,6 +158,20 @@ async fn best_effort_delete_meta_value(storage: &dyn MetaStore, key: &str) {
     }
 }
 
+async fn best_effort_write_path_prune(storage: &dyn MetaStore, now_unix_secs: u64) {
+    let _ = prune_expired_split_bridge_results_budgeted(
+        storage,
+        now_unix_secs,
+        None,
+        SplitBridgePruneBudget {
+            max_deletes: SPLIT_BRIDGE_WRITE_PRUNE_BATCH,
+            max_pages: 1,
+            time_budget: SPLIT_BRIDGE_WRITE_PRUNE_TIME_BUDGET,
+        },
+    )
+    .await;
+}
+
 pub async fn record_manual_warmup_result(
     storage: &dyn MetaStore,
     upstream_id: Uuid,
@@ -146,13 +188,7 @@ pub async fn record_manual_warmup_result(
         "split manual warmup result",
     )?;
     storage.put_meta_value(&key, &encoded).await?;
-    let _ = prune_expired_split_bridge_results_with_page_limit(
-        storage,
-        now_unix_secs,
-        SPLIT_BRIDGE_WRITE_PRUNE_BATCH,
-        Some(1),
-    )
-    .await;
+    best_effort_write_path_prune(storage, now_unix_secs).await;
     Ok(())
 }
 
@@ -172,13 +208,7 @@ pub async fn record_manual_warmup_expired_before_start(
     };
     let encoded = serialize_result(&payload, "split manual warmup expired-before-start")?;
     storage.put_meta_value(&key, &encoded).await?;
-    let _ = prune_expired_split_bridge_results_with_page_limit(
-        storage,
-        now_unix_secs,
-        SPLIT_BRIDGE_WRITE_PRUNE_BATCH,
-        Some(1),
-    )
-    .await;
+    best_effort_write_path_prune(storage, now_unix_secs).await;
     Ok(())
 }
 
@@ -225,13 +255,7 @@ pub async fn record_oauth_usage_refresh_result(
     let key = oauth_usage_refresh_result_meta_key(upstream_id, result.nonce);
     let encoded = serialize_result(&result, "split usage refresh result")?;
     storage.put_meta_value(&key, &encoded).await?;
-    let _ = prune_expired_split_bridge_results_with_page_limit(
-        storage,
-        now_unix_secs,
-        SPLIT_BRIDGE_WRITE_PRUNE_BATCH,
-        Some(1),
-    )
-    .await;
+    best_effort_write_path_prune(storage, now_unix_secs).await;
     Ok(())
 }
 
@@ -264,6 +288,11 @@ pub async fn take_oauth_usage_refresh_result(
     Ok(Some(parsed))
 }
 
+const SPLIT_BRIDGE_PRUNE_PREFIXES: [(&str, bool); 2] = [
+    (SPLIT_MANUAL_WARMUP_RESULT_PREFIX, true),
+    (SPLIT_USAGE_REFRESH_RESULT_PREFIX, false),
+];
+
 /// Sweeps expired per-nonce split bridge result keys across keyset-paginated
 /// prefix scans without ever deleting unexpired entries.
 pub async fn prune_expired_split_bridge_results(
@@ -271,50 +300,106 @@ pub async fn prune_expired_split_bridge_results(
     now_unix_secs: u64,
     batch_limit: usize,
 ) -> StorageResult<u64> {
-    prune_expired_split_bridge_results_with_page_limit(storage, now_unix_secs, batch_limit, None)
-        .await
+    let report = prune_expired_split_bridge_results_budgeted(
+        storage,
+        now_unix_secs,
+        None,
+        SplitBridgePruneBudget {
+            max_deletes: batch_limit,
+            max_pages: usize::MAX,
+            time_budget: Duration::from_secs(60),
+        },
+    )
+    .await?;
+    Ok(report.deleted)
 }
 
-async fn prune_expired_split_bridge_results_with_page_limit(
+/// Sweeps expired split-bridge entries under explicit delete, page, and wall-time budgets,
+/// returning a keyset cursor (`next_cursor`) whenever remaining work must continue later.
+pub async fn prune_expired_split_bridge_results_budgeted(
     storage: &dyn MetaStore,
     now_unix_secs: u64,
-    batch_limit: usize,
-    max_pages_per_prefix: Option<usize>,
-) -> StorageResult<u64> {
-    if batch_limit == 0 {
-        return Ok(0);
+    cursor: Option<SplitBridgePruneCursor>,
+    budget: SplitBridgePruneBudget,
+) -> StorageResult<SplitBridgePruneReport> {
+    let start = cursor.unwrap_or_default();
+    let start_prefix = usize::from(start.prefix_index);
+    if start_prefix >= SPLIT_BRIDGE_PRUNE_PREFIXES.len() {
+        return Ok(SplitBridgePruneReport::default());
     }
-    let mut deleted = 0_u64;
+    let next_step = start.step.saturating_add(1);
+    if budget.max_deletes == 0 || budget.max_pages == 0 || budget.time_budget.is_zero() {
+        return Ok(SplitBridgePruneReport {
+            deleted: 0,
+            pages_scanned: 0,
+            next_cursor: Some(SplitBridgePruneCursor {
+                prefix_index: start.prefix_index,
+                after_key: start.after_key,
+                step: next_step,
+            }),
+        });
+    }
 
-    for (prefix, is_manual) in [
-        (SPLIT_MANUAL_WARMUP_RESULT_PREFIX, true),
-        (SPLIT_USAGE_REFRESH_RESULT_PREFIX, false),
-    ] {
-        let mut after_key: Option<String> = None;
-        let mut pages_scanned = 0_usize;
+    let deadline = tokio::time::Instant::now() + budget.time_budget;
+    let mut deleted = 0_u64;
+    let mut pages_scanned = 0_usize;
+
+    for (prefix_idx, (prefix, is_manual)) in SPLIT_BRIDGE_PRUNE_PREFIXES
+        .iter()
+        .copied()
+        .enumerate()
+        .skip(start_prefix)
+    {
+        let mut after_key = if prefix_idx == start_prefix {
+            start.after_key.clone()
+        } else {
+            None
+        };
         loop {
-            if deleted as usize >= batch_limit
-                || max_pages_per_prefix.is_some_and(|max| pages_scanned >= max)
+            if deleted as usize >= budget.max_deletes
+                || pages_scanned >= budget.max_pages
+                || tokio::time::Instant::now() >= deadline
             {
-                break;
+                return Ok(SplitBridgePruneReport {
+                    deleted,
+                    pages_scanned,
+                    next_cursor: Some(SplitBridgePruneCursor {
+                        prefix_index: prefix_idx as u8,
+                        after_key,
+                        step: next_step,
+                    }),
+                });
             }
-            let rows = storage
-                .list_meta_values_by_prefix(
+            let rows = match tokio::time::timeout_at(
+                deadline,
+                storage.list_meta_values_by_prefix(
                     prefix,
                     after_key.as_deref(),
                     SPLIT_BRIDGE_PRUNE_PAGE_SIZE,
-                )
-                .await?;
+                ),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(_elapsed) => {
+                    return Ok(SplitBridgePruneReport {
+                        deleted,
+                        pages_scanned,
+                        next_cursor: Some(SplitBridgePruneCursor {
+                            prefix_index: prefix_idx as u8,
+                            after_key,
+                            step: next_step,
+                        }),
+                    });
+                }
+            };
             if rows.is_empty() {
                 break;
             }
             pages_scanned += 1;
             let page_len = rows.len();
-            let last_key = rows.last().map(|(key, _)| key.clone());
+            let mut last_processed_key = after_key.clone();
             for (key, raw) in rows {
-                if deleted as usize >= batch_limit {
-                    break;
-                }
                 let expires_at = if is_manual {
                     parse_manual_warmup_result(&raw).map(|entry| entry.expires_at_unix_secs())
                 } else {
@@ -322,21 +407,57 @@ async fn prune_expired_split_bridge_results_with_page_limit(
                         .ok()
                         .map(|entry| entry.expires_at_unix_secs)
                 };
-                let should_delete = match expires_at {
-                    Some(exp) => exp > 0 && exp <= now_unix_secs,
-                    None => false,
-                };
-                if should_delete && storage.delete_meta_value(&key).await? {
-                    deleted += 1;
+                let should_delete =
+                    matches!(expires_at, Some(exp) if exp > 0 && exp <= now_unix_secs);
+                if !should_delete {
+                    last_processed_key = Some(key);
+                    continue;
+                }
+                if deleted as usize >= budget.max_deletes || tokio::time::Instant::now() >= deadline
+                {
+                    return Ok(SplitBridgePruneReport {
+                        deleted,
+                        pages_scanned,
+                        next_cursor: Some(SplitBridgePruneCursor {
+                            prefix_index: prefix_idx as u8,
+                            after_key: last_processed_key,
+                            step: next_step,
+                        }),
+                    });
+                }
+                match tokio::time::timeout_at(deadline, storage.delete_meta_value(&key)).await {
+                    Ok(Ok(removed)) => {
+                        if removed {
+                            deleted += 1;
+                        }
+                        last_processed_key = Some(key);
+                    }
+                    Ok(Err(error)) => return Err(error),
+                    Err(_elapsed) => {
+                        return Ok(SplitBridgePruneReport {
+                            deleted,
+                            pages_scanned,
+                            next_cursor: Some(SplitBridgePruneCursor {
+                                prefix_index: prefix_idx as u8,
+                                after_key: last_processed_key,
+                                step: next_step,
+                            }),
+                        });
+                    }
                 }
             }
             if page_len < SPLIT_BRIDGE_PRUNE_PAGE_SIZE {
                 break;
             }
-            after_key = last_key;
+            after_key = last_processed_key;
         }
     }
-    Ok(deleted)
+
+    Ok(SplitBridgePruneReport {
+        deleted,
+        pages_scanned,
+        next_cursor: None,
+    })
 }
 
 #[cfg(test)]
@@ -773,6 +894,302 @@ mod tests {
                     .is_some(),
                 "live key {key} must survive expiry sweep"
             );
+        }
+    }
+
+    struct InMemoryMetaStore {
+        entries: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
+        delete_delay: Duration,
+    }
+
+    impl InMemoryMetaStore {
+        fn new(delete_delay: Duration) -> Self {
+            Self {
+                entries: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                delete_delay,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MetaStore for InMemoryMetaStore {
+        async fn initialize(&self) -> StorageResult<()> {
+            Ok(())
+        }
+
+        async fn backend_kind(&self) -> StorageResult<cc_lb_storage_api::BackendKind> {
+            Ok(cc_lb_storage_api::BackendKind::Sqlite)
+        }
+
+        async fn get_meta_value(&self, key: &str) -> StorageResult<Option<String>> {
+            Ok(self.entries.lock().expect("entries lock").get(key).cloned())
+        }
+
+        async fn put_meta_value(&self, key: &str, value: &str) -> StorageResult<()> {
+            self.entries
+                .lock()
+                .expect("entries lock")
+                .insert(key.to_owned(), value.to_owned());
+            Ok(())
+        }
+
+        async fn compare_and_put_meta_value(
+            &self,
+            key: &str,
+            expected: Option<&str>,
+            value: &str,
+        ) -> StorageResult<bool> {
+            let mut map = self.entries.lock().expect("entries lock");
+            let matches = map.get(key).map(String::as_str) == expected;
+            if matches {
+                map.insert(key.to_owned(), value.to_owned());
+            }
+            Ok(matches)
+        }
+
+        async fn delete_meta_value(&self, key: &str) -> StorageResult<bool> {
+            if !self.delete_delay.is_zero() {
+                tokio::time::sleep(self.delete_delay).await;
+            }
+            Ok(self
+                .entries
+                .lock()
+                .expect("entries lock")
+                .remove(key)
+                .is_some())
+        }
+
+        async fn list_meta_values_by_prefix(
+            &self,
+            prefix: &str,
+            after_key: Option<&str>,
+            limit: usize,
+        ) -> StorageResult<Vec<(String, String)>> {
+            let map = self.entries.lock().expect("entries lock");
+            Ok(map
+                .iter()
+                .filter(|(k, _)| k.starts_with(prefix))
+                .filter(|(k, _)| after_key.is_none_or(|after| k.as_str() > after))
+                .take(limit)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect())
+        }
+
+        async fn verify_schema_current(&self) -> StorageResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prune_expired_split_bridge_results_budgeted_resumes_across_page_delete_and_time_budgets()
+     {
+        // 1. Page budget (`max_pages = 1`) walks >256 live keys in prefix 0 and resumes into prefix 1.
+        let paged_store = InMemoryMetaStore::new(Duration::ZERO);
+        let early_upstream = Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("uuid");
+        let late_upstream = Uuid::parse_str("ffffffff-ffff-4000-8000-000000000001").expect("uuid");
+
+        let mut live_keys = Vec::new();
+        for idx in 0..270_u128 {
+            let nonce = Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0001 + idx);
+            let key = manual_warmup_result_meta_key(early_upstream, WarmupLane::Primary, nonce);
+            let raw = serialize_result(
+                &ManualWarmupBridgeResult::Settled(ManualWarmupJobResult {
+                    nonce,
+                    outcome: WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
+                    cycle_key: Some(1),
+                    error_detail: None,
+                    expires_at_unix_secs: 2_000,
+                }),
+                "live",
+            )
+            .expect("serialize");
+            paged_store.put_meta_value(&key, &raw).await.expect("put");
+            live_keys.push(key);
+        }
+        let mut expired_paged_keys = Vec::new();
+        for idx in 0..3_u128 {
+            let nonce = Uuid::from_u128(0xffff_ffff_ffff_4000_8000_0000_0000_0001 + idx);
+            let m_key = manual_warmup_result_meta_key(late_upstream, WarmupLane::Primary, nonce);
+            let m_raw = serialize_result(
+                &ManualWarmupBridgeResult::Settled(ManualWarmupJobResult {
+                    nonce,
+                    outcome: WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
+                    cycle_key: Some(2),
+                    error_detail: None,
+                    expires_at_unix_secs: 1_000,
+                }),
+                "expired manual",
+            )
+            .expect("serialize");
+            paged_store
+                .put_meta_value(&m_key, &m_raw)
+                .await
+                .expect("put");
+            expired_paged_keys.push(m_key);
+
+            let u_key = oauth_usage_refresh_result_meta_key(late_upstream, nonce);
+            let u_raw = serialize_result(
+                &OAuthUsageRefreshJobResult {
+                    nonce,
+                    outcome: LimitResetUsageRefresh::Refreshed,
+                    expires_at_unix_secs: 1_000,
+                },
+                "expired usage",
+            )
+            .expect("serialize");
+            paged_store
+                .put_meta_value(&u_key, &u_raw)
+                .await
+                .expect("put");
+            expired_paged_keys.push(u_key);
+        }
+
+        let zero_budget = prune_expired_split_bridge_results_budgeted(
+            &paged_store,
+            1_500,
+            None,
+            SplitBridgePruneBudget {
+                max_deletes: 64,
+                max_pages: 4,
+                time_budget: Duration::ZERO,
+            },
+        )
+        .await
+        .expect("zero time budget");
+        assert_eq!(zero_budget.deleted, 0);
+        assert_eq!(zero_budget.pages_scanned, 0);
+        assert_eq!(
+            zero_budget.next_cursor,
+            Some(SplitBridgePruneCursor {
+                prefix_index: 0,
+                after_key: None,
+                step: 1,
+            })
+        );
+
+        let mut cursor = None;
+        let mut passes = 0_usize;
+        let mut total_deleted = 0_u64;
+        loop {
+            passes += 1;
+            let report = prune_expired_split_bridge_results_budgeted(
+                &paged_store,
+                1_500,
+                cursor,
+                SplitBridgePruneBudget {
+                    max_deletes: 2,
+                    max_pages: 1,
+                    time_budget: Duration::from_secs(10),
+                },
+            )
+            .await
+            .expect("paged prune");
+            total_deleted += report.deleted;
+            cursor = report.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+            assert!(passes < 16, "continuation loop must converge");
+        }
+        assert!(passes >= 4, "must span multiple page/delete-capped passes");
+        assert_eq!(total_deleted, 6);
+        for key in expired_paged_keys {
+            assert_eq!(paged_store.get_meta_value(&key).await.expect("get"), None);
+        }
+        for key in live_keys {
+            assert!(
+                paged_store
+                    .get_meta_value(&key)
+                    .await
+                    .expect("get")
+                    .is_some()
+            );
+        }
+
+        // 2. Time budget (`time_budget = 700ms`, `delete_delay = 260ms`, 10 expired keys).
+        let slow_store = InMemoryMetaStore::new(Duration::from_millis(260));
+        let mut slow_keys = Vec::with_capacity(10);
+        for idx in 0..10_u128 {
+            let nonce = Uuid::from_u128(0x1000_0000_0000_4000_8000_0000_0000_0001 + idx);
+            let key = manual_warmup_result_meta_key(early_upstream, WarmupLane::Primary, nonce);
+            let raw = serialize_result(
+                &ManualWarmupBridgeResult::Settled(ManualWarmupJobResult {
+                    nonce,
+                    outcome: WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
+                    cycle_key: Some(3),
+                    error_detail: None,
+                    expires_at_unix_secs: 1_000,
+                }),
+                "slow expired",
+            )
+            .expect("serialize");
+            slow_store.put_meta_value(&key, &raw).await.expect("put");
+            slow_keys.push(key);
+        }
+
+        let started = tokio::time::Instant::now();
+        let first = prune_expired_split_bridge_results_budgeted(
+            &slow_store,
+            1_500,
+            None,
+            SplitBridgePruneBudget {
+                max_deletes: 64,
+                max_pages: 4,
+                time_budget: Duration::from_millis(700),
+            },
+        )
+        .await
+        .expect("first timed pass");
+        assert!(
+            started.elapsed() <= Duration::from_millis(700),
+            "first pass exceeded time budget: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            first.deleted, 2,
+            "two 260ms deletes fit in 700ms before 3rd times out"
+        );
+        let first_cursor = first
+            .next_cursor
+            .expect("time-capped pass must return cursor");
+        assert_eq!(
+            first_cursor.after_key,
+            Some(slow_keys[1].clone()),
+            "timed-out delete on slow_keys[2] must not advance cursor past slow_keys[2]"
+        );
+        assert!(
+            slow_store
+                .get_meta_value(&slow_keys[2])
+                .await
+                .expect("get timed-out key")
+                .is_some(),
+            "timed-out key must remain intact for the next continuation"
+        );
+
+        let mut cursor = Some(first_cursor);
+        let mut total_slow_deleted = first.deleted;
+        let mut slow_passes = 1_usize;
+        while let Some(c) = cursor {
+            slow_passes += 1;
+            let report = prune_expired_split_bridge_results_budgeted(
+                &slow_store,
+                1_500,
+                Some(c),
+                SplitBridgePruneBudget {
+                    max_deletes: 64,
+                    max_pages: 4,
+                    time_budget: Duration::from_millis(700),
+                },
+            )
+            .await
+            .expect("resume timed pass");
+            total_slow_deleted += report.deleted;
+            cursor = report.next_cursor;
+            assert!(slow_passes < 16, "slow continuation must converge");
+        }
+        assert_eq!(total_slow_deleted, 10);
+        for key in slow_keys {
+            assert_eq!(slow_store.get_meta_value(&key).await.expect("get"), None);
         }
     }
 }
