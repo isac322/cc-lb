@@ -29,7 +29,8 @@ pub use backend::{PostgresApalisStorage, PostgresSchedulerBackend};
 #[cfg(feature = "sqlite")]
 pub use backend::{SqliteApalisStorage, SqliteSchedulerBackend};
 pub use backend_api::{
-    AdaptiveTaskKeyState, Filter, SchedulerPushTask, SchedulerTaskRow, TaskStatus,
+    AdaptiveTaskKeyState, Filter, SchedulerPushTask, SchedulerTaskRow, SchedulerTaskStatusRow,
+    TaskStatus,
 };
 pub use jobs::{AdaptiveJob, CronJob};
 pub use layers::{AdaptiveWorker, CronWorker, build_cron_worker};
@@ -149,7 +150,7 @@ const CONSUMER_LONG_RUN_THRESHOLD: Duration = Duration::from_secs(30);
 pub fn make_worker_instance_id(clock: &dyn Clock) -> String {
     let pid = std::process::id();
     let started_ms = unix_millis(clock.now());
-    format!("{pid}-{started_ms}")
+    format!("{pid}-{started_ms}-{}", uuid::Uuid::new_v4().simple())
 }
 
 static WORKER_RUN_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -424,4 +425,22 @@ pub fn build_adaptive_worker(
     ctx: SchedulerCtx,
 ) -> Result<AdaptiveWorker, SchedulerError> {
     layers::build_backend_adaptive_worker(backend, ctx)
+}
+
+#[cfg(test)]
+mod tests {
+    use cc_lb_clock::TestClock;
+
+    use super::make_worker_instance_id;
+
+    #[test]
+    fn make_worker_instance_id_is_unique_with_identical_clock_and_pid() {
+        let clock = TestClock::new_at_secs(1_800_000_000);
+        let first = make_worker_instance_id(&clock);
+        let second = make_worker_instance_id(&clock);
+        assert_ne!(first, second);
+        let prefix = format!("{}-1800000000000-", std::process::id());
+        assert!(first.starts_with(&prefix), "unexpected prefix: {first}");
+        assert!(second.starts_with(&prefix), "unexpected prefix: {second}");
+    }
 }

@@ -59,7 +59,7 @@ fn on_pace_candidate(name: &str, seed: u8) -> UpstreamCandidate {
 }
 
 fn winner(candidates: &[UpstreamCandidate], request_id: &str) -> Uuid {
-    SubscriptionPreferenceFilter::new()
+    filter_at_t0()
         .filter(
             &ctx_with_request_id(MODEL_AGNOSTIC, request_id),
             &principal(),
@@ -75,7 +75,7 @@ fn winner_with_pricing(
 ) -> Uuid {
     let mut ctx = ctx_with_request_id(MODEL_AGNOSTIC, request_id);
     ctx.cache_pricing = cache_pricing;
-    SubscriptionPreferenceFilter::new()
+    filter_at_t0()
         .filter(&ctx, &principal(), candidates)
         .expect("builtin filter cannot fail")
         .kept_upstream_ids[0]

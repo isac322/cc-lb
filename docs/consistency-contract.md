@@ -164,7 +164,7 @@ A valid provider observation without a supported main routing quota is still a s
 
 **Inline, not queued.** Fire-now warmup, subscription metadata refresh, and limit-reset claims call the provider during the request. Metadata refresh and limit-reset results are committed before the response. Fire-now is a hybrid: the provider call and the audit row are inline, but the warmup attempt row is written best-effort. `execute_warmup_attempt` logs a failed `insert_warmup_attempt` and returns the computed outcome anyway (`crates/cc-lb-event-pipeline/src/warmup_attempts.rs`), so a 2xx fire-now response does not prove the attempt row exists. Fire-now warms one lane per request (`?lane=`, default `primary`).
 
-`GET /admin/v1/upstreams/{id}/warmup` reads committed job rows directly. Apalis stores `Pending` retries (with a future `run_at`), `Failed` rows (which Apalis may reclaim while `attempts < max_attempts`), and terminal `Killed` rows in the scheduler jobs table.
+`GET /admin/v1/upstreams/{id}/warmup` reads committed job rows directly. Apalis stores `Pending` retries (with a future `run_at`, including retryable handler errors routed through `RetryClass`), reclaimable legacy `Failed` rows while `attempts < max_attempts`, and terminal `Killed` rows in the scheduler jobs table.
 
 ## OAuth token refresh
 

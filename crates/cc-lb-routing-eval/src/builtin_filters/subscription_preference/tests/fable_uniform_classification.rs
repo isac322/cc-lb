@@ -72,6 +72,7 @@ fn fable_observation_tier_uses_uniform_base_classification() {
             0,
             relevant_base_windows(FABLE_MODEL),
             &FilterConfig::default(),
+            T0_MILLIS,
         )
         .expect("Fable candidate is assessable");
 
@@ -94,6 +95,7 @@ fn stale_nonrejected_fable_remains_partial_base() {
         0,
         relevant_base_windows(FABLE_MODEL),
         &FilterConfig::default(),
+        T0_MILLIS,
     )
     .expect("partial Fable candidate is assessable");
 
@@ -121,6 +123,7 @@ fn absent_fable_window_is_noop() {
         0,
         relevant_base_windows(FABLE_MODEL),
         &FilterConfig::default(),
+        T0_MILLIS,
     )
     .expect("candidate with a proven-absent Fable window is assessable");
 
@@ -147,6 +150,7 @@ fn unobserved_fable_window_remains_partial_base() {
         0,
         relevant_base_windows(FABLE_MODEL),
         &FilterConfig::default(),
+        T0_MILLIS,
     )
     .expect("candidate without a Fable observation is assessable");
 
@@ -181,6 +185,7 @@ fn fable_hard_negatives_with_live_reset_retain_overage_transition() {
             0,
             relevant_base_windows(FABLE_MODEL),
             &FilterConfig::default(),
+            T0_MILLIS,
         )
         .expect("valid hard negative uses overage");
 

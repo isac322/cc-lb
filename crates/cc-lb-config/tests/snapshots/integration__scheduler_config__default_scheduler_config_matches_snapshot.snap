@@ -34,12 +34,12 @@ expression: "SchedulerConfig::default()"
     "oauth_usage_poll": {
       "enabled": true,
       "interval_secs": 60,
-      "jitter_secs": 0
+      "jitter_secs": 15
     },
     "pool_quota_snapshot": {
       "enabled": true,
       "interval_secs": 60,
-      "jitter_secs": 0
+      "jitter_secs": 29
     },
     "price_catalog_refresh": {
       "enabled": true,

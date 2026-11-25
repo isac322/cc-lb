@@ -136,17 +136,26 @@ where
                 upstream: upstream.clone(),
             })),
             Err(original @ SignerError::ExpiredToken { .. }) => {
-                if lazy_refresh_under_single_flight(
+                match refresh_or_rebuild_signer(
                     &self.refresh_locks,
                     &self.refresh_handle,
+                    &inner,
+                    upstream,
                     self.upstream_id,
                 )
                 .await
-                .is_err()
                 {
-                    return Err(original);
+                    Ok(signer) => Ok(Arc::new(LazyRefreshSigner {
+                        signer: RwLock::new(signer),
+                        inner,
+                        refresh_handle: self.refresh_handle.clone(),
+                        refresh_locks: self.refresh_locks.clone(),
+                        upstream_id: self.upstream_id,
+                        upstream: upstream.clone(),
+                    })),
+                    Err(SignerError::ExpiredToken { .. }) => Err(original),
+                    Err(error) => Err(error),
                 }
-                inner.build(upstream).await
             }
             Err(error) => Err(error),
         }
@@ -208,12 +217,24 @@ where
         match current.sign(shaped, capability).await {
             Ok(signed) => Ok(signed),
             Err(SignerError::ExpiredToken { .. }) => {
-                if let Err(refresh_error) = lazy_refresh_under_single_flight(
-                    &self.refresh_locks,
-                    &self.refresh_handle,
-                    self.upstream_id,
-                )
-                .await
+                let upstream_key = self.upstream_id.to_string();
+                let lock = single_flight::lock_for(&self.refresh_locks, "upstream", &upstream_key);
+                let _guard = lock.lock().await;
+
+                match self.inner.build(&self.upstream).await {
+                    Ok(rebuilt) => match rebuilt.sign(retry_shape.clone(), capability).await {
+                        Ok(signed) => {
+                            self.set_signer(rebuilt);
+                            return Ok(signed);
+                        }
+                        Err(SignerError::ExpiredToken { .. }) => {}
+                        Err(error) => return Err(error),
+                    },
+                    Err(SignerError::ExpiredToken { .. }) => {}
+                    Err(error) => return Err(error),
+                }
+
+                if let Err(refresh_error) = self.refresh_handle.refresh_one(self.upstream_id).await
                 {
                     tracing::warn!(
                         upstream_id = %self.upstream_id,
@@ -224,6 +245,7 @@ where
                         LazyRefreshError::Failed { reason } => SignerError::ExpiredToken { reason },
                     });
                 }
+
                 let refreshed = self.inner.build(&self.upstream).await?;
                 self.set_signer(refreshed.clone());
                 refreshed.sign(retry_shape, capability).await
@@ -245,15 +267,34 @@ where
     }
 }
 
-async fn lazy_refresh_under_single_flight(
+async fn refresh_or_rebuild_signer<Inner: LazyRefreshConfigurable + Clone>(
     refresh_locks: &RefreshLocks,
     refresh_handle: &Arc<dyn LazyRefreshHandle>,
+    inner: &Inner,
+    upstream: &Upstream,
     upstream_id: Uuid,
-) -> Result<(), LazyRefreshError> {
+) -> Result<Arc<dyn Signer>, SignerError> {
     let upstream_key = upstream_id.to_string();
     let lock = single_flight::lock_for(refresh_locks, "upstream", &upstream_key);
     let _guard = lock.lock().await;
-    refresh_handle.refresh_one(upstream_id).await
+    // Re-check storage/builder under the per-upstream singleflight mutex before
+    // calling refresh_one so concurrent waiters reuse request #1's new token.
+    match inner.build(upstream).await {
+        Ok(signer) => return Ok(signer),
+        Err(SignerError::ExpiredToken { .. }) => {}
+        Err(error) => return Err(error),
+    }
+    if let Err(refresh_error) = refresh_handle.refresh_one(upstream_id).await {
+        tracing::warn!(
+            upstream_id = %upstream_id,
+            reason = %refresh_error,
+            "lazy OAuth refresh failed after token expiry"
+        );
+        return Err(match refresh_error {
+            LazyRefreshError::Failed { reason } => SignerError::ExpiredToken { reason },
+        });
+    }
+    inner.build(upstream).await
 }
 
 #[derive(Clone)]
@@ -910,14 +951,16 @@ mod tests {
             tokens: EncryptedOAuthTokens,
             never_refresh: bool,
         ) -> StorageResult<UpstreamRecord> {
-            self.mutate(id, Some(expected_revision), |record| {
-                record.oauth_credentials = Some(tokens);
-                record.oauth_never_refresh = never_refresh;
-                record.oauth_token_generation += 1;
-                record.last_apply_error = None;
-                Ok(())
-            })
-            .await
+            let updated = self
+                .mutate(id, Some(expected_revision), |record| {
+                    record.oauth_credentials = Some(tokens);
+                    record.oauth_never_refresh = never_refresh;
+                    record.oauth_token_generation += 1;
+                    record.last_apply_error = None;
+                    Ok(())
+                })
+                .await?;
+            Ok(updated)
         }
 
         async fn complete_refresh(

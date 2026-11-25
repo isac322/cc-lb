@@ -614,7 +614,8 @@ async fn subscription_websocket_state(
         clock.clone(),
     ));
     let filter: Arc<dyn cc_lb_routing::FilterPlugin> = Arc::new(
-        cc_lb_routing_eval::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::new(
+        cc_lb_routing_eval::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::with_clock(
+            clock.clone(),
         ),
     );
     let principal_view = Arc::new(PrincipalView::for_tests(

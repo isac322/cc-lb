@@ -5,11 +5,71 @@ use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
+use apalis_core::error::{AbortError, BoxDynError};
 use serde::{Deserialize, Serialize};
 use tower::{Layer, Service};
 
 use crate::error::SchedulerError;
 use crate::middleware::JobOutcomeStatus;
+
+/// Classifies errors escaping a job handler as fatal (`Killed`) or retryable
+/// through [`RetryClass`].
+pub trait RetryErrorClassify {
+    fn is_fatal_retry_error(&self) -> bool;
+
+    fn retry_error_category(&self) -> &'static str {
+        "handler_error"
+    }
+}
+
+impl RetryErrorClassify for SchedulerError {
+    fn is_fatal_retry_error(&self) -> bool {
+        matches!(
+            self,
+            Self::InvalidRetryDelay | Self::RetriesExhausted { .. }
+        )
+    }
+
+    fn retry_error_category(&self) -> &'static str {
+        match self {
+            Self::Database(_) => "database",
+            Self::Job(_) => "job_error",
+            Self::Conflict(_) => "conflict",
+            Self::InvalidRetryDelay => "invalid_retry_delay",
+            Self::JobTimeout { .. } => "job_timeout",
+            Self::RetriesExhausted { category, .. } => category,
+        }
+    }
+}
+
+impl RetryErrorClassify for AbortError {
+    fn is_fatal_retry_error(&self) -> bool {
+        true
+    }
+
+    fn retry_error_category(&self) -> &'static str {
+        "abort_error"
+    }
+}
+
+impl RetryErrorClassify for BoxDynError {
+    fn is_fatal_retry_error(&self) -> bool {
+        self.downcast_ref::<AbortError>().is_some()
+            || self
+                .downcast_ref::<SchedulerError>()
+                .is_some_and(SchedulerError::is_fatal_retry_error)
+    }
+
+    fn retry_error_category(&self) -> &'static str {
+        if self.downcast_ref::<AbortError>().is_some() {
+            "abort_error"
+        } else if let Some(err) = self.downcast_ref::<SchedulerError>() {
+            err.retry_error_category()
+        } else {
+            "handler_error"
+        }
+    }
+}
 
 type RetryFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
@@ -202,7 +262,7 @@ impl<S, P> Service<P> for RetryClassService<S>
 where
     P: RetryPayload + Send + 'static,
     S: Service<P, Response = JobOutcome>,
-    S::Error: From<SchedulerError>,
+    S::Error: From<SchedulerError> + RetryErrorClassify + std::fmt::Display,
     S::Future: Send + 'static,
 {
     type Response = JobOutcome;
@@ -221,14 +281,36 @@ where
         let class = self.class;
         let future = self.inner.call(payload);
         Box::pin(async move {
-            match future.await? {
+            let mut escaping_error = None;
+            let outcome = match future.await {
+                Ok(outcome) => outcome,
+                Err(err) if err.is_fatal_retry_error() => return Err(err),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        attempt = ordinal,
+                        "scheduler job returned error; routing through RetryClass",
+                    );
+                    escaping_error = Some((
+                        err.retry_error_category(),
+                        crate::error::sanitize_failure_summary(&err.to_string()),
+                    ));
+                    JobOutcome::Retry { delay: None }
+                }
+            };
+            match outcome {
                 JobOutcome::Retry {
                     delay: Some(explicit),
                 } if explicit.is_zero() => Err(SchedulerError::InvalidRetryDelay.into()),
                 JobOutcome::Retry { .. }
                     if !allows_retry || ordinal > class.policy().max_attempts() =>
                 {
-                    Ok(JobOutcome::DeadLetter)
+                    match escaping_error {
+                        Some((category, summary)) => {
+                            Err(SchedulerError::RetriesExhausted { category, summary }.into())
+                        }
+                        None => Ok(JobOutcome::DeadLetter),
+                    }
                 }
                 JobOutcome::Retry {
                     delay: Some(explicit),
@@ -238,7 +320,12 @@ where
                 JobOutcome::Retry { delay: None } => {
                     match class.next_delay_with_seed(ordinal, retry_seed) {
                         Some(delay) => Ok(JobOutcome::Retry { delay: Some(delay) }),
-                        None => Ok(JobOutcome::DeadLetter),
+                        None => match escaping_error {
+                            Some((category, summary)) => {
+                                Err(SchedulerError::RetriesExhausted { category, summary }.into())
+                            }
+                            None => Ok(JobOutcome::DeadLetter),
+                        },
                     }
                 }
                 outcome @ (JobOutcome::Done

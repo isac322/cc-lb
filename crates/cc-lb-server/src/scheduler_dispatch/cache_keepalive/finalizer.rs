@@ -128,11 +128,19 @@ impl SchedulerDispatch {
             }
             finalization.accounting_guard.forget();
         }
+        let renewal_path =
+            cc_lb_engine::cache_keepalive::resolve_keepalive_url(snapshot, &upstream)
+                .map(|url| url.path().to_owned())
+                .unwrap_or_else(|_| snapshot.url.path().to_owned());
+        let renewal_stream =
+            upstream.kind == cc_lb_storage_api::upstream::UpstreamKind::OpenaiOauth;
         publish_renewal_lifecycle(
             self.event_bus.as_ref(),
             RenewalLifecycleInput {
                 event_id: &event_id,
                 source_ref_id: &source_ref_id,
+                path: &renewal_path,
+                stream: renewal_stream,
                 record,
                 thread_id,
                 upstream: &upstream,

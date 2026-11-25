@@ -684,7 +684,11 @@ impl<'v, 'a> FailoverRouter<'v, 'a> {
         if filters
             .iter()
             .any(|filter| filter.plugin_id() == BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
-            && subscription_hard_blocked(self.ctx.canonical_model_id.as_str(), selected)
+            && subscription_hard_blocked(
+                self.ctx.canonical_model_id.as_str(),
+                selected,
+                u64::try_from(cc_lb_clock::unix_millis(lifecycle.clock.now())).unwrap_or(u64::MAX),
+            )
         {
             return None;
         }

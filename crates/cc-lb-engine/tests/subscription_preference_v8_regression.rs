@@ -153,7 +153,9 @@ fn same_thread_uses_formula_winner_without_cache_loss_gate() {
         .expect("price catalog test lock");
     install_test_pricing();
 
-    let filter = SubscriptionPreferenceFilter::new();
+    let filter = SubscriptionPreferenceFilter::with_clock(std::sync::Arc::new(
+        cc_lb_clock::TestClock::new_at_secs(T0_SECS),
+    ));
     let principal = principal();
     let thread_id = "example-session-id";
     let example_peer = with_cache_score(
@@ -231,7 +233,9 @@ fn hard_rejected_incumbent_switches_despite_high_reprime_cost() {
         .expect("price catalog test lock");
     install_test_pricing();
 
-    let filter = SubscriptionPreferenceFilter::new();
+    let filter = SubscriptionPreferenceFilter::with_clock(std::sync::Arc::new(
+        cc_lb_clock::TestClock::new_at_secs(T0_SECS),
+    ));
     let principal = principal();
     let thread_id = "thread-hard-reject-bypass";
     let warm_owner = with_cache_score(clean_known_base("warm-owner", 1), warm_cache_score(516_000));
@@ -324,7 +328,9 @@ fn near_full_allowed_quota_remains_smooth_positive_weight() {
 #[test]
 fn same_thread_recomputes_without_successor_convergence() {
     // Given: one stable thread first routes to owner-a, then cache facts change.
-    let filter = SubscriptionPreferenceFilter::new();
+    let filter = SubscriptionPreferenceFilter::with_clock(std::sync::Arc::new(
+        cc_lb_clock::TestClock::new_at_secs(T0_SECS),
+    ));
     let principal = principal();
     let thread_id = "thread-owner-stability";
     let owner_a = with_live_cache(clean_known_base("owner-a", 1), 250_000);
@@ -385,9 +391,11 @@ fn same_thread_recomputes_without_successor_convergence() {
 }
 
 fn filter(candidates: &[UpstreamCandidate]) -> cc_lb_routing::FilterOutput {
-    SubscriptionPreferenceFilter::new()
-        .filter(&ctx(), &principal(), candidates)
-        .expect("builtin filter cannot fail")
+    SubscriptionPreferenceFilter::with_clock(std::sync::Arc::new(
+        cc_lb_clock::TestClock::new_at_secs(T0_SECS),
+    ))
+    .filter(&ctx(), &principal(), candidates)
+    .expect("builtin filter cannot fail")
 }
 
 fn candidate_tier(

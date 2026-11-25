@@ -94,5 +94,8 @@ impl UsagePruneRunner for StorageHandle {
 }
 
 pub(super) fn storage_scheduler_error(error: StorageError) -> SchedulerError {
-    SchedulerError::Job(error.to_string())
+    match error {
+        StorageError::Conflict { message } => SchedulerError::Conflict(message),
+        other => SchedulerError::Job(other.to_string()),
+    }
 }

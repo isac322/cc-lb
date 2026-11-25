@@ -11,6 +11,8 @@ use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 pub(super) struct RenewalLifecycleInput<'a> {
     pub(super) event_id: &'a str,
     pub(super) source_ref_id: &'a str,
+    pub(super) path: &'a str,
+    pub(super) stream: bool,
     pub(super) record: &'a CacheKeepaliveSessionRecord,
     pub(super) thread_id: Option<String>,
     pub(super) upstream: &'a UpstreamRecord,
@@ -32,7 +34,7 @@ pub(super) fn publish_renewal_lifecycle(
         event_id: input.event_id.to_owned(),
         request_id: input.event_id.to_owned(),
         ts_ms: input.ts.saturating_mul(1_000),
-        stream: false,
+        stream: input.stream,
         source_kind: Some("renewal".to_owned()),
         source_ref_id: Some(input.source_ref_id.to_owned()),
         event_kind: Some(cc_lb_request_log::RequestEventKind::Renewal),
@@ -41,10 +43,10 @@ pub(super) fn publish_renewal_lifecycle(
     event_bus.publish_lifecycle(LifecycleEvent::ParseCompleted {
         event_id: input.event_id.to_owned(),
         result: Ok(ParseInfo {
-            path: "/v1/messages".to_owned(),
+            path: input.path.to_owned(),
             method: "POST".to_owned(),
             model: Some(input.model.to_owned()),
-            stream: false,
+            stream: input.stream,
             body_bytes: 0,
             cache_breakpoints: Vec::new(),
             cache_prefix_hash: None,
@@ -185,8 +187,10 @@ fn upstream_kind_label(kind: UpstreamKind) -> &'static str {
     match kind {
         UpstreamKind::AnthropicApiKey => "anthropic_key",
         UpstreamKind::AnthropicOauth => "anthropic_oauth",
-        UpstreamKind::OpenaiApiKey | UpstreamKind::OpenaiOauth => "openai_key",
-        UpstreamKind::GeminiApiKey | UpstreamKind::GeminiOauth => "gemini_key",
+        UpstreamKind::OpenaiApiKey => "openai_key",
+        UpstreamKind::OpenaiOauth => "openai_oauth",
+        UpstreamKind::GeminiApiKey => "gemini_key",
+        UpstreamKind::GeminiOauth => "gemini_oauth",
         UpstreamKind::VertexApiKey => "vertex_key",
         UpstreamKind::VertexCredential => "vertex_credential",
     }

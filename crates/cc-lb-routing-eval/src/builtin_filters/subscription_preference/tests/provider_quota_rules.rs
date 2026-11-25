@@ -69,8 +69,8 @@ fn exhausted_oauth_loses_to_healthy_oauth_even_with_more_cache_reads() {
             let trace = output.subscription_preference.expect("tier trace");
             assert_eq!(trace.chosen_tier, cc_lb_domain::SubscriptionTier::KnownBase);
             assert_eq!(trace.candidates.len(), 1);
-            assert!(subscription_hard_blocked(model, &exhausted));
-            assert!(!subscription_hard_blocked(model, &healthy));
+            assert!(subscription_hard_blocked(model, &exhausted, T0_MILLIS));
+            assert!(!subscription_hard_blocked(model, &healthy, T0_MILLIS));
         }
     }
 }
@@ -433,7 +433,7 @@ fn gemini_model_family_ignores_the_other_familys_exhaustion() {
                 .chosen_tier,
             cc_lb_domain::SubscriptionTier::KnownBase
         );
-        assert!(!subscription_hard_blocked(model, &oauth));
+        assert!(!subscription_hard_blocked(model, &oauth, T0_MILLIS));
     }
 }
 
@@ -462,7 +462,7 @@ fn selected_gemini_family_exhaustion_falls_back_despite_other_family_headroom() 
         let key = other_provider("key", 2, UpstreamKind::GeminiApiKey);
         let output = filter_for_model(&[oauth.clone(), key.clone()], model);
         assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
-        assert!(subscription_hard_blocked(model, &oauth));
+        assert!(subscription_hard_blocked(model, &oauth, T0_MILLIS));
     }
 }
 
@@ -485,7 +485,11 @@ fn unknown_gemini_model_family_treats_both_families_as_unknown() {
                 .chosen_tier,
             cc_lb_domain::SubscriptionTier::UnknownProbe
         );
-        assert!(!subscription_hard_blocked("unidentified-model", &oauth));
+        assert!(!subscription_hard_blocked(
+            "unidentified-model",
+            &oauth,
+            T0_MILLIS
+        ));
     }
 }
 
@@ -533,7 +537,7 @@ fn provider_stale_observations_use_existing_reset_semantics() {
                     oauth.upstream_id
                 }]
             );
-            assert_eq!(subscription_hard_blocked(model, &oauth), blocked);
+            assert_eq!(subscription_hard_blocked(model, &oauth, T0_MILLIS), blocked);
             if !blocked {
                 let trace = output.subscription_preference.expect("unknown stale trace");
                 assert_eq!(

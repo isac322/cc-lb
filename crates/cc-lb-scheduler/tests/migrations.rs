@@ -62,7 +62,7 @@ mod sqlite {
         )
         .fetch_one(&pool)
         .await?;
-        assert_eq!(applied_count, 10);
+        assert_eq!(applied_count, 11);
 
         let index_sql: String = sqlx::query_scalar(
             "SELECT sql FROM sqlite_master
@@ -88,7 +88,7 @@ mod sqlite {
         )
         .fetch_one(&pool)
         .await?;
-        assert_eq!(reseeded_count, 10);
+        assert_eq!(reseeded_count, 11);
 
         assert_eq!(
             insert_job(&pool, "job-1", "q::email", "key-reuse").await?,
@@ -240,7 +240,7 @@ mod postgres {
         )
         .fetch_one(pool)
         .await?;
-        assert_eq!(applied_count, 10);
+        assert_eq!(applied_count, 11);
 
         let predicate: Option<String> = sqlx::query_scalar(
             "SELECT pg_get_expr(indexes.indpred, indexes.indrelid)
@@ -266,6 +266,12 @@ mod postgres {
             .execute(pool)
             .await?;
         apply_post_setup_migrations(pool).await?;
+        let reseeded_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cc_lb_scheduler._sqlx_post_setup_migrations WHERE success",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(reseeded_count, 11);
         let index_oid_after_preledger: i64 = sqlx::query_scalar(
             "SELECT classes.oid::bigint
              FROM pg_class classes

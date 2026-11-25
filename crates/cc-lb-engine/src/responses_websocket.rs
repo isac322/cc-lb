@@ -7822,7 +7822,8 @@ pub(crate) mod tests {
                 .await
                 .expect("issue prewarm fixture key");
             let filter: Arc<dyn FilterPlugin> = Arc::new(
-                crate::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::new(
+                crate::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::with_clock(
+                    clock.clone(),
                 ),
             );
             let pipeline = Arc::new(RouterPipelineCache {

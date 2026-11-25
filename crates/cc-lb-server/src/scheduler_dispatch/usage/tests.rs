@@ -411,27 +411,31 @@ fn codex_usage_and_header_credit_observations_drive_routing_and_keep_poll_restri
         rate_limit_tier: None,
         seat_tier: None,
     };
-    let evaluate = |now| {
-        SubscriptionPreferenceFilter::new()
-            .filter(
-                &context,
-                &principal,
-                &[
-                    candidate(
-                        cc_lb_domain::UpstreamKind::OpenaiOauth,
-                        upstream_id,
-                        cache.snapshot_for_upstream(upstream_id, now, 60),
-                        now,
-                    ),
-                    candidate(
-                        cc_lb_domain::UpstreamKind::OpenaiApiKey,
-                        key_id,
-                        vec![],
-                        now,
-                    ),
-                ],
-            )
-            .expect("quota filter")
+    let evaluate = |now: u64| {
+        SubscriptionPreferenceFilter::with_clock(std::sync::Arc::new(
+            cc_lb_clock::TestClock::new_at(
+                std::time::UNIX_EPOCH + std::time::Duration::from_millis(now),
+            ),
+        ))
+        .filter(
+            &context,
+            &principal,
+            &[
+                candidate(
+                    cc_lb_domain::UpstreamKind::OpenaiOauth,
+                    upstream_id,
+                    cache.snapshot_for_upstream(upstream_id, now, 60),
+                    now,
+                ),
+                candidate(
+                    cc_lb_domain::UpstreamKind::OpenaiApiKey,
+                    key_id,
+                    vec![],
+                    now,
+                ),
+            ],
+        )
+        .expect("quota filter")
     };
     let usage_body = |blocked| {
         serde_json::json!({

@@ -319,3 +319,221 @@ async fn codex_prefix_fidelity() {
     .await;
     assert_eq!(requests[0].body().as_ref(), expected);
 }
+
+#[tokio::test]
+async fn openai_oauth_resolve_keepalive_url_uses_codex_base_and_preserves_path_prefix() {
+    let legacy_snapshot = RequestSnapshot::capture_openai(
+        "https://api.openai.com/v1/responses".parse().unwrap(),
+        Method::POST,
+        HeaderMap::new(),
+        Bytes::copy_from_slice(REQUEST),
+        Uuid::from_u128(1),
+        cc_lb_storage_api::CacheTtl::Ttl30m,
+        usize::MAX,
+    )
+    .unwrap();
+
+    // Default OpenAI OAuth base_url (None) resolves to the Codex backend URL, never /v1/responses.
+    let mut oauth_default = UpstreamRecord {
+        id: Uuid::from_u128(1),
+        kind: UpstreamKind::OpenaiOauth,
+        base_url: None,
+        enabled: true,
+        ..UpstreamRecord::default()
+    };
+    assert_eq!(
+        resolve_keepalive_url(&legacy_snapshot, &oauth_default)
+            .unwrap()
+            .as_str(),
+        "https://chatgpt.com/backend-api/codex/responses"
+    );
+
+    // Custom base URL with /backend-api/codex prefix preserves prefix and strips /v1/.
+    oauth_default.base_url = Some("http://127.0.0.1:4100/backend-api/codex".parse().unwrap());
+    assert_eq!(
+        resolve_keepalive_url(&legacy_snapshot, &oauth_default)
+            .unwrap()
+            .as_str(),
+        "http://127.0.0.1:4100/backend-api/codex/responses"
+    );
+
+    // Mock base URL rooted at "/" resolves to "/responses".
+    oauth_default.base_url = Some("http://127.0.0.1:4100/".parse().unwrap());
+    assert_eq!(
+        resolve_keepalive_url(&legacy_snapshot, &oauth_default)
+            .unwrap()
+            .as_str(),
+        "http://127.0.0.1:4100/responses"
+    );
+
+    // API key upstream retains /v1/responses.
+    let api_key_upstream = UpstreamRecord {
+        id: Uuid::from_u128(1),
+        kind: UpstreamKind::OpenaiApiKey,
+        base_url: Some("http://127.0.0.1:4100/".parse().unwrap()),
+        enabled: true,
+        ..UpstreamRecord::default()
+    };
+    assert_eq!(
+        resolve_keepalive_url(&legacy_snapshot, &api_key_upstream)
+            .unwrap()
+            .as_str(),
+        "http://127.0.0.1:4100/v1/responses"
+    );
+}
+
+#[tokio::test]
+async fn codex_compressed_responses_decode_before_classification_and_errors() {
+    use std::io::Write as _;
+
+    struct EncodedDispatch {
+        status: StatusCode,
+        encoding: &'static str,
+        body: Bytes,
+    }
+
+    #[async_trait::async_trait]
+    impl UpstreamDispatch for EncodedDispatch {
+        async fn dispatch(
+            &self,
+            _request: cc_lb_upstream::SignedRequest,
+        ) -> Result<Response<crate::lifecycle::Body>, crate::lifecycle::DispatchError> {
+            let mut response = Response::new(crate::lifecycle::Body::from(self.body.clone()));
+            *response.status_mut() = self.status;
+            response.headers_mut().insert(
+                http::header::CONTENT_ENCODING,
+                http::HeaderValue::from_static(self.encoding),
+            );
+            Ok(response)
+        }
+    }
+
+    let sse_hit = terminal_wire(
+        "response.completed",
+        json!({
+            "input_tokens": 2048,
+            "output_tokens": 5,
+            "input_tokens_details": {"cached_tokens": 1024}
+        }),
+    );
+
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(&sse_hit).unwrap();
+    let gzip_body = Bytes::from(gz.finish().unwrap());
+
+    let mut br_body = Vec::new();
+    {
+        let mut writer = brotli::CompressorWriter::new(&mut br_body, 4096, 4, 22);
+        writer.write_all(&sse_hit).unwrap();
+    }
+
+    let zstd_body = Bytes::from(zstd::stream::encode_all(sse_hit.as_ref(), 0).unwrap());
+
+    let upstream = UpstreamRecord {
+        id: Uuid::from_u128(1299),
+        name: "codex-compressed".to_owned(),
+        kind: UpstreamKind::OpenaiOauth,
+        enabled: true,
+        ..UpstreamRecord::default()
+    };
+    let snapshot = RequestSnapshot::capture_openai(
+        "https://chatgpt.com/backend-api/codex/responses"
+            .parse()
+            .unwrap(),
+        Method::POST,
+        HeaderMap::new(),
+        Bytes::copy_from_slice(REQUEST),
+        upstream.id,
+        cc_lb_storage_api::CacheTtl::Ttl30m,
+        usize::MAX,
+    )
+    .unwrap();
+
+    let build_dispatcher = |status, encoding, body| {
+        let view = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(TestSignerFactory))
+            .principal_view(Arc::new(
+                cc_lb_control::api_keys::principal_view::PrincipalView::for_tests(
+                    "test",
+                    true,
+                    vec!["*".to_owned()],
+                    Vec::new(),
+                    HashMap::new(),
+                ),
+            ))
+            .upstream_records(vec![upstream.clone()])
+            .build();
+        AnthropicKeepaliveDispatcher::new(
+            Arc::new(DynamicViewHolder::new(view)),
+            Arc::new(TestUpstreamStore::new(upstream.clone())),
+            Arc::new(EncodedDispatch {
+                status,
+                encoding,
+                body,
+            }),
+            Arc::new(cc_lb_clock::SystemClock),
+        )
+    };
+
+    for (encoding, encoded) in [
+        ("gzip", gzip_body.clone()),
+        ("br", Bytes::from(br_body)),
+        ("zstd", zstd_body),
+    ] {
+        let dispatcher = build_dispatcher(StatusCode::OK, encoding, encoded);
+        let outcome = dispatcher
+            .dispatch(
+                &snapshot,
+                KeepaliveDispatchContext::new(None, format!("enc-{encoding}"), u64::MAX),
+            )
+            .await;
+        let DispatchOutcome::CacheHit { finalization, .. } = outcome else {
+            panic!("compressed 200 ({encoding}) must decompress and classify as CacheHit");
+        };
+        assert_eq!(finalization.usage.cache_read_input_tokens, 1024);
+    }
+
+    // Corrupt compressed 200 must surface a clear decompression error rather than JSON parse garbage.
+    let corrupt_dispatcher =
+        build_dispatcher(StatusCode::OK, "gzip", Bytes::from_static(b"not-gzip"));
+    let corrupt_outcome = corrupt_dispatcher
+        .dispatch(
+            &snapshot,
+            KeepaliveDispatchContext::new(None, "corrupt-gzip".to_owned(), u64::MAX),
+        )
+        .await;
+    assert!(
+        matches!(corrupt_outcome, DispatchOutcome::Error(ref msg) if msg.contains("decompression failed")),
+        "expected decompression error"
+    );
+
+    // Compressed non-200 error body keeps allowlisted codes and strips message/body text.
+    let mut err_gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    err_gz
+        .write_all(
+            br#"{"error":{"type":"server_error","code":"bad_gateway","message":"rejected input: SYNTHETIC_PROMPT_SECRET_42"}}"#,
+        )
+        .unwrap();
+    let err_dispatcher = build_dispatcher(
+        StatusCode::BAD_GATEWAY,
+        "gzip",
+        Bytes::from(err_gz.finish().unwrap()),
+    );
+    let err_outcome = err_dispatcher
+        .dispatch(
+            &snapshot,
+            KeepaliveDispatchContext::new(None, "err-gzip".to_owned(), u64::MAX),
+        )
+        .await;
+    let DispatchOutcome::Error(msg) = err_outcome else {
+        panic!("expected non-200 error outcome");
+    };
+    assert!(
+        msg.contains("status=502")
+            && msg.contains("type=server_error")
+            && msg.contains("code=bad_gateway")
+            && !msg.contains("SYNTHETIC_PROMPT_SECRET_42")
+            && !msg.contains("rejected input"),
+        "expected status and allowlisted error codes without body text: {msg}"
+    );
+}

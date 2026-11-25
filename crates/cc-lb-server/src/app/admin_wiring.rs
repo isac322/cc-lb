@@ -257,6 +257,7 @@ async fn build_app_with_storage_inner(
                 stores: core.stores,
                 aead: core.aead,
                 lazy_refresher,
+                http: warmup_dialect_http_client(),
                 clock: clock.clone(),
                 config: admin_config.clone(),
             }) as Arc<dyn WarmupDialectDispatcher>
@@ -292,6 +293,7 @@ pub(super) struct ServerWarmupDialectDispatcher {
     stores: Arc<DynamicStores>,
     aead: Arc<AeadService>,
     lazy_refresher: Arc<LazyRefresher>,
+    http: crate::warmup::request::WarmupHttpClient,
     clock: ClockHandle,
     config: Arc<Config>,
 }
@@ -305,7 +307,6 @@ impl WarmupDialectDispatcher for ServerWarmupDialectDispatcher {
         upstream: &cc_lb_storage_api::UpstreamRecord,
         lane: cc_lb_storage_api::WarmupLane,
     ) -> Result<WarmupDialectDispatchOutcome, WarmupDialectDispatchError> {
-        let http = warmup_dialect_http_client();
         let outcome = crate::warmup::dialect::dispatch_warmup_with_dialect(
             crate::warmup::dialect::WarmupDialectDispatchParams {
                 runtime,
@@ -314,7 +315,7 @@ impl WarmupDialectDispatcher for ServerWarmupDialectDispatcher {
                 aead: self.aead.clone(),
                 lazy_refresher: Some(self.lazy_refresher.clone()),
                 upstream,
-                http: &http,
+                http: &self.http,
                 clock: self.clock.clone(),
                 config: self.config.as_ref(),
                 lane,
@@ -384,10 +385,9 @@ impl WarmupDialectDispatcher for ServerWarmupDialectDispatcher {
             None
         };
         let upstream = refreshed_upstream.as_ref().unwrap_or(upstream);
-        let http = warmup_dialect_http_client();
         Ok(
             match dispatch_provider_warmup_attempt(ProviderWarmupDispatchParams {
-                http: &http,
+                http: &self.http,
                 upstream,
                 aead: self.aead.as_ref(),
                 config: self.config.as_ref(),

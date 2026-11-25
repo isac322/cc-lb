@@ -1383,6 +1383,8 @@ impl Lifecycle {
         if let Some(target) = target {
             candidates.retain(|candidate| candidate.upstream_id == target);
         }
+        let now_unix_millis =
+            u64::try_from(cc_lb_clock::unix_millis(self.clock.now())).unwrap_or(u64::MAX);
         let prewarm_hint_id = if target.is_none() && is_openai_prewarm_request(body) {
             let now_unix_secs = unix_secs(self.clock.now());
             let ttl_secs = self.config.upstream_affinity_ttl.as_secs();
@@ -1412,7 +1414,11 @@ impl Lifecycle {
             candidate_hint.filter(|hint_id| {
                 candidates.iter().any(|candidate| {
                     candidate.upstream_id == *hint_id
-                        && !subscription_hard_blocked(ctx.canonical_model_id.as_str(), candidate)
+                        && !subscription_hard_blocked(
+                            ctx.canonical_model_id.as_str(),
+                            candidate,
+                            now_unix_millis,
+                        )
                 })
             })
         } else {
@@ -1436,6 +1442,7 @@ impl Lifecycle {
                 && !subscription_hard_blocked(
                     ctx.canonical_model_id.as_str(),
                     &hinted_result.candidates[0],
+                    now_unix_millis,
                 )
             {
                 hinted_result
@@ -1470,7 +1477,11 @@ impl Lifecycle {
                 .iter()
                 .any(|filter| filter.plugin_id() == BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
             && result.candidates.iter().all(|candidate| {
-                subscription_hard_blocked(ctx.canonical_model_id.as_str(), candidate)
+                subscription_hard_blocked(
+                    ctx.canonical_model_id.as_str(),
+                    candidate,
+                    now_unix_millis,
+                )
             })
         {
             return Err(WebSocketError::new(
@@ -1510,7 +1521,11 @@ impl Lifecycle {
                 else {
                     break;
                 };
-                if subscription_hard_blocked(ctx.canonical_model_id.as_str(), &next_candidate) {
+                if subscription_hard_blocked(
+                    ctx.canonical_model_id.as_str(),
+                    &next_candidate,
+                    now_unix_millis,
+                ) {
                     break;
                 }
                 excluded.push(next_id);

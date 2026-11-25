@@ -4094,3 +4094,136 @@ fn activity_evidence_bounds_cycle_and_source_batches_and_deduplicates_union() {
         fixture.drop_schema().await
     });
 }
+
+#[test]
+fn clock_drives_in_request_expiry_and_sessions_last_5m() {
+    run_postgres_case("clock drives in_request expiry", |url| async move {
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_099));
+        let fixture = Fixture::create(&url).await?;
+        let storage = PostgresStorage::new(fixture.pool.clone(), clock.clone());
+        storage.initialize().await?;
+
+        let replace = request("clock-in-request", 1_000, "agent-in-turn");
+        storage
+            .replace_from_real_request_fenced(&replace, None)
+            .await?;
+        sqlx::query(
+            "UPDATE cache_keepalive_sessions
+             SET status = 'terminal',
+                 terminal_reason = 'cancelled',
+                 cancel_reason = 'new_request',
+                 running_since_unix_secs = 1050,
+                 run_at = 1100,
+                 last_message_at_ms = 1000000
+             WHERE session_key_hash = $1",
+        )
+        .bind(&replace.session_key_hash)
+        .execute(storage.pool())
+        .await?;
+
+        let in_request_query = CacheKeepaliveSessionListQuery {
+            filter: CacheKeepaliveSessionFilter::InRequest,
+            ..query(PRINCIPAL_ID, 10)
+        };
+        let expired_query = CacheKeepaliveSessionListQuery {
+            filter: CacheKeepaliveSessionFilter::Expired,
+            ..query(PRINCIPAL_ID, 10)
+        };
+
+        let page_before = storage
+            .list_cache_keepalive_sessions(&in_request_query)
+            .await?;
+        assert_eq!(page_before.rows.len(), 1);
+        assert!(!page_before.rows[0].request_incomplete);
+        assert!(
+            storage
+                .list_cache_keepalive_sessions(&expired_query)
+                .await?
+                .rows
+                .is_empty()
+        );
+        assert_eq!(
+            storage
+                .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 900_000, None)
+                .await?
+                .sessions_last_5m,
+            1
+        );
+
+        clock.advance_secs(1);
+        assert!(
+            storage
+                .list_cache_keepalive_sessions(&in_request_query)
+                .await?
+                .rows
+                .is_empty()
+        );
+        let expired_after = storage
+            .list_cache_keepalive_sessions(&expired_query)
+            .await?;
+        assert_eq!(expired_after.rows.len(), 1);
+        assert!(expired_after.rows[0].request_incomplete);
+        let item = storage
+            .get_cache_keepalive_list_item(PRINCIPAL_ID, &replace.session_key_hash)
+            .await?
+            .expect("session list item present");
+        assert!(item.request_incomplete);
+        assert_eq!(
+            storage
+                .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 900_000, None)
+                .await?
+                .sessions_last_5m,
+            0
+        );
+
+        fixture.drop_schema().await
+    });
+}
+
+#[test]
+fn clock_drives_pending_to_observed_at_open_until_millisecond_boundary() {
+    run_postgres_case("clock drives pending boundary", |url| async move {
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at(
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_569_999),
+        ));
+        let fixture = Fixture::create(&url).await?;
+        let storage = PostgresStorage::new(fixture.pool.clone(), clock.clone());
+        storage.initialize().await?;
+
+        let cycle = Uuid::from_u128(99_301);
+        let mut replace = request("clock-open-until", 1_000, "agent-in-turn");
+        replace.cycle_id = cycle;
+        storage
+            .replace_from_real_request_fenced(&replace, None)
+            .await?;
+
+        let mut projection =
+            economics_projection("clock-open-until-renewal", Some(cycle), 1_270, "hit", 6_000);
+        projection
+            .turn
+            .as_mut()
+            .expect("renewal turn")
+            .session_key_hash = replace.session_key_hash.clone();
+        projection.evidence[0].session_key_hash = Some(replace.session_key_hash.clone());
+        projection.evidence[0].cycle_anchor_ms = Some(970_000);
+        storage
+            .append_request_event_with_projections(
+                &event("clock-open-until-renewal", 1_270),
+                &projection,
+            )
+            .await?;
+
+        let before = storage
+            .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
+            .await?;
+        assert_eq!(before.evidence_status, "pending");
+
+        clock.advance(std::time::Duration::from_millis(1));
+        let after = storage
+            .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
+            .await?;
+        assert_eq!(after.evidence_status, "observed");
+
+        fixture.drop_schema().await
+    });
+}

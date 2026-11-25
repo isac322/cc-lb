@@ -191,20 +191,22 @@ fn selected(fixture: &DispatchFixture, upstream: &UpstreamRecord) -> Uuid {
         .to_owned(),
         cache_pricing: Default::default(),
     };
-    SubscriptionPreferenceFilter::new()
-        .filter(
-            &context,
-            &Principal {
-                id: "reset-test".to_owned(),
-                kind: PrincipalKind::InternalKey,
-            },
-            &[
-                candidate(upstream.id, kind, snapshots),
-                candidate(key, key_kind, Vec::new()),
-            ],
-        )
-        .expect("routing filter")
-        .kept_upstream_ids[0]
+    SubscriptionPreferenceFilter::with_clock(Arc::new(cc_lb_clock::TestClock::new_at_secs(
+        1_700_000_000,
+    )))
+    .filter(
+        &context,
+        &Principal {
+            id: "reset-test".to_owned(),
+            kind: PrincipalKind::InternalKey,
+        },
+        &[
+            candidate(upstream.id, kind, snapshots),
+            candidate(key, key_kind, Vec::new()),
+        ],
+    )
+    .expect("routing filter")
+    .kept_upstream_ids[0]
 }
 
 async fn refresh(fixture: &DispatchFixture, upstream: &UpstreamRecord) -> LimitResetUsageRefresh {
@@ -814,19 +816,21 @@ impl cc_lb_clock::Clock for AfterEpochReadClock {
             && self.reads_after_inventory.fetch_add(1, Ordering::SeqCst) == 1
             && !self.paused_once.swap(true, Ordering::SeqCst)
         {
-            self.entered.notify_one();
-            let released = self.release.0.lock().unwrap();
-            let (released, _) = self
-                .release
-                .1
-                .wait_timeout_while(released, std::time::Duration::from_secs(10), |released| {
-                    !*released
-                })
-                .unwrap();
-            assert!(
-                *released,
-                "test must release the poll paused after its epoch read"
-            );
+            tokio::task::block_in_place(|| {
+                self.entered.notify_one();
+                let released = self.release.0.lock().unwrap();
+                let (released, _) = self
+                    .release
+                    .1
+                    .wait_timeout_while(released, std::time::Duration::from_secs(10), |released| {
+                        !*released
+                    })
+                    .unwrap();
+                assert!(
+                    *released,
+                    "test must release the poll paused after its epoch read"
+                );
+            });
         }
         std::time::UNIX_EPOCH + std::time::Duration::from_secs(self.seconds.load(Ordering::SeqCst))
     }

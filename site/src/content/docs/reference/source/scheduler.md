@@ -77,7 +77,7 @@ SQL rows pushed with `max_attempts = 1` disable retries through `RetryPayload::a
 
 ## 7. Scheduler Failures and Storage State
 
-A rescheduled `Retry` returns the same row to `Pending` with a future `run_at`. When a job exhausts its retry class, `DeadLetter` marks the row `Killed`. Panics and invalid zero retry delays also produce terminal `Killed` rows. Apalis may reclaim a `Failed` row from an ordinary handler error while `attempts < max_attempts`.
+A rescheduled `Retry` returns the same row to `Pending` with a future `run_at`. Retryable handler errors (including job timeouts and transient failures) also flow through `RetryClass` to schedule `Pending` backoff retries, and emit `DeadLetter` -> `Killed` (incrementing `cclb_scheduler_failures_total`) when retries are exhausted. Panics and invalid zero retry delays immediately produce terminal `Killed` rows. Legacy or rolling-upgrade `Failed` rows remain reclaimable while `attempts < max_attempts`, without stamping `done_at` or retaining a stale worker lock.
 
 - **Ticket Model**: Apalis `Failed` and `Killed` rows in the scheduler jobs table are the failure tickets, including `Failed` rows that Apalis may retry. This satisfies the "ticket/metric only, no auto-page" operator promise without a `scheduler_failures` table.
 - **Redaction**: Failure summaries stored in Apalis are bounded and redact prompt, `Authorization`, `x-api-key`, downstream API key, ciphertext, and payload-shaped material. Cache keepalive rows surface the job type and hashed/idempotency summary, never the prompt snapshot or downstream auth headers.

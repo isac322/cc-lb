@@ -10,7 +10,6 @@ use cc_lb_runtime_wasmtime::{
     RuntimeSlotKey, RuntimeSlotRole, WasmPluginWireDispatch, WasmtimeRuntime, WasmtimeRuntimeError,
 };
 
-use crate::PluginManifest;
 use crate::wasm_host::WasmtimeUpstreamDialect;
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh, LazyRefreshHandle,
@@ -95,6 +94,17 @@ impl WarmupDispatchError {
     }
 }
 
+pub(crate) fn warmup_dialect_slot_key(sha256: [u8; 32], plugin_name: &str) -> RuntimeSlotKey {
+    use std::fmt::Write as _;
+
+    let mut synth = String::with_capacity("__warmup_sha256__".len() + 64);
+    synth.push_str("__warmup_sha256__");
+    for byte in sha256 {
+        let _ = write!(&mut synth, "{byte:02x}");
+    }
+    RuntimeSlotKey::new(synth, plugin_name.to_owned(), RuntimeSlotRole::Shape)
+}
+
 pub async fn dispatch_warmup_with_dialect(
     params: WarmupDialectDispatchParams<'_>,
 ) -> Result<WarmupDispatchOutcome, WarmupDispatchError> {
@@ -128,28 +138,21 @@ pub async fn dispatch_warmup_with_dialect(
         });
     }
 
-    let wasm_path = materialize_wasm(params.stores, params.data_dir, registry_entry.sha256)
-        .await
-        .map_err(|error| WarmupDispatchError::Materialize(error.to_string()))?;
-    let manifest = PluginManifest {
-        name: registry_entry.name,
-        artifact: wasm_path.to_string_lossy().into_owned(),
+    let slot_key = warmup_dialect_slot_key(registry_entry.sha256, &registry_entry.name);
+    let slot = match params.runtime.get_slot(&slot_key) {
+        Some(slot) => slot,
+        None => {
+            let wasm_path = materialize_wasm(params.stores, params.data_dir, registry_entry.sha256)
+                .await
+                .map_err(|error| WarmupDispatchError::Materialize(error.to_string()))?;
+            let wasm_bytes = tokio::fs::read(&wasm_path)
+                .await
+                .map_err(|error| WarmupDispatchError::Materialize(error.to_string()))?;
+            params
+                .runtime
+                .register_shape(slot_key, registry_entry.name.clone(), &wasm_bytes)?
+        }
     };
-
-    let synth_name = format!("__warmup__{}", params.upstream.id);
-
-    let wasm_bytes = tokio::fs::read(&manifest.artifact)
-        .await
-        .map_err(|error| WarmupDispatchError::Materialize(error.to_string()))?;
-    let slot = params.runtime.register_shape(
-        RuntimeSlotKey::new(
-            synth_name.clone(),
-            manifest.name.clone(),
-            RuntimeSlotRole::Shape,
-        ),
-        manifest.name.clone(),
-        &wasm_bytes,
-    )?;
     let provider = match params.upstream.kind {
         UpstreamKind::OpenaiOauth => ProviderFamily::Openai,
         UpstreamKind::GeminiOauth => ProviderFamily::Gemini,
@@ -239,26 +242,7 @@ pub async fn dispatch_warmup_with_dialect(
         )
         .await
         .map_err(WarmupDispatchError::Shape)?;
-        let response = tokio::time::timeout(WARMUP_RESPONSE_TIMEOUT, params.http.request(request))
-            .await
-            .map_err(|_| WarmupDispatchError::Http("warmup response timed out".to_owned()))?
-            .map_err(|error| WarmupDispatchError::Http(error.to_string()))?;
-        let outcome = WarmupDispatchOutcome {
-            status: response.status(),
-            headers: response.headers().clone(),
-        };
-        let mut body = response.into_body();
-        tokio::time::timeout(WARMUP_RESPONSE_TIMEOUT, async {
-            while let Some(frame) = body.frame().await {
-                frame.map_err(|error| {
-                    WarmupDispatchError::Http(signer.scrub_secrets(&error.to_string()).into_owned())
-                })?;
-            }
-            Ok::<(), WarmupDispatchError>(())
-        })
-        .await
-        .map_err(|_| WarmupDispatchError::Http("warmup response timed out".to_owned()))??;
-        return Ok(outcome);
+        return send_and_drain_warmup_request(params.http, request, signer.as_ref()).await;
     }
 
     let body_json = json!({
@@ -295,6 +279,20 @@ pub async fn dispatch_warmup_with_dialect(
     let signer = if let Some(lazy_refresher) = params.lazy_refresher {
         let refresh_handle: Arc<dyn LazyRefreshHandle> = lazy_refresher;
         AnthropicOAuthSignerFactoryWithLazyRefresh::new(factory, refresh_handle, params.upstream.id)
+            .with_shared_refresh_state(
+                params
+                    .stores
+                    .vertex_state
+                    .shared_signer_state
+                    .refresh_locks
+                    .clone(),
+                params
+                    .stores
+                    .vertex_state
+                    .shared_signer_state
+                    .anthropic_forced_generations
+                    .clone(),
+            )
             .build(&upstream_api)
             .await
     } else {
@@ -314,16 +312,41 @@ pub async fn dispatch_warmup_with_dialect(
     }
     let request = request_builder.body(Full::new(signed.body().clone()))?;
 
-    let response = params
-        .http
-        .request(request)
-        .await
-        .map_err(|error| WarmupDispatchError::Http(error.to_string()))?;
+    send_and_drain_warmup_request(params.http, request, signer.as_ref()).await
+}
 
-    Ok(WarmupDispatchOutcome {
-        status: response.status(),
-        headers: response.headers().clone(),
+async fn send_and_drain_warmup_request(
+    http: &WarmupHttpClient,
+    request: Request<Full<Bytes>>,
+    signer: &dyn cc_lb_upstream::Signer,
+) -> Result<WarmupDispatchOutcome, WarmupDispatchError> {
+    send_and_drain_warmup_request_with_timeout(http, request, signer, WARMUP_RESPONSE_TIMEOUT).await
+}
+
+async fn send_and_drain_warmup_request_with_timeout(
+    http: &WarmupHttpClient,
+    request: Request<Full<Bytes>>,
+    signer: &dyn cc_lb_upstream::Signer,
+    timeout: std::time::Duration,
+) -> Result<WarmupDispatchOutcome, WarmupDispatchError> {
+    tokio::time::timeout(timeout, async {
+        let response = http.request(request).await.map_err(|error| {
+            WarmupDispatchError::Http(signer.scrub_secrets(&error.to_string()).into_owned())
+        })?;
+        let outcome = WarmupDispatchOutcome {
+            status: response.status(),
+            headers: response.headers().clone(),
+        };
+        let mut body = response.into_body();
+        while let Some(frame) = body.frame().await {
+            frame.map_err(|error| {
+                WarmupDispatchError::Http(signer.scrub_secrets(&error.to_string()).into_owned())
+            })?;
+        }
+        Ok(outcome)
     })
+    .await
+    .map_err(|_| WarmupDispatchError::Http("warmup response timed out".to_owned()))?
 }
 
 fn registry_entry_unsupported_slot(
@@ -331,4 +354,175 @@ fn registry_entry_unsupported_slot(
     slot: PluginSlotKind,
 ) -> bool {
     !registry_entry.is_builtin && !registry_entry.supported_slots.contains(&slot)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use cc_lb_upstream::{
+        RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SigningCapability,
+        UpstreamError,
+    };
+    use http::Request;
+    use http_body_util::Full;
+    use hyper_rustls::HttpsConnectorBuilder;
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::Notify;
+
+    use super::{WarmupDispatchError, send_and_drain_warmup_request_with_timeout};
+
+    struct TestScrubSigner {
+        secret: String,
+    }
+
+    #[async_trait]
+    impl Signer for TestScrubSigner {
+        async fn sign(
+            &self,
+            request: ShapedRequest,
+            capability: &mut SigningCapability,
+        ) -> Result<SignedRequest, SignerError> {
+            Ok(SignedRequest::from_shaped(request, capability))
+        }
+
+        async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+            RetryDecision::Fail
+        }
+
+        fn scrub_secrets<'a>(&self, message: &'a str) -> Cow<'a, str> {
+            if message.contains(&self.secret) {
+                Cow::Owned(message.replace(&self.secret, "[REDACTED]"))
+            } else {
+                Cow::Borrowed(message)
+            }
+        }
+    }
+
+    fn test_http_client() -> crate::warmup::request::WarmupHttpClient {
+        let connector = HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http1()
+            .build();
+        Client::builder(TokioExecutor::new()).build(connector)
+    }
+
+    #[tokio::test]
+    async fn warmup_request_helper_drains_body_and_enforces_single_timeout() {
+        let drained = Arc::new(AtomicBool::new(false));
+        let drained_flag = drained.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n")
+                .await
+                .expect("write headers and first chunk");
+            drained_flag.store(true, Ordering::SeqCst);
+            stream
+                .write_all(b"6\r\n world\r\n0\r\n\r\n")
+                .await
+                .expect("write final chunk");
+        });
+
+        let req = Request::post(format!("http://{addr}/v1/messages"))
+            .body(Full::new(Bytes::new()))
+            .expect("req");
+        let signer = TestScrubSigner {
+            secret: "sk-secret".to_owned(),
+        };
+        let outcome = send_and_drain_warmup_request_with_timeout(
+            &test_http_client(),
+            req,
+            &signer,
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("drained response succeeds");
+        assert_eq!(outcome.status, http::StatusCode::OK);
+        assert!(drained.load(Ordering::SeqCst));
+
+        // Body stall must fail under the single timeout budget even after headers arrived.
+        let stall_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let stall_addr = stall_listener.local_addr().expect("addr");
+        let hold = Arc::new(Notify::new());
+        let hold_srv = hold.clone();
+        tokio::spawn(async move {
+            let (mut stream, _) = stall_listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial")
+                .await
+                .expect("write incomplete body");
+            hold_srv.notified().await;
+        });
+
+        let stall_req = Request::post(format!("http://{stall_addr}/v1/messages"))
+            .body(Full::new(Bytes::new()))
+            .expect("req");
+        let err = send_and_drain_warmup_request_with_timeout(
+            &test_http_client(),
+            stall_req,
+            &signer,
+            Duration::from_millis(40),
+        )
+        .await
+        .err()
+        .expect("stalled body times out under single budget");
+        hold.notify_one();
+        assert!(matches!(err, WarmupDispatchError::Http(msg) if msg.contains("timed out")));
+    }
+
+    #[tokio::test]
+    async fn warmup_request_helper_scrubs_secrets_on_body_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nINVALID\r\n")
+                .await
+                .expect("write invalid chunk");
+        });
+
+        let req = Request::post(format!("http://{addr}/v1/messages"))
+            .body(Full::new(Bytes::new()))
+            .expect("req");
+        let signer = TestScrubSigner {
+            secret: "chunk".to_owned(),
+        };
+        let err = send_and_drain_warmup_request_with_timeout(
+            &test_http_client(),
+            req,
+            &signer,
+            Duration::from_secs(2),
+        )
+        .await
+        .err()
+        .expect("corrupt chunked body fails");
+        match err {
+            WarmupDispatchError::Http(msg) => {
+                assert!(
+                    !msg.contains("chunk"),
+                    "unscrubbed error leaked token: {msg}"
+                );
+            }
+            other => panic!("expected Http error, got {other:?}"),
+        }
+    }
 }

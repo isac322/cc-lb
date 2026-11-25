@@ -534,3 +534,37 @@ async fn oauth_refresh_watchdog_recovers_exhausted_failed_and_killed_same_genera
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn watchdog_scans_keys_without_decoding_corrupt_unrelated_job_payload() -> TestResult<()> {
+    let fixture = Fixture::new().await?;
+    let active_upstream = Uuid::new_v4();
+    let seeded_upstream = Uuid::new_v4();
+    let active_key = WatchdogEntityKind::Warmup.bootstrap_key(active_upstream, TICK_UNIX_SECS);
+    sqlx::query(
+        "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, idempotency_key) \
+         VALUES (?1, ?2, 'adaptive', 'Pending', 0, 5, 0, ?3)",
+    )
+    .bind(b"{corrupt-not-json".to_vec())
+    .bind(ulid::Ulid::generate().to_string())
+    .bind(&active_key)
+    .execute(&fixture.pool)
+    .await?;
+
+    let stats = run_entity_watchdog(
+        &fixture.backend,
+        WatchdogEntityKind::Warmup,
+        &[active_upstream, seeded_upstream],
+        TICK_UNIX_SECS,
+        RUN_AT_UNIX_SECS,
+    )
+    .await?;
+    assert_eq!(stats.seeded, 1);
+    assert_eq!(
+        fixture
+            .count_key(&WatchdogEntityKind::Warmup.bootstrap_key(seeded_upstream, TICK_UNIX_SECS))
+            .await?,
+        1
+    );
+    Ok(())
+}

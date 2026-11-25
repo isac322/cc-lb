@@ -1006,14 +1006,14 @@ fn default_scheduler_recurring_jobs() -> HashMap<String, RecurringJobConfig> {
             "oauth_refresh_watchdog".to_owned(),
             recurring_job_config(9360, scheduler_jitter_secs(9360)),
         ),
-        ("oauth_usage_poll".to_owned(), recurring_job_config(60, 0)),
+        ("oauth_usage_poll".to_owned(), recurring_job_config(60, 15)),
         (
             "api_key_usage_poll".to_owned(),
             recurring_job_config(300, 15),
         ),
         (
             "pool_quota_snapshot".to_owned(),
-            recurring_job_config(60, 0),
+            recurring_job_config(60, 29),
         ),
     ])
 }

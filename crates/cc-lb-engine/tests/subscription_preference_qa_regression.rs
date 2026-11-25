@@ -143,9 +143,11 @@ fn base_quota(utilization: f64, five_hour_reset_offset_secs: u64) -> BaseQuota {
 }
 
 fn route(request_id: &str, candidates: &[UpstreamCandidate]) -> RouteResult {
-    let output = SubscriptionPreferenceFilter::new()
-        .filter(&ctx(request_id), &principal(), candidates)
-        .expect("subscription preference filter succeeds");
+    let output = SubscriptionPreferenceFilter::with_clock(std::sync::Arc::new(
+        cc_lb_clock::TestClock::new_at_secs(T0_SECS),
+    ))
+    .filter(&ctx(request_id), &principal(), candidates)
+    .expect("subscription preference filter succeeds");
     let trace = output
         .subscription_preference
         .expect("subscription preference trace present");

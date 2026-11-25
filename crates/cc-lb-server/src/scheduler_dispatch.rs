@@ -93,6 +93,7 @@ pub(super) struct SchedulerDispatch {
     pub(super) clock: ClockHandle,
     pub(super) anthropic_org_api: AnthropicOrgApi,
     pub(super) openai_org_api: OpenAiOrgApi,
+    pub(super) oauth_usage_poll_rotation: Arc<parking_lot::Mutex<(Option<u64>, usize)>>,
 }
 
 pub(crate) fn build_scheduler_ctx(
@@ -139,6 +140,7 @@ impl SchedulerDispatch {
             clock: deps.clock,
             anthropic_org_api: deps.anthropic_org_api,
             openai_org_api: deps.openai_org_api,
+            oauth_usage_poll_rotation: Arc::new(parking_lot::Mutex::new((None, 0))),
         }
     }
 
@@ -161,9 +163,10 @@ impl SchedulerDispatch {
             AdaptiveJob::Warmup(job) => self.dispatch_warmup(job).await,
             AdaptiveJob::OAuthRefresh(job) => self.dispatch_oauth_refresh(job).await,
             AdaptiveJob::MetadataRefresh(job) => {
-                let runner = CoreMetadataRefreshRunner::new(
+                let runner = CoreMetadataRefreshRunner::with_client(
                     self.storage.clone(),
                     self.aead.clone(),
+                    self.http.clone(),
                     self.cancel.clone(),
                     self.clock.clone(),
                 );

@@ -39,7 +39,6 @@ use cc_lb_control::anthropic_compat::{
 use cc_lb_control::anthropic_metadata::{
     CedarEmberIdentityRecord, CedarEmberPollRecord, CedarEmberStatus,
     cedar_ember_identity_meta_key, cedar_ember_meta_key, fetch_oauth_profile_at,
-    make_metadata_http_client,
 };
 use cc_lb_control::gemini_period_unknown_quota::{
     GeminiRawQuotaBinding, persist_gemini_quota_observation,
@@ -1158,9 +1157,8 @@ impl SchedulerDispatch {
                 return;
             }
         };
-        let client = make_metadata_http_client();
         let profile = match fetch_oauth_profile_at(
-            &client,
+            &self.http,
             &base_url,
             &bundle.access_token,
             user_agent,

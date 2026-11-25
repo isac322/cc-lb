@@ -49,6 +49,13 @@ pub enum AdaptiveTaskKeyState {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SchedulerTaskStatusRow {
+    pub status: TaskStatus,
+    pub attempts: i32,
+    pub max_attempts: i32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SchedulerPushTask<Args> {
     pub args: Args,
     pub idempotency_key: Option<String>,
@@ -213,6 +220,108 @@ impl SchedulerBackend {
                     .into_iter()
                     .map(postgres_task_to_row)
                     .collect()
+            }
+        }
+    }
+
+    /// Reads status/attempt metadata for matching adaptive tasks by exact idempotency key
+    /// without decoding the serialized `job` payload.
+    pub async fn get_adaptive_task_statuses_by_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Vec<SchedulerTaskStatusRow>, SchedulerError> {
+        let rows: Vec<(String, i32, i32)> = match self {
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(sqlite) => {
+                sqlx::query_as(
+                    "SELECT status, attempts, max_attempts FROM Jobs \
+                     WHERE job_type = ?1 AND idempotency_key = ?2",
+                )
+                .bind(ADAPTIVE_QUEUE)
+                .bind(idempotency_key)
+                .fetch_all(sqlite.pool())
+                .await?
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => {
+                sqlx::query_as(
+                    "SELECT status, attempts, max_attempts FROM apalis.jobs \
+                     WHERE job_type = $1 AND idempotency_key = $2",
+                )
+                .bind(ADAPTIVE_QUEUE)
+                .bind(idempotency_key)
+                .fetch_all(postgres.pool())
+                .await?
+            }
+        };
+        rows.into_iter()
+            .map(|(status, attempts, max_attempts)| {
+                Ok(SchedulerTaskStatusRow {
+                    status: parse_task_status(&status)?,
+                    attempts,
+                    max_attempts,
+                })
+            })
+            .collect()
+    }
+
+    /// Lists idempotency keys of active adaptive tasks matching `prefix` using the partial
+    /// `(job_type, idempotency_key)` index without decoding `job` payloads.
+    pub async fn list_active_adaptive_idempotency_keys_by_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<String>, SchedulerError> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(sqlite) => {
+                if let Some(upper) = prefix_upper_bound(prefix) {
+                    sqlx::query_scalar(
+                        "SELECT idempotency_key FROM Jobs \
+                         WHERE job_type = ?1 \
+                           AND status IN ('Pending', 'Queued', 'Running', 'Failed') \
+                           AND idempotency_key IS NOT NULL \
+                           AND idempotency_key >= ?2 \
+                           AND idempotency_key < ?3 \
+                           AND (status != 'Failed' OR attempts < max_attempts)",
+                    )
+                    .bind(ADAPTIVE_QUEUE)
+                    .bind(prefix)
+                    .bind(upper)
+                    .fetch_all(sqlite.pool())
+                    .await
+                    .map_err(Into::into)
+                } else {
+                    sqlx::query_scalar(
+                        "SELECT idempotency_key FROM Jobs \
+                         WHERE job_type = ?1 \
+                           AND status IN ('Pending', 'Queued', 'Running', 'Failed') \
+                           AND idempotency_key IS NOT NULL \
+                           AND idempotency_key >= ?2 \
+                           AND (status != 'Failed' OR attempts < max_attempts)",
+                    )
+                    .bind(ADAPTIVE_QUEUE)
+                    .bind(prefix)
+                    .fetch_all(sqlite.pool())
+                    .await
+                    .map_err(Into::into)
+                }
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => {
+                let pattern = escape_like_prefix(prefix);
+                sqlx::query_scalar(
+                    "SELECT idempotency_key FROM apalis.jobs \
+                     WHERE job_type = $1 \
+                       AND status IN ('Pending', 'Queued', 'Running', 'Failed') \
+                       AND idempotency_key IS NOT NULL \
+                       AND idempotency_key LIKE $2 ESCAPE '\\' \
+                       AND (status <> 'Failed' OR attempts < max_attempts)",
+                )
+                .bind(ADAPTIVE_QUEUE)
+                .bind(pattern)
+                .fetch_all(postgres.pool())
+                .await
+                .map_err(Into::into)
             }
         }
     }
@@ -621,6 +730,54 @@ fn u64_to_i64(value: u64, field: &str) -> Result<i64, SchedulerError> {
     i64::try_from(value).map_err(|_| SchedulerError::Job(format!("{field} exceeds i64::MAX")))
 }
 
+fn parse_task_status(raw: &str) -> Result<TaskStatus, SchedulerError> {
+    match raw {
+        "Pending" => Ok(TaskStatus::Pending),
+        "Queued" => Ok(TaskStatus::Queued),
+        "Running" => Ok(TaskStatus::Running),
+        "Failed" => Ok(TaskStatus::Failed),
+        "Killed" => Ok(TaskStatus::Killed),
+        "Done" => Ok(TaskStatus::Done),
+        _ => raw
+            .parse::<TaskStatus>()
+            .map_err(|_| SchedulerError::Job(format!("unknown scheduler task status `{raw}`"))),
+    }
+}
+
+#[cfg(feature = "sqlite")]
+fn prefix_upper_bound(prefix: &str) -> Option<String> {
+    let mut chars: Vec<char> = prefix.chars().collect();
+    while let Some(last) = chars.pop() {
+        let code = last as u32;
+        let next_code = match code {
+            0xD7FF => Some(0xE000),
+            0x10_FFFF => None,
+            _ => Some(code + 1),
+        };
+        if let Some(ch) = next_code.and_then(char::from_u32) {
+            chars.push(ch);
+            return Some(chars.into_iter().collect());
+        }
+    }
+    None
+}
+
+#[cfg(feature = "postgres")]
+fn escape_like_prefix(prefix: &str) -> String {
+    let mut out = String::with_capacity(prefix.len() + 2);
+    for ch in prefix.chars() {
+        match ch {
+            '\\' | '%' | '_' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out.push('%');
+    out
+}
+
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use cc_lb_storage_api::CacheTtl;
@@ -731,5 +888,102 @@ mod tests {
             .await
             .expect("read max_attempts");
         assert_eq!(max_attempts, 5);
+    }
+
+    #[tokio::test]
+    async fn sqlite_indexed_queries_skip_corrupt_job_payloads() {
+        use std::sync::Arc;
+
+        use cc_lb_clock::SystemClock;
+
+        use crate::worker::{SchedulerBackend, SqliteSchedulerBackend, TaskStatus};
+
+        let pool = SqlitePool::connect(":memory:").await.expect("sqlite pool");
+        apalis_sqlite::SqliteStorage::setup(&pool)
+            .await
+            .expect("apalis setup");
+        crate::migrations::apply_post_setup_migrations(&pool)
+            .await
+            .expect("post setup migrations");
+
+        let upstream_id = Uuid::new_v4();
+        let active_key = format!("adaptive:warmup:{upstream_id}:100");
+        let exhausted_key = format!("adaptive:warmup:{upstream_id}:exhausted");
+        let done_key = format!("adaptive:warmup:{upstream_id}:done");
+
+        sqlx::query(
+            "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, idempotency_key) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+        )
+        .bind(b"{corrupt-not-json".to_vec())
+        .bind(ulid::Ulid::generate().to_string())
+        .bind(ADAPTIVE_QUEUE)
+        .bind("Pending")
+        .bind(0_i32)
+        .bind(5_i32)
+        .bind(&active_key)
+        .execute(&pool)
+        .await
+        .expect("insert corrupt active row");
+
+        sqlx::query(
+            "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, idempotency_key) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+        )
+        .bind(b"null".to_vec())
+        .bind(ulid::Ulid::generate().to_string())
+        .bind(ADAPTIVE_QUEUE)
+        .bind("Failed")
+        .bind(5_i32)
+        .bind(5_i32)
+        .bind(&exhausted_key)
+        .execute(&pool)
+        .await
+        .expect("insert exhausted failed row");
+
+        sqlx::query(
+            "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, idempotency_key) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+        )
+        .bind(b"null".to_vec())
+        .bind(ulid::Ulid::generate().to_string())
+        .bind(ADAPTIVE_QUEUE)
+        .bind("Done")
+        .bind(1_i32)
+        .bind(5_i32)
+        .bind(&done_key)
+        .execute(&pool)
+        .await
+        .expect("insert done row");
+
+        let backend =
+            SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(pool, Arc::new(SystemClock)));
+
+        let statuses = backend
+            .get_adaptive_task_statuses_by_key(&active_key)
+            .await
+            .expect("indexed status query ignores corrupt job payload");
+        assert_eq!(
+            statuses,
+            vec![super::SchedulerTaskStatusRow {
+                status: TaskStatus::Pending,
+                attempts: 0,
+                max_attempts: 5,
+            }]
+        );
+
+        let active_keys = backend
+            .list_active_adaptive_idempotency_keys_by_prefix("adaptive:warmup:")
+            .await
+            .expect("indexed prefix query ignores corrupt job payload");
+        assert_eq!(active_keys, vec![active_key]);
+    }
+
+    #[test]
+    fn prefix_upper_bound_computes_exclusive_range() {
+        assert_eq!(
+            super::prefix_upper_bound("adaptive:warmup:").as_deref(),
+            Some("adaptive:warmup;")
+        );
     }
 }
