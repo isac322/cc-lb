@@ -17,6 +17,8 @@ fn postgres_config_rendering() {
     assert!(config.contains("proxy_addr = \"0.0.0.0:31001\""));
     assert!(config.contains("admin_addr = \"0.0.0.0:31002\""));
     assert!(config.contains("metrics_addr = \"0.0.0.0:31003\""));
+    assert!(!config.contains("[cluster]"));
+    assert!(!config.contains("instance_url"));
 }
 
 #[test]

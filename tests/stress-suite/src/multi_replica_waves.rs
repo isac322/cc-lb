@@ -13,7 +13,6 @@ use crate::multi_replica_storage::{address, wait_for_postgres};
 use crate::supervisor_process::SupervisedChild;
 
 const ADMIN_TOKEN: &str = "stress-admin";
-const CLUSTER_TOKEN: &str = "stress-cluster";
 const MASTER_KEY: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const MESSAGES_BODY: &str =
     r#"{"model":"fake-alpha","max_tokens":8,"messages":[{"role":"user","content":"stress"}]}"#;
@@ -80,14 +79,12 @@ fn spawn_replica(
     let replica_dir = root.join(format!("replica-{index}"));
     std::fs::create_dir_all(&replica_dir).map_err(|error| error.to_string())?;
     let config_path = replica_dir.join("cc-lb.toml");
-    let instance_url = format!("http://127.0.0.1:{}", ports.admin);
     std::fs::write(
         &config_path,
         render_config(&ReplicaConfig {
             storage_url,
             ports,
             data_dir: &replica_dir.display().to_string(),
-            instance_url: &instance_url,
         }),
     )
     .map_err(|error| error.to_string())?;
@@ -98,8 +95,7 @@ fn spawn_replica(
         .arg("--data-dir")
         .arg(&replica_dir)
         .env("CC_LB_MASTER_KEY", MASTER_KEY)
-        .env("CC_LB_ADMIN_TOKEN", ADMIN_TOKEN)
-        .env("CC_LB_CLUSTER_TOKEN", CLUSTER_TOKEN);
+        .env("CC_LB_ADMIN_TOKEN", ADMIN_TOKEN);
     SupervisedChild::spawn(command)
 }
 
