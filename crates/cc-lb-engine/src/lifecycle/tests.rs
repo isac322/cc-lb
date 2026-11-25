@@ -8762,8 +8762,8 @@ async fn responses_websocket_subscription_preference_keeps_api_key_fallback_rech
         .await
         .expect("pinned continuation must still be allowed on exhausted candidate");
 
-    // 3. Hybrid reasoning preserves unestablished items at prepare time so the
-    //    WebSocket gateway can apply any active session pin before deciding strip vs retry.
+    // 3. Hybrid reasoning uses the full dispatchable pool under subscription-preference:
+    //    multi-upstream unpinned -> StrippedUpfront; single-owner or lone healthy -> RetryStripAll.
     let reasoning_frame = Bytes::from_static(
         br#"{"model":"gpt-6.2-sol","store":false,"input":[{"type":"reasoning","id":"rs_foreign","encrypted_content":"gAAAAABforeign_reason","summary":[]},{"type":"message","role":"user","content":"hi"}]}"#,
     );
@@ -8790,9 +8790,9 @@ async fn responses_websocket_subscription_preference_keeps_api_key_fallback_rech
     assert!(
         matches!(
             multi_turn.unknown_reasoning_plan,
-            WsUnknownReasoningPlan::Unestablished { .. }
+            WsUnknownReasoningPlan::StrippedUpfront { .. }
         ),
-        "multi-upstream subscription-preference turn must defer unestablished reasoning to the gateway"
+        "multi-upstream subscription-preference pool must strip unestablished reasoning upfront"
     );
 
     let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
@@ -8815,9 +8815,9 @@ async fn responses_websocket_subscription_preference_keeps_api_key_fallback_rech
     assert!(
         matches!(
             pinned_turn.unknown_reasoning_plan,
-            WsUnknownReasoningPlan::Unestablished { .. }
+            WsUnknownReasoningPlan::RetryStripAll { .. }
         ),
-        "pinned turn must pass Unestablished reasoning plan to the gateway"
+        "single-owner turn must preserve RetryStripAll behavior"
     );
 
     // Mark all OAuth accounts except oauth_ids[0] exhausted so only 1 upstream is dispatchable.
@@ -8860,9 +8860,9 @@ async fn responses_websocket_subscription_preference_keeps_api_key_fallback_rech
     assert!(
         matches!(
             single_healthy_turn.unknown_reasoning_plan,
-            WsUnknownReasoningPlan::Unestablished { .. }
+            WsUnknownReasoningPlan::RetryStripAll { .. }
         ),
-        "single healthy OAuth upstream must pass Unestablished reasoning plan to the gateway"
+        "single healthy OAuth upstream without non-blocked fallbacks must keep RetryStripAll"
     );
 }
 

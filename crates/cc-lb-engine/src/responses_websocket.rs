@@ -22,6 +22,8 @@ use crate::authn_rail::Authenticated;
 use crate::completion_observer::{StreamCompletionLog, StreamLatency};
 use crate::downstream_stream_drop_guard::record_stream_termination_metric;
 use crate::lifecycle::{Lifecycle, PromptCacheObservationContext, WebSocketTurnOwner};
+use crate::request_context::RequestContext;
+use cc_lb_domain::{CacheBreakpoint, Principal};
 
 fn is_prewarm_body(body: &serde_json::Value) -> bool {
     body.get("generate") == Some(&serde_json::Value::Bool(false))
@@ -204,11 +206,30 @@ pub(crate) struct WebSocketIngress<'a> {
     pub query: Option<&'a str>,
 }
 
+#[derive(Clone)]
+pub(crate) struct DeferredWebSocketLimitContext {
+    pub(crate) ctx: RequestContext,
+    pub(crate) principal: Principal,
+    pub(crate) cache_breakpoints: Vec<CacheBreakpoint>,
+}
+
 pub(crate) enum WsUnknownReasoningPlan {
     None,
-    /// Unestablished encrypted reasoning deferred to gateway dispatch so session
-    /// pinning decides between upfront stripping (>1 candidate) and retry-on-400 (<=1).
-    Unestablished {
+    /// Multiple dispatchable upstreams without an active session pin or other
+    /// pinning-eligible turns/transports: strip upfront and adjust admission estimate.
+    StrippedUpfront {
+        body: Arc<Value>,
+        frame: Bytes,
+    },
+    /// Resolved or single dispatchable upstream: send verbatim first and retry once
+    /// stripping all encrypted reasoning items on HTTP-400 `invalid_encrypted_content`.
+    RetryStripAll {
+        unknown_keys: Vec<UpstreamAffinityKey>,
+    },
+    /// Multi-upstream unpinned turn that can narrow to a single OAuth session owner
+    /// (or switch between OAuth and API-key transports) before send: defer final
+    /// encrypted-reasoning normalization and limit estimation until `validate_candidate_for_send`.
+    DeferredUnestablished {
         unknown_keys: Vec<UpstreamAffinityKey>,
     },
     /// Resolved owner with unmatched pending reasoning digests: send verbatim first;
@@ -218,6 +239,13 @@ pub(crate) enum WsUnknownReasoningPlan {
         pending_digests: HashSet<[u8; 32]>,
         pending_keys: Vec<UpstreamAffinityKey>,
     },
+}
+
+struct DeferredUnestablishedReasoning {
+    original_body: Arc<Value>,
+    original_frame: Bytes,
+    unknown_keys: Vec<UpstreamAffinityKey>,
+    currently_stripped: bool,
 }
 
 enum WsUnknownReasoningRetry {
@@ -231,6 +259,7 @@ pub(crate) struct PreparedWebSocketTurn {
     pub completion_observer: Arc<crate::completion_observer::CompletionObserver>,
     pub prompt_cache_observation_context: Option<PromptCacheObservationContext>,
     pub reservation: Option<Reservation>,
+    pub deferred_limit_context: Option<DeferredWebSocketLimitContext>,
     pub limit_engine: Option<Arc<LimitEngine>>,
     pub principal_id: String,
     pub key_id: String,
@@ -656,8 +685,8 @@ struct Turn {
     unknown_reasoning_retry: Option<WsUnknownReasoningRetry>,
     unknown_reasoning_retried: bool,
     pending_affinity_keys: Vec<UpstreamAffinityKey>,
-    unestablished_unknown_keys: Option<Vec<UpstreamAffinityKey>>,
-    started_with_oauth_candidate: bool,
+    deferred_unestablished: Option<DeferredUnestablishedReasoning>,
+    has_any_oauth_candidate: bool,
     all_candidates_oauth: bool,
     admitted_session_upstream: Option<Uuid>,
 }
@@ -1069,9 +1098,11 @@ impl ResponsesWebSocketGateway {
                 .flatten()
                 .map_or(WebSocketTurnOwner::None, WebSocketTurnOwner::SessionHint),
         };
+        let session_unpinned = self.session_upstream.is_none();
+        let other_turns_active = !self.turns.is_empty();
         let mut prepared = self
             .lifecycle
-            .prepare_websocket_turn_with_surface(
+            .prepare_websocket_turn_with_surface_and_session(
                 &auth,
                 WebSocketIngress {
                     headers: &self.headers,
@@ -1083,34 +1114,51 @@ impl ResponsesWebSocketGateway {
                 observer,
                 request_id,
                 self.codex_backend,
+                session_unpinned,
+                other_turns_active,
             )
             .await
             .map_err(|error| error.with_stream(lane.clone()))?;
-        let (
-            body,
-            frame,
-            unknown_reasoning_retry,
-            pending_affinity_keys,
-            unestablished_unknown_keys,
-        ) = match std::mem::replace(
-            &mut prepared.unknown_reasoning_plan,
-            WsUnknownReasoningPlan::None,
-        ) {
-            WsUnknownReasoningPlan::None => (body, frame, None, Vec::new(), None),
-            WsUnknownReasoningPlan::Unestablished { unknown_keys } => {
-                (body, frame, None, Vec::new(), Some(unknown_keys))
-            }
-            WsUnknownReasoningPlan::RetryStripPending {
-                pending_digests,
-                pending_keys,
-            } => (
-                body,
-                frame,
-                Some(WsUnknownReasoningRetry::Pending(pending_digests)),
-                pending_keys,
-                None,
-            ),
-        };
+        let (body, frame, unknown_reasoning_retry, pending_affinity_keys, deferred_unestablished) =
+            match std::mem::replace(
+                &mut prepared.unknown_reasoning_plan,
+                WsUnknownReasoningPlan::None,
+            ) {
+                WsUnknownReasoningPlan::None => (body, frame, None, Vec::new(), None),
+                WsUnknownReasoningPlan::StrippedUpfront {
+                    body: stripped_body,
+                    frame: stripped_frame,
+                } => (stripped_body, stripped_frame, None, Vec::new(), None),
+                WsUnknownReasoningPlan::RetryStripAll { unknown_keys } => (
+                    body,
+                    frame,
+                    Some(WsUnknownReasoningRetry::All),
+                    unknown_keys,
+                    None,
+                ),
+                WsUnknownReasoningPlan::DeferredUnestablished { unknown_keys } => (
+                    body.clone(),
+                    frame.clone(),
+                    None,
+                    Vec::new(),
+                    Some(DeferredUnestablishedReasoning {
+                        original_body: body,
+                        original_frame: frame,
+                        unknown_keys,
+                        currently_stripped: false,
+                    }),
+                ),
+                WsUnknownReasoningPlan::RetryStripPending {
+                    pending_digests,
+                    pending_keys,
+                } => (
+                    body,
+                    frame,
+                    Some(WsUnknownReasoningRetry::Pending(pending_digests)),
+                    pending_keys,
+                    None,
+                ),
+            };
         let actual_charge = frame
             .len()
             .saturating_add(json_owned_bytes(&body))
@@ -1195,8 +1243,8 @@ impl ResponsesWebSocketGateway {
                 unknown_reasoning_retry,
                 unknown_reasoning_retried: false,
                 pending_affinity_keys,
-                unestablished_unknown_keys,
-                started_with_oauth_candidate: false,
+                deferred_unestablished,
+                has_any_oauth_candidate: false,
                 all_candidates_oauth,
                 admitted_session_upstream: self.session_upstream,
             },
@@ -1409,8 +1457,8 @@ impl ResponsesWebSocketGateway {
                 unknown_reasoning_retry: None,
                 unknown_reasoning_retried: false,
                 pending_affinity_keys: Vec::new(),
-                unestablished_unknown_keys: None,
-                started_with_oauth_candidate: false,
+                deferred_unestablished: None,
+                has_any_oauth_candidate: false,
                 all_candidates_oauth,
                 admitted_session_upstream: self.session_upstream,
             },
@@ -1497,75 +1545,74 @@ impl ResponsesWebSocketGateway {
     fn apply_unestablished_reasoning(
         &mut self,
         turn_id: u64,
-        candidate_count: usize,
+        pinned_to_single_owner: bool,
     ) -> Option<Bytes> {
-        let unknown_keys = {
-            let turn = self.turns.get_mut(&turn_id)?;
-            turn.unestablished_unknown_keys.take()?
+        let currently_stripped = {
+            let turn = self.turns.get(&turn_id)?;
+            turn.deferred_unestablished.as_ref()?.currently_stripped
         };
-        if candidate_count > 1 {
-            let (old_dynamic, stripped_body, stripped_frame) = {
-                let turn = self.turns.get(&turn_id)?;
-                let stripped_body = strip_openai_reasoning_encrypted_items(&turn.body, None)?;
-                let stripped_bytes = serde_json::to_vec(&stripped_body).ok()?;
-                let stripped_frame = Bytes::from(stripped_bytes);
-                let old_dynamic = turn
-                    .frame
-                    .len()
-                    .saturating_add(json_owned_bytes(&turn.body))
-                    .saturating_add(
-                        turn.plugin_request
-                            .as_ref()
-                            .map_or(0, |(_, req)| req.frame.len()),
-                    );
-                (old_dynamic, Arc::new(stripped_body), stripped_frame)
-            };
-            let new_dynamic = stripped_frame
-                .len()
-                .saturating_add(json_owned_bytes(&stripped_body));
-            if new_dynamic
-                <= self
-                    .byte_cap
-                    .saturating_sub(self.used_bytes)
-                    .saturating_add(old_dynamic)
-            {
-                let turn = self.turns.get_mut(&turn_id).expect("turn exists");
-                self.used_bytes = self
-                    .used_bytes
-                    .saturating_sub(old_dynamic)
-                    .saturating_add(new_dynamic);
-                turn.charged_bytes = turn
-                    .charged_bytes
-                    .saturating_sub(old_dynamic)
-                    .saturating_add(new_dynamic);
+        if !pinned_to_single_owner {
+            if !currently_stripped {
+                let (stripped_body, stripped_frame) = {
+                    let turn = self.turns.get(&turn_id)?;
+                    let deferred = turn.deferred_unestablished.as_ref()?;
+                    let stripped =
+                        strip_openai_reasoning_encrypted_items(&deferred.original_body, None)?;
+                    let bytes = serde_json::to_vec(&stripped).ok()?;
+                    (Arc::new(stripped), Bytes::from(bytes))
+                };
+                let turn = self.turns.get_mut(&turn_id)?;
+                if let Some((_, req)) = turn.plugin_request.take() {
+                    let req_len = req.frame.len();
+                    self.used_bytes = self.used_bytes.saturating_sub(req_len);
+                    turn.charged_bytes = turn.charged_bytes.saturating_sub(req_len);
+                }
                 turn.body = stripped_body;
-                turn.frame = stripped_frame.clone();
-                turn.plugin_request = None;
-                return Some(stripped_frame);
+                turn.frame = stripped_frame;
+                if let Some(deferred) = turn.deferred_unestablished.as_mut() {
+                    deferred.currently_stripped = true;
+                }
             }
-            None
-        } else {
-            let turn = self.turns.get_mut(&turn_id).expect("turn exists");
-            turn.unknown_reasoning_retry = Some(WsUnknownReasoningRetry::All);
-            turn.pending_affinity_keys = unknown_keys;
-            None
+            let turn = self.turns.get_mut(&turn_id)?;
+            turn.unknown_reasoning_retry = None;
+            turn.pending_affinity_keys.clear();
+            return Some(turn.frame.clone());
         }
+        let turn = self.turns.get_mut(&turn_id)?;
+        if currently_stripped {
+            if let Some((_, req)) = turn.plugin_request.take() {
+                let req_len = req.frame.len();
+                self.used_bytes = self.used_bytes.saturating_sub(req_len);
+                turn.charged_bytes = turn.charged_bytes.saturating_sub(req_len);
+            }
+            if let Some(deferred) = turn.deferred_unestablished.as_mut() {
+                turn.body = Arc::clone(&deferred.original_body);
+                turn.frame = deferred.original_frame.clone();
+                deferred.currently_stripped = false;
+            }
+        }
+        if let Some(deferred) = turn.deferred_unestablished.as_ref() {
+            turn.unknown_reasoning_retry = Some(WsUnknownReasoningRetry::All);
+            turn.pending_affinity_keys = deferred.unknown_keys.clone();
+        }
+        Some(turn.frame.clone())
     }
 
     /// Resolve any deferred unestablished encrypted-reasoning plan once the
-    /// final candidate pool size is known (after session pinning).
+    /// final candidate selection decides between stripping (failover / API-key)
+    /// and verbatim preservation with `RetryStripAll` (pinned single owner).
     pub fn finalize_dispatch_reasoning(
         &mut self,
         dispatch: &mut WebSocketDispatch,
-        candidate_count: usize,
+        pinned_to_single_owner: bool,
     ) {
         if dispatch.control {
             return;
         }
-        if let Some(stripped_frame) =
-            self.apply_unestablished_reasoning(dispatch.turn_id, candidate_count)
+        if let Some(frame) =
+            self.apply_unestablished_reasoning(dispatch.turn_id, pinned_to_single_owner)
         {
-            dispatch.frame = stripped_frame;
+            dispatch.frame = frame;
         }
     }
 
@@ -1588,7 +1635,7 @@ impl ResponsesWebSocketGateway {
             self.lifecycle
                 .websocket_candidate_for_upstream(owner, self.codex_backend)
         });
-        let (candidates, current_starts_with_oauth) = {
+        let (candidates, current_has_any_oauth_candidate) = {
             let turn = self.turns.get_mut(&turn_id)?;
             let mut candidates = std::mem::take(&mut turn.prepared.candidates);
             if let Some(owner) = session_owner {
@@ -1612,11 +1659,11 @@ impl ResponsesWebSocketGateway {
                     candidates.insert(0, owner_cand);
                 }
             }
-            let starts_with_oauth = candidates.first().is_some_and(|c| !c.is_api_key);
-            turn.started_with_oauth_candidate = starts_with_oauth;
-            (candidates, starts_with_oauth)
+            let has_any_oauth_candidate = candidates.iter().any(|c| !c.is_api_key);
+            turn.has_any_oauth_candidate = has_any_oauth_candidate;
+            (candidates, has_any_oauth_candidate)
         };
-        let defer_for_other_oauth_owner = current_starts_with_oauth
+        let defer_for_other_oauth_owner = current_has_any_oauth_candidate
             && self.session_upstream.is_none()
             && !has_explicit_affinity
             && self.turns.iter().any(|(other_id, other)| {
@@ -1627,10 +1674,12 @@ impl ResponsesWebSocketGateway {
                         .get(&other.lane)
                         .is_some_and(|l| l.active == Some(*other_id))
                     && other.upstream_id.is_none()
-                    && other.started_with_oauth_candidate
+                    && other.has_any_oauth_candidate
             });
-        if !defer_for_other_oauth_owner {
-            self.apply_unestablished_reasoning(turn_id, candidates.len());
+        if candidates.len() <= 1 {
+            self.apply_unestablished_reasoning(turn_id, true);
+        } else if !defer_for_other_oauth_owner {
+            self.apply_unestablished_reasoning(turn_id, false);
         }
         let turn = self.turns.get(&turn_id)?;
         let prefer_api_key_on_final_attempt = !self.codex_backend && turn.pinned.is_none();
@@ -2038,7 +2087,7 @@ impl ResponsesWebSocketGateway {
     /// for rechecking fresh quota, auth, and reservation state before committing
     /// connection ownership or session pinning.
     pub async fn validate_candidate_for_send(
-        &self,
+        &mut self,
         turn_id: u64,
         upstream_id: Uuid,
         existing_connection_id: Option<u64>,
@@ -2161,6 +2210,50 @@ impl ResponsesWebSocketGateway {
                 "The admitted response is no longer available",
             )
         })?;
+        if let Some((deferred_ctx, turn_body, observer, lane)) = turn
+            .prepared
+            .deferred_limit_context
+            .as_ref()
+            .filter(|_| turn.prepared.reservation.is_none())
+            .map(|deferred_ctx| {
+                (
+                    deferred_ctx.clone(),
+                    Arc::clone(&turn.body),
+                    turn.prepared.observer.clone(),
+                    turn.lane.clone(),
+                )
+            })
+        {
+            let (reservation, cache_context) = self
+                .lifecycle
+                .reserve_websocket_deferred_limit(
+                    &auth,
+                    &self.headers,
+                    &deferred_ctx,
+                    upstream_id,
+                    &turn_body,
+                    observer.as_ref(),
+                )
+                .await
+                .map_err(|error| error.with_stream(lane))?;
+            let turn = self.turns.get_mut(&turn_id).ok_or_else(|| {
+                WebSocketError::new(
+                    409,
+                    "response_not_found",
+                    "The admitted response is no longer available",
+                )
+            })?;
+            turn.prepared.reservation = reservation;
+            turn.prepared.prompt_cache_observation_context = cache_context;
+            turn.prepared.deferred_limit_context = None;
+        }
+        let turn = self.turns.get(&turn_id).ok_or_else(|| {
+            WebSocketError::new(
+                409,
+                "response_not_found",
+                "The admitted response is no longer available",
+            )
+        })?;
         if turn
             .prepared
             .reservation
@@ -2184,6 +2277,21 @@ impl ResponsesWebSocketGateway {
         {
             turn.attempted = true;
             turn.attempt_num = turn.attempt_num.saturating_add(1);
+            if let Some(deferred) = turn.deferred_unestablished.take()
+                && deferred.currently_stripped
+            {
+                let orig = deferred
+                    .original_frame
+                    .len()
+                    .saturating_add(json_owned_bytes(&deferred.original_body));
+                let cur = turn
+                    .frame
+                    .len()
+                    .saturating_add(json_owned_bytes(&turn.body));
+                let delta = orig.saturating_sub(cur);
+                self.used_bytes = self.used_bytes.saturating_sub(delta);
+                turn.charged_bytes = turn.charged_bytes.saturating_sub(delta);
+            }
             if let Some(observer) = turn.prepared.observer.as_ref() {
                 observer.emit_lifecycle(LifecycleEvent::UpstreamAttempt {
                     event_id: observer.event_id().to_owned(),
@@ -2195,6 +2303,13 @@ impl ResponsesWebSocketGateway {
     }
 
     pub async fn validate_send(&mut self, turn_id: u64) -> Result<(), WebSocketError> {
+        if self
+            .turns
+            .get(&turn_id)
+            .is_some_and(|turn| turn.deferred_unestablished.is_some())
+        {
+            self.apply_unestablished_reasoning(turn_id, true);
+        }
         let Some(turn) = self.turns.get(&turn_id) else {
             return Err(WebSocketError::new(
                 409,
@@ -4800,6 +4915,7 @@ pub(crate) mod tests {
                     ),
                     prompt_cache_observation_context: None,
                     reservation: None,
+                    deferred_limit_context: None,
                     limit_engine: None,
                     principal_id: DIRECT_PRINCIPAL.to_owned(),
                     key_id: fixture.record.key_hash_b64.clone(),
@@ -4843,8 +4959,8 @@ pub(crate) mod tests {
                 unknown_reasoning_retry: None,
                 unknown_reasoning_retried: false,
                 pending_affinity_keys: Vec::new(),
-                unestablished_unknown_keys: None,
-                started_with_oauth_candidate: false,
+                deferred_unestablished: None,
+                has_any_oauth_candidate: false,
                 all_candidates_oauth: false,
                 admitted_session_upstream: None,
             },
@@ -5449,6 +5565,7 @@ pub(crate) mod tests {
                         ),
                         prompt_cache_observation_context: None,
                         reservation: Some(reservation),
+                        deferred_limit_context: None,
                         limit_engine: Some(fixture.engine.clone()),
                         principal_id: DIRECT_PRINCIPAL.to_owned(),
                         key_id: fixture.record.key_hash_b64.clone(),
@@ -5492,8 +5609,8 @@ pub(crate) mod tests {
                     unknown_reasoning_retry: None,
                     unknown_reasoning_retried: false,
                     pending_affinity_keys: Vec::new(),
-                    unestablished_unknown_keys: None,
-                    started_with_oauth_candidate: false,
+                    deferred_unestablished: None,
+                    has_any_oauth_candidate: false,
                     all_candidates_oauth: false,
                     admitted_session_upstream: None,
                 },
@@ -6450,6 +6567,7 @@ pub(crate) mod tests {
                 completion_observer: Arc::new(crate::completion_observer::CompletionObserver::new()),
                 prompt_cache_observation_context: None,
                 reservation: None,
+                deferred_limit_context: None,
                 limit_engine: None,
                 principal_id: DIRECT_PRINCIPAL.to_owned(),
                 key_id: fixture.record.key_hash_b64.clone(),
@@ -6493,8 +6611,8 @@ pub(crate) mod tests {
             unknown_reasoning_retry: None,
             unknown_reasoning_retried: false,
             pending_affinity_keys: Vec::new(),
-            unestablished_unknown_keys: None,
-            started_with_oauth_candidate: false,
+            deferred_unestablished: None,
+            has_any_oauth_candidate: false,
             all_candidates_oauth: false,
             admitted_session_upstream: None,
         }
@@ -9194,5 +9312,506 @@ pub(crate) mod tests {
             !retry_text.contains(unknown_cipher),
             "RetryStripAll must strip ciphertext on 400 invalid_encrypted_content: {retry_text}"
         );
+    }
+
+    #[tokio::test]
+    async fn unestablished_reasoning_upfront_strip_uses_stripped_body_for_limit_admission_while_single_owner_keeps_verbatim()
+     {
+        use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+        use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+        use cc_lb_control::api_keys::principal_view::{
+            DialectCache, PrincipalView, RouterPipelineCache,
+        };
+        use cc_lb_control::dynamic_view::{DynamicViewBuilder, DynamicViewHolder};
+        use cc_lb_domain::TerminalStrategy;
+        use cc_lb_routing::FilterPlugin;
+        use cc_lb_storage_api::upstream::{UpstreamKind as StorageRecordKind, UpstreamRecord};
+        use cc_lb_upstream::{
+            ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer,
+            SignerError, SignerFactory, SigningCapability, UpstreamError,
+        };
+
+        struct DummySignerFactory;
+        impl ApiKeyAwareSignerFactory for DummySignerFactory {
+            fn with_router_choice(&self, _name: String) -> Arc<dyn SignerFactory> {
+                Arc::new(Self)
+            }
+        }
+        #[async_trait::async_trait]
+        impl SignerFactory for DummySignerFactory {
+            async fn build(
+                &self,
+                _upstream: &cc_lb_domain::Upstream,
+            ) -> Result<Arc<dyn Signer>, SignerError> {
+                Ok(Arc::new(DummySigner))
+            }
+        }
+        struct DummySigner;
+        #[async_trait::async_trait]
+        impl Signer for DummySigner {
+            async fn sign(
+                &self,
+                shaped: ShapedRequest,
+                capability: &mut SigningCapability,
+            ) -> Result<SignedRequest, SignerError> {
+                Ok(SignedRequest::from_shaped(shaped, capability))
+            }
+            async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+                RetryDecision::Fail
+            }
+        }
+        struct UnusedDispatcher;
+        #[async_trait::async_trait]
+        impl crate::UpstreamDispatch for UnusedDispatcher {
+            async fn dispatch(
+                &self,
+                _request: SignedRequest,
+            ) -> Result<http::Response<crate::Body>, crate::DispatchError> {
+                unreachable!("unused dispatcher in limit admission test")
+            }
+        }
+
+        const NOW_SECS: u64 = 1_700_000_000;
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(NOW_SECS));
+        let storage = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite("sqlite::memory:", clock.clone())
+                .await
+                .expect("open in-memory limit test db"),
+        );
+        storage.initialize().await.expect("migrate limit test db");
+        let keys = Arc::new(KeyStore::new(storage));
+        let (_record, secret) = keys
+            .create(
+                DIRECT_PRINCIPAL,
+                CreateParams {
+                    label: "reasoning-limit-test".to_owned(),
+                    description: None,
+                    expires_at_unix_secs: None,
+                    limit_overrides: Vec::new(),
+                },
+            )
+            .await
+            .expect("issue limit fixture key");
+        let filter: Arc<dyn FilterPlugin> = Arc::new(
+            crate::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::with_clock(
+                clock.clone(),
+            ),
+        );
+        let pipeline = Arc::new(RouterPipelineCache {
+            user_filters: vec![filter],
+            terminal: TerminalStrategy::FirstPick,
+            instantiation_error: None,
+            provider_filters: None,
+        });
+        let mut chains = HashMap::new();
+        chains.insert(
+            DIRECT_PRINCIPAL.to_owned(),
+            (Some(pipeline), DialectCache::Inherit),
+        );
+        let view = Arc::new(PrincipalView::for_tests(
+            DIRECT_PRINCIPAL,
+            true,
+            vec!["*".to_owned()],
+            vec![Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 4_500,
+            }],
+            chains,
+        ));
+        let authn = Arc::new(BuiltinAuthn::new(keys, clock.clone()));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            secret.expose().parse().expect("fixture key header"),
+        );
+        let auth = crate::authenticate_first(&authn, &headers, &view)
+            .await
+            .expect("authenticate limit fixture");
+
+        let upstream_a = Uuid::from_u128(0xAA01);
+        let upstream_b = Uuid::from_u128(0xBB02);
+        let upstreams = vec![
+            UpstreamRecord {
+                id: upstream_a,
+                name: "oauth-a".to_owned(),
+                kind: StorageRecordKind::OpenaiOauth,
+                enabled: true,
+                ..Default::default()
+            },
+            UpstreamRecord {
+                id: upstream_b,
+                name: "oauth-b".to_owned(),
+                kind: StorageRecordKind::OpenaiOauth,
+                enabled: true,
+                ..Default::default()
+            },
+        ];
+        let quota_cache = Arc::new(PrewarmQuotaCache::default());
+        {
+            let mut guard = quota_cache.snapshots.lock().expect("quota cache lock");
+            guard.insert(
+                upstream_a,
+                vec![
+                    prewarm_quota_snapshot("5h", 0.2, "allowed", NOW_SECS + 10_000),
+                    prewarm_quota_snapshot("7d", 0.2, "allowed", NOW_SECS + 100_000),
+                ],
+            );
+            guard.insert(
+                upstream_b,
+                vec![
+                    prewarm_quota_snapshot("5h", 0.1, "allowed", NOW_SECS + 10_000),
+                    prewarm_quota_snapshot("7d", 0.1, "allowed", NOW_SECS + 100_000),
+                ],
+            );
+        }
+        let dynamic = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(DummySignerFactory))
+            .principal_view(view.clone())
+            .subscription_quota_cache(quota_cache.clone())
+            .subscription_quota_routing_max_staleness_secs(60)
+            .upstream_records(upstreams)
+            .build();
+        let dynamic_view = Arc::new(DynamicViewHolder::new(dynamic));
+        let concurrency = Arc::new(KeyConcurrencyManager::new());
+        let engine = LimitEngine::new(concurrency, clock.clone());
+        let affinity_store = Arc::new(PrewarmAffinityStore::default());
+        let config = crate::LifecycleConfig {
+            unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy::Hybrid,
+            ..Default::default()
+        };
+        let lifecycle = Arc::new(
+            Lifecycle::new_with_dynamic_view(
+                authn.clone(),
+                Arc::clone(&dynamic_view),
+                Arc::new(UnusedDispatcher),
+                config,
+                clock,
+            )
+            .with_upstream_affinity_store(affinity_store)
+            .with_limit_engine(engine, authn),
+        );
+
+        let bloated_cipher = format!("gAAAAAB_bloated_{}", "X".repeat(20_000));
+        let frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "store": false,
+                "max_output_tokens": 16,
+                "input": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_bloated",
+                        "summary": [],
+                        "content": [],
+                        "encrypted_content": bloated_cipher
+                    },
+                    {"role": "user", "content": "hi"}
+                ]
+            }))
+            .unwrap(),
+        );
+
+        // Multi-upstream unpinned turn strips upfront before LimitRequest and passes the 200-token cap.
+        let mut multi_gw = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            1_024 * 1_024,
+            16,
+        )
+        .with_codex_backend(true);
+        let dispatch = multi_gw
+            .client_message(auth.clone(), frame.clone())
+            .await
+            .expect("stripped multi-upstream turn must pass tight token limit")
+            .expect("dispatch returned");
+        assert!(dispatch.candidates.len() > 1);
+        let sent_text = std::str::from_utf8(&dispatch.frame).unwrap();
+        assert!(!sent_text.contains(&bloated_cipher));
+
+        // Single healthy upstream keeps bloated encrypted_content verbatim (RetryStripAll), so
+        // LimitRequest counts the retained encrypted bytes and rejects at 429 `limit_rejected`.
+        let single_upstreams = vec![UpstreamRecord {
+            id: upstream_a,
+            name: "oauth-a".to_owned(),
+            kind: StorageRecordKind::OpenaiOauth,
+            enabled: true,
+            ..Default::default()
+        }];
+        let current = dynamic_view.load();
+        dynamic_view.store(
+            DynamicViewBuilder::from_view(&current)
+                .upstream_records(single_upstreams)
+                .build(),
+        );
+        let mut single_gw =
+            ResponsesWebSocketGateway::new(lifecycle, &auth, headers, 1_024 * 1_024, 16)
+                .with_codex_backend(true);
+        let err = single_gw
+            .client_message(auth, frame)
+            .await
+            .expect_err("single-owner verbatim body exceeds 200-token limit");
+        assert_eq!(err.status, 429);
+        assert_eq!(err.code, "limit_rejected");
+    }
+
+    #[tokio::test]
+    async fn mixed_api_key_then_oauth_fallback_restores_verbatim_reasoning_when_pinned_to_session_owner()
+     {
+        use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+        use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+        use cc_lb_control::api_keys::principal_view::{
+            DialectCache, PrincipalView, RouterPipelineCache,
+        };
+        use cc_lb_control::dynamic_view::{DynamicViewBuilder, DynamicViewHolder};
+        use cc_lb_domain::TerminalStrategy;
+        use cc_lb_storage_api::upstream::{UpstreamKind as StorageRecordKind, UpstreamRecord};
+        use cc_lb_upstream::{
+            ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer,
+            SignerError, SignerFactory, SigningCapability, UpstreamError,
+        };
+
+        struct DummySignerFactory;
+        impl ApiKeyAwareSignerFactory for DummySignerFactory {
+            fn with_router_choice(&self, _name: String) -> Arc<dyn SignerFactory> {
+                Arc::new(Self)
+            }
+        }
+        #[async_trait::async_trait]
+        impl SignerFactory for DummySignerFactory {
+            async fn build(
+                &self,
+                _upstream: &cc_lb_domain::Upstream,
+            ) -> Result<Arc<dyn Signer>, SignerError> {
+                Ok(Arc::new(DummySigner))
+            }
+        }
+        struct DummySigner;
+        #[async_trait::async_trait]
+        impl Signer for DummySigner {
+            async fn sign(
+                &self,
+                shaped: ShapedRequest,
+                capability: &mut SigningCapability,
+            ) -> Result<SignedRequest, SignerError> {
+                Ok(SignedRequest::from_shaped(shaped, capability))
+            }
+            async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+                RetryDecision::Fail
+            }
+        }
+        struct UnusedDispatcher;
+        #[async_trait::async_trait]
+        impl crate::UpstreamDispatch for UnusedDispatcher {
+            async fn dispatch(
+                &self,
+                _request: SignedRequest,
+            ) -> Result<http::Response<crate::Body>, crate::DispatchError> {
+                unreachable!("unused dispatcher in mixed fallback reasoning test")
+            }
+        }
+
+        const NOW_SECS: u64 = 1_700_000_000;
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(NOW_SECS));
+        let storage = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite("sqlite::memory:", clock.clone())
+                .await
+                .expect("open in-memory mixed fallback test db"),
+        );
+        storage
+            .initialize()
+            .await
+            .expect("migrate mixed fallback test db");
+        let keys = Arc::new(KeyStore::new(storage));
+        let (_record, secret) = keys
+            .create(
+                DIRECT_PRINCIPAL,
+                CreateParams {
+                    label: "mixed-fallback-test".to_owned(),
+                    description: None,
+                    expires_at_unix_secs: None,
+                    limit_overrides: Vec::new(),
+                },
+            )
+            .await
+            .expect("issue mixed fallback key");
+        let pipeline = Arc::new(RouterPipelineCache {
+            user_filters: Vec::new(),
+            terminal: TerminalStrategy::FirstPick,
+            instantiation_error: None,
+            provider_filters: None,
+        });
+        let mut chains = HashMap::new();
+        chains.insert(
+            DIRECT_PRINCIPAL.to_owned(),
+            (Some(pipeline), DialectCache::Inherit),
+        );
+        let view = Arc::new(PrincipalView::for_tests(
+            DIRECT_PRINCIPAL,
+            true,
+            vec!["*".to_owned()],
+            vec![Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 4_500,
+            }],
+            chains,
+        ));
+        let authn = Arc::new(BuiltinAuthn::new(keys, clock.clone()));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            secret.expose().parse().expect("fixture key header"),
+        );
+        let auth = crate::authenticate_first(&authn, &headers, &view)
+            .await
+            .expect("authenticate mixed fallback caller");
+
+        let api_key_id = Uuid::from_u128(0x1111);
+        let oauth_a_id = Uuid::from_u128(0x2222);
+        let oauth_b_id = Uuid::from_u128(0x3333);
+        let upstreams = vec![
+            UpstreamRecord {
+                id: api_key_id,
+                name: "api-key-primary".to_owned(),
+                kind: StorageRecordKind::OpenaiApiKey,
+                enabled: true,
+                ..Default::default()
+            },
+            UpstreamRecord {
+                id: oauth_a_id,
+                name: "oauth-a".to_owned(),
+                kind: StorageRecordKind::OpenaiOauth,
+                enabled: true,
+                ..Default::default()
+            },
+            UpstreamRecord {
+                id: oauth_b_id,
+                name: "oauth-b".to_owned(),
+                kind: StorageRecordKind::OpenaiOauth,
+                enabled: true,
+                ..Default::default()
+            },
+        ];
+        let dynamic = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(DummySignerFactory))
+            .principal_view(view)
+            .upstream_records(upstreams)
+            .build();
+        let dynamic_view = Arc::new(DynamicViewHolder::new(dynamic));
+        let concurrency = Arc::new(KeyConcurrencyManager::new());
+        let engine = LimitEngine::new(concurrency, clock.clone());
+        let affinity_store = Arc::new(PrewarmAffinityStore::default());
+        let config = crate::LifecycleConfig {
+            unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy::Hybrid,
+            ..Default::default()
+        };
+        let lifecycle = Arc::new(
+            Lifecycle::new_with_dynamic_view(
+                authn.clone(),
+                Arc::clone(&dynamic_view),
+                Arc::new(UnusedDispatcher),
+                config,
+                clock,
+            )
+            .with_upstream_affinity_store(affinity_store)
+            .with_limit_engine(engine, authn),
+        );
+
+        let bloated_cipher = format!("gAAAAAB_mixed_owner_{}", "Z".repeat(20_000));
+        let reasoning_frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "store": false,
+                "max_output_tokens": 16,
+                "input": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_mixed",
+                        "summary": [],
+                        "content": [],
+                        "encrypted_content": bloated_cipher
+                    },
+                    {"role": "user", "content": "hi"}
+                ]
+            }))
+            .unwrap(),
+        );
+
+        // Case 1: Mixed [api_key, oauth_a, oauth_b] defers both normalization and limit estimation;
+        // targeting api_key first strips encrypted_content and validates under the 200-token limit.
+        let mut gw = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            1_024 * 1_024,
+            16,
+        );
+        let mut dispatch = gw
+            .client_message(auth.clone(), reasoning_frame.clone())
+            .await
+            .expect("mixed turn admits before deferred limit estimation")
+            .expect("mixed dispatch returns");
+        assert!(dispatch.candidates[0].is_api_key);
+        assert!(
+            gw.turns
+                .get(&dispatch.turn_id)
+                .unwrap()
+                .prepared
+                .reservation
+                .is_none(),
+            "mixed unpinned turn must defer limit reservation until candidate send decision"
+        );
+        gw.finalize_dispatch_reasoning(&mut dispatch, false);
+        assert!(
+            !std::str::from_utf8(&dispatch.frame)
+                .unwrap()
+                .contains(&bloated_cipher),
+            "API-key attempt with multi-upstream fallback must strip unestablished reasoning"
+        );
+        gw.validate_candidate_for_send(dispatch.turn_id, api_key_id, None, true)
+            .await
+            .expect("stripped API-key payload must pass deferred 200-token limit");
+
+        // Case 2: If API-key attempt failed before commit and session pins to OAuth A,
+        // finalizing as single-owner restores the original ciphertext verbatim, arms
+        // RetryStripAll, and computes deferred limit estimation against the restored body.
+        let mut fallback_gw =
+            ResponsesWebSocketGateway::new(lifecycle, &auth, headers, 1_024 * 1_024, 16);
+        let mut d_fallback = fallback_gw
+            .client_message(auth, reasoning_frame)
+            .await
+            .unwrap()
+            .unwrap();
+        fallback_gw.finalize_dispatch_reasoning(&mut d_fallback, false);
+        assert!(
+            !std::str::from_utf8(&d_fallback.frame)
+                .unwrap()
+                .contains(&bloated_cipher)
+        );
+        fallback_gw.finalize_dispatch_reasoning(&mut d_fallback, true);
+        assert!(
+            std::str::from_utf8(&d_fallback.frame)
+                .unwrap()
+                .contains(&bloated_cipher),
+            "switching to pinned single OAuth owner before commit must restore verbatim ciphertext"
+        );
+        assert!(matches!(
+            fallback_gw
+                .turns
+                .get(&d_fallback.turn_id)
+                .unwrap()
+                .unknown_reasoning_retry,
+            Some(WsUnknownReasoningRetry::All)
+        ));
+        let err = fallback_gw
+            .validate_candidate_for_send(d_fallback.turn_id, oauth_a_id, None, false)
+            .await
+            .expect_err("deferred limit estimation on restored verbatim body must hit tight cap");
+        assert_eq!(err.status, 429);
+        assert_eq!(err.code, "limit_rejected");
     }
 }

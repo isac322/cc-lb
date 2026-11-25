@@ -165,8 +165,12 @@ async fn emulate_input_tokens(
             80
         }
     });
-    let connection = tokio::time::timeout(connect_timeout, async move {
-        let dial_deadline = tokio::time::Instant::now() + connect_timeout;
+    let dial_deadline = tokio::time::Instant::now()
+        .checked_add(connect_timeout)
+        .ok_or_else(|| {
+            dispatch_error("input_tokens WebSocket connect timeout exceeds representable deadline")
+        })?;
+    let connection = tokio::time::timeout_at(dial_deadline, async move {
         let addrs = dns_resolver
             .resolve_host_progressive(&host, port)
             .await

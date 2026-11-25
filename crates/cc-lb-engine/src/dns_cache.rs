@@ -786,7 +786,19 @@ impl Service<Uri> for CachingDnsConnector {
                 .resolve_host_progressive(&host, port)
                 .await
                 .map_err(io::Error::other)?;
-            let deadline = connect_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
+            let deadline = match connect_timeout {
+                Some(timeout) => Some(
+                    tokio::time::Instant::now()
+                        .checked_add(timeout)
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "upstream connect timeout exceeds representable deadline",
+                            )
+                        })?,
+                ),
+                None => None,
+            };
             #[cfg(test)]
             let stream = if let Some(dialer) = dialer {
                 connect_tcp_with_progressive_fallback_using(addrs, deadline, move |addr| {
@@ -890,7 +902,9 @@ async fn resolve_host_ips_progressive(
                 crate::request_timing::DnsResolutionOutcome::Resolved,
             );
             emit_dns_metric(if was_hit { "hit" } else { "miss" });
-            metric_cache.insert(host, Instant::now() + metric_ttl);
+            if let Some(expires_at) = Instant::now().checked_add(metric_ttl) {
+                metric_cache.insert(host, expires_at);
+            }
             let initial = resolution
                 .initial
                 .into_iter()
@@ -1654,5 +1668,23 @@ mod tests {
             .expect("HTTP connector must rescue refused IPv4 via delayed AAAA");
         assert_eq!(io.inner().peer_addr().unwrap(), healthy_local);
         accept_task.abort();
+    }
+
+    #[tokio::test]
+    async fn connector_rejects_unrepresentable_connect_timeout_without_panicking() {
+        let resolver = MetricDnsResolver::with_resolver(
+            Arc::new(StubResolver::new(|_| async {
+                Ok(vec!["127.0.0.1".parse::<IpAddr>().unwrap()])
+            })),
+            &DnsResolverConfig::default(),
+        );
+        let mut connector =
+            CachingDnsConnector::from_metric_resolver(resolver, Some(Duration::MAX));
+        let uri: Uri = "https://overflow.example.test/".parse().unwrap();
+        let err = connector
+            .call(uri)
+            .await
+            .expect_err("Duration::MAX connect timeout must return InvalidInput without panicking");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 }

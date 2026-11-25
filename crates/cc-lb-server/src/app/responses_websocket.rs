@@ -201,8 +201,15 @@ async fn connect_provider_websocket_with_permit(
         }
     });
     let ws_config = responses_websocket_config(message_cap);
-    let result = tokio::time::timeout(connect_timeout, async move {
-        let dial_deadline = tokio::time::Instant::now() + connect_timeout;
+    let Some(dial_deadline) = tokio::time::Instant::now().checked_add(connect_timeout) else {
+        drop(permit);
+        return Err(WebSocketError::new(
+            502,
+            "upstream_unavailable",
+            "provider WebSocket connect timeout exceeds representable deadline",
+        ));
+    };
+    let result = tokio::time::timeout_at(dial_deadline, async move {
         let mut connect_timings = WsConnectTimings::default();
         let ip_literal = host
             .trim_start_matches('[')
@@ -463,7 +470,7 @@ async fn commit_and_send_responses_dispatch(
 
 async fn send_responses_dispatch(
     gateway: &mut ResponsesWebSocketGateway,
-    dispatch: WebSocketDispatch,
+    mut dispatch: WebSocketDispatch,
     connection_id: u64,
     connections: &mut HashMap<u64, WsProviderConnection>,
     dispatch_timings: cc_lb_engine::responses_websocket::ResponsesDispatchTimings,
@@ -535,6 +542,7 @@ async fn send_responses_dispatch(
         return (Vec::new(), Vec::new());
     }
     let upstream_id = connection.upstream_id;
+    gateway.finalize_dispatch_reasoning(&mut dispatch, true);
     match tokio::time::timeout_at(
         deadline,
         gateway.validate_candidate_for_send(
@@ -589,6 +597,14 @@ fn has_remaining_ws_candidates(
             }))
 }
 
+const MAX_FALLBACK_DEADLINE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
+fn bounded_deadline(now: tokio::time::Instant, duration: Duration) -> tokio::time::Instant {
+    now.checked_add(duration)
+        .or_else(|| now.checked_add(MAX_FALLBACK_DEADLINE))
+        .unwrap_or(now)
+}
+
 struct PendingDispatchState {
     dispatch: WebSocketDispatch,
     remaining: VecDeque<cc_lb_engine::responses_websocket::WebSocketCandidate>,
@@ -597,6 +613,7 @@ struct PendingDispatchState {
     deadline: tokio::time::Instant,
     per_attempt_timeout: Duration,
     last_error: Option<WebSocketError>,
+    pinned_to_single_owner: bool,
 }
 
 impl PendingDispatchState {
@@ -607,14 +624,16 @@ impl PendingDispatchState {
         max_attempts: usize,
     ) -> Self {
         let remaining = dispatch.candidates.iter().cloned().collect();
+        let pinned_to_single_owner = dispatch.candidates.len() <= 1;
         Self {
             dispatch,
             remaining,
             attempts: 0,
             max_attempts,
-            deadline: tokio::time::Instant::now() + connect_budget,
+            deadline: bounded_deadline(tokio::time::Instant::now(), connect_budget),
             per_attempt_timeout,
             last_error: None,
+            pinned_to_single_owner,
         }
     }
 }
@@ -653,7 +672,7 @@ struct ConnectAttemptOutcome {
 fn is_fatal_ws_connect_error(error: &WebSocketError) -> bool {
     matches!(
         error.code,
-        "authentication_error" | "reservation_expired" | "response_not_found"
+        "authentication_error" | "reservation_expired" | "response_not_found" | "limit_rejected"
     )
 }
 
@@ -756,7 +775,10 @@ async fn advance_one_dispatch(
                 pending.attempts,
                 pending.max_attempts,
             );
-            gateway.finalize_dispatch_reasoning(&mut pending.dispatch, 1 + pending.remaining.len());
+            let pinned_to_single_owner = pending.pinned_to_single_owner
+                || (!pending.dispatch.has_explicit_affinity
+                    && gateway.session_upstream() == Some(candidate.upstream_id));
+            gateway.finalize_dispatch_reasoning(&mut pending.dispatch, pinned_to_single_owner);
             match tokio::time::timeout_at(
                 pending.deadline,
                 gateway.validate_candidate_for_send(
@@ -809,7 +831,10 @@ async fn advance_one_dispatch(
             deferred_for_session_owner.push_back(pending);
             return (Vec::new(), Vec::new());
         }
-        gateway.finalize_dispatch_reasoning(&mut pending.dispatch, 1 + pending.remaining.len());
+        let pinned_to_single_owner = pending.pinned_to_single_owner
+            || (!pending.dispatch.has_explicit_affinity
+                && gateway.session_upstream() == Some(candidate.upstream_id));
+        gateway.finalize_dispatch_reasoning(&mut pending.dispatch, pinned_to_single_owner);
 
         // Coalesce concurrent shareable API-key lanes onto an in-flight dial instead of
         // opening duplicate sockets and consuming extra bulkhead permits.
@@ -888,7 +913,8 @@ async fn advance_one_dispatch(
         }
         pending.attempts += 1;
         let attempt_deadline =
-            (tokio::time::Instant::now() + pending.per_attempt_timeout).min(pending.deadline);
+            bounded_deadline(tokio::time::Instant::now(), pending.per_attempt_timeout)
+                .min(pending.deadline);
         let prepare_job = match gateway.begin_connection_prepare(&pending.dispatch, &candidate) {
             Ok(job) => job,
             Err(error) => {
@@ -1131,6 +1157,10 @@ async fn handle_connect_outcome(
                     entry.attempts,
                     entry.max_attempts,
                 );
+                let pinned_to_single_owner = entry.pinned_to_single_owner
+                    || (!entry.dispatch.has_explicit_affinity
+                        && gateway.session_upstream() == Some(upstream_id));
+                gateway.finalize_dispatch_reasoning(&mut entry.dispatch, pinned_to_single_owner);
                 match tokio::time::timeout_at(
                     entry.deadline,
                     gateway.validate_candidate_for_send(
@@ -1289,6 +1319,7 @@ async fn handle_connect_outcome(
                     errors.extend(errs);
                     continue;
                 }
+                deferred.pinned_to_single_owner = true;
             }
             resumed.push_back(deferred);
         }

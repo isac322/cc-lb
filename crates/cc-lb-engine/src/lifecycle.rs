@@ -207,8 +207,8 @@ use crate::response_transform::{
     unwrap_gemini_code_assist_body,
 };
 use crate::responses_websocket::{
-    PreparedWebSocketTurn, WebSocketCandidate, WebSocketError, WebSocketIngress,
-    WebSocketPluginRequest, WsUnknownReasoningPlan,
+    DeferredWebSocketLimitContext, PreparedWebSocketTurn, WebSocketCandidate, WebSocketError,
+    WebSocketIngress, WebSocketPluginRequest, WsUnknownReasoningPlan,
 };
 use crate::sse_error_frame::{
     ResponsesSseErrorContext, make_provider_error_frame, make_responses_failed_frame,
@@ -720,6 +720,36 @@ impl Lifecycle {
         request_id: &str,
         codex_backend: bool,
     ) -> Result<PreparedWebSocketTurn, WebSocketError> {
+        self.prepare_websocket_turn_with_surface_and_session(
+            auth,
+            ingress,
+            body,
+            owner,
+            observer,
+            request_id,
+            codex_backend,
+            false,
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// Route and reserve one logical Responses WebSocket turn with gateway
+    /// session pinning context so indeterminate encrypted-reasoning turns can
+    /// defer both normalization and limit estimation until candidate selection.
+    pub(crate) async fn prepare_websocket_turn_with_surface_and_session(
+        &self,
+        auth: &crate::Authenticated,
+        ingress: WebSocketIngress<'_>,
+        body: Arc<Value>,
+        owner: WebSocketTurnOwner,
+        observer: Option<LifecycleContext>,
+        request_id: &str,
+        codex_backend: bool,
+        session_unpinned: bool,
+        other_turns_active: bool,
+    ) -> Result<PreparedWebSocketTurn, WebSocketError> {
         let span = tracing::info_span!(
             "proxy.responses_websocket.turn",
             cc_lb.request.id = request_id,
@@ -772,7 +802,7 @@ impl Lifecycle {
             observer.emit_request_started(true);
         }
         let mut setup_timings = cc_lb_lifecycle::RequestSetupTimings::default();
-        let result = async {
+        let result: Result<PreparedWebSocketTurn, WebSocketError> = async {
             let view = self.dynamic_view.load();
             let cached = view
                 .principal_view
@@ -862,6 +892,8 @@ impl Lifecycle {
                     request_id.to_owned(),
                     codex_backend,
                     false,
+                    session_unpinned,
+                    other_turns_active,
                 )
                 .await
                 .inspect_err(|error| {
@@ -879,7 +911,12 @@ impl Lifecycle {
                         });
                     }
                 })?;
-            let effective_body = Arc::clone(&body);
+            let effective_body: Arc<Value> = match &unknown_reasoning_plan {
+                WsUnknownReasoningPlan::StrippedUpfront { body: stripped, .. } => {
+                    Arc::clone(stripped)
+                }
+                _ => Arc::clone(&body),
+            };
             if let Some(observer) = observer.as_ref() {
                 for error in pipeline_result.internal_errors.drain(..) {
                     observer.record_internal_error(error);
@@ -948,72 +985,33 @@ impl Lifecycle {
                     routing_trace: route_info.routing_trace.clone(),
                 });
             }
-            let body_view = RequestBodyView {
-                parsed: Ok(effective_body.clone()),
-                json_parse_ms: 0.0,
-            };
-            let reserve_started = Instant::now();
-            let mut active_limit = match self
-                .reserve_limit(
-                    &view.principal_view,
-                    &ctx,
-                    &principal,
-                    record,
-                    auth.success(),
-                    || {
-                        body_view.limit_request(
-                            &ctx.canonical_model_id,
-                            Some(ProviderCapability::OpenaiResponses),
-                            &routed.cache_bundle.cache_breakpoints,
-                            true,
-                        )
-                    },
+            let (reservation, deferred_limit_context) = if matches!(
+                unknown_reasoning_plan,
+                WsUnknownReasoningPlan::DeferredUnestablished { .. }
+            ) {
+                (
+                    None,
+                    Some(DeferredWebSocketLimitContext {
+                        ctx,
+                        principal,
+                        cache_breakpoints: routed.cache_bundle.cache_breakpoints.clone(),
+                    }),
                 )
-                .await
-            {
-                Ok(limit) => limit,
-                Err(LimitRejectionErr { response, info }) => {
-                    if let Some(observer) = observer.as_ref() {
-                        observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
-                            event_id: observer.event_id().to_owned(),
-                            decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
-                                reason: info.reason_label.clone(),
-                                subject: info.subject,
-                                request_summary: info.request_summary,
-                                route_summary: info.route_summary,
-                                limit_violation: info.limit_violation,
-                            },
-                        });
-                    }
-                    return Err(WebSocketError::new(
-                        response.status().as_u16(),
-                        error_codes::LIMIT_REJECTED,
-                        info.reason_label,
-                    ));
-                }
+            } else {
+                let reservation = self
+                    .reserve_websocket_limit_for_record(
+                        &view.principal_view,
+                        &ctx,
+                        &principal,
+                        record,
+                        auth.success(),
+                        &effective_body,
+                        &routed.cache_bundle.cache_breakpoints,
+                        observer.as_ref(),
+                    )
+                    .await?;
+                (reservation, None)
             };
-            let reservation_id = active_limit
-                .as_ref()
-                .and_then(|limit| limit.reservation.as_ref())
-                .map(|reservation| reservation.id().to_owned())
-                .unwrap_or_default();
-            if let Some(observer) = observer.as_ref() {
-                if let Some(engine) = self.limit_engine.as_ref()
-                    && !reservation_id.is_empty()
-                {
-                    observer.attach_limit_reservation(Arc::clone(engine), reservation_id.clone());
-                }
-                observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
-                    event_id: observer.event_id().to_owned(),
-                    decision: cc_lb_lifecycle::LimitDecisionKind::Reserved {
-                        reservation_id,
-                        amount: active_limit.as_ref().map_or(0, |limit| {
-                            limit.request.max_tokens.unwrap_or(0).max(0) as u64
-                        }),
-                        limit_reserve_ms: Some(duration_to_ms(reserve_started.elapsed())),
-                    },
-                });
-            }
             let explicit_store = body.get("store").and_then(Value::as_bool);
             let mut candidates =
                 Vec::with_capacity(pipeline_result.candidates.len() + fallback_candidates.len());
@@ -1042,9 +1040,8 @@ impl Lifecycle {
                 observer: observer.clone(),
                 completion_observer: Arc::clone(&self.completion_observer),
                 prompt_cache_observation_context,
-                reservation: active_limit
-                    .as_mut()
-                    .and_then(|limit| limit.reservation.take()),
+                reservation,
+                deferred_limit_context,
                 limit_engine: self.limit_engine.clone(),
                 oauth_compat: false,
                 oauth_transport: record.kind == StorageUpstreamKind::OpenaiOauth,
@@ -1213,9 +1210,150 @@ impl Lifecycle {
             next_request_id(),
             codex_backend,
             reject_exhausted_subscription,
+            false,
+            false,
         )
         .await
         .map(|_| ())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn reserve_websocket_limit_for_record(
+        &self,
+        principal_view: &PrincipalView,
+        ctx: &RequestContext,
+        principal: &Principal,
+        record: &UpstreamRecord,
+        authn_success: &AuthnSuccess,
+        effective_body: &Arc<Value>,
+        cache_breakpoints: &[CacheBreakpoint],
+        observer: Option<&LifecycleContext>,
+    ) -> Result<Option<LimitReservation>, WebSocketError> {
+        let body_view = RequestBodyView {
+            parsed: Ok(Arc::clone(effective_body)),
+            json_parse_ms: 0.0,
+        };
+        let reserve_started = Instant::now();
+        let mut active_limit = match self
+            .reserve_limit(
+                principal_view,
+                ctx,
+                principal,
+                record,
+                authn_success,
+                || {
+                    body_view.limit_request(
+                        &ctx.canonical_model_id,
+                        Some(ProviderCapability::OpenaiResponses),
+                        cache_breakpoints,
+                        true,
+                    )
+                },
+            )
+            .await
+        {
+            Ok(limit) => limit,
+            Err(LimitRejectionErr { response, info }) => {
+                if let Some(observer) = observer {
+                    observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
+                        event_id: observer.event_id().to_owned(),
+                        decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
+                            reason: info.reason_label.clone(),
+                            subject: info.subject,
+                            request_summary: info.request_summary,
+                            route_summary: info.route_summary,
+                            limit_violation: info.limit_violation,
+                        },
+                    });
+                }
+                return Err(WebSocketError::new(
+                    response.status().as_u16(),
+                    error_codes::LIMIT_REJECTED,
+                    info.reason_label,
+                ));
+            }
+        };
+        let reservation = active_limit
+            .as_mut()
+            .and_then(|limit| limit.reservation.take());
+        let reservation_id = reservation
+            .as_ref()
+            .map(|reservation| reservation.id().to_owned())
+            .unwrap_or_default();
+        if let Some(observer) = observer {
+            if let Some(engine) = self.limit_engine.as_ref()
+                && !reservation_id.is_empty()
+            {
+                observer.attach_limit_reservation(Arc::clone(engine), reservation_id.clone());
+            }
+            observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
+                event_id: observer.event_id().to_owned(),
+                decision: cc_lb_lifecycle::LimitDecisionKind::Reserved {
+                    reservation_id,
+                    amount: active_limit.as_ref().map_or(0, |limit| {
+                        limit.request.max_tokens.unwrap_or(0).max(0) as u64
+                    }),
+                    limit_reserve_ms: Some(duration_to_ms(reserve_started.elapsed())),
+                },
+            });
+        }
+        Ok(reservation)
+    }
+
+    pub(crate) async fn reserve_websocket_deferred_limit(
+        &self,
+        auth: &crate::Authenticated,
+        headers: &HeaderMap,
+        deferred: &DeferredWebSocketLimitContext,
+        upstream_id: Uuid,
+        effective_body: &Arc<Value>,
+        observer: Option<&LifecycleContext>,
+    ) -> Result<
+        (
+            Option<LimitReservation>,
+            Option<PromptCacheObservationContext>,
+        ),
+        WebSocketError,
+    > {
+        let view = self.dynamic_view.load();
+        let record = view
+            .upstreams_snapshot()
+            .iter()
+            .find(|record| record.id == upstream_id)
+            .ok_or_else(|| {
+                WebSocketError::new(
+                    502,
+                    error_codes::ROUTE_NOT_CONFIGURED,
+                    "selected upstream is unavailable",
+                )
+            })?;
+        let cache_context = prompt_cache_observation_context(
+            &view,
+            upstream_id,
+            &deferred.ctx.canonical_model_id,
+            &[],
+            &HashSet::new(),
+            None,
+            provider_cache::analyze(
+                ProviderCapability::OpenaiResponses,
+                effective_body.as_ref(),
+                &deferred.ctx.canonical_model_id,
+                headers,
+            ),
+        );
+        let reservation = self
+            .reserve_websocket_limit_for_record(
+                &view.principal_view,
+                &deferred.ctx,
+                &deferred.principal,
+                record,
+                auth.success(),
+                effective_body,
+                &deferred.cache_breakpoints,
+                observer,
+            )
+            .await?;
+        Ok((reservation, cache_context))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1229,6 +1367,8 @@ impl Lifecycle {
         request_id: String,
         codex_backend: bool,
         reject_exhausted_subscription: bool,
+        session_unpinned: bool,
+        other_turns_active: bool,
     ) -> Result<
         (
             RequestContext,
@@ -1438,7 +1578,7 @@ impl Lifecycle {
                 )
             },
         );
-        let ctx = RequestContext::builder()
+        let mut ctx = RequestContext::builder()
             .request_id(request_id)
             .thread_id(identity.thread_id)
             .downstream_headers(downstream_headers)
@@ -1709,10 +1849,43 @@ impl Lifecycle {
                 }
             }
         }
+        let dispatchable_candidates = result.candidates.len() + fallback_candidates.len();
         let plan = match recovery {
             WsUnknownReasoningRecovery::None => WsUnknownReasoningPlan::None,
             WsUnknownReasoningRecovery::Unestablished => {
-                WsUnknownReasoningPlan::Unestablished { unknown_keys: keys }
+                if dispatchable_candidates <= 1 {
+                    WsUnknownReasoningPlan::RetryStripAll { unknown_keys: keys }
+                } else {
+                    let has_oauth = result
+                        .candidates
+                        .iter()
+                        .chain(fallback_candidates.iter())
+                        .any(|candidate| candidate.kind == cc_lb_domain::UpstreamKind::OpenaiOauth);
+                    let has_api_key = result
+                        .candidates
+                        .iter()
+                        .chain(fallback_candidates.iter())
+                        .any(|candidate| {
+                            candidate.kind.credential_kind() == CredentialKind::ApiKey
+                        });
+                    let can_pin_before_send =
+                        session_unpinned && (other_turns_active || (has_oauth && has_api_key));
+                    if can_pin_before_send {
+                        WsUnknownReasoningPlan::DeferredUnestablished { unknown_keys: keys }
+                    } else if let Some(stripped) =
+                        strip_openai_reasoning_encrypted_items(body, None)
+                        && let Ok(bytes) = serde_json::to_vec(&stripped)
+                    {
+                        let frame = Bytes::from(bytes);
+                        ctx.body_bytes = frame.clone();
+                        WsUnknownReasoningPlan::StrippedUpfront {
+                            body: Arc::new(stripped),
+                            frame,
+                        }
+                    } else {
+                        WsUnknownReasoningPlan::None
+                    }
+                }
             }
             WsUnknownReasoningRecovery::Pending {
                 pending_digests,
