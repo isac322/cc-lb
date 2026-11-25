@@ -158,11 +158,22 @@ async fn best_effort_delete_meta_value(storage: &dyn MetaStore, key: &str) {
     }
 }
 
-async fn best_effort_write_path_prune(storage: &dyn MetaStore, now_unix_secs: u64) {
+const MANUAL_WARMUP_PREFIX_INDEX: u8 = 0;
+const USAGE_REFRESH_PREFIX_INDEX: u8 = 1;
+
+async fn best_effort_write_path_prune(
+    storage: &dyn MetaStore,
+    now_unix_secs: u64,
+    prefix_index: u8,
+) {
     let _ = prune_expired_split_bridge_results_budgeted(
         storage,
         now_unix_secs,
-        None,
+        Some(SplitBridgePruneCursor {
+            prefix_index,
+            after_key: None,
+            step: 0,
+        }),
         SplitBridgePruneBudget {
             max_deletes: SPLIT_BRIDGE_WRITE_PRUNE_BATCH,
             max_pages: 1,
@@ -188,7 +199,7 @@ pub async fn record_manual_warmup_result(
         "split manual warmup result",
     )?;
     storage.put_meta_value(&key, &encoded).await?;
-    best_effort_write_path_prune(storage, now_unix_secs).await;
+    best_effort_write_path_prune(storage, now_unix_secs, MANUAL_WARMUP_PREFIX_INDEX).await;
     Ok(())
 }
 
@@ -208,7 +219,7 @@ pub async fn record_manual_warmup_expired_before_start(
     };
     let encoded = serialize_result(&payload, "split manual warmup expired-before-start")?;
     storage.put_meta_value(&key, &encoded).await?;
-    best_effort_write_path_prune(storage, now_unix_secs).await;
+    best_effort_write_path_prune(storage, now_unix_secs, MANUAL_WARMUP_PREFIX_INDEX).await;
     Ok(())
 }
 
@@ -255,7 +266,7 @@ pub async fn record_oauth_usage_refresh_result(
     let key = oauth_usage_refresh_result_meta_key(upstream_id, result.nonce);
     let encoded = serialize_result(&result, "split usage refresh result")?;
     storage.put_meta_value(&key, &encoded).await?;
-    best_effort_write_path_prune(storage, now_unix_secs).await;
+    best_effort_write_path_prune(storage, now_unix_secs, USAGE_REFRESH_PREFIX_INDEX).await;
     Ok(())
 }
 
@@ -1191,5 +1202,87 @@ mod tests {
         for key in slow_keys {
             assert_eq!(slow_store.get_meta_value(&key).await.expect("get"), None);
         }
+    }
+
+    #[tokio::test]
+    async fn record_oauth_usage_refresh_result_prunes_expired_usage_entries_despite_live_manual_warmup_keys()
+     {
+        let store = InMemoryMetaStore::new(Duration::ZERO);
+        let upstream_id = Uuid::new_v4();
+
+        let live_manual_nonce = Uuid::new_v4();
+        let live_manual_key =
+            manual_warmup_result_meta_key(upstream_id, WarmupLane::Primary, live_manual_nonce);
+        record_manual_warmup_result(
+            &store,
+            upstream_id,
+            WarmupLane::Primary,
+            1_000,
+            ManualWarmupJobResult {
+                nonce: live_manual_nonce,
+                outcome: WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
+                cycle_key: Some(1),
+                error_detail: None,
+                expires_at_unix_secs: 2_000,
+            },
+        )
+        .await
+        .expect("seed live manual warmup entry");
+
+        let expired_usage_nonce = Uuid::new_v4();
+        let expired_usage_key =
+            oauth_usage_refresh_result_meta_key(upstream_id, expired_usage_nonce);
+        record_oauth_usage_refresh_result(
+            &store,
+            upstream_id,
+            1_000,
+            OAuthUsageRefreshJobResult {
+                nonce: expired_usage_nonce,
+                outcome: LimitResetUsageRefresh::Refreshed,
+                expires_at_unix_secs: 1_005,
+            },
+        )
+        .await
+        .expect("seed expired usage refresh entry");
+
+        let fresh_usage_nonce = Uuid::new_v4();
+        let fresh_usage_key = oauth_usage_refresh_result_meta_key(upstream_id, fresh_usage_nonce);
+        record_oauth_usage_refresh_result(
+            &store,
+            upstream_id,
+            1_500,
+            OAuthUsageRefreshJobResult {
+                nonce: fresh_usage_nonce,
+                outcome: LimitResetUsageRefresh::Refreshed,
+                expires_at_unix_secs: 2_000,
+            },
+        )
+        .await
+        .expect("write fresh usage refresh entry");
+
+        assert_eq!(
+            store
+                .get_meta_value(&expired_usage_key)
+                .await
+                .expect("get expired usage"),
+            None,
+            "expired usage-refresh entry must be pruned on usage-refresh write even when live manual warmup keys exist"
+        );
+        assert!(
+            store
+                .get_meta_value(&live_manual_key)
+                .await
+                .expect("get live manual")
+                .is_some(),
+            "live manual warmup key must remain intact"
+        );
+        assert!(
+            store
+                .get_meta_value(&fresh_usage_key)
+                .await
+                .expect("get fresh usage")
+                .is_some(),
+            "fresh usage refresh key must remain intact"
+        );
     }
 }
