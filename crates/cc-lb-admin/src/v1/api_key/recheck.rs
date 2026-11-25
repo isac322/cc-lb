@@ -14,7 +14,7 @@ use cc_lb_control::AuditPayload;
 use cc_lb_control::anthropic_api_key::{
     NormalizedApiKey, normalize_api_key,
     preflight::{PreflightInput, PreflightMode, run_preflight},
-    remediation::operator_message,
+    remediation::{endpoint_operator_message, operator_message},
     resolve_stored_api_key,
     wire::PreflightVerdict,
 };
@@ -217,11 +217,12 @@ pub(crate) async fn recheck_upstream_api_key(
         && let Some(primary) = outcome.wire.remediation.first()
         && outcome.wire.verdict == PreflightVerdict::Rejected
     {
-        outcome.access.last_error = Some(operator_message_for_kind(
-            record.kind,
-            Some(primary.code),
-            false,
-        ));
+        outcome.access.last_error = Some(if record.kind == UpstreamKind::AnthropicApiKey {
+            let on_anthropic = state.anthropic_org_api.applies_to(&base_url);
+            endpoint_operator_message(primary.code, on_anthropic).to_owned()
+        } else {
+            operator_message_for_kind(record.kind, Some(primary.code), false)
+        });
     }
 
     // The snapshot is written against the revision the probe ran for. A PUT

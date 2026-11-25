@@ -98,6 +98,9 @@ async function installAppFixtures(
     if (pathname === '/admin/v1/upstreams' && method === 'GET') {
       return json(200, { upstreams: [upstream] });
     }
+    if (pathname === '/admin/v1/upstreams/limit-resets' && method === 'GET') {
+      return json(200, { upstreams: [] });
+    }
     if (pathname === '/admin/v1/principals' && method === 'GET') {
       return json(200, { principals: [] });
     }

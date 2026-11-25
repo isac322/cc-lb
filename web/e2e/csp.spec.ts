@@ -117,7 +117,8 @@ test('packaged bootstrap and fonts load alongside authenticated routes', async (
   }, ADMIN_TOKEN);
 
   await page.goto('/', { waitUntil: 'load' });
-  await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Set up the pool', exact: true })).toBeVisible();
+  await expect(page.locator('header').getByText('Overview', { exact: true })).toBeVisible();
   const loadedFonts = await page.evaluate(async () => {
     const [nonLatin, latin] = await Promise.all([
       document.fonts.load('16px "Hanken Grotesk Variable"', '\u0460'),

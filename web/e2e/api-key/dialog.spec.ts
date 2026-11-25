@@ -30,21 +30,28 @@ const PREFLIGHT = '/admin/v1/upstreams/preflight';
 const BOUND_ID = 'wrkspc_01BoundWorkspaceZZ9q';
 
 test.describe('kind step and rail', () => {
-  test('UI-D-01 / UI-CP-05: two kind cards, one primary per step', async ({
+  test('UI-D-01 / UI-CP-05: provider step, two kind cards, one primary per step', async ({
     page,
   }) => {
     await openUpstreams(page);
     await page.getByRole('button', { name: 'Add upstream' }).first().click();
     const dialog = page.getByRole('dialog');
+    await expect(dialog.getByText('Choose provider')).toBeVisible();
+    await expect(dialog.getByRole('button', { name: /^Anthropic\b/ })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await expect(primaryButtons(dialog)).toHaveText(['Continue']);
+    await dialog.getByRole('button', { name: 'Continue' }).click();
     await expect(dialog.getByRole('radio')).toHaveCount(2);
     await expect(
-      dialog.locator('label', { hasText: 'Claude subscription' }),
-    ).toContainText('Recommended');
+      dialog.getByRole('radio', { name: /Subscription/ }),
+    ).toBeChecked();
     await expect(primaryButtons(dialog)).toHaveText(['Continue']);
-    await dialog.getByRole('radio', { name: /Anthropic API key/ }).click();
+    await dialog.getByRole('radio', { name: /API key/ }).click();
     await dialog.getByRole('button', { name: 'Continue' }).click();
     await expect(currentRailStep(dialog)).toContainText('Key');
-    await expect(dialog.locator('ol[aria-label="Steps"] li')).toHaveCount(3);
+    await expect(dialog.locator('ol[aria-label="Steps"] li')).toHaveCount(4);
     await keyField(dialog).fill(apiKey('cp05'));
     await expect(primaryButtons(dialog)).toHaveText(['Check key']);
   });
@@ -58,9 +65,9 @@ test.describe('kind step and rail', () => {
     const dialog = await openApiKeyDialog(page);
     await expect(dialog.locator('ol[aria-label="Steps"]')).toBeHidden();
     const line = dialog.locator('[aria-live="polite"]');
-    await expect(line).toHaveText('Step 2 of 3 · Key');
+    await expect(line).toHaveText('Step 3 of 4 · Key');
     await pasteInto(keyField(dialog), apiKey('d05'));
-    await expect(line).toHaveText('Step 3 of 4 · Workspace');
+    await expect(line).toHaveText('Step 4 of 5 · Workspace');
   });
 });
 
@@ -410,7 +417,7 @@ test.describe('workspace step and Finish', () => {
     await useCustomEndpoint(dialog, fake.url);
     await pasteInto(keyField(dialog), key);
     await expect(dialog.getByText('Key verified')).toBeVisible();
-    await expect(dialog.locator('ol[aria-label="Steps"] li')).toHaveCount(3);
+    await expect(dialog.locator('ol[aria-label="Steps"] li')).toHaveCount(4);
     await expect(dialog.getByText('Key accepted')).toBeVisible();
     await expect(dialog.getByText('Fixed by the key')).toBeVisible();
     await expect(dialog.getByText('wrkspc_…ZZ9q')).toBeVisible();
@@ -690,11 +697,16 @@ test.describe('workspace step and Finish', () => {
     const steps: Array<(dialog: Locator) => Promise<void>> = [
       async () => {},
       async (dialog) => {
-        await dialog.getByRole('radio', { name: /Anthropic API key/ }).click();
         await dialog.getByRole('button', { name: 'Continue' }).click();
       },
       async (dialog) => {
-        await dialog.getByRole('radio', { name: /Anthropic API key/ }).click();
+        await dialog.getByRole('button', { name: 'Continue' }).click();
+        await dialog.getByRole('radio', { name: /API key/ }).click();
+        await dialog.getByRole('button', { name: 'Continue' }).click();
+      },
+      async (dialog) => {
+        await dialog.getByRole('button', { name: 'Continue' }).click();
+        await dialog.getByRole('radio', { name: /API key/ }).click();
         await dialog.getByRole('button', { name: 'Continue' }).click();
         await useCustomEndpoint(dialog, fake.url);
         await pasteInto(keyField(dialog), apiKey('d30'));
@@ -750,11 +762,12 @@ test.describe('accessibility, toasts, layout', () => {
     const trigger = page.getByRole('button', { name: 'Add upstream' }).first();
     await trigger.click();
     const dialog = page.getByRole('dialog');
-    const radio = dialog.getByRole('radio', { name: /Claude subscription/ });
+    await dialog.getByRole('button', { name: 'Continue' }).click();
+    const radio = dialog.getByRole('radio', { name: /Subscription/ });
     await radio.focus();
     await page.keyboard.press('ArrowDown');
     await expect(
-      dialog.getByRole('radio', { name: /Anthropic API key/ }),
+      dialog.getByRole('radio', { name: /API key/ }),
     ).toBeChecked();
     await dialog.getByRole('button', { name: 'Continue' }).click();
     await expect(keyField(dialog)).toBeFocused();
@@ -778,7 +791,9 @@ test.describe('accessibility, toasts, layout', () => {
     await trigger.focus();
     await page.keyboard.press('Enter');
     const dialog = page.getByRole('dialog');
-    await dialog.getByRole('radio', { name: /Claude subscription/ }).focus();
+    await dialog.getByRole('button', { name: 'Continue' }).focus();
+    await page.keyboard.press('Enter');
+    await dialog.getByRole('radio', { name: /Subscription/ }).focus();
     await page.keyboard.press('ArrowDown');
     await dialog.getByRole('button', { name: 'Continue' }).focus();
     await page.keyboard.press('Enter');
@@ -915,7 +930,9 @@ test.describe('accessibility, toasts, layout', () => {
     await page.getByRole('button', { name: 'Add upstream' }).first().click();
     const dialog = page.getByRole('dialog');
     await fits();
-    await dialog.getByRole('radio', { name: /Anthropic API key/ }).click();
+    await dialog.getByRole('button', { name: 'Continue' }).click();
+    await fits();
+    await dialog.getByRole('radio', { name: /API key/ }).click();
     await dialog.getByRole('button', { name: 'Continue' }).click();
     await fits();
     await dialog.getByRole('button', { name: "Don't have a key?" }).click();

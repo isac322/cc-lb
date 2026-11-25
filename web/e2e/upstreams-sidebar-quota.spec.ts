@@ -336,7 +336,7 @@ test.describe('Upstreams Sidebar Quota', () => {
       const upstreamList = page.getByRole('list', { name: 'Upstreams', exact: true });
       await expect(upstreamList).toBeVisible();
       await expect(upstreamList.getByText('7d', { exact: true })).toBeVisible();
-      await expect(upstreamList.getByText('Fable', { exact: true })).toBeVisible();
+      await expect(upstreamList.getByText('7d (Fable)', { exact: true })).toBeVisible();
       await expect(upstreamList.getByText('20%', { exact: true })).toBeVisible();
       await expect(upstreamList.getByText(/\b5h\b/)).toHaveCount(0);
       await expect(upstreamList.getByText('No reading', { exact: true })).toHaveCount(0);
@@ -360,7 +360,7 @@ test.describe('Upstreams Sidebar Quota', () => {
       await expect(quota.getByRole('meter', { name: '7d', exact: true })).toHaveAttribute('aria-valuenow', '20');
       await expect(quota.getByRole('meter', { name: '7d (Fable)', exact: true })).toHaveAttribute('aria-valuenow', '30');
       await expect(quota.getByRole('meter', { name: 'Extra usage', exact: true })).toHaveAttribute('aria-valuenow', '50');
-      await expect(quota.getByText('7d', { exact: true })).toBeVisible();
+      await expect(quota.locator('.text-title-card', { hasText: /^7d$/ })).toBeVisible();
       await expect(quota.getByText('7d (Fable)', { exact: true })).toBeVisible();
       await expect(quota.getByText('Extra usage', { exact: true })).toBeVisible();
       expect(

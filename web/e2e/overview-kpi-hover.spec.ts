@@ -6,6 +6,7 @@ import type {
   UsageBucket,
 } from '../src/lib/api';
 import type { Theme } from '../src/lib/theme';
+import { activeAnthropicOAuthStatus } from './fixtures/oauthStatus';
 
 const TIMESTAMPS = [
   Date.UTC(2026, 7, 17, 13, 30) / 1000,
@@ -28,6 +29,8 @@ function usageBucket(
     virtual_cost_micros: 0,
     latency_ms_sum: 0,
     latency_count: 0,
+    pricing_completeness: 'priced',
+    priced_request_count: overrides.request_count ?? 0,
     ...overrides,
   };
 }
@@ -79,6 +82,8 @@ const summary: DashboardSummaryResponse = {
     error_rate: 24 / 540,
     virtual_cost_micros: 7_500_000,
     avg_latency_ms: 200,
+    pricing_completeness: 'priced',
+    priced_request_count: 540,
   },
   sparkline: { buckets: summaryBuckets },
   observed: true,
@@ -243,38 +248,32 @@ type KpiChartId = (typeof KPI_CHART_IDS)[number];
  * the cache figures the first payload puts on the tokens tile and the principal
  * row. Each `REFRESHED_` value is what the second payload replaces it with.
  */
-const TOKENS_VALUE_ROW = 'Tokens 900';
-const CACHE_MISS_ROW = 'Cache miss 50.0%';
-const REFRESHED_CACHE_MISS_ROW = 'Cache miss 80.0%';
+const TOKENS_VALUE_ROW = '900 tokens';
+const CACHE_MISS_ROW = '50.0% cache miss';
+const REFRESHED_CACHE_MISS_ROW = '80.0% cache miss';
 const CACHE_MISS_AVG = 'Cache miss 44.4%';
 const REFRESHED_CACHE_MISS_AVG = 'Cache miss 70.0%';
-const PRINCIPAL_CACHE_HIT = '83.3% cache hit';
-const REFRESHED_PRINCIPAL_CACHE_HIT = '40.0% cache hit';
+const PRINCIPAL_CACHE_HIT = '83%';
+const REFRESHED_PRINCIPAL_CACHE_HIT = '40%';
 
 /**
- * The principal's cost breakdown: label, exact value and share for every
- * request-log category, then the footer total. Only the first bucket of the
- * window records components, so its $1.00 is split and the second bucket's
- * $2.00 stays unattributed — the shape a window that straddles the upgrade has.
- * Each `REFRESHED_` list is what the second payload replaces it with, at the
- * same $3.00 total.
+ * Figures the open cost breakdown shows, in `USAGE_CATEGORIES` order, then
+ * unattributed and the footer total. Only non-zero rows render; zero rows are
+ * omitted by `BreakdownPopover`.
  */
 const PRINCIPAL_COST_VALUES = [
+  'Cache read',
+  '$0.1500',
+  '5%',
+  'Cache create 5m',
+  '$0.1500',
+  '5%',
   'Input',
   '$0.3000',
   '10%',
   'Output',
   '$0.4000',
   '13%',
-  'Cache create 5m',
-  '$0.1500',
-  '5%',
-  'Cache create 1h',
-  '$0.0000',
-  '—',
-  'Cache read',
-  '$0.1500',
-  '5%',
   'Unattributed',
   '$2.0000',
   '67%',
@@ -283,21 +282,18 @@ const PRINCIPAL_COST_VALUES = [
 ];
 
 const REFRESHED_PRINCIPAL_COST_VALUES = [
-  'Input',
-  '$0.6000',
-  '20%',
-  'Output',
-  '$0.2000',
-  '7%',
   'Cache create 5m',
   '$0.1000',
   '3%',
   'Cache create 1h',
   '$0.1000',
   '3%',
-  'Cache read',
-  '$0.0000',
-  '—',
+  'Input',
+  '$0.6000',
+  '20%',
+  'Output',
+  '$0.2000',
+  '7%',
   'Unattributed',
   '$2.0000',
   '67%',
@@ -306,23 +302,23 @@ const REFRESHED_PRINCIPAL_COST_VALUES = [
 ];
 
 /**
- * Bar segments, in order, as a percentage of the filled meter: a category worth
- * $0 is drawn by nobody, and the $2.00 no category accounts for closes the bar.
+ * Bar segments, in `USAGE_CATEGORIES` order plus unattributed, as a CSS token
+ * and declared width share of the filled meter.
  */
 const PRINCIPAL_COST_SEGMENTS = [
-  { category: 'input', widthPct: 10 },
-  { category: 'output', widthPct: 13.33 },
-  { category: 'cache_create_5m', widthPct: 5 },
-  { category: 'cache_read', widthPct: 5 },
-  { category: 'unattributed', widthPct: 66.67 },
+  { color: 'var(--color-series-cache-read)', widthPct: 5 },
+  { color: 'var(--color-series-cache-create-5m)', widthPct: 5 },
+  { color: 'var(--color-series-input)', widthPct: 10 },
+  { color: 'var(--color-series-output)', widthPct: 13.33 },
+  { color: 'var(--color-neutral)', widthPct: 66.67 },
 ];
 
 const REFRESHED_PRINCIPAL_COST_SEGMENTS = [
-  { category: 'input', widthPct: 20 },
-  { category: 'output', widthPct: 6.67 },
-  { category: 'cache_create_5m', widthPct: 3.33 },
-  { category: 'cache_create_1h', widthPct: 3.33 },
-  { category: 'unattributed', widthPct: 66.67 },
+  { color: 'var(--color-series-cache-create-5m)', widthPct: 3.33 },
+  { color: 'var(--color-series-cache-create-1h)', widthPct: 3.33 },
+  { color: 'var(--color-series-input)', widthPct: 20 },
+  { color: 'var(--color-series-output)', widthPct: 6.67 },
+  { color: 'var(--color-neutral)', widthPct: 66.67 },
 ];
 
 /**
@@ -335,9 +331,9 @@ function expectedTooltipRows(
   return {
     'request-rate': ['Req/s 3'],
     tokens: [TOKENS_VALUE_ROW, cacheMissRow],
-    cost: ['Equiv $ $2.50'],
+    cost: ['Cost $2.50'],
     latency: ['Avg latency 200ms'],
-    'error-rate': ['Err rate 10.00%'],
+    'error-rate': ['Error rate 10.00%'],
   };
 }
 
@@ -448,19 +444,97 @@ async function installOverviewFixtures(page: Page): Promise<OverviewFixtures> {
         uptime_secs: 1,
       });
     }
+    if (pathname === '/admin/v1/auth/session') {
+      return json(200, {
+        authority: 'e2e',
+        subject: 'e2e-operator',
+        kind: 'human',
+        provider_id: 'static',
+        email: null,
+        display_name: 'E2E Operator',
+        expires_at_unix_secs: null,
+        auth_mode: 'static_token',
+      });
+    }
     if (pathname === '/admin/v1/principals') {
       return json(200, {
         principals: [{ id: 'principal-alpha', name: 'Principal Alpha' }],
       });
     }
     if (pathname === '/admin/v1/upstreams') {
+      return json(200, {
+        upstreams: [
+          {
+            id: 'upstream-alpha',
+            name: 'Anthropic Alpha',
+            kind: 'anthropic_oauth',
+            enabled: true,
+            base_url: null,
+            warmup_enabled: false,
+            warmup_dialect_plugin: null,
+            spec_revision: 1,
+            status: {
+              last_apply_error: null,
+              last_apply_at_unix_secs: null,
+              last_warmup_at_unix_secs: null,
+            },
+          },
+        ],
+      });
+    }
+    if (pathname === '/admin/v1/upstreams/limit-resets') {
       return json(200, { upstreams: [] });
+    }
+    if (pathname === '/admin/v1/plugins/registry') {
+      return json(200, { entries: [] });
+    }
+    if (pathname === '/admin/v1/status') {
+      return json(200, {
+        version: 'test',
+        git_sha: 'test',
+        uptime_secs: 1,
+        build: { rust_version: 'mock', profile: 'debug', target: 'mock' },
+        generation: 1,
+        upstreams: [
+          {
+            id: 'upstream-alpha',
+            name: 'Anthropic Alpha',
+            status: 'active',
+            last_apply_at_unix_secs: null,
+            last_apply_error: null,
+          },
+        ],
+      });
+    }
+    if (pathname === '/admin/v1/subscription-quotas/latest') {
+      return json(200, {
+        max_staleness_secs: 300,
+        upstreams: [],
+      });
+    }
+    const oauthStatusMatch = pathname.match(
+      /^\/admin\/v1\/upstreams\/([^/]+)\/oauth\/status$/,
+    );
+    if (oauthStatusMatch) {
+      return json(200, activeAnthropicOAuthStatus(oauthStatusMatch[1]));
     }
     if (pathname === '/admin/v1/dashboard/summary') {
       summaryRanges.push(url.searchParams.get('range') ?? '');
       return json(200, servedSummary);
     }
     if (pathname === '/admin/v1/dashboard/usage') {
+      const groupBy = url.searchParams.get('group_by') ?? '';
+      if (groupBy !== 'principal') {
+        return json(200, {
+          range: url.searchParams.get('range') ?? '7d',
+          step: url.searchParams.get('step') ?? 'hour',
+          group_by: groupBy || 'upstream',
+          window_start_unix_secs: TIMESTAMPS[0],
+          window_end_unix_secs: TIMESTAMPS[2] + 60,
+          observed: true,
+          series: [],
+        });
+      }
       principalUsageRanges.push(url.searchParams.get('range') ?? '');
       principalUsageProjections.push(
         url.searchParams.get('projection') ?? 'full',
@@ -475,7 +549,7 @@ async function installOverviewFixtures(page: Page): Promise<OverviewFixtures> {
         now_unix_secs: TIMESTAMPS[2],
         window_anchor_unix_secs: TIMESTAMPS[0],
         max_staleness_secs: 300,
-        upstream_count: 0,
+        upstream_count: 1,
         windows: [],
         caveats: [],
       });
@@ -535,58 +609,34 @@ async function bootOverviewWithTheme(page: Page, theme: ThemeChoice) {
     .toBe(theme);
 }
 
-/** Shapes the cache-miss wrapper is allowed to draw itself with. */
-const SECONDARY_SHAPES = 'path, polyline, line, circle';
-
 /**
- * Geometry the cache-miss wrapper actually paints over the tokens sparkline,
- * in CSS pixels and measured against the chart it is laid over. The wrapper
- * carries the test id while the drawing lives in its `<path>`/`<circle>`
- * children, so the union of those children is what a reader can see.
+ * Geometry the dashed secondary cache-miss `<Area>` actually paints over the
+ * tokens sparkline, in CSS pixels and measured against the chart container.
  */
 async function readTokensSecondaryGeometry(page: Page) {
-  const wrapper = page.getByTestId('overview-kpi-secondary-tokens');
-  await expect(wrapper).toHaveCount(1);
-  return wrapper.evaluate((element, shapes) => {
-    const nodes = shapes.split(', ').includes(element.tagName.toLowerCase())
-      ? [element]
-      : Array.from(element.querySelectorAll(shapes));
-    const chart = element
+  const curve = page
+    .getByTestId('overview-kpi-chart-tokens')
+    .locator('path.recharts-area-curve[stroke-dasharray]');
+  await expect(curve).toHaveCount(1);
+  return curve.evaluate((node) => {
+    const chart = node
       .closest('[data-testid="overview-kpi-chart-tokens"]')
       ?.getBoundingClientRect();
-    let left = Number.POSITIVE_INFINITY;
-    let right = Number.NEGATIVE_INFINITY;
-    let top = Number.POSITIVE_INFINITY;
-    let bottom = Number.NEGATIVE_INFINITY;
-    let drawn = 0;
-    for (const node of nodes) {
-      const rect = node.getBoundingClientRect();
-      // A shape with no geometry reports an empty rect at the origin; folding
-      // it into the union would stretch the union across the whole viewport.
-      if (rect.width === 0 && rect.height === 0) continue;
-      drawn += 1;
-      left = Math.min(left, rect.left);
-      right = Math.max(right, rect.right);
-      top = Math.min(top, rect.top);
-      bottom = Math.max(bottom, rect.bottom);
-    }
-    const style = nodes[0] ? window.getComputedStyle(nodes[0]) : null;
+    const rect = node.getBoundingClientRect();
+    const drawn = rect.width === 0 && rect.height === 0 ? 0 : 1;
+    const style = window.getComputedStyle(node);
     return {
-      shapeCount: nodes.length,
+      shapeCount: 1,
       drawn,
-      width: drawn === 0 ? 0 : right - left,
-      height: drawn === 0 ? 0 : bottom - top,
+      width: drawn === 0 ? 0 : rect.width,
+      height: drawn === 0 ? 0 : rect.height,
       chartWidth: chart?.width ?? 0,
-      // Line segments carry the series color on `stroke`; a lone marker for an
-      // isolated bucket carries it on `fill`.
       paint:
-        style == null
-          ? ''
-          : style.stroke !== 'none' && style.stroke !== ''
-            ? style.stroke
-            : style.fill,
+        style.stroke !== 'none' && style.stroke !== ''
+          ? style.stroke
+          : style.fill,
     };
-  }, SECONDARY_SHAPES);
+  });
 }
 
 /**
@@ -644,7 +694,7 @@ async function expectSynchronizedTooltips(
     await expect(tooltip).toBeVisible({ timeout: options?.timeout });
     // Exact and ordered, row by row: a different bucket, a changed formatter,
     // or an extra/missing line fails here instead of passing a substring.
-    await expect(tooltip.locator('span')).toHaveText(
+    await expect(tooltip.locator(':scope > span')).toHaveText(
       [expectedTimestamp, ...rows[chartId]],
       { timeout: options?.timeout },
     );
@@ -673,7 +723,7 @@ type RangeChoice = '1h' | '6h' | '24h' | '7d';
  */
 async function selectRange(page: Page, range: RangeChoice) {
   const control = page
-    .getByLabel('Time range')
+    .getByLabel('Usage range')
     .getByText(range, { exact: true });
   await expect(control).toBeVisible();
   await control.dispatchEvent('click');
@@ -690,13 +740,14 @@ async function readTokensTooltipColors(page: Page) {
   const measured = await page.getByTestId('overview-kpi-tooltip-tokens')
     .evaluate(
       (element, rows) => {
-        const spans = Array.from(element.querySelectorAll('span'));
+        const spans = Array.from(element.querySelectorAll(':scope > span'));
         return {
           background: window.getComputedStyle(element).backgroundColor,
           rows: rows.map((text) => {
             const row = spans.find((span) => span.textContent?.trim() === text);
             if (!row) throw new Error(`Tokens tooltip has no "${text}" row`);
-            return window.getComputedStyle(row).color;
+            const textSpan = row.querySelector('span');
+            return window.getComputedStyle(textSpan ?? row).color;
           }),
         };
       },
@@ -725,19 +776,25 @@ async function readPrincipalCostValues(page: Page) {
     );
 }
 
+function principalCostTrigger(page: Page) {
+  return page
+    .getByTestId('top-principal-row')
+    .getByRole('button', { name: /show breakdown$/ });
+}
+
 /**
- * Category and declared width share of every segment drawn inside the filled
+ * Color token and declared width share of every segment drawn inside the filled
  * meter. Widths are rounded to two decimals: the proportions are the contract,
  * not however far the CSSOM chooses to serialize a repeating fraction.
  */
 async function readPrincipalCostSegments(page: Page) {
-  return page
-    .getByTestId('top-principal-cost-segment')
+  return principalCostTrigger(page)
+    .locator('[data-cell-bar] span')
     .evaluateAll((nodes) =>
       nodes.map((node) => {
         const element = node as HTMLElement;
         return {
-          category: element.dataset.category ?? '',
+          color: element.style.backgroundColor,
           widthPct:
             Math.round(Number.parseFloat(element.style.width) * 100) / 100,
         };
@@ -750,8 +807,8 @@ async function readPrincipalCostSegments(page: Page) {
  * one has to be opaque and distinct from its neighbours in the active theme.
  */
 async function expectPrincipalCostPalette(page: Page) {
-  const painted = await page
-    .getByTestId('top-principal-cost-segment')
+  const painted = await principalCostTrigger(page)
+    .locator('[data-cell-bar] span')
     .evaluateAll((nodes) =>
       nodes.map((node) => window.getComputedStyle(node).backgroundColor),
     );
@@ -762,7 +819,7 @@ async function expectPrincipalCostPalette(page: Page) {
 
 /** Opens the principal cost breakdown by pointer, as a reader would. */
 async function hoverPrincipalCostMeter(page: Page) {
-  const trigger = page.getByTestId('top-principal-cost-trigger');
+  const trigger = principalCostTrigger(page);
   await expect(trigger).toBeVisible();
   await trigger.scrollIntoViewIfNeeded();
   await trigger.hover();
@@ -963,7 +1020,7 @@ test.describe('Overview KPI hover', () => {
       [
         ...fixtures.summaryRanges(),
         ...fixtures.principalUsageRanges(),
-      ].filter((range) => range !== '24h'),
+      ].filter((range) => range !== '7d'),
     ).toEqual([]);
     expect(
       await page.evaluate(() => (window as ProbedWindow).cclbPollProbe),
@@ -982,19 +1039,19 @@ test.describe('Overview KPI hover', () => {
     await page.goto('/');
     await expect(page.getByTestId('overview-kpi-request-rate')).toBeVisible();
 
-    const meter = page.getByTestId('top-principal-cost-meter');
-    await expect(meter).toBeVisible();
-    await expect(meter).toHaveAttribute('aria-label', 'Principal Alpha cost');
-    // One of the two buckets recorded components, so the bar says so instead of
-    // spreading the whole $3.00 across the categories.
-    await expect(meter).toHaveAttribute('data-cost-components', 'partial');
+    const trigger = principalCostTrigger(page);
+    await expect(trigger).toBeVisible();
+    await expect(trigger).toHaveAttribute(
+      'aria-label',
+      'Principal Alpha cost $3.0000, show breakdown',
+    );
     expect(await readPrincipalCostSegments(page)).toEqual(
       PRINCIPAL_COST_SEGMENTS,
     );
 
-    const trigger = page.getByTestId('top-principal-cost-trigger');
     await trigger.focus();
     await expect(trigger).toBeFocused();
+    await page.keyboard.press('Enter');
     await expect(
       page.getByTestId('top-principal-cost-details'),
     ).toBeVisible();
@@ -1037,15 +1094,16 @@ test.describe('Overview KPI hover', () => {
 
     // Only the cache hit moved in the row itself: the refreshed payload keeps
     // its requests, tokens and cost, and no per-category figure leaks into the
-    // row text — those live in the breakdown and in the meter's value text.
+    // row text — those live in the breakdown.
     expect(await page.getByTestId('top-principal-row').innerText()).toBe(
       stalePrincipalRow.replace(
         PRINCIPAL_CACHE_HIT,
         REFRESHED_PRINCIPAL_CACHE_HIT,
       ),
     );
-    expect(await meter.getAttribute('aria-valuetext')).toBe(
-      'Total $3.0000; 100.0% of the largest principal; Input $0.6000, Output $0.2000, Cache create 5m $0.1000, Cache create 1h $0.1000, Cache read $0.0000, Unattributed $2.0000',
+    await expect(trigger).toHaveAttribute(
+      'aria-label',
+      'Principal Alpha cost $3.0000, show breakdown',
     );
     expect(fixtures.principalUsageRanges().length).toBeGreaterThan(
       fetchesBefore,
@@ -1127,17 +1185,61 @@ test.describe('Overview KPI hover', () => {
       .toContain('7d');
 
     const chart = page.getByTestId('pool-quota-chart-slot');
-    await expect(chart.getByText('140%', { exact: true })).toBeVisible();
+    await expect(chart.getByText('100%', { exact: true })).toBeVisible();
+    const fableLegendRow = page
+      .locator('[data-testid="pool-quota-legend-slot"][data-window="7d_fable"]');
+    await expect(fableLegendRow).toBeVisible();
+    await expect(fableLegendRow).toContainText('7d (Fable)');
+    await expect(fableLegendRow).toContainText('109%');
+    const weeklyLegendRow = page
+      .locator('[data-testid="pool-quota-legend-slot"][data-window="7d"]');
+    await expect(weeklyLegendRow).toBeVisible();
+    await expect(weeklyLegendRow).toContainText('7d');
+    await expect(weeklyLegendRow).toContainText('35%');
+
+    // Verify the historical 137% (-6d) sample is plotted (not dropped) as a
+    // top-edge clamped segment spanning >75% of the plot and reading 100% used
+    // alongside 7d's 40% historical reading when hovering that earlier point.
+    const fableStrokeColor = await fableLegendRow
+      .locator('[data-slot="window-chip"]')
+      .evaluate((el) => window.getComputedStyle(el).backgroundColor);
+    const fablePlot = await chart.evaluate((container, expectedStroke) => {
+      const grid = container
+        .querySelector('.recharts-cartesian-grid')
+        ?.getBoundingClientRect();
+      const curves = Array.from(
+        container.querySelectorAll('path.recharts-area-curve'),
+      ).filter((node) => {
+        const stroke = window.getComputedStyle(node).stroke;
+        return stroke === expectedStroke;
+      });
+      const curveBox = curves[0]?.getBoundingClientRect();
+      if (!grid || !curveBox) return null;
+      return {
+        gridWidth: grid.width,
+        gridTop: grid.top,
+        gridHeight: grid.height,
+        curveLeft: curveBox.left,
+        curveTop: curveBox.top,
+        curveWidth: curveBox.width,
+      };
+    }, fableStrokeColor);
+    expect(fablePlot).not.toBeNull();
+    expect(fablePlot!.curveWidth / fablePlot!.gridWidth).toBeGreaterThan(0.75);
+    expect(Math.abs(fablePlot!.curveTop - fablePlot!.gridTop)).toBeLessThan(3);
+
+    await page.mouse.move(
+      fablePlot!.curveLeft + 2,
+      fablePlot!.gridTop + fablePlot!.gridHeight / 2,
+    );
+    const tooltipRows = chart.locator('[data-slot="pool-tooltip-row"]');
+    await expect(tooltipRows).toHaveCount(3);
     await expect(
-      page.getByTestId('pool-quota-legend-slot').filter({
-        hasText: 'Fable · 109%',
-      }),
-    ).toBeVisible();
+      tooltipRows.filter({ hasText: '7d window' }),
+    ).toContainText('40% used');
     await expect(
-      page.getByTestId('pool-quota-legend-slot').filter({
-        hasText: '7d · 35%',
-      }),
-    ).toBeVisible();
+      tooltipRows.filter({ hasText: '7d (Fable) window' }),
+    ).toContainText('100% used');
   });
 
   test('keeps the mobile Overview free of horizontal overflow', async ({

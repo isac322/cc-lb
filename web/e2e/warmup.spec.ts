@@ -191,7 +191,7 @@ function shapePlugin(id = 'anthropic-shape-v2'): PluginFixture {
     metadata: null,
     supported_slots: ['shape'],
     hook_metadata: {
-      shape: { wire_version: 1, description: 'Warmup shape', usage: 'Warmup fixture', mode: 'active' },
+      shape_anthropic: { wire_version: 1, description: 'Warmup shape', usage: 'Warmup fixture', mode: 'active' },
     },
   };
 }

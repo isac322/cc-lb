@@ -651,6 +651,68 @@ async fn rck_04_revoked_key_reads_denied_without_key_material() {
     assert_no_key_material(&detail.body.to_string(), BAD_KEY);
 }
 
+async fn rck_04b_custom_endpoint_rejection_names_endpoint_not_anthropic() {
+    let h = spawn_api_key_harness().await;
+    let custom_cfg = fake_anthropic::AppConfig::default();
+    let rejected_policy = KeyPolicy {
+        models: Script::error(401, "authentication_error", "invalid x-api-key"),
+        count_tokens: Script::error(401, "authentication_error", "invalid x-api-key"),
+        ..KeyPolicy::default()
+    };
+    custom_cfg
+        .key_policies
+        .set(BAD_KEY, rejected_policy.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind custom fake-anthropic");
+    let addr = listener.local_addr().expect("custom fake-anthropic addr");
+    let _custom_server = tokio::spawn(async move {
+        let _ = axum::serve(listener, fake_anthropic::app(custom_cfg)).await;
+    });
+    let custom_url = format!("http://{addr}/");
+
+    let custom_created = h
+        .create_api_key_upstream(
+            "custom-revoked",
+            BAD_KEY,
+            json!({"base_url": custom_url, "skip_preflight": true}),
+        )
+        .await;
+    assert_eq!(
+        custom_created.status,
+        StatusCode::CREATED,
+        "{}",
+        custom_created.body
+    );
+    let custom_recheck = recheck(&h, custom_created.id()).await;
+    assert_eq!(custom_recheck.status, StatusCode::OK);
+    assert_eq!(custom_recheck.body["verdict"], "rejected");
+    let custom_detail = h.get_upstream(custom_created.id()).await;
+    let custom_last_error = custom_detail.body["api_key_access"]["last_error"]
+        .as_str()
+        .expect("custom operator last_error");
+    assert!(
+        custom_last_error.contains("Your endpoint"),
+        "{custom_last_error}"
+    );
+    assert!(
+        !custom_last_error.contains("Anthropic"),
+        "{custom_last_error}"
+    );
+
+    // By contrast, an upstream targeting the configured Anthropic origin still names Anthropic.
+    h.set_policy(BAD_KEY, rejected_policy);
+    let org_upstream = h.seed_legacy_api_key_upstream("org-revoked", BAD_KEY).await;
+    let org_recheck = recheck(&h, org_upstream.id).await;
+    assert_eq!(org_recheck.status, StatusCode::OK);
+    assert_eq!(org_recheck.body["verdict"], "rejected");
+    let org_detail = h.get_upstream(org_upstream.id).await;
+    let org_last_error = org_detail.body["api_key_access"]["last_error"]
+        .as_str()
+        .expect("org operator last_error");
+    assert!(org_last_error.contains("Anthropic"), "{org_last_error}");
+}
+
 async fn rck_05_recheck_sends_the_stored_workspace_and_persists_not_found() {
     let h = spawn_api_key_harness().await;
     h.set_policy(ORG, org_policy(ORG));
@@ -2218,6 +2280,7 @@ async fn v1_upstreams_api_key_read_suite_part_1() {
     rck_02_recheck_persists_the_snapshot_for_a_legacy_row().await;
     rck_03_acc_05_recheck_never_bumps_the_spec_or_rebuilds_the_view().await;
     rck_04_revoked_key_reads_denied_without_key_material().await;
+    rck_04b_custom_endpoint_rejection_names_endpoint_not_anthropic().await;
     rck_05_recheck_sends_the_stored_workspace_and_persists_not_found().await;
     rck_07_recheck_restores_usage_reports_after_demotion().await;
     rck_08_wrong_kind_missing_and_deleted_upstreams_make_no_calls().await;

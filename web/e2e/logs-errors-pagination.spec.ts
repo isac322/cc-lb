@@ -7,6 +7,7 @@ test('errors pages contain matching rows even behind newer successes', async ({
   const errors = Array.from({ length: 51 }, (_, index) => ({
     event_id: `error-${index}`,
     request_id: `error-${index}`,
+    event_kind: 'messages',
     ts: 1_800_000_000 + index,
     ts_ms: (1_800_000_000 + index) * 1_000,
     status: index === 0 ? 200 : 429,
@@ -16,6 +17,7 @@ test('errors pages contain matching rows even behind newer successes', async ({
   const successes = Array.from({ length: 60 }, (_, index) => ({
     event_id: `success-${index}`,
     request_id: `success-${index}`,
+    event_kind: 'messages',
     ts: 1_800_000_100 + index,
     ts_ms: (1_800_000_100 + index) * 1_000,
     status: 200,
@@ -66,6 +68,18 @@ test('errors pages contain matching rows even behind newer successes', async ({
     if (url.pathname === '/admin/v1/events/histogram') {
       return json({ buckets: [], bucket_ms: 60_000, bucket_count: 0 });
     }
+    if (url.pathname === '/admin/v1/upstreams') {
+      return json({ upstreams: [] });
+    }
+    if (url.pathname === '/admin/v1/upstreams/limit-resets') {
+      return json({ upstreams: [] });
+    }
+    if (url.pathname === '/admin/v1/principals') {
+      return json({ principals: [] });
+    }
+    if (url.pathname === '/admin/v1/plugins/registry') {
+      return json({ entries: [] });
+    }
     if (url.pathname === '/admin/health') {
       return json({ status: 'ok', version: 'test', git_sha: 'test', uptime_secs: 1 });
     }
@@ -88,6 +102,7 @@ test('errors pages contain matching rows even behind newer successes', async ({
   errors.unshift({
     event_id: 'new-error',
     request_id: 'new-error',
+    event_kind: 'messages',
     ts: 1_800_000_200,
     ts_ms: 1_800_000_200_000,
     status: 429,
