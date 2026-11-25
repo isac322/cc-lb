@@ -92,7 +92,11 @@ pub use drain::{DrainController, proxy_drain_middleware};
 #[cfg(not(loom))]
 pub use error_format::{anthropic_error_response, provider_scope_error_response};
 #[cfg(not(loom))]
-pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop};
+pub use hop_by_hop::{
+    HopByHopStripLayer, HopByHopStripService, is_ingress_proxy_header,
+    is_ingress_proxy_header_name, scrub_ingress_auth_cookie_bytes, strip_hop_by_hop,
+    strip_ingress_proxy_headers,
+};
 #[cfg(not(loom))]
 pub use lifecycle::{
     AuthLimitSubject, Body, DispatchError, Lifecycle, LifecycleConfig, LimitCostEstimator,

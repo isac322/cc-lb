@@ -242,6 +242,298 @@ async fn backend_codex_websocket_strips_actor_authorization_on_responses() {
 }
 
 #[tokio::test]
+async fn backend_codex_websocket_strips_ingress_proxy_and_cf_cookies_preserves_client_headers() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let fake = crate::backend_api_codex::spawn_codex_media_realtime_fake().await;
+    let server = common::spawn_test_server_with_openai_budget("").await;
+    let client = Client::new();
+    let upstreams = client
+        .get(format!("http://{}/admin/v1/upstreams", server.admin_addr))
+        .bearer_auth("admin-token")
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    for u in upstreams["upstreams"].as_array().unwrap() {
+        let id = u["id"].as_str().unwrap();
+        let detail = client
+            .get(format!(
+                "http://{}/admin/v1/upstreams/{id}",
+                server.admin_addr
+            ))
+            .bearer_auth("admin-token")
+            .send()
+            .await
+            .unwrap();
+        let etag = detail
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .unwrap()
+            .to_owned();
+        let _ = client
+            .patch(format!(
+                "http://{}/admin/v1/upstreams/{id}",
+                server.admin_addr
+            ))
+            .bearer_auth("admin-token")
+            .header("if-match", etag)
+            .json(&json!({ "enabled": false }))
+            .send()
+            .await
+            .unwrap();
+    }
+    crate::backend_api_codex::add_oauth_upstream(
+        &client,
+        &server,
+        "oauth-ws-strip-ingress",
+        &fake.base,
+        "acct-ws-strip-ingress",
+    )
+    .await;
+
+    let mut request = format!(
+        "ws://{}/openai/backend-api/codex/responses?trace=strip-ingress",
+        server.proxy_addr
+    )
+    .into_client_request()
+    .unwrap();
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", server.managed_key.plaintext)
+            .parse()
+            .unwrap(),
+    );
+    for (name, val) in [
+        ("cf-connecting-ip", "203.0.113.10"),
+        ("cf-ray", "1234567890abcdef-ICN"),
+        ("cf-visitor", r#"{"scheme":"https"}"#),
+        ("cf-warp-tag-id", "warp-tag"),
+        ("cf-ew-via", "15"),
+        ("cf-access-jwt-assertion", "jwt.secret.sig"),
+        ("cf-access-authenticated-user-email", "user@example.com"),
+        ("cf-access-client-id", "service-client-id"),
+        ("cf-access-client-secret", "service-client-secret"),
+        ("cdn-loop", "cloudflare; loops=1"),
+        ("forwarded", "for=203.0.113.10;proto=https"),
+        ("x-forwarded-for", "203.0.113.10"),
+        ("x-forwarded-proto", "https"),
+        ("x-real-ip", "203.0.113.10"),
+        ("true-client-ip", "203.0.113.10"),
+        ("x-envoy-external-address", "203.0.113.10"),
+        ("cookie", "CF_Authorization=jwt.secret.sig"),
+        ("originator", "codex_cli_rs"),
+        ("session_id", "sess-ws-ingress"),
+    ] {
+        request.headers_mut().insert(name, val.parse().unwrap());
+    }
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    socket
+        .send(Message::Text(
+            r#"{"type":"response.create","model":"gpt-test","input":"ws-strip-ingress"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let _ = socket.next().await.unwrap().unwrap();
+    let _ = socket.next().await.unwrap().unwrap();
+
+    let recorded = fake.state.0.lock().unwrap();
+    let ws_req = recorded
+        .iter()
+        .find(|r| r.method == "WS" && r.path == "/backend-api/codex/responses")
+        .expect("responses websocket handshake reached upstream");
+    for (name, _) in &ws_req.headers {
+        assert!(
+            !cc_lb_engine::is_ingress_proxy_header_name(name),
+            "WS ingress header {name} leaked upstream"
+        );
+        assert!(
+            !name.eq_ignore_ascii_case("cookie"),
+            "CF_Authorization-only cookie header leaked upstream on WS"
+        );
+    }
+    assert!(
+        ws_req
+            .headers
+            .iter()
+            .any(|(name, value)| name == "originator" && value == "codex_cli_rs")
+    );
+    assert!(
+        ws_req
+            .headers
+            .iter()
+            .any(|(name, value)| name == "session_id" && value == "sess-ws-ingress")
+    );
+}
+
+#[tokio::test]
+async fn responses_websocket_raw_api_key_fallback_strips_ingress_proxy_and_cf_cookies() {
+    type RecordedHeaderPairs = Vec<(String, String)>;
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let recorded_headers = Arc::new(Mutex::new(RecordedHeaderPairs::new()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake_addr = listener.local_addr().unwrap();
+    let captured_state = Arc::clone(&recorded_headers);
+    let _fake_task = tokio::spawn(async move {
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                axum::routing::get(
+                    |headers: axum::http::HeaderMap,
+                     ws: WebSocketUpgrade,
+                     State(state): State<Arc<Mutex<RecordedHeaderPairs>>>| async move {
+                        let pairs = headers
+                            .iter()
+                            .map(|(k, v)| {
+                                (
+                                    k.as_str().to_ascii_lowercase(),
+                                    v.to_str().unwrap_or("").to_owned(),
+                                )
+                            })
+                            .collect();
+                        *state.lock().unwrap() = pairs;
+                        ws.on_upgrade(|mut socket: AxumWebSocket| async move {
+                            if let Some(Ok(AxumMessage::Text(_))) = socket.next().await {
+                                let _ = socket
+                                    .send(AxumMessage::Text(
+                                        r#"{"type":"response.created","response":{"id":"resp_raw","object":"response","status":"in_progress"}}"#.into(),
+                                    ))
+                                    .await;
+                                let _ = socket
+                                    .send(AxumMessage::Text(
+                                        r#"{"type":"response.completed","response":{"id":"resp_raw","object":"response","status":"completed","usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}"#.into(),
+                                    ))
+                                    .await;
+                            }
+                        })
+                    },
+                ),
+            )
+            .with_state(captured_state);
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let server = common::spawn_test_server_with_openai_budget("").await;
+    let client = Client::new();
+    let upstreams = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::GET,
+        "/admin/v1/upstreams",
+        None,
+        None,
+    )
+    .await
+    .1;
+    for u in upstreams["upstreams"].as_array().unwrap() {
+        let id = u["id"].as_str().unwrap();
+        let (_, _, etag) = crate::openai_oauth_public_compat::admin(
+            &client,
+            &server,
+            reqwest::Method::GET,
+            &format!("/admin/v1/upstreams/{id}"),
+            None,
+            None,
+        )
+        .await;
+        let _ = crate::openai_oauth_public_compat::admin(
+            &client,
+            &server,
+            reqwest::Method::PATCH,
+            &format!("/admin/v1/upstreams/{id}"),
+            Some(json!({ "enabled": false })),
+            etag.as_deref(),
+        )
+        .await;
+    }
+    let (status, body, _) = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::POST,
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "openai-raw-ws-fallback",
+            "kind": "openai_api_key",
+            "base_url": format!("http://{fake_addr}"),
+            "api_key_value": "test-api-key",
+            "skip_preflight": true
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    let mut request = format!(
+        "ws://{}/openai/v1/responses?trace=raw-fallback",
+        server.proxy_addr
+    )
+    .into_client_request()
+    .unwrap();
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", server.managed_key.plaintext)
+            .parse()
+            .unwrap(),
+    );
+    for (name, val) in [
+        ("cf-connecting-ip", "203.0.113.10"),
+        ("cf-ray", "1234567890abcdef-ICN"),
+        ("cf-access-client-id", "client-spoofed"),
+        ("cf-access-client-secret", "client-secret-spoofed"),
+        ("cdn-loop", "cloudflare; loops=1"),
+        ("x-forwarded-for", "203.0.113.10"),
+        ("forwarded", "for=203.0.113.10;proto=https"),
+        (
+            "cookie",
+            "theme=dark; CF_Authorization=jwt.secret.sig; keep=yes",
+        ),
+        ("originator", "codex_cli_rs"),
+        ("session_id", "sess-ws-raw-fallback"),
+    ] {
+        request.headers_mut().insert(name, val.parse().unwrap());
+    }
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    socket
+        .send(Message::Text(
+            r#"{"type":"response.create","model":"gpt-test","input":"raw-ws"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let _ = socket.next().await.unwrap().unwrap();
+    let _ = socket.next().await.unwrap().unwrap();
+
+    let headers = recorded_headers.lock().unwrap().clone();
+    assert!(
+        !headers.is_empty(),
+        "upstream WS handshake must have occurred"
+    );
+    for (name, _) in &headers {
+        assert!(
+            !cc_lb_engine::is_ingress_proxy_header_name(name),
+            "raw WS fallback leaked ingress header {name}"
+        );
+    }
+    let cookies: Vec<&str> = headers
+        .iter()
+        .filter(|(name, _)| name == "cookie")
+        .map(|(_, value)| value.as_str())
+        .collect();
+    assert_eq!(cookies, vec!["theme=dark; keep=yes"]);
+    assert!(
+        headers
+            .iter()
+            .any(|(name, value)| name == "originator" && value == "codex_cli_rs")
+    );
+    assert!(
+        headers
+            .iter()
+            .any(|(name, value)| name == "session_id" && value == "sess-ws-raw-fallback")
+    );
+}
+
+#[tokio::test]
 async fn backend_codex_realtime_websocket_supports_standalone_sideband_and_pinning() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let fake = crate::backend_api_codex::spawn_codex_media_realtime_fake().await;

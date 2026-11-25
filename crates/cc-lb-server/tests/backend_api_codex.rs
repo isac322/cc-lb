@@ -1281,6 +1281,91 @@ async fn backend_codex_strips_actor_authorization_header_on_responses() {
 }
 
 #[tokio::test]
+async fn backend_codex_strips_ingress_proxy_and_cf_cookies_preserves_client_headers() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let server = common::spawn_test_server_with_openai_budget("").await;
+    let fake = openai_oauth_public_compat::spawn().await;
+    let client = Client::new();
+    openai_oauth_public_compat::setup(&server, &fake.base, &client).await;
+    let key = &server.managed_key.plaintext;
+
+    let response = client
+        .post(format!(
+            "http://{}/openai/backend-api/codex/responses",
+            server.proxy_addr
+        ))
+        .header("x-api-key", key)
+        .header("cf-connecting-ip", "203.0.113.10")
+        .header("cf-ray", "1234567890abcdef-ICN")
+        .header("cf-visitor", r#"{"scheme":"https"}"#)
+        .header("cf-ipcountry", "KR")
+        .header("cf-warp-tag-id", "warp-tag")
+        .header("cf-ew-via", "15")
+        .header("cf-access-jwt-assertion", "jwt.secret.sig")
+        .header("cf-access-authenticated-user-email", "user@example.com")
+        .header("cf-access-client-id", "service-client-id")
+        .header("cf-access-client-secret", "service-client-secret")
+        .header("cdn-loop", "cloudflare; loops=1")
+        .header("forwarded", "for=203.0.113.10;proto=https")
+        .header("x-forwarded-for", "203.0.113.10")
+        .header("x-forwarded-host", "cc-lb-proxy.example.com")
+        .header("x-forwarded-proto", "https")
+        .header("x-real-ip", "203.0.113.10")
+        .header("true-client-ip", "203.0.113.10")
+        .header("x-envoy-external-address", "203.0.113.10")
+        .header(
+            "cookie",
+            "theme=dark; CF_Authorization=cf.jwt.secret; CF_AppSession=sess123; keep=yes",
+        )
+        .header("originator", "codex_cli_rs")
+        .header("user-agent", "codex-tui/1.0")
+        .header("x-client-request-id", "req-http-ingress")
+        .json(&json!({"model": "gpt-test", "input": "strip-ingress-http"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let _ = response.bytes().await.unwrap();
+
+    let recorded = fake.state.0.lock().unwrap();
+    let request = recorded
+        .iter()
+        .rev()
+        .find(|(path, headers, _)| {
+            path == "/codex/responses"
+                && headers.iter().any(|(name, value)| {
+                    name == "x-client-request-id" && value == "req-http-ingress"
+                })
+        })
+        .expect("responses reached upstream");
+    for (name, _) in &request.1 {
+        assert!(
+            !cc_lb_engine::is_ingress_proxy_header_name(name),
+            "ingress header {name} leaked upstream"
+        );
+    }
+    let cookies: Vec<&str> = request
+        .1
+        .iter()
+        .filter(|(name, _)| name == "cookie")
+        .map(|(_, value)| value.as_str())
+        .collect();
+    assert_eq!(cookies, vec!["theme=dark; keep=yes"]);
+    assert!(
+        request
+            .1
+            .iter()
+            .any(|(name, value)| name == "originator" && value == "codex_cli_rs")
+    );
+    assert!(
+        request
+            .1
+            .iter()
+            .any(|(name, value)| name == "user-agent" && value == "codex-tui/1.0")
+    );
+}
+
+#[tokio::test]
 async fn backend_codex_realtime_call_pins_hangup_to_owning_oauth_upstream() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let fake = spawn_codex_media_realtime_fake().await;

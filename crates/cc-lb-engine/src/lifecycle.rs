@@ -174,7 +174,7 @@ use crate::error_format::{
     anthropic_error_response, provider_error_body, provider_error_body_with_retry_after,
     provider_error_response, provider_error_response_with_retry_after,
 };
-use crate::hop_by_hop::strip_hop_by_hop;
+use crate::hop_by_hop::{strip_hop_by_hop, strip_ingress_proxy_headers};
 use crate::lifecycle::compat_request::{
     CompatResponseKind, effective_policy, prepare_request, retain_api_key_candidates,
 };
@@ -1593,6 +1593,7 @@ impl Lifecycle {
         }
         let mut downstream_headers = ingress.headers.clone();
         strip_hop_by_hop(&mut downstream_headers);
+        strip_ingress_proxy_headers(&mut downstream_headers);
         let canonical_model = canonical_model_id(Provider::Openai, model).to_owned();
         let service_tier = body.get("service_tier").and_then(Value::as_str);
         let identity = request_identity_metadata(
@@ -1990,6 +1991,7 @@ impl Lifecycle {
         })?;
         let mut downstream_headers = ingress.headers.clone();
         strip_hop_by_hop(&mut downstream_headers);
+        strip_ingress_proxy_headers(&mut downstream_headers);
         // BuiltinAuthn authenticates managed cc-lb keys, not provider keys or
         // OAuth subjects. Human/machine/admin is a separate storage taxonomy.
         let principal = Principal {
@@ -6071,6 +6073,7 @@ impl Lifecycle {
 
         let downstream_headers = {
             strip_hop_by_hop(&mut parts.headers);
+            strip_ingress_proxy_headers(&mut parts.headers);
             parts.headers.remove("x-cc-lb-emulate");
             parts.headers
         };

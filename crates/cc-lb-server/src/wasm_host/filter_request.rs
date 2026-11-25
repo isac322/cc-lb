@@ -115,16 +115,13 @@ impl FilterWireRequest<'_> {
                 }
             })
             .collect();
-        let headers: Vec<v3::HeaderRef<'_>> = self
-            .ctx
-            .downstream_headers
+        let projected_headers =
+            project_downstream_headers(&self.ctx.downstream_headers, self.cookie_redaction);
+        let headers: Vec<v3::HeaderRef<'_>> = projected_headers
             .iter()
-            .filter(|(name, _)| {
-                !is_stripped_downstream_header(name.as_str(), self.cookie_redaction)
-            })
             .map(|(name, value)| v3::HeaderRef {
-                name: name.as_str(),
-                value: value.as_bytes(),
+                name,
+                value: value.as_ref(),
             })
             .collect();
         let native_pricing = self.ctx.cache_pricing.native.as_ref();
@@ -267,10 +264,33 @@ pub(super) fn is_stripped_downstream_header(name: &str, cookie_redaction: bool) 
             | "x-openai-actor-authorization"
             | "host"
             | "proxy-authorization"
-    ) {
+    ) || cc_lb_engine::is_ingress_proxy_header_name(lower.as_str())
+    {
         return true;
     }
     cookie_redaction && lower == "cookie"
+}
+
+pub(super) fn project_downstream_headers<'a>(
+    headers: &'a http::HeaderMap,
+    cookie_redaction: bool,
+) -> Vec<(&'a str, Cow<'a, [u8]>)> {
+    let mut projected = Vec::new();
+    for (name, value) in headers.iter() {
+        if is_stripped_downstream_header(name.as_str(), cookie_redaction) {
+            continue;
+        }
+        if *name == http::header::COOKIE {
+            let Some(scrubbed) = cc_lb_engine::scrub_ingress_auth_cookie_bytes(value.as_bytes())
+            else {
+                continue;
+            };
+            projected.push((name.as_str(), scrubbed));
+            continue;
+        }
+        projected.push((name.as_str(), Cow::Borrowed(value.as_bytes())));
+    }
+    projected
 }
 
 pub(super) fn scrub_query_api_key(query: &str) -> Cow<'_, str> {
@@ -296,6 +316,23 @@ mod security_tests {
         ] {
             assert!(is_stripped_downstream_header(name, false), "{name}");
         }
+    }
+
+    #[test]
+    fn strips_ingress_proxy_and_cdn_headers_without_cookie_redaction() {
+        for name in [
+            "cf-access-jwt-assertion",
+            "cf-connecting-ip",
+            "CF-Ray",
+            "cdn-loop",
+            "x-forwarded-for",
+            "x-envoy-external-address",
+        ] {
+            assert!(is_stripped_downstream_header(name, false), "{name}");
+        }
+        assert!(is_stripped_downstream_header("cookie", true));
+        assert!(!is_stripped_downstream_header("cookie", false));
+        assert!(!is_stripped_downstream_header("originator", false));
     }
 
     #[test]
@@ -416,5 +453,88 @@ mod security_tests {
             })
             .expect("encode filter request");
         }
+    }
+
+    #[test]
+    fn filter_wire_scrubs_cf_access_cookies_when_cookie_redaction_disabled() {
+        let mut headers = http::HeaderMap::new();
+        headers.append(
+            http::header::COOKIE,
+            http::HeaderValue::from_static(
+                "theme=dark; CF_Authorization=cf.jwt.secret; CF_AppSession=sess123; keep=yes",
+            ),
+        );
+        headers.append(
+            http::header::COOKIE,
+            http::HeaderValue::from_static("CF_Authorization=solo"),
+        );
+        let context = RoutingContext {
+            request_id: "req-filter-cookie".to_owned(),
+            thread_id: None,
+            requested_service_tier: None,
+            downstream_headers: headers,
+            method: http::Method::POST,
+            path: "/v1/responses".to_owned(),
+            query: None,
+            body_bytes: bytes::Bytes::from_static(b"{}"),
+            canonical_model_id: "gpt-5".to_owned(),
+            cache_pricing: cc_lb_domain::CachePricingSummary::default(),
+        };
+        let principal = Principal {
+            id: "principal-filter".to_owned(),
+            kind: PrincipalKind::ApiKey,
+        };
+
+        FilterWireRequest {
+            ctx: &context,
+            principal: &principal,
+            claims: &[],
+            candidates: &[],
+            cookie_redaction: false,
+        }
+        .encode(|bytes| {
+            for secret in [
+                b"cf.jwt.secret".as_slice(),
+                b"sess123".as_slice(),
+                b"solo".as_slice(),
+            ] {
+                assert!(
+                    !bytes.windows(secret.len()).any(|window| window == secret),
+                    "Access cookie bytes leaked into V3 filter request"
+                );
+            }
+            let archived =
+                rkyv::access::<cc_lb_plugin_wire::v3::ArchivedFilterRequest, RkyvError>(bytes)
+                    .expect("filter request");
+            let cookies: Vec<&[u8]> = archived
+                .headers
+                .iter()
+                .filter(|h| h.name.eq_ignore_ascii_case("cookie"))
+                .map(|h| h.value.as_ref())
+                .collect();
+            assert_eq!(cookies, vec![b"theme=dark; keep=yes".as_slice()]);
+        })
+        .expect("encode filter request without cookie redaction");
+
+        FilterWireRequest {
+            ctx: &context,
+            principal: &principal,
+            claims: &[],
+            candidates: &[],
+            cookie_redaction: true,
+        }
+        .encode(|bytes| {
+            let archived =
+                rkyv::access::<cc_lb_plugin_wire::v3::ArchivedFilterRequest, RkyvError>(bytes)
+                    .expect("filter request");
+            assert!(
+                archived
+                    .headers
+                    .iter()
+                    .all(|h| !h.name.eq_ignore_ascii_case("cookie")),
+                "cookie_redaction = true must omit all Cookie headers"
+            );
+        })
+        .expect("encode filter request with cookie redaction");
     }
 }

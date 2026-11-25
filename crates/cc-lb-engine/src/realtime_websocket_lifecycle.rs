@@ -207,6 +207,7 @@ impl Lifecycle {
             };
             let mut clean_headers = headers.clone();
             strip_hop_by_hop(&mut clean_headers);
+            strip_ingress_proxy_headers(&mut clean_headers);
             let query = query
                 .map(cc_lb_upstream::scrub_query_api_key)
                 .filter(|query| !query.is_empty())
