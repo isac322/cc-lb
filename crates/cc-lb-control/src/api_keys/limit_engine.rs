@@ -1252,9 +1252,11 @@ impl LimitEngine {
         true
     }
 
-    /// Commit a reservation without altering its already-recorded rolling
-    /// usage (e.g. an HTTP stream terminated after content began without a
-    /// usage event). Releases concurrency guards and records durable usage.
+    /// Commit a reservation without altering live rolling holds, while posting
+    /// admitted estimates into `now_sec` for any window hold that already
+    /// expired (e.g. an HTTP stream terminated after content began without a
+    /// usage event or an expired hold was skipped across handoff). Releases
+    /// concurrency guards and records durable usage.
     pub fn commit_reserved_by_id(&self, id: &str) -> bool {
         let durable_usage = self.inner.durable_usage.read().clone();
         let concurrent_guards = {
@@ -1264,6 +1266,24 @@ impl LimitEngine {
             };
             let concurrent_guards = std::mem::take(&mut record.concurrent_guards);
             let now_sec = unix_secs(self.inner.clock.now());
+            {
+                let mut rolling = self.inner.rolling.write();
+                for amount in &record.reserved {
+                    if amount.kind != LimitKind::Concurrent
+                        && !amount.is_live_at(now_sec)
+                        && amount.amount != 0
+                    {
+                        record_amount_locked(
+                            &mut rolling,
+                            &record.key_id,
+                            amount.kind,
+                            amount.window_sec,
+                            amount.amount,
+                            now_sec,
+                        );
+                    }
+                }
+            }
             if let Some(state) = durable_usage.as_ref()
                 && !record.durable_bucket_widths.is_empty()
             {
@@ -5927,6 +5947,92 @@ mod tests {
             .await
             .expect("exact remaining 900-token capacity succeeds");
         drop(at_cap);
+
+        // 4. Advance 65s so 60s window clears again, reserve 300 tokens (`res4`) and hand off
+        // response without usage (`handoff_after_response`), advance 65s so 60s expires while
+        // 3600s remains live, rebuild across handoff, then estimate-only commit via
+        // `commit_reserved_by_id`. Expired 60s window must charge the admitted 300 tokens once
+        // at t5 while live 3600s stays charged once (100 from phase 3 + 300 live = 400).
+        clock.advance_secs(65);
+        let res4 = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-handoff",
+                "claude-3-opus",
+                Some(100),
+                200,
+                None,
+            )
+            .await
+            .expect("res4 succeeds");
+        let res4_id = res4.id().to_owned();
+        res4.handoff_after_response();
+        clock.advance_secs(65);
+        let t5 = unix_secs(clock.now());
+        rebuild_local_usage_after_handoff(&engine, &state, t5);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t5),
+            0
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::Requests, 60, t5),
+            0
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 3_600, t5),
+            400
+        );
+
+        assert!(engine.commit_reserved_by_id(&res4_id));
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t5),
+            300,
+            "estimate-only commit after expired 60s hold skipped at handoff must charge 300 tokens locally"
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::Requests, 60, t5),
+            1
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 3_600, t5),
+            400,
+            "live 3600s hold must remain charged once without double-counting"
+        );
+
+        let over_commit_cap = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-handoff",
+                "claude-3-opus",
+                Some(350),
+                400,
+                None,
+            )
+            .await;
+        assert!(
+            matches!(
+                over_commit_cap,
+                Err(RejectReason::TokenRateLimit {
+                    kind: LimitKind::TotalTokens
+                })
+            ),
+            "committed 300-token charge must leave 700 capacity"
+        );
+        let at_commit_cap = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-handoff",
+                "claude-3-opus",
+                Some(300),
+                400,
+                None,
+            )
+            .await
+            .expect("exact remaining 700-token capacity succeeds");
+        drop(at_commit_cap);
     }
 
     #[test]
