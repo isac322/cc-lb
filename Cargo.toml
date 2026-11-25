@@ -59,7 +59,7 @@ cc-lb-pdk-wasmtime = { version = "0.2", path = "crates/cc-lb-pdk-wasmtime" }
 cc-lb-pdk-wasmtime-macros = { version = "0.2", path = "crates/cc-lb-pdk-wasmtime-macros" }
 cc-lb-workspace-hack = { path = "tools/workspace-hack" }
 
-wasmtime = { version = "50.0.2", default-features = false, features = [
+wasmtime = { version = "51.0.0", default-features = false, features = [
     "anyhow",
     "cranelift",
     "pooling-allocator",
