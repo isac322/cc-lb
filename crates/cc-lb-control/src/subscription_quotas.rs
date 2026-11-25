@@ -488,12 +488,73 @@ pub async fn build_cc_lb_aggregate_response_for_provider(
         .iter()
         .map(|input| (input.upstream_id, input.window))
         .collect::<HashSet<_>>();
+    let mut samples_by_upstream: HashMap<Uuid, Vec<SubscriptionQuotaSample>> = HashMap::new();
+    for sample in &durable_latest {
+        if allowed_sources.contains(&sample.source) {
+            samples_by_upstream
+                .entry(sample.upstream_id)
+                .or_default()
+                .push(sample.clone());
+        }
+    }
+    let mut durable_snapshots = Vec::new();
+    for upstream in &upstreams {
+        let Some(samples) = samples_by_upstream.get(&upstream.id) else {
+            continue;
+        };
+        let capacity_ratio = capacity_ratios
+            .get(&upstream.id)
+            .copied()
+            .unwrap_or(PRO_CAPACITY_RATIO);
+        for snapshot in crate::subscription_quota_snapshots::candidate_snapshots_from_samples(
+            samples,
+            now_unix_millis,
+            max_staleness_secs,
+        ) {
+            let Some(window) = SubscriptionQuotaWindow::from_str(&snapshot.window) else {
+                continue;
+            };
+            if window_secs(window).is_none()
+                || !windows.contains(&window)
+                || matches!(
+                    snapshot.state,
+                    SubscriptionQuotaDataState::Unobserved | SubscriptionQuotaDataState::Absent
+                )
+            {
+                continue;
+            }
+            durable_snapshots.push((upstream.id, window, snapshot, capacity_ratio));
+        }
+    }
     lot_inputs.extend(
         latest_candidates
             .iter()
             .filter(|(upstream_id, window, _, _)| {
                 window_secs(*window).is_some()
                     && !covered_by_provider_lots.contains(&(*upstream_id, *window))
+                    && !absent_windows.contains(&(*upstream_id, *window))
+            })
+            .filter_map(|(upstream_id, window, snapshot, capacity_ratio)| {
+                upstream_by_id.get(upstream_id).map(|upstream| {
+                    provider_lot_input_from_snapshot(
+                        upstream,
+                        *window,
+                        snapshot,
+                        *capacity_ratio,
+                        now_unix_secs,
+                    )
+                })
+            }),
+    );
+    let covered_duration_keys = lot_inputs
+        .iter()
+        .map(|input| (input.upstream_id, input.window))
+        .collect::<HashSet<_>>();
+    lot_inputs.extend(
+        durable_snapshots
+            .iter()
+            .filter(|(upstream_id, window, _, _)| {
+                !covered_duration_keys.contains(&(*upstream_id, *window))
                     && !absent_windows.contains(&(*upstream_id, *window))
             })
             .filter_map(|(upstream_id, window, snapshot, capacity_ratio)| {
@@ -3384,5 +3445,95 @@ mod tests {
         assert_eq!(extra.enabled, Some(true));
         assert_eq!(extra.monthly_limit, Some(900.0));
         assert_eq!(extra.used_credits, Some(300.0));
+    }
+
+    #[tokio::test]
+    async fn aggregate_falls_back_to_durable_latest_duration_rows_without_local_quota_cache() {
+        use cc_lb_storage_api::{UpstreamCreate, UpstreamSubscriptionQuotaStore};
+
+        let now_secs = now_unix_secs_test();
+        let (_dir, clock, storage) = open_quota_test_sqlite(now_secs).await;
+        let upstream_id = Uuid::from_u128(77);
+        UpstreamStore::create(
+            &storage,
+            UpstreamCreate {
+                id: upstream_id,
+                name: "split-openai-durable".to_owned(),
+                kind: UpstreamKind::OpenaiOauth,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                vertex: None,
+                vertex_credential_type: None,
+                vertex_quota_project_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .expect("create upstream");
+
+        let api_sample: SubscriptionQuotaSample = serde_json::from_value(json!({
+            "upstream_id": upstream_id,
+            "window": "5h",
+            "source": "api",
+            "sample_kind": "sample",
+            "observed_at_unix_millis": now_secs * 1_000,
+            "ingested_at_unix_millis": now_secs * 1_000,
+            "sample_id": Uuid::from_u128(177),
+            "utilization": 0.42,
+            "resets_at_unix_secs": now_secs + 3_600,
+        }))
+        .expect("sample deserializes");
+        storage
+            .record_subscription_quota_samples(&[api_sample])
+            .await
+            .expect("record sample");
+
+        let holder = dynamic_view_holder_with_quota_cache(std::sync::Arc::new(
+            crate::NoopSubscriptionQuotaCache,
+        ));
+        for source in [
+            SubscriptionQuotaSourceMerge::Merged,
+            SubscriptionQuotaSourceMerge::Api,
+        ] {
+            let aggregate = build_cc_lb_aggregate_response_for_provider(
+                &storage,
+                &holder,
+                AggregateBuildParams {
+                    upstream_ids: None,
+                    windows: vec![SubscriptionQuotaWindow::FiveHour],
+                    source,
+                    max_staleness_secs: 1_800,
+                    provider: PoolQuotaProvider::Openai,
+                },
+                clock.as_ref(),
+            )
+            .await
+            .expect("aggregate builds");
+            assert_eq!(aggregate.windows.len(), 1);
+            assert_eq!(aggregate.windows[0].contributing_upstreams, 1);
+            assert!(
+                (aggregate.windows[0].utilization.expect("utilization") - 0.42).abs() < 1e-6,
+                "expected durable latest utilization for {source:?}"
+            );
+        }
+        let header_only = build_cc_lb_aggregate_response_for_provider(
+            &storage,
+            &holder,
+            AggregateBuildParams {
+                upstream_ids: None,
+                windows: vec![SubscriptionQuotaWindow::FiveHour],
+                source: SubscriptionQuotaSourceMerge::Header,
+                max_staleness_secs: 1_800,
+                provider: PoolQuotaProvider::Openai,
+            },
+            clock.as_ref(),
+        )
+        .await
+        .expect("header-only aggregate builds");
+        assert_eq!(header_only.windows[0].contributing_upstreams, 0);
     }
 }

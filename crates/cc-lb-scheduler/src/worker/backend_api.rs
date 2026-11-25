@@ -224,6 +224,50 @@ impl SchedulerBackend {
         }
     }
 
+    /// Atomically cancels an unstarted `Pending` adaptive job (`attempts == 0`) by
+    /// transitioning it to terminal `Killed`. Returns `true` only if this call
+    /// performed the transition, proving no worker had claimed the job yet.
+    pub async fn cancel_pending_adaptive_task_by_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<bool, SchedulerError> {
+        let rows_affected = match self {
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(sqlite) => sqlx::query(
+                "UPDATE Jobs \
+                     SET status = 'Killed', \
+                         done_at = CAST(strftime('%s', 'now') AS INTEGER), \
+                         last_result = '{\"Err\":\"cancelled_before_start\"}' \
+                     WHERE job_type = ?1 \
+                       AND idempotency_key = ?2 \
+                       AND status = 'Pending' \
+                       AND attempts = 0",
+            )
+            .bind(ADAPTIVE_QUEUE)
+            .bind(idempotency_key)
+            .execute(sqlite.pool())
+            .await?
+            .rows_affected(),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => sqlx::query(
+                "UPDATE apalis.jobs \
+                     SET status = 'Killed', \
+                         done_at = NOW(), \
+                         last_result = '{\"Err\":\"cancelled_before_start\"}'::jsonb \
+                     WHERE job_type = $1 \
+                       AND idempotency_key = $2 \
+                       AND status = 'Pending' \
+                       AND attempts = 0",
+            )
+            .bind(ADAPTIVE_QUEUE)
+            .bind(idempotency_key)
+            .execute(postgres.pool())
+            .await?
+            .rows_affected(),
+        };
+        Ok(rows_affected > 0)
+    }
+
     /// Reads status/attempt metadata for matching adaptive tasks by exact idempotency key
     /// without decoding the serialized `job` payload.
     pub async fn get_adaptive_task_statuses_by_key(
@@ -254,15 +298,63 @@ impl SchedulerBackend {
                 .await?
             }
         };
-        rows.into_iter()
-            .map(|(status, attempts, max_attempts)| {
-                Ok(SchedulerTaskStatusRow {
-                    status: parse_task_status(&status)?,
-                    attempts,
-                    max_attempts,
-                })
-            })
-            .collect()
+        parse_status_rows(rows)
+    }
+
+    /// Reads status/attempt metadata for matching adaptive tasks by exact idempotency key
+    /// or `"{idempotency_key}:*"` subkeys (such as `:watchdog:*` or `:bridge:*` recovery rows).
+    pub async fn get_adaptive_task_statuses_by_key_or_subkey(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Vec<SchedulerTaskStatusRow>, SchedulerError> {
+        let subkey_prefix = format!("{idempotency_key}:");
+        let rows: Vec<(String, i32, i32)> = match self {
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(sqlite) => {
+                // Keep a binary-collated range predicate so SQLite uses `(job_type, idempotency_key)`
+                // for both the exact lookup and the `:` subkey seek instead of scanning via `substr`.
+                if let Some(subkey_upper) = prefix_upper_bound(&subkey_prefix) {
+                    sqlx::query_as(
+                        "SELECT status, attempts, max_attempts FROM Jobs \
+                         WHERE job_type = ?1 \
+                           AND (idempotency_key = ?2 OR (idempotency_key >= ?3 AND idempotency_key < ?4))",
+                    )
+                    .bind(ADAPTIVE_QUEUE)
+                    .bind(idempotency_key)
+                    .bind(&subkey_prefix)
+                    .bind(subkey_upper)
+                    .fetch_all(sqlite.pool())
+                    .await?
+                } else {
+                    sqlx::query_as(
+                        "SELECT status, attempts, max_attempts FROM Jobs \
+                         WHERE job_type = ?1 \
+                           AND (idempotency_key = ?2 OR idempotency_key >= ?3)",
+                    )
+                    .bind(ADAPTIVE_QUEUE)
+                    .bind(idempotency_key)
+                    .bind(&subkey_prefix)
+                    .fetch_all(sqlite.pool())
+                    .await?
+                }
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => {
+                // Postgres `starts_with` is collation-independent (unlike `>= ':' AND < ';'`,
+                // which misorders punctuation under ICU/libc locale collations such as `und`).
+                sqlx::query_as(
+                    "SELECT status, attempts, max_attempts FROM apalis.jobs \
+                     WHERE job_type = $1 \
+                       AND (idempotency_key = $2 OR starts_with(idempotency_key, $3))",
+                )
+                .bind(ADAPTIVE_QUEUE)
+                .bind(idempotency_key)
+                .bind(&subkey_prefix)
+                .fetch_all(postgres.pool())
+                .await?
+            }
+        };
+        parse_status_rows(rows)
     }
 
     /// Lists idempotency keys of active adaptive tasks matching `prefix` using the partial
@@ -744,6 +836,20 @@ fn parse_task_status(raw: &str) -> Result<TaskStatus, SchedulerError> {
     }
 }
 
+fn parse_status_rows(
+    rows: Vec<(String, i32, i32)>,
+) -> Result<Vec<SchedulerTaskStatusRow>, SchedulerError> {
+    rows.into_iter()
+        .map(|(status, attempts, max_attempts)| {
+            Ok(SchedulerTaskStatusRow {
+                status: parse_task_status(&status)?,
+                attempts,
+                max_attempts,
+            })
+        })
+        .collect()
+}
+
 #[cfg(feature = "sqlite")]
 fn prefix_upper_bound(prefix: &str) -> Option<String> {
     let mut chars: Vec<char> = prefix.chars().collect();
@@ -977,6 +1083,229 @@ mod tests {
             .await
             .expect("indexed prefix query ignores corrupt job payload");
         assert_eq!(active_keys, vec![active_key]);
+    }
+
+    #[tokio::test]
+    async fn get_adaptive_task_statuses_by_key_or_subkey_matches_exact_and_colons_only() {
+        use std::sync::Arc;
+
+        use cc_lb_clock::SystemClock;
+
+        use crate::worker::{SchedulerBackend, SqliteSchedulerBackend, TaskStatus};
+
+        let pool = SqlitePool::connect(":memory:").await.expect("sqlite pool");
+        apalis_sqlite::SqliteStorage::setup(&pool)
+            .await
+            .expect("apalis setup");
+        crate::migrations::apply_post_setup_migrations(&pool)
+            .await
+            .expect("post setup migrations");
+
+        let base_key = format!("adaptive:oauth_refresh:{}:gen:0:exp:100", Uuid::new_v4());
+        let rows = [
+            (base_key.clone(), "Pending", 0_i32, 5_i32),
+            (format!("{base_key}:watchdog:1"), "Running", 1_i32, 3_i32),
+            (format!("{base_key}:bridge:abc"), "Done", 1_i32, 2_i32),
+            (format!("{base_key}_other"), "Pending", 0_i32, 5_i32),
+            (format!("{base_key};other"), "Pending", 0_i32, 5_i32),
+            (format!("other:{base_key}"), "Pending", 0_i32, 5_i32),
+        ];
+        for (key, status, attempts, max_attempts) in rows {
+            sqlx::query(
+                "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, idempotency_key) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+            )
+            .bind(b"null".to_vec())
+            .bind(ulid::Ulid::generate().to_string())
+            .bind(ADAPTIVE_QUEUE)
+            .bind(status)
+            .bind(attempts)
+            .bind(max_attempts)
+            .bind(key)
+            .execute(&pool)
+            .await
+            .expect("insert job row");
+        }
+
+        let subkey_prefix = format!("{base_key}:");
+        let subkey_upper =
+            super::prefix_upper_bound(&subkey_prefix).expect("colon subkey prefix has upper bound");
+        let plan_rows: Vec<(i32, i32, i32, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN \
+             SELECT status, attempts, max_attempts FROM Jobs \
+             WHERE job_type = ?1 \
+               AND (idempotency_key = ?2 OR (idempotency_key >= ?3 AND idempotency_key < ?4))",
+        )
+        .bind(ADAPTIVE_QUEUE)
+        .bind(&base_key)
+        .bind(&subkey_prefix)
+        .bind(&subkey_upper)
+        .fetch_all(&pool)
+        .await
+        .expect("explain sqlite subkey range query plan");
+        let plan_details = plan_rows
+            .into_iter()
+            .map(|(_, _, _, detail)| detail)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plan_details.contains("idempotency_key=?"),
+            "expected exact idempotency_key index lookup in SQLite query plan: {plan_details}"
+        );
+        assert!(
+            plan_details.contains("idempotency_key>?"),
+            "expected bounded idempotency_key range seek in SQLite query plan: {plan_details}"
+        );
+
+        let backend =
+            SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(pool, Arc::new(SystemClock)));
+        let mut statuses = backend
+            .get_adaptive_task_statuses_by_key_or_subkey(&base_key)
+            .await
+            .expect("query key or subkeys");
+        statuses.sort_by_key(|row| format!("{:?}:{}", row.status, row.attempts));
+        assert_eq!(
+            statuses,
+            vec![
+                super::SchedulerTaskStatusRow {
+                    status: TaskStatus::Done,
+                    attempts: 1,
+                    max_attempts: 2,
+                },
+                super::SchedulerTaskStatusRow {
+                    status: TaskStatus::Pending,
+                    attempts: 0,
+                    max_attempts: 5,
+                },
+                super::SchedulerTaskStatusRow {
+                    status: TaskStatus::Running,
+                    attempts: 1,
+                    max_attempts: 3,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_pending_adaptive_task_by_key_transitions_only_unstarted_pending() {
+        use std::sync::Arc;
+
+        use cc_lb_clock::SystemClock;
+
+        use crate::worker::{SchedulerBackend, SqliteSchedulerBackend, TaskStatus};
+
+        let pool = SqlitePool::connect(":memory:").await.expect("sqlite pool");
+        apalis_sqlite::SqliteStorage::setup(&pool)
+            .await
+            .expect("apalis setup");
+        crate::migrations::apply_post_setup_migrations(&pool)
+            .await
+            .expect("post setup migrations");
+
+        let pending_key = format!(
+            "split_manual_warmup:{}:primary:{}",
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        );
+        let queued_key = format!(
+            "split_manual_warmup:{}:primary:{}",
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        );
+        let running_key = format!(
+            "split_manual_warmup:{}:primary:{}",
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        );
+        let retried_pending_key = format!(
+            "split_manual_warmup:{}:primary:{}",
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        );
+        for (key, status, attempts) in [
+            (&pending_key, "Pending", 0_i32),
+            (&queued_key, "Queued", 0_i32),
+            (&running_key, "Running", 1_i32),
+            (&retried_pending_key, "Pending", 1_i32),
+        ] {
+            sqlx::query(
+                "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, idempotency_key) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, 0, ?6)",
+            )
+            .bind(b"null".to_vec())
+            .bind(ulid::Ulid::generate().to_string())
+            .bind(ADAPTIVE_QUEUE)
+            .bind(status)
+            .bind(attempts)
+            .bind(key)
+            .execute(&pool)
+            .await
+            .expect("insert job row");
+        }
+
+        let backend =
+            SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(pool, Arc::new(SystemClock)));
+        assert!(
+            backend
+                .cancel_pending_adaptive_task_by_key(&pending_key)
+                .await
+                .expect("cancel pending")
+        );
+        assert!(
+            !backend
+                .cancel_pending_adaptive_task_by_key(&pending_key)
+                .await
+                .expect("second cancel is idempotent false")
+        );
+        assert!(
+            !backend
+                .cancel_pending_adaptive_task_by_key(&queued_key)
+                .await
+                .expect("cancel queued returns false")
+        );
+        assert!(
+            !backend
+                .cancel_pending_adaptive_task_by_key(&running_key)
+                .await
+                .expect("cancel running returns false")
+        );
+        assert!(
+            !backend
+                .cancel_pending_adaptive_task_by_key(&retried_pending_key)
+                .await
+                .expect("cancel retried returns false")
+        );
+
+        let statuses = backend
+            .get_adaptive_task_statuses_by_key(&pending_key)
+            .await
+            .expect("status after cancel");
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].status, TaskStatus::Killed);
+        assert_eq!(
+            backend
+                .get_adaptive_task_statuses_by_key(&queued_key)
+                .await
+                .expect("queued untouched")[0]
+                .status,
+            TaskStatus::Queued
+        );
+        assert_eq!(
+            backend
+                .get_adaptive_task_statuses_by_key(&running_key)
+                .await
+                .expect("running untouched")[0]
+                .status,
+            TaskStatus::Running
+        );
+        assert_eq!(
+            backend
+                .get_adaptive_task_statuses_by_key(&retried_pending_key)
+                .await
+                .expect("retried untouched")[0]
+                .status,
+            TaskStatus::Pending
+        );
     }
 
     #[test]

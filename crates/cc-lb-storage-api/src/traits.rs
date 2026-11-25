@@ -370,6 +370,18 @@ pub trait ManagedKeyStore: Send + Sync {
     async fn list_by_principal(&self, principal_id: &str)
     -> StorageResult<Vec<StoredApiKeyRecord>>;
 
+    async fn list_by_principal_with_ids(
+        &self,
+        principal_id: &str,
+    ) -> StorageResult<Vec<(String, StoredApiKeyRecord)>> {
+        Ok(self
+            .list_all()
+            .await?
+            .into_iter()
+            .filter_map(|(pid, key_id, record)| (pid == principal_id).then_some((key_id, record)))
+            .collect())
+    }
+
     async fn list_all(&self) -> StorageResult<Vec<(String, String, StoredApiKeyRecord)>>;
 
     async fn update(
@@ -441,6 +453,26 @@ pub trait MetaStore: Send + Sync {
         let _ = (key, expected, value);
         Err(StorageError::Fatal {
             message: "compare_and_put_meta_value is not implemented for this storage backend"
+                .to_owned(),
+        })
+    }
+
+    async fn delete_meta_value(&self, key: &str) -> StorageResult<bool> {
+        let _ = key;
+        Err(StorageError::Fatal {
+            message: "delete_meta_value is not implemented for this storage backend".to_owned(),
+        })
+    }
+
+    async fn list_meta_values_by_prefix(
+        &self,
+        prefix: &str,
+        after_key: Option<&str>,
+        limit: usize,
+    ) -> StorageResult<Vec<(String, String)>> {
+        let _ = (prefix, after_key, limit);
+        Err(StorageError::Fatal {
+            message: "list_meta_values_by_prefix is not implemented for this storage backend"
                 .to_owned(),
         })
     }

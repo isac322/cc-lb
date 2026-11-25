@@ -18,12 +18,15 @@ pub(crate) struct PostCommitAborted;
 ///
 /// The spawned task is not tied to the request future, so it keeps running if
 /// the caller is dropped. Panics propagate unchanged to the caller.
-pub(crate) async fn complete_after_commit<F, T>(continuation: F) -> Result<T, PostCommitAborted>
+pub(crate) async fn complete_after_commit<F, T>(
+    tracker: &cc_lb_control::PostCommitTracker,
+    continuation: F,
+) -> Result<T, PostCommitAborted>
 where
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    match tokio::spawn(continuation).await {
+    match tracker.spawn(continuation).await {
         Ok(output) => Ok(output),
         Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
         Err(error) => {

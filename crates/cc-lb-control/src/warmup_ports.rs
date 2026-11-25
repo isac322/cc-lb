@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use cc_lb_quota::UnifiedQuotaObservation;
 use cc_lb_storage_api::{SubscriptionQuotaWindow, UpstreamRecord, WarmupLane};
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LimitResetUsageRefresh {
     Refreshed,

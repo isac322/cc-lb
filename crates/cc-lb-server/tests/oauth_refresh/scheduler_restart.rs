@@ -62,6 +62,8 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
                         let upstream_id = match job {
                             AdaptiveJob::OAuthRefresh(job) => job.upstream_id,
                             AdaptiveJob::Warmup(_)
+                            | AdaptiveJob::ManualWarmup(_)
+                            | AdaptiveJob::OAuthUsageRefresh(_)
                             | AdaptiveJob::MetadataRefresh(_)
                             | AdaptiveJob::CacheKeepalive(_) => {
                                 panic!("unexpected generation 1 adaptive job")
@@ -193,6 +195,8 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
                                     .expect("dispatch receiver remains open");
                             }
                             AdaptiveJob::Warmup(_)
+                            | AdaptiveJob::ManualWarmup(_)
+                            | AdaptiveJob::OAuthUsageRefresh(_)
                             | AdaptiveJob::MetadataRefresh(_)
                             | AdaptiveJob::CacheKeepalive(_) => {}
                         }

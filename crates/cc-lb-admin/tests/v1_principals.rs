@@ -593,3 +593,34 @@ async fn create_and_update_validate_default_limits_window_and_cap() {
     assert_eq!(body["error"], "invalid_input");
     assert_eq!(body["field"], "default_limits[0].window_secs");
 }
+
+#[tokio::test]
+async fn list_returns_exact_total_count_beyond_page_limit_and_excludes_deleted() {
+    let server = admin_test_common::spawn_admin_server().await;
+    let mut created_ids = Vec::new();
+    for name in ["p-01", "p-02", "p-03", "p-04", "p-05", "p-06"] {
+        let (status, headers, body) = create_principal(&server.client, name).await;
+        assert_eq!(status, StatusCode::CREATED);
+        created_ids.push((
+            body["id"].as_str().unwrap().to_owned(),
+            server
+                .client
+                .header_str(&headers, header::ETAG.as_str())
+                .to_owned(),
+        ));
+    }
+    let (deleted_id, deleted_etag) = &created_ids[0];
+    let (delete_status, _, _) = server
+        .client
+        .delete(&format!("/admin/v1/principals/{deleted_id}"), deleted_etag)
+        .await;
+    assert_eq!(delete_status, StatusCode::NO_CONTENT);
+
+    let (status, headers, body) = server
+        .client
+        .get("/admin/v1/principals?after=1&limit=2")
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(server.client.header_str(&headers, "x-total-count"), "5");
+    assert_eq!(body["principals"].as_array().unwrap().len(), 2);
+}

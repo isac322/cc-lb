@@ -524,6 +524,7 @@ fn admin_router(
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock: fixture.clock.clone(),
         anthropic_org_api: fixture.dispatch.anthropic_org_api.clone(),
+        post_commit_tracker: Default::default(),
     })
 }
 
@@ -1531,4 +1532,32 @@ async fn anthropic_empty_or_coupon_only_usage_poll_does_not_claim_main_quota_pub
             "{label}: post-reset refresh must succeed when main quota is published"
         );
     }
+}
+
+#[tokio::test]
+async fn dispatch_oauth_usage_refresh_records_result_in_meta_envelope() {
+    let provider = Provider::new(UpstreamKind::OpenaiOauth, 18).await;
+    let fixture = DispatchFixture::new().await;
+    let upstream = provider.upstream(&fixture, UpstreamKind::OpenaiOauth).await;
+    let nonce = Uuid::new_v4();
+
+    let outcome = fixture
+        .dispatch
+        .dispatch_entity(cc_lb_scheduler::worker::AdaptiveJob::OAuthUsageRefresh(
+            cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsageRefreshJob::new(upstream.id, nonce),
+        ))
+        .await
+        .expect("dispatch_oauth_usage_refresh");
+    assert_eq!(outcome, cc_lb_scheduler::retry::JobOutcome::Done);
+
+    let recorded = cc_lb_control::load_oauth_usage_refresh_result(
+        fixture.storage.as_ref(),
+        upstream.id,
+        nonce,
+    )
+    .await
+    .expect("load result")
+    .expect("recorded usage refresh result");
+    assert_eq!(recorded.nonce, nonce);
+    assert_eq!(recorded.outcome, LimitResetUsageRefresh::Refreshed);
 }

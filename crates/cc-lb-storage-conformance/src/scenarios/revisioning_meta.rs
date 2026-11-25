@@ -311,3 +311,79 @@ where
     result?;
     teardown
 }
+
+pub async fn meta_prefix_list_and_delete<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+{
+    let mut fixture = ConformanceFixture::new(backend).await?;
+    let result: Result<()> = async {
+        let storage = fixture.storage();
+        MetaStore::initialize(storage.as_ref()).await?;
+
+        MetaStore::put_meta_value(storage.as_ref(), "prefix_test:01", "v1").await?;
+        MetaStore::put_meta_value(storage.as_ref(), "prefix_test:02", "v2").await?;
+        MetaStore::put_meta_value(storage.as_ref(), "prefix_test:03", "v3").await?;
+        MetaStore::put_meta_value(storage.as_ref(), "prefix_test:ff", "v4").await?;
+        // Punctuation sibling outside "prefix_test:" (ASCII ';' follows ':').
+        MetaStore::put_meta_value(storage.as_ref(), "prefix_test;sibling", "nope").await?;
+
+        let page1 =
+            MetaStore::list_meta_values_by_prefix(storage.as_ref(), "prefix_test:", None, 2)
+                .await?;
+        assert_eq!(
+            page1,
+            vec![
+                ("prefix_test:01".to_owned(), "v1".to_owned()),
+                ("prefix_test:02".to_owned(), "v2".to_owned()),
+            ]
+        );
+        let page2 = MetaStore::list_meta_values_by_prefix(
+            storage.as_ref(),
+            "prefix_test:",
+            Some(&page1.last().expect("page1 non-empty").0),
+            2,
+        )
+        .await?;
+        assert_eq!(
+            page2,
+            vec![
+                ("prefix_test:03".to_owned(), "v3".to_owned()),
+                ("prefix_test:ff".to_owned(), "v4".to_owned()),
+            ]
+        );
+        let page3 = MetaStore::list_meta_values_by_prefix(
+            storage.as_ref(),
+            "prefix_test:",
+            Some(&page2.last().expect("page2 non-empty").0),
+            2,
+        )
+        .await?;
+        assert!(page3.is_empty());
+
+        assert!(MetaStore::delete_meta_value(storage.as_ref(), "prefix_test:02").await?);
+        assert!(!MetaStore::delete_meta_value(storage.as_ref(), "prefix_test:02").await?);
+        assert_eq!(
+            MetaStore::get_meta_value(storage.as_ref(), "prefix_test:02").await?,
+            None
+        );
+
+        let after_delete =
+            MetaStore::list_meta_values_by_prefix(storage.as_ref(), "prefix_test:", None, 10)
+                .await?;
+        assert_eq!(
+            after_delete,
+            vec![
+                ("prefix_test:01".to_owned(), "v1".to_owned()),
+                ("prefix_test:03".to_owned(), "v3".to_owned()),
+                ("prefix_test:ff".to_owned(), "v4".to_owned()),
+            ]
+        );
+
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.teardown().await;
+    result?;
+    teardown
+}

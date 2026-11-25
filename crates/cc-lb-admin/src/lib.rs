@@ -38,7 +38,11 @@ use cc_lb_storage_api::{
     WarmupTransientFailureReason,
 };
 
-use crate::ports::{SubscriptionQuotaIngestionPort, WarmupPort};
+use crate::ports::{SplitManualWarmupPort, SubscriptionQuotaIngestionPort, WarmupPort};
+
+pub use cc_lb_control::PostCommitTracker;
+pub use ports::SplitManualWarmupError;
+pub use ports::SplitManualWarmupPort as SplitManualWarmup;
 
 pub(crate) use cc_lb_control::{
     LimitResetUsageRefresh, LimitResetUsageRefreshPort, WarmupWindowCheck, WarmupWindowVerifier,
@@ -123,6 +127,7 @@ pub struct AdminPorts {
     pub warmup: Option<Arc<dyn WarmupPort>>,
     pub subscription_quota_ingestion: Option<Arc<dyn SubscriptionQuotaIngestionPort>>,
     pub replica_identity: Option<ReplicaIdentity>,
+    pub split_manual_warmup: Option<Arc<dyn SplitManualWarmupPort>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -165,6 +170,8 @@ pub struct AdminState {
     pub clock: ClockHandle,
     /// Org Admin API origin and probe bounds for API-key upstreams.
     pub anthropic_org_api: AnthropicOrgApi,
+    /// Tracks detached post-commit continuations for graceful shutdown drain.
+    pub post_commit_tracker: cc_lb_control::PostCommitTracker,
 }
 
 pub fn router(state: AdminState) -> Router {

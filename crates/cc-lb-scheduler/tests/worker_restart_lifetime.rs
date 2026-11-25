@@ -131,6 +131,8 @@ fn start_worker(
                 let upstream_id = match job {
                     AdaptiveJob::OAuthRefresh(job) => job.upstream_id,
                     AdaptiveJob::Warmup(_)
+                    | AdaptiveJob::ManualWarmup(_)
+                    | AdaptiveJob::OAuthUsageRefresh(_)
                     | AdaptiveJob::MetadataRefresh(_)
                     | AdaptiveJob::CacheKeepalive(_) => {
                         panic!("unexpected adaptive job in restart lifetime test")

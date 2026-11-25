@@ -152,6 +152,7 @@ mod tests {
             clock,
             anthropic_org_api: AnthropicOrgApi::production()
                 .expect("production Anthropic origin parses"),
+            post_commit_tracker: Default::default(),
         };
         Harness {
             _dir: dir,

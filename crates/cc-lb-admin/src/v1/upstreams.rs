@@ -1384,7 +1384,8 @@ async fn create_upstream(
     let check = api_key.map(|prepared| prepared.check);
     let imported_oauth = oauth_bundle.is_some();
     let storage = storage_arc(&state)?;
-    complete_after_commit(async move {
+    let post_commit_tracker = state.post_commit_tracker.clone();
+    complete_after_commit(&post_commit_tracker, async move {
         if imported_oauth
             && let Err(error) = super::oauth::seed_oauth_bootstrap_tasks(&state, &record).await
         {
@@ -1583,7 +1584,8 @@ async fn refresh_upstream_subscription_metadata(
 
     // The subscription record is committed: the organization write, the
     // audit and the response read outlive a dropped request.
-    complete_after_commit(async move {
+    let post_commit_tracker = state.post_commit_tracker.clone();
+    complete_after_commit(&post_commit_tracker, async move {
         match tokio::time::timeout_at(
             deadline,
             store_organization_metadata(storage.as_ref(), &records),
@@ -1652,7 +1654,8 @@ async fn fire_now_upstream_warmup(
             .await?;
     // Every stage has committed a warmup attempt row (or needs no write);
     // the remaining persistence and the audit outlive a dropped request.
-    complete_after_commit(async move {
+    let post_commit_tracker = state.post_commit_tracker.clone();
+    complete_after_commit(&post_commit_tracker, async move {
         let response = match stage {
             FireNowStage::Finished(response) => response,
             FireNowStage::Attempted(attempted) => {
@@ -1667,6 +1670,44 @@ async fn fire_now_upstream_warmup(
                 {
                     Ok(response) => response,
                     Err(error) => return Err(error),
+                }
+            }
+            FireNowStage::SplitDispatch {
+                split_warmup,
+                holder,
+                candidate_cycle_key,
+            } => {
+                match split_warmup
+                    .enqueue_manual_warmup(upstream_id, lane, holder.clone(), candidate_cycle_key)
+                    .await
+                {
+                    Ok(ticket) => match split_warmup.wait_manual_warmup(ticket).await {
+                        Ok(result) => split_manual_warmup_settled_response(
+                            upstream_id,
+                            lane,
+                            &holder,
+                            candidate_cycle_key,
+                            result,
+                        ),
+                        Err(crate::ports::SplitManualWarmupError::ExpiredBeforeStart(detail)) => {
+                            split_manual_warmup_expired_response(upstream_id, lane, &holder, detail)
+                        }
+                        Err(
+                            crate::ports::SplitManualWarmupError::OutcomeUnknown(detail)
+                            | crate::ports::SplitManualWarmupError::Unavailable(detail),
+                        ) => {
+                            split_manual_warmup_unknown_response(upstream_id, lane, &holder, detail)
+                        }
+                    },
+                    Err(crate::ports::SplitManualWarmupError::Unavailable(_)) => {
+                        return Err(UpstreamError::WarmupUnavailable);
+                    }
+                    Err(crate::ports::SplitManualWarmupError::ExpiredBeforeStart(detail)) => {
+                        split_manual_warmup_expired_response(upstream_id, lane, &holder, detail)
+                    }
+                    Err(crate::ports::SplitManualWarmupError::OutcomeUnknown(detail)) => {
+                        split_manual_warmup_unknown_response(upstream_id, lane, &holder, detail)
+                    }
                 }
             }
         };
@@ -1704,6 +1745,101 @@ enum FireNowStage {
     /// The dispatch attempt row is committed; quota observations, warmup
     /// status and the response still follow.
     Attempted(FireNowAttempted),
+    /// DB-only split dispatch moves enqueue, bounded bridge wait, and audit
+    /// into `complete_after_commit` so client disconnects still audit outcomes.
+    SplitDispatch {
+        split_warmup: Arc<dyn crate::ports::SplitManualWarmupPort>,
+        holder: String,
+        candidate_cycle_key: i64,
+    },
+}
+
+fn split_manual_warmup_expired_response(
+    upstream_id: Uuid,
+    lane: WarmupLane,
+    holder: &str,
+    detail: String,
+) -> Response {
+    tracing::warn!(
+        target: "warmup",
+        upstream_id = %upstream_id,
+        holder = %holder,
+        error = %detail,
+        action = "split_dispatch_expired_before_start"
+    );
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "fired": false,
+            "lane": lane,
+            "error": "warmup_expired_before_start",
+            "detail": detail,
+        })),
+    )
+        .into_response()
+}
+
+fn split_manual_warmup_unknown_response(
+    upstream_id: Uuid,
+    lane: WarmupLane,
+    holder: &str,
+    detail: String,
+) -> Response {
+    tracing::warn!(
+        target: "warmup",
+        upstream_id = %upstream_id,
+        holder = %holder,
+        error = %detail,
+        action = "split_dispatch_outcome_unknown"
+    );
+    (
+        StatusCode::GATEWAY_TIMEOUT,
+        Json(json!({
+            "fired": false,
+            "lane": lane,
+            "error": "warmup_outcome_unknown",
+            "detail": detail,
+        })),
+    )
+        .into_response()
+}
+
+fn split_manual_warmup_settled_response(
+    upstream_id: Uuid,
+    lane: WarmupLane,
+    holder: &str,
+    candidate_cycle_key: i64,
+    result: cc_lb_control::ManualWarmupJobResult,
+) -> Response {
+    tracing::info!(
+        target: "warmup",
+        upstream_id = %upstream_id,
+        holder = %holder,
+        outcome = ?result.outcome,
+        dispatch_error = result.error_detail.as_deref(),
+        action = "split_dispatch_result"
+    );
+    match result.outcome {
+        WarmupAttemptOutcome::Success(_) => {
+            let response_cycle_key = result.cycle_key.unwrap_or(candidate_cycle_key);
+            Json(FireNowFiredResponse {
+                fired: true,
+                lane,
+                cycle_key: response_cycle_key,
+                outcome: result.outcome,
+            })
+            .into_response()
+        }
+        WarmupAttemptOutcome::PermanentFailure(_) => {
+            fire_now_not_fired_response(StatusCode::BAD_GATEWAY, lane, result.outcome)
+        }
+        WarmupAttemptOutcome::TransientFailure(_) => {
+            fire_now_not_fired_response(StatusCode::SERVICE_UNAVAILABLE, lane, result.outcome)
+        }
+        WarmupAttemptOutcome::Skipped(_) => {
+            fire_now_not_fired_response(StatusCode::ACCEPTED, lane, result.outcome)
+        }
+    }
 }
 
 struct FireNowAttempted {
@@ -1890,6 +2026,19 @@ async fn fire_now_upstream_warmup_inner(
                 .map(|(_, reset)| *reset)
         })
         .unwrap_or(now_unix_secs);
+    if state.warmup_dialect_dispatcher.is_none()
+        && let Some(split_warmup) = state
+            .lifecycle
+            .as_ref()
+            .and_then(|ports| ports.split_manual_warmup.as_ref())
+            .cloned()
+    {
+        return Ok(FireNowStage::SplitDispatch {
+            split_warmup,
+            holder,
+            candidate_cycle_key,
+        });
+    }
     if upstream.warmup_dialect_plugin.is_some()
         && (state.runtime.is_none()
             || state.data_dir.is_none()
@@ -2934,7 +3083,8 @@ async fn update_upstream(
         };
         let mut response = respond_with_etag(&updated, None);
         add_dynamic_rebind_headers(&mut response, &state).await;
-        complete_after_commit(async move {
+        let post_commit_tracker = state.post_commit_tracker.clone();
+        complete_after_commit(&post_commit_tracker, async move {
             if let Err(error) = super::oauth::seed_oauth_bootstrap_tasks(&state, &updated).await {
                 super::oauth::rebuild_after_committed_failure(
                     &state,
@@ -3179,7 +3329,8 @@ async fn update_upstream(
         match result {
             Ok(updated) => {
                 let storage = storage_arc(&state)?;
-                complete_after_commit(async move {
+                let post_commit_tracker = state.post_commit_tracker.clone();
+                complete_after_commit(&post_commit_tracker, async move {
                     if let Err(error) = seed_warmup_if_toggled(&state, &current, &updated).await {
                         // The update is committed even though seeding failed;
                         // keep routing in step before returning the seed error.
@@ -3350,7 +3501,8 @@ async fn delete_upstream(
     let result = UpstreamStore::soft_delete(storage, current.id, expected_revision).await;
     match result {
         Ok(()) => {
-            complete_after_commit(async move {
+            let post_commit_tracker = state.post_commit_tracker.clone();
+            complete_after_commit(&post_commit_tracker, async move {
                 let payload = AuditPayload::UpstreamDelete {
                     upstream_id: current.id.to_string(),
                 };
@@ -3407,7 +3559,8 @@ async fn delete_upstream_warmup_dialect_plugin(
     match cleared {
         Some(updated) => {
             let storage = storage_arc(&state)?;
-            complete_after_commit(async move {
+            let post_commit_tracker = state.post_commit_tracker.clone();
+            complete_after_commit(&post_commit_tracker, async move {
                 let payload = AuditPayload::UpstreamUpdate {
                     upstream_id: updated.id.to_string(),
                     fields_changed: vec!["warmup_dialect_plugin"],
@@ -4444,6 +4597,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fire_now_split_ambiguous_enqueue_returns_504_with_audit_and_confirmed_unavailable_returns_503()
+     {
+        use crate::ports::{
+            SplitManualWarmupError, SplitManualWarmupPort, SplitManualWarmupTicket,
+        };
+
+        struct FixedEnqueuePort {
+            err: SplitManualWarmupError,
+        }
+
+        #[async_trait::async_trait]
+        impl SplitManualWarmupPort for FixedEnqueuePort {
+            async fn enqueue_manual_warmup(
+                &self,
+                _upstream_id: Uuid,
+                _lane: WarmupLane,
+                _holder: String,
+                _candidate_cycle_key: i64,
+            ) -> Result<SplitManualWarmupTicket, SplitManualWarmupError> {
+                Err(self.err.clone())
+            }
+
+            async fn wait_manual_warmup(
+                &self,
+                _ticket: SplitManualWarmupTicket,
+            ) -> Result<cc_lb_control::ManualWarmupJobResult, SplitManualWarmupError> {
+                unreachable!("wait_manual_warmup must not run when enqueue fails")
+            }
+        }
+
+        let mut context = test_context().await;
+        let upstream =
+            create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), true, None)
+                .await;
+
+        // Ambiguous enqueue -> 504 warmup_outcome_unknown WITH attributed audit row.
+        context.state.lifecycle = Some(crate::AdminPorts {
+            warmup: None,
+            subscription_quota_ingestion: None,
+            replica_identity: None,
+            split_manual_warmup: Some(Arc::new(FixedEnqueuePort {
+                err: SplitManualWarmupError::OutcomeUnknown(
+                    "enqueue timed out after commit".to_owned(),
+                ),
+            })),
+        });
+        let (status, body) = fire_now_response(context.state.clone(), upstream.id).await;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(body["fired"], false);
+        assert_eq!(body["error"], "warmup_outcome_unknown");
+        context.state.post_commit_tracker.wait_idle().await;
+        let audits = cc_lb_storage_api::AuditStore::query_recent_audit(
+            context.storage.as_ref(),
+            cc_lb_storage_api::AuditQueryScope::All,
+            0,
+            u64::MAX,
+            20,
+            true,
+        )
+        .await
+        .expect("query audit rows");
+        assert!(
+            audits.iter().any(|entry| {
+                entry.admin_action.as_deref() == Some("upstream_warmup_fire_now")
+                    && entry.status == 504
+            }),
+            "ambiguous enqueue must persist a 504 fire-now audit row: {audits:?}"
+        );
+
+        // Confirmed non-acceptance -> 503 warmup_unavailable and no new audit row.
+        let before_count = audits.len();
+        context.state.lifecycle = Some(crate::AdminPorts {
+            warmup: None,
+            subscription_quota_ingestion: None,
+            replica_identity: None,
+            split_manual_warmup: Some(Arc::new(FixedEnqueuePort {
+                err: SplitManualWarmupError::Unavailable("pool closed before submit".to_owned()),
+            })),
+        });
+        let (status_503, body_503) = fire_now_response(context.state.clone(), upstream.id).await;
+        assert_eq!(status_503, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body_503["error"], "warmup_unavailable");
+        context.state.post_commit_tracker.wait_idle().await;
+        let after_audits = cc_lb_storage_api::AuditStore::query_recent_audit(
+            context.storage.as_ref(),
+            cc_lb_storage_api::AuditQueryScope::All,
+            0,
+            u64::MAX,
+            20,
+            true,
+        )
+        .await
+        .expect("query audit rows after 503");
+        assert_eq!(after_audits.len(), before_count);
+    }
+
+    #[tokio::test]
     async fn fire_now_returns_200_on_success() {
         let context = test_context_with_dispatcher(StatusCode::OK).await;
         let upstream =
@@ -4847,6 +5097,7 @@ mod tests {
             clock: Arc::new(cc_lb_clock::SystemClock),
             anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
                 .expect("production Anthropic origin parses"),
+            post_commit_tracker: Default::default(),
         };
         TestContext {
             _dir: dir,

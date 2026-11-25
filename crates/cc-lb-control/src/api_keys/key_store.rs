@@ -281,6 +281,16 @@ impl KeyStore {
         Ok(self.storage.list_by_principal(principal_id).await?)
     }
 
+    pub async fn list_by_principal_with_ids(
+        &self,
+        principal_id: &str,
+    ) -> Result<Vec<(String, StoredApiKeyRecord)>> {
+        Ok(self
+            .storage
+            .list_by_principal_with_ids(principal_id)
+            .await?)
+    }
+
     pub async fn list_all(&self) -> Result<Vec<(String, String, StoredApiKeyRecord)>> {
         Ok(self.storage.list_all().await?)
     }

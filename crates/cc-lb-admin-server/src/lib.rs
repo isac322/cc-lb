@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod split_ports;
 pub mod version;
 
 pub use app::{

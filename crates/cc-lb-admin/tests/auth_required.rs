@@ -46,6 +46,7 @@ fn test_state_with_auth(admin_auth: Arc<AdminAuthenticator>) -> AdminState {
         clock: Arc::new(cc_lb_clock::SystemClock),
         anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
             .expect("production Anthropic origin parses"),
+        post_commit_tracker: Default::default(),
     }
 }
 
@@ -422,4 +423,77 @@ async fn api_only_mode_omits_spa_routes_and_keeps_health_and_auth() {
         .await
         .unwrap();
     assert_eq!(unauth_res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn unauthenticated_401_flood_bounds_audit_writes_and_sheds_excess_with_429() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = admin_test_common::sqlite_storage(dir.path(), "auth-flood.sqlite").await;
+    let mut state = test_state();
+    state.storage = Some(storage);
+    let app = router(state);
+
+    // Send 80 concurrent unauthenticated requests: sleep semaphore (64) bounds concurrent
+    // sleeps and sheds excess immediately with 429 Retry-After: 1, while audit writes stay
+    // capped at the 10-token burst (no 80-row amplification).
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..80 {
+        let app = app.clone();
+        set.spawn(async move {
+            let req = Request::builder()
+                .method("GET")
+                .uri("/admin/v1/status")
+                .header("Authorization", "Bearer wrong-token")
+                .body(Body::empty())
+                .unwrap();
+            app.oneshot(req).await.unwrap()
+        });
+    }
+
+    let mut unauthorized_count = 0usize;
+    let mut throttled_count = 0usize;
+    while let Some(res) = set.join_next().await {
+        let response = res.unwrap();
+        match response.status() {
+            StatusCode::UNAUTHORIZED => unauthorized_count += 1,
+            StatusCode::TOO_MANY_REQUESTS => {
+                assert_eq!(
+                    response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok()),
+                    Some("1")
+                );
+                throttled_count += 1;
+            }
+            other => panic!("unexpected status during 401 flood: {other}"),
+        }
+    }
+    assert!(unauthorized_count <= 64 && unauthorized_count > 0);
+    assert_eq!(unauthorized_count + throttled_count, 80);
+    assert!(throttled_count >= 16);
+
+    // Query audit table via authenticated admin endpoint and verify audit rows are bounded.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/admin/v1/audit?limit=100")
+        .header("Authorization", "Bearer test-token")
+        .body(Body::empty())
+        .unwrap();
+    let audit_res = app.oneshot(req).await.unwrap();
+    assert_eq!(audit_res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(audit_res.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let auth_rejected_rows = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["admin_action"] == "auth_rejected")
+        .count();
+    assert!(
+        auth_rejected_rows <= 12,
+        "expected audit burst <= ~10 rows during 80-req 401 flood, saw {auth_rejected_rows}"
+    );
 }

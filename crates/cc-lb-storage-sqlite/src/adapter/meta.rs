@@ -11,6 +11,23 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 static COMPILED_FAST_INIT_SQL: &str = include_str!(concat!(env!("OUT_DIR"), "/fast_init.sql"));
 static FAST_INIT_SQL: OnceLock<String> = OnceLock::new();
 
+fn meta_prefix_upper_bound(prefix: &str) -> Option<String> {
+    let mut chars: Vec<char> = prefix.chars().collect();
+    while let Some(last) = chars.pop() {
+        let code = last as u32;
+        let next_code = match code {
+            0xD7FF => Some(0xE000),
+            0x10_FFFF => None,
+            _ => Some(code + 1),
+        };
+        if let Some(ch) = next_code.and_then(char::from_u32) {
+            chars.push(ch);
+            return Some(chars.into_iter().collect());
+        }
+    }
+    None
+}
+
 async fn get_or_build_fast_init_sql() -> Result<&'static String, StorageError> {
     if let Some(sql) = FAST_INIT_SQL.get() {
         return Ok(sql);
@@ -207,6 +224,70 @@ impl MetaStore for SqliteStorage {
             }
             .map_err(map_sqlx_error)?;
         Ok(result.rows_affected() == 1)
+    }
+
+    async fn delete_meta_value(&self, key: &str) -> StorageResult<bool> {
+        let result = sqlx::query("DELETE FROM meta_v1 WHERE key = ?")
+            .bind(key)
+            .execute(self.pool())
+            .await
+            .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn list_meta_values_by_prefix(
+        &self,
+        prefix: &str,
+        after_key: Option<&str>,
+        limit: usize,
+    ) -> StorageResult<Vec<(String, String)>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        match (meta_prefix_upper_bound(prefix), after_key) {
+            (Some(upper), Some(after)) => sqlx::query_as(
+                "SELECT key, value FROM meta_v1 \
+                 WHERE key >= ?1 AND key < ?2 AND key > ?3 \
+                 ORDER BY key ASC LIMIT ?4",
+            )
+            .bind(prefix)
+            .bind(upper)
+            .bind(after)
+            .bind(limit)
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_sqlx_error),
+            (Some(upper), None) => sqlx::query_as(
+                "SELECT key, value FROM meta_v1 \
+                 WHERE key >= ?1 AND key < ?2 \
+                 ORDER BY key ASC LIMIT ?3",
+            )
+            .bind(prefix)
+            .bind(upper)
+            .bind(limit)
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_sqlx_error),
+            (None, Some(after)) => sqlx::query_as(
+                "SELECT key, value FROM meta_v1 \
+                 WHERE key >= ?1 AND key > ?2 \
+                 ORDER BY key ASC LIMIT ?3",
+            )
+            .bind(prefix)
+            .bind(after)
+            .bind(limit)
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_sqlx_error),
+            (None, None) => sqlx::query_as(
+                "SELECT key, value FROM meta_v1 \
+                 WHERE key >= ?1 \
+                 ORDER BY key ASC LIMIT ?2",
+            )
+            .bind(prefix)
+            .bind(limit)
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_sqlx_error),
+        }
     }
 
     /// Read-only: never migrates, so an operator CLI pointed at an older or

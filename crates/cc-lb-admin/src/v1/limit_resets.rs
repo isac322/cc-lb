@@ -492,7 +492,8 @@ pub(crate) async fn claim_upstream_limit_reset(
     let target_upstream = upstream.name.clone();
     // Dispatch, fence settlement, usage refresh and audit belong to one
     // continuation, so dropping the HTTP request cannot abandon a dispatched claim.
-    complete_after_commit(async move {
+    let post_commit_tracker = state.post_commit_tracker.clone();
+    complete_after_commit(&post_commit_tracker, async move {
         let mut metadata = ClaimMetadata::default();
         let dispatched =
             dispatch_limit_reset_claim(&state, storage.clone(), &upstream, &body, &mut metadata)

@@ -216,16 +216,23 @@ impl SchedulerDispatch {
         observations: Vec<UnifiedQuotaObservation>,
     ) -> SchedulerResult<()> {
         let observed_at_unix_millis = now_unix_millis(&*self.clock);
+        let mut first_enqueue_error: Option<SchedulerError> = None;
         for observation in observations {
             let record =
                 unified_observation_to_sample(upstream_id, observation, observed_at_unix_millis);
             self.subscription_quota_cache
                 .upsert_observation(upstream_id, &record);
-            self.subscription_quota_sink
-                .enqueue(record)
-                .map_err(|error| SchedulerError::Job(error.to_string()))?;
+            if let Err(error) = self.subscription_quota_sink.enqueue(record)
+                && first_enqueue_error.is_none()
+            {
+                first_enqueue_error = Some(SchedulerError::Job(error.to_string()));
+            }
         }
-        Ok(())
+        if let Some(error) = first_enqueue_error {
+            Err(error)
+        } else {
+            Ok(())
+        }
     }
 }
 

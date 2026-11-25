@@ -142,6 +142,7 @@ pub async fn spawn_api_key_harness() -> ApiKeyHarness {
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock: clock.clone(),
         anthropic_org_api: AnthropicOrgApi::with_origin(fake_url.clone()),
+        post_commit_tracker: Default::default(),
     };
     ApiKeyHarness {
         app: router(state.clone()),

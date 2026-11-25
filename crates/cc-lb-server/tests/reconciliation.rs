@@ -883,6 +883,9 @@ impl PrincipalStore for EmptyPrincipalStore {
     ) -> StorageResult<Vec<PrincipalRecord>> {
         Ok(Vec::new())
     }
+    async fn count(&self, _include_deleted: bool) -> StorageResult<usize> {
+        Ok(0)
+    }
     async fn update(
         &self,
         _id: Uuid,

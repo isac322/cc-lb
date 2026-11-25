@@ -276,6 +276,121 @@ async fn missing_cloudflare_header_is_recorded_as_auth_rejected() {
     assert_eq!(auth_rejected["payload"]["reason"], "missing_credentials");
 }
 
+#[tokio::test]
+async fn invalid_claims_and_oversized_kid_skip_jwks_fetch_and_unknown_kids_throttle() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wiremock::ResponseTemplate;
+
+    let mock_server = MockServer::start().await;
+    let issuer = mock_server.uri();
+    let jwks_requests = Arc::new(AtomicUsize::new(0));
+    let jwks_requests_counter = Arc::clone(&jwks_requests);
+    Mock::given(method("GET"))
+        .and(path("/cdn-cgi/access/certs"))
+        .respond_with(move |_: &wiremock::Request| {
+            jwks_requests_counter.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(json!({
+                "keys": [{
+                    "kid": "test",
+                    "kty": "RSA",
+                    "alg": "RS256",
+                    "use": "sig",
+                    "n": TEST_RSA_N,
+                    "e": TEST_RSA_E,
+                }]
+            }))
+        })
+        .mount(&mock_server)
+        .await;
+
+    let private_key = STANDARD
+        .decode(TEST_PRIVATE_KEY_PKCS8_BASE64)
+        .expect("embedded PKCS#8 key");
+    let signing_key = RsaKeyPair::from_pkcs8(&private_key).expect("ring key");
+    let fixture = JwtFixture {
+        _mock_server: mock_server,
+        issuer: issuer.clone(),
+        signing_key,
+    };
+    let server =
+        admin_test_common::spawn_admin_server_with_auth(fixture.authenticator(false)).await;
+    let now = unix_secs();
+
+    let sign_custom = |kid: &str, iss: &str, aud: Value, exp: u64| {
+        let header = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({"alg": "RS256", "kid": kid, "typ": "JWT"})).unwrap(),
+        );
+        let claims = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({
+                "sub": "user-subject",
+                "email": "alice@example.com",
+                "aud": aud,
+                "iss": iss,
+                "iat": now,
+                "exp": exp,
+            }))
+            .unwrap(),
+        );
+        let signing_input = format!("{header}.{claims}");
+        let mut sig = vec![0; fixture.signing_key.public().modulus_len()];
+        fixture
+            .signing_key
+            .sign(
+                &RSA_PKCS1_SHA256,
+                &SystemRandom::new(),
+                signing_input.as_bytes(),
+                &mut sig,
+            )
+            .unwrap();
+        format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(sig))
+    };
+
+    // Prime cache with one valid token -> 1 JWKS fetch.
+    let valid = sign_custom("test", &issuer, json!(ACCESS_AUDIENCE), now + 300);
+    let (status, _, _) = session_with_token(&server.client, &valid).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(jwks_requests.load(Ordering::SeqCst), 1);
+
+    // Invalid iss / aud / exp and oversized kid with unknown kid trigger 0 additional JWKS fetches.
+    for token in [
+        sign_custom(
+            "unknown-iss",
+            "https://wrong.issuer",
+            json!(ACCESS_AUDIENCE),
+            now + 300,
+        ),
+        sign_custom("unknown-aud", &issuer, json!("wrong-aud"), now + 300),
+        sign_custom(
+            "unknown-exp",
+            &issuer,
+            json!(ACCESS_AUDIENCE),
+            now.saturating_sub(300),
+        ),
+        sign_custom(&"x".repeat(257), &issuer, json!(ACCESS_AUDIENCE), now + 300),
+    ] {
+        let (status, _, _) = session_with_token(&server.client, &token).await;
+        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(jwks_requests.load(Ordering::SeqCst), 1);
+
+    // Flood 10 distinct unknown kids with valid claims: global bucket caps additional fetches at <= 3.
+    for idx in 0..10 {
+        let token = sign_custom(
+            &format!("unknown-{idx}"),
+            &issuer,
+            json!(ACCESS_AUDIENCE),
+            now + 300,
+        );
+        let (status, _, _) = session_with_token(&server.client, &token).await;
+        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+    }
+    assert!(
+        jwks_requests.load(Ordering::SeqCst) <= 4,
+        "expected initial fetch + <=3 burst refetches, saw {}",
+        jwks_requests.load(Ordering::SeqCst)
+    );
+}
+
 async fn session_with_token(
     client: &admin_test_common::AdminClient,
     token: &str,

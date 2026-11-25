@@ -97,6 +97,17 @@ where
         );
         assert_record_eq(&principal_records[0], &issued)?;
 
+        let keyed_records = store.list_by_principal_with_ids("principal-a").await?;
+        ensure!(
+            keyed_records.len() == 1,
+            "principal keyed list should contain one key"
+        );
+        ensure!(
+            keyed_records[0].0 == "key-a",
+            "principal keyed list key_id mismatch"
+        );
+        assert_record_eq(&keyed_records[0].1, &issued)?;
+
         let all_records = store.list_all().await?;
         ensure!(all_records.len() == 1, "list_all should contain one key");
         ensure!(
@@ -105,6 +116,31 @@ where
         );
         ensure!(all_records[0].1 == "key-a", "list_all key mismatch");
         assert_record_eq(&all_records[0].2, &issued)?;
+
+        store
+            .issue("principal-b", "key-b", issue_params(12))
+            .await?;
+        store
+            .issue("principal-a", "key-0", issue_params(13))
+            .await?;
+        let sorted_a = store.list_by_principal_with_ids("principal-a").await?;
+        ensure!(
+            sorted_a
+                .iter()
+                .map(|(key_id, _)| key_id.as_str())
+                .collect::<Vec<_>>()
+                == ["key-0", "key-a"],
+            "list_by_principal_with_ids should isolate by principal and sort by key_id"
+        );
+        let sorted_b = store.list_by_principal_with_ids("principal-b").await?;
+        ensure!(
+            sorted_b
+                .iter()
+                .map(|(key_id, _)| key_id.as_str())
+                .collect::<Vec<_>>()
+                == ["key-b"],
+            "list_by_principal_with_ids should isolate principal-b"
+        );
 
         store
             .update(

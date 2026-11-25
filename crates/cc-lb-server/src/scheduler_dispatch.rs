@@ -161,7 +161,9 @@ impl SchedulerDispatch {
     async fn dispatch_entity(&self, job: AdaptiveJob) -> SchedulerResult<JobOutcome> {
         match job {
             AdaptiveJob::Warmup(job) => self.dispatch_warmup(job).await,
+            AdaptiveJob::ManualWarmup(job) => self.dispatch_manual_warmup(job).await,
             AdaptiveJob::OAuthRefresh(job) => self.dispatch_oauth_refresh(job).await,
+            AdaptiveJob::OAuthUsageRefresh(job) => self.dispatch_oauth_usage_refresh(job).await,
             AdaptiveJob::MetadataRefresh(job) => {
                 let runner = CoreMetadataRefreshRunner::with_client(
                     self.storage.clone(),
@@ -174,6 +176,33 @@ impl SchedulerDispatch {
             }
             AdaptiveJob::CacheKeepalive(job) => self.dispatch_cache_keepalive(job).await,
         }
+    }
+
+    async fn dispatch_oauth_usage_refresh(
+        &self,
+        job: cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsageRefreshJob,
+    ) -> SchedulerResult<JobOutcome> {
+        let outcome = <Self as cc_lb_control::LimitResetUsageRefreshPort>::refresh_upstream_usage(
+            self,
+            job.upstream_id,
+            &self.cancel,
+        )
+        .await;
+        let now_unix_secs = cc_lb_clock::unix_secs(self.clock.now());
+        cc_lb_control::record_oauth_usage_refresh_result(
+            self.storage.as_ref(),
+            job.upstream_id,
+            now_unix_secs,
+            cc_lb_control::OAuthUsageRefreshJobResult {
+                nonce: job.nonce,
+                outcome,
+                expires_at_unix_secs: now_unix_secs
+                    .saturating_add(cc_lb_control::SPLIT_BRIDGE_RESULT_TTL_SECS),
+            },
+        )
+        .await
+        .map_err(crate::scheduler_dispatch::storage::storage_scheduler_error)?;
+        Ok(JobOutcome::Done)
     }
 }
 

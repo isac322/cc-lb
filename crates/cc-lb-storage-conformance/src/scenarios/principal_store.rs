@@ -27,6 +27,7 @@ where
     get_by_id_returns_created(Arc::clone(&backend)).await?;
     get_by_name_returns_created(Arc::clone(&backend)).await?;
     list_paginates_by_name(Arc::clone(&backend)).await?;
+    count_tracks_live_and_deleted_principals(Arc::clone(&backend)).await?;
     update_with_current_revision_succeeds(Arc::clone(&backend)).await?;
     stale_revision_conflict(Arc::clone(&backend)).await?;
     set_enabled_toggles(Arc::clone(&backend)).await?;
@@ -100,6 +101,34 @@ where
         }
         let page = PrincipalStore::list(&*storage, 1, 1, false).await?;
         ensure!(names(&page) == ["principal-0002"]);
+        Ok(())
+    })
+    .await
+}
+
+async fn count_tracks_live_and_deleted_principals<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: AuditStore + PrincipalStore,
+{
+    with_fixture(backend, |storage| async move {
+        ensure!(PrincipalStore::count(&*storage, false).await? == 0);
+        ensure!(PrincipalStore::count(&*storage, true).await? == 0);
+
+        let first = PrincipalStore::create(&*storage, principal_create(201), BASE_TS).await?;
+        let second = PrincipalStore::create(&*storage, principal_create(202), BASE_TS + 1).await?;
+        let _third = PrincipalStore::create(&*storage, principal_create(203), BASE_TS + 2).await?;
+
+        ensure!(PrincipalStore::count(&*storage, false).await? == 3);
+        ensure!(PrincipalStore::count(&*storage, true).await? == 3);
+
+        PrincipalStore::soft_delete(&*storage, second.id, second.revision, BASE_TS + 3).await?;
+        ensure!(PrincipalStore::count(&*storage, false).await? == 2);
+        ensure!(PrincipalStore::count(&*storage, true).await? == 3);
+
+        PrincipalStore::soft_delete(&*storage, first.id, first.revision, BASE_TS + 4).await?;
+        ensure!(PrincipalStore::count(&*storage, false).await? == 1);
+        ensure!(PrincipalStore::count(&*storage, true).await? == 3);
         Ok(())
     })
     .await

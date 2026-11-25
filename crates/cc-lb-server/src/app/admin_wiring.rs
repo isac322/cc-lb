@@ -41,6 +41,7 @@ pub struct App {
     pub admin_router: Router,
     pub proxy_addr: SocketAddr,
     pub admin_addr: SocketAddr,
+    admin_post_commit_tracker: cc_lb_control::PostCommitTracker,
     shutdown: ShutdownRuntime,
 }
 
@@ -62,7 +63,11 @@ impl App {
             self.shutdown,
             self.router,
             self.proxy_addr,
-            Some((self.admin_router, self.admin_addr)),
+            Some((
+                self.admin_router,
+                self.admin_addr,
+                self.admin_post_commit_tracker,
+            )),
         )
         .await
     }
@@ -239,6 +244,7 @@ async fn build_app_with_storage_inner(
             message: error.to_string(),
         })?,
     ));
+    let admin_post_commit_tracker = cc_lb_control::PostCommitTracker::default();
     let admin_state = AdminState {
         build: BuildMeta::current().admin_build_info(),
         storage: Some(core.storage),
@@ -250,6 +256,7 @@ async fn build_app_with_storage_inner(
                 ServerSubscriptionQuotaIngestionPort::new(core.shutdown.lifecycle.clone()),
             )),
             replica_identity: core.replica_identity,
+            split_manual_warmup: None,
         }),
         lazy_refresher: core.lazy_refresher,
         runtime: Some(core.runtime),
@@ -280,6 +287,7 @@ async fn build_app_with_storage_inner(
         storage_tail: storage_tail_tx,
         clock,
         anthropic_org_api: core.anthropic_org_api,
+        post_commit_tracker: admin_post_commit_tracker.clone(),
     };
 
     core.shutdown.server_state.transition_to_ready();
@@ -289,6 +297,7 @@ async fn build_app_with_storage_inner(
         admin_router: super::admin_router(admin_state),
         proxy_addr: core.proxy_addr,
         admin_addr: core.admin_addr,
+        admin_post_commit_tracker,
         shutdown: core.shutdown,
     })
 }
