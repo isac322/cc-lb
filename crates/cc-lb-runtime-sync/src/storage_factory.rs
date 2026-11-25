@@ -51,6 +51,139 @@ mod pool_metrics_tests {
         metrics::with_local_recorder(&recorder, || record_postgres_pool_metrics(&pool));
         assert_pool_samples(&handle.render(), 0, 0);
     }
+
+    #[tokio::test]
+    async fn postgres_mismatched_listener_target_fails_before_migrations() {
+        let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+            eprintln!("skipped: CI_POSTGRES_URL unset");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let schema_a = format!("cclb_target_a_{suffix}");
+        let schema_b = format!("cclb_target_b_{suffix}");
+
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect admin pool");
+        for schema in [&schema_a, &schema_b] {
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+                .execute(&admin_pool)
+                .await
+                .expect("create isolated test schema");
+        }
+
+        let with_schema = |schema: &str| {
+            let mut parsed = url::Url::parse(&url).expect("parse CI_POSTGRES_URL");
+            parsed
+                .query_pairs_mut()
+                .append_pair("options", &format!("-c search_path={schema},public"));
+            parsed.to_string()
+        };
+
+        let result = super::open_storage(
+            &cc_lb_config::StorageConfig::Postgres {
+                url: with_schema(&schema_a),
+                pool: cc_lb_config::PostgresPoolConfig {
+                    listener_url: Some(with_schema(&schema_b)),
+                    pgbouncer_transaction_pooling: true,
+                    ..Default::default()
+                },
+            },
+            std::sync::Arc::new(cc_lb_clock::SystemClock),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(super::StorageFactoryError::ConnectionFailed { ref message }) if message.contains("different PostgreSQL database or schema targets")),
+            "expected ConnectionFailed on mismatched listener target"
+        );
+
+        let table_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ANY($1)",
+        )
+        .bind([schema_a.as_str(), schema_b.as_str()])
+        .fetch_one(&admin_pool)
+        .await
+        .expect("query created tables");
+        assert_eq!(table_count, 0, "mismatched target must abort before DDL");
+
+        for schema in [&schema_a, &schema_b] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE"
+            )))
+            .execute(&admin_pool)
+            .await
+            .expect("drop isolated test schema");
+        }
+        admin_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_advisory_lock_handshake_distinguishes_same_vs_different_databases() {
+        let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+            eprintln!("skipped: CI_POSTGRES_URL unset");
+            return;
+        };
+        let other_db = format!("cclb_handshake_{}", uuid::Uuid::new_v4().simple());
+        let mut other_url = url::Url::parse(&url).expect("parse CI_POSTGRES_URL");
+        other_url.set_path(&other_db);
+
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect admin pool");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            r#"CREATE DATABASE "{other_db}""#
+        )))
+        .execute(&admin_pool)
+        .await
+        .expect("create secondary database");
+
+        let pool_a = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect pool_a");
+        let pool_a_direct = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect pool_a_direct");
+        let pool_b_direct = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(other_url.as_str())
+            .await
+            .expect("connect pool_b_direct");
+
+        super::verify_advisory_lock_handshake(&url, &pool_a, &url, &pool_a_direct)
+            .await
+            .expect("same database passes advisory-lock handshake");
+        let mismatch = super::verify_advisory_lock_handshake(
+            &url,
+            &pool_a,
+            other_url.as_str(),
+            &pool_b_direct,
+        )
+        .await;
+        assert!(
+            matches!(mismatch, Err(super::StorageFactoryError::ConnectionFailed { ref message }) if message.contains("same PostgreSQL cluster/database")),
+            "expected advisory-lock mismatch error across independent databases, got {mismatch:?}"
+        );
+
+        pool_b_direct.close().await;
+        pool_a_direct.close().await;
+        pool_a.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            r#"DROP DATABASE IF EXISTS "{other_db}" WITH (FORCE)"#
+        )))
+        .execute(&admin_pool)
+        .await
+        .expect("drop secondary database");
+        admin_pool.close().await;
+    }
 }
 
 use std::path::Path;
@@ -112,7 +245,11 @@ pub async fn open_pg_fanout_pool(
     let mut fanout_pool_config = pool_config.clone();
     fanout_pool_config.max_connections = PG_FANOUT_MAX_CONNECTIONS;
     fanout_pool_config.min_connections = 0;
-    open_postgres_pool(url, &fanout_pool_config).await.map(Some)
+    fanout_pool_config.pgbouncer_transaction_pooling = false;
+    fanout_pool_config.statement_cache_capacity = None;
+    open_postgres_pool(pool_config.effective_listener_url(url), &fanout_pool_config)
+        .await
+        .map(Some)
 }
 
 #[cfg(not(feature = "postgres"))]
@@ -191,11 +328,24 @@ async fn open_postgres(
     clock: cc_lb_clock::ClockHandle,
 ) -> Result<OpenedStorage, StorageFactoryError> {
     let pool = open_postgres_pool(url, pool_config).await?;
+    let mut listener_pool_config = pool_config.clone();
+    listener_pool_config.max_connections = 2;
+    listener_pool_config.min_connections = 0;
+    listener_pool_config.pgbouncer_transaction_pooling = false;
+    listener_pool_config.statement_cache_capacity = None;
+    let listener_url = pool_config.effective_listener_url(url);
+    let listener_pool = open_postgres_pool(listener_url, &listener_pool_config).await?;
+    if pool_config.listener_url.is_some() {
+        verify_listener_target_matches_primary(url, &pool, listener_url, &listener_pool).await?;
+    }
 
-    let storage = Arc::new(cc_lb_storage_postgres::PostgresStorage::new(
-        pool.clone(),
-        clock.clone(),
-    ));
+    let storage = Arc::new(
+        cc_lb_storage_postgres::PostgresStorage::new_with_listener_pool(
+            pool.clone(),
+            listener_pool,
+            clock.clone(),
+        ),
+    );
     storage.initialize().await.map_err(init_error)?;
     record_postgres_pool_metrics(storage.pool());
     let weak_storage = Arc::downgrade(&storage);
@@ -241,25 +391,36 @@ async fn open_postgres_pool(
     use sqlx::postgres::PgPoolOptions;
 
     let statement_timeout_ms = pool_config.statement_timeout_secs * 1000;
-    let connect_options = postgres_connect_options(url, pool_config.sslmode.as_deref())?;
+    let mut connect_options = postgres_connect_options(url, pool_config.sslmode.as_deref())?;
+    if let Some(cache_capacity) = pool_config.effective_statement_cache_capacity() {
+        connect_options = connect_options.statement_cache_capacity(cache_capacity);
+    }
 
-    PgPoolOptions::new()
+    let mut builder = PgPoolOptions::new()
         .max_connections(pool_config.max_connections)
         .min_connections(pool_config.min_connections)
         .acquire_timeout(Duration::from_secs(pool_config.acquire_timeout_secs))
         .idle_timeout(Duration::from_secs(pool_config.idle_timeout_secs))
         .max_lifetime(Duration::from_secs(pool_config.max_lifetime_secs))
-        .test_before_acquire(pool_config.test_before_acquire)
-        .after_connect(move |conn, _meta| {
+        .test_before_acquire(pool_config.test_before_acquire);
+    if !pool_config.pgbouncer_transaction_pooling {
+        builder = builder.after_connect(move |conn, _meta| {
             Box::pin(async move {
                 let statement_timeout =
                     format!("SET statement_timeout = '{statement_timeout_ms}ms'");
                 sqlx::query(AssertSqlSafe(statement_timeout))
-                    .execute(conn)
+                    .execute(&mut *conn)
+                    .await?;
+                let idle_in_tx_timeout =
+                    format!("SET idle_in_transaction_session_timeout = '{statement_timeout_ms}ms'");
+                sqlx::query(AssertSqlSafe(idle_in_tx_timeout))
+                    .execute(&mut *conn)
                     .await?;
                 Ok(())
             })
-        })
+        });
+    }
+    builder
         .connect_with(connect_options)
         .await
         .map_err(|error| StorageFactoryError::ConnectionFailed {
@@ -343,6 +504,197 @@ async fn probe_postgres_connection_impl(
             message: host_only(url) + ": connection timed out",
         }),
     }
+}
+
+#[cfg(feature = "postgres")]
+fn random_advisory_lock_key() -> i64 {
+    let raw = uuid::Uuid::new_v4().as_u128();
+    let folded = ((raw >> 64) ^ raw) as i64;
+    if folded == 0 { 1 } else { folded }
+}
+
+#[cfg(feature = "postgres")]
+async fn verify_advisory_lock_handshake(
+    url: &str,
+    primary: &sqlx::PgPool,
+    listener_url: &str,
+    listener_pool: &sqlx::PgPool,
+) -> Result<(), StorageFactoryError> {
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+
+    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let mut direct_conn = timeout(HANDSHAKE_TIMEOUT, listener_pool.acquire())
+        .await
+        .map_err(|_| StorageFactoryError::ConnectionFailed {
+            message: format!(
+                "{}: direct listener advisory-lock acquire timed out",
+                host_only(listener_url)
+            ),
+        })?
+        .map_err(|error| StorageFactoryError::ConnectionFailed {
+            message: host_only(listener_url) + ": " + &error.to_string(),
+        })?;
+
+    let mut probe_key = None;
+    for _ in 0..3 {
+        let candidate = random_advisory_lock_key();
+        let locked = match timeout(
+            HANDSHAKE_TIMEOUT,
+            sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+                .bind(candidate)
+                .fetch_one(&mut *direct_conn),
+        )
+        .await
+        {
+            Ok(Ok(locked)) => locked,
+            Ok(Err(error)) => {
+                let _ = direct_conn.close().await;
+                return Err(StorageFactoryError::ConnectionFailed {
+                    message: host_only(listener_url) + ": " + &error.to_string(),
+                });
+            }
+            Err(_) => {
+                let _ = direct_conn.close().await;
+                return Err(StorageFactoryError::ConnectionFailed {
+                    message: format!(
+                        "{}: direct listener advisory-lock probe timed out",
+                        host_only(listener_url)
+                    ),
+                });
+            }
+        };
+        if locked {
+            probe_key = Some(candidate);
+            break;
+        }
+    }
+
+    let Some(probe_key) = probe_key else {
+        let _ = direct_conn.close().await;
+        return Err(StorageFactoryError::ConnectionFailed {
+            message: format!(
+                "{}: failed to acquire advisory-lock probe on direct listener connection",
+                host_only(listener_url)
+            ),
+        });
+    };
+
+    let primary_probe = timeout(
+        HANDSHAKE_TIMEOUT,
+        sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(probe_key)
+            .fetch_one(primary),
+    )
+    .await;
+
+    let unlocked = timeout(
+        HANDSHAKE_TIMEOUT,
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(probe_key)
+            .execute(&mut *direct_conn),
+    )
+    .await;
+    if !matches!(unlocked, Ok(Ok(_))) {
+        let _ = direct_conn.close().await;
+    } else {
+        drop(direct_conn);
+    }
+
+    let acquired_while_held = primary_probe
+        .map_err(|_| StorageFactoryError::ConnectionFailed {
+            message: format!("{}: advisory-lock handshake timed out", host_only(url)),
+        })?
+        .map_err(|error| StorageFactoryError::ConnectionFailed {
+            message: host_only(url) + ": " + &error.to_string(),
+        })?;
+    if acquired_while_held {
+        return Err(StorageFactoryError::ConnectionFailed {
+            message: format!(
+                "storage.url ({}) and storage.pool.listener_url ({}) do not reach the same PostgreSQL cluster/database",
+                host_only(url),
+                host_only(listener_url),
+            ),
+        });
+    }
+
+    let acquired_after_release = timeout(
+        HANDSHAKE_TIMEOUT,
+        sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(probe_key)
+            .fetch_one(primary),
+    )
+    .await
+    .map_err(|_| StorageFactoryError::ConnectionFailed {
+        message: format!(
+            "{}: advisory-lock release verification timed out",
+            host_only(url)
+        ),
+    })?
+    .map_err(|error| StorageFactoryError::ConnectionFailed {
+        message: host_only(url) + ": " + &error.to_string(),
+    })?;
+    if !acquired_after_release {
+        return Err(StorageFactoryError::ConnectionFailed {
+            message: format!(
+                "storage.url ({}) could not verify advisory-lock release from storage.pool.listener_url ({})",
+                host_only(url),
+                host_only(listener_url),
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+async fn verify_listener_target_matches_primary(
+    url: &str,
+    primary: &sqlx::PgPool,
+    listener_url: &str,
+    listener_pool: &sqlx::PgPool,
+) -> Result<(), StorageFactoryError> {
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+
+    const TARGET_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let primary_target: (String, Option<String>) = timeout(
+        TARGET_TIMEOUT,
+        sqlx::query_as("SELECT current_database(), current_schema()").fetch_one(primary),
+    )
+    .await
+    .map_err(|_| StorageFactoryError::ConnectionFailed {
+        message: format!("{}: target inspection timed out", host_only(url)),
+    })?
+    .map_err(|error| StorageFactoryError::ConnectionFailed {
+        message: host_only(url) + ": " + &error.to_string(),
+    })?;
+    let listener_target: (String, Option<String>) = timeout(
+        TARGET_TIMEOUT,
+        sqlx::query_as("SELECT current_database(), current_schema()").fetch_one(listener_pool),
+    )
+    .await
+    .map_err(|_| StorageFactoryError::ConnectionFailed {
+        message: format!(
+            "{}: direct listener target inspection timed out",
+            host_only(listener_url)
+        ),
+    })?
+    .map_err(|error| StorageFactoryError::ConnectionFailed {
+        message: host_only(listener_url) + ": " + &error.to_string(),
+    })?;
+    if primary_target != listener_target {
+        return Err(StorageFactoryError::ConnectionFailed {
+            message: format!(
+                "storage.url ({:?}.{:?}) and storage.pool.listener_url ({:?}.{:?}) resolve to different PostgreSQL database or schema targets",
+                primary_target.0, primary_target.1, listener_target.0, listener_target.1,
+            ),
+        });
+    }
+    verify_advisory_lock_handshake(url, primary, listener_url, listener_pool).await
 }
 
 /// Extract only the host from a connection URL to avoid leaking credentials in logs.

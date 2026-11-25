@@ -9,7 +9,7 @@ use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{PluginSlotKind, StorageResult, UpstreamRecord, upstream::UpstreamKind};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
-use xxhash_rust::xxh3::xxh3_64_with_seed;
+use xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed};
 
 use crate::dynamic_view_builder::{Stores, build_dynamic_view, list_upstreams};
 use crate::revision_hash::compute_revision_hash;
@@ -229,34 +229,114 @@ pub(crate) async fn collect_revision_hash(stores: &Stores) -> StorageResult<u64>
             break;
         }
         offset += page.len();
-        for principal in page {
-            chains.extend(chain_revisions(stores, principal.id, PluginSlotKind::Router).await?);
-            chains.extend(chain_revisions(stores, principal.id, PluginSlotKind::Shape).await?);
-            principals.push((principal.id, principal.revision));
-        }
+        let page_ids = page
+            .iter()
+            .map(|principal| principal.id)
+            .collect::<Vec<_>>();
+        let page_chains = stores
+            .plugin_registry
+            .list_chains_for_principals(&page_ids, &[PluginSlotKind::Router, PluginSlotKind::Shape])
+            .await?;
+        chains.extend(
+            page_chains
+                .into_iter()
+                .map(|entry| (entry.id, entry.revision)),
+        );
+        principals.extend(
+            page.into_iter()
+                .map(|principal| (principal.id, principal.revision)),
+        );
     }
+
+    let plan_metadata_hash = collect_plan_metadata_hash(stores).await?;
 
     Ok(compute_revision_hash(
         &upstreams,
         &principals,
         &chains,
         &registry_entries,
+        plan_metadata_hash,
     ))
 }
 
-async fn chain_revisions(
-    stores: &Stores,
-    principal_id: Uuid,
-    slot: PluginSlotKind,
-) -> StorageResult<Vec<(Uuid, u64)>> {
-    let entries = stores
-        .plugin_registry
-        .list_chain_for_principal(principal_id, slot)
-        .await?;
-    Ok(entries
-        .into_iter()
-        .map(|entry| (entry.id, entry.revision))
-        .collect())
+async fn collect_plan_metadata_hash(stores: &Stores) -> StorageResult<u64> {
+    let (mut ratios, mut overrides, mut subscription_meta, mut organization_meta) = tokio::try_join!(
+        stores.plan_tiers.list_current_plan_tier_ratios(),
+        stores.plan_tiers.list_current_metadata_tier_overrides(),
+        stores
+            .upstream_subscription_metadata
+            .list_upstream_subscription_metadata(),
+        stores.organization_metadata.list_organization_metadata(),
+    )?;
+
+    ratios.sort_by(|a, b| a.tier_key.cmp(&b.tier_key));
+    overrides.sort_by(|a, b| {
+        (
+            a.organization_type.as_deref(),
+            a.rate_limit_tier.as_deref(),
+            a.seat_tier.as_deref(),
+            a.tier_key.as_str(),
+        )
+            .cmp(&(
+                b.organization_type.as_deref(),
+                b.rate_limit_tier.as_deref(),
+                b.seat_tier.as_deref(),
+                b.tier_key.as_str(),
+            ))
+    });
+    subscription_meta.sort_by_key(|record| record.upstream_id);
+    organization_meta.sort_by(|a, b| a.organization_uuid.cmp(&b.organization_uuid));
+
+    let mut bytes = Vec::new();
+    let push_str = |buf: &mut Vec<u8>, s: &str| {
+        buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    };
+    let push_opt_str = |buf: &mut Vec<u8>, s: Option<&str>| match s {
+        Some(v) => {
+            buf.push(1);
+            push_str(buf, v);
+        }
+        None => buf.push(0),
+    };
+
+    bytes.extend_from_slice(&(ratios.len() as u32).to_le_bytes());
+    for ratio in ratios {
+        push_str(&mut bytes, &ratio.tier_key);
+        bytes.extend_from_slice(&ratio.pro_relative_ratio.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&ratio.effective_from_unix_millis.to_le_bytes());
+        bytes.extend_from_slice(&ratio.created_at_unix_millis.to_le_bytes());
+    }
+
+    bytes.extend_from_slice(&(overrides.len() as u32).to_le_bytes());
+    for entry in overrides {
+        push_opt_str(&mut bytes, entry.organization_type.as_deref());
+        push_opt_str(&mut bytes, entry.rate_limit_tier.as_deref());
+        push_opt_str(&mut bytes, entry.seat_tier.as_deref());
+        push_str(&mut bytes, &entry.tier_key);
+        bytes.extend_from_slice(&entry.effective_from_unix_millis.to_le_bytes());
+        bytes.extend_from_slice(&entry.created_at_unix_millis.to_le_bytes());
+    }
+
+    bytes.extend_from_slice(&(subscription_meta.len() as u32).to_le_bytes());
+    for entry in subscription_meta {
+        bytes.extend_from_slice(&entry.upstream_id.as_u128().to_le_bytes());
+        push_opt_str(&mut bytes, entry.organization_uuid.as_deref());
+        push_opt_str(&mut bytes, entry.organization_role.as_deref());
+        push_opt_str(&mut bytes, entry.workspace_role.as_deref());
+        bytes.extend_from_slice(&entry.observed_at_unix_millis.to_le_bytes());
+    }
+
+    bytes.extend_from_slice(&(organization_meta.len() as u32).to_le_bytes());
+    for entry in organization_meta {
+        push_str(&mut bytes, &entry.organization_uuid);
+        push_opt_str(&mut bytes, entry.organization_type.as_deref());
+        push_opt_str(&mut bytes, entry.rate_limit_tier.as_deref());
+        push_opt_str(&mut bytes, entry.seat_tier.as_deref());
+        bytes.extend_from_slice(&entry.observed_at_unix_millis.to_le_bytes());
+    }
+
+    Ok(xxh3_64(&bytes))
 }
 
 fn upstream_revision_material(record: &UpstreamRecord) -> (Uuid, u64) {

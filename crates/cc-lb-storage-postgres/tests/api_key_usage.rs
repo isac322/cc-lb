@@ -116,6 +116,195 @@ async fn run_contracts(pool: &PgPool) -> Result<()> {
             cost_usd_micros: 150
         }
     );
+
+    // Multi-delta bulk UNNEST flush inserts and accumulates multiple distinct buckets atomically.
+    let bulk_writer = Uuid::now_v7();
+    storage
+        .register_api_key_usage_writer(bulk_writer, NOW + 300)
+        .await?;
+    let bulk_flush = ApiKeyUsageFlush {
+        writer_epoch: bulk_writer,
+        flush_id: Uuid::now_v7(),
+        lease_until_unix_secs: NOW + 300,
+        deltas: vec![
+            ApiKeyUsageBucketDelta {
+                key: ApiKeyUsageBucketKey {
+                    key_id: "key-bulk-1".to_owned(),
+                    bucket_width_secs: 60,
+                    bucket_start_unix_secs: NOW,
+                },
+                usage: ApiKeyUsage {
+                    requests: 4,
+                    input_tokens: 40,
+                    output_tokens: 80,
+                    cost_usd_micros: 120,
+                },
+            },
+            ApiKeyUsageBucketDelta {
+                key: ApiKeyUsageBucketKey {
+                    key_id: "key-bulk-2".to_owned(),
+                    bucket_width_secs: 60,
+                    bucket_start_unix_secs: NOW,
+                },
+                usage: ApiKeyUsage {
+                    requests: 6,
+                    input_tokens: 60,
+                    output_tokens: 120,
+                    cost_usd_micros: 180,
+                },
+            },
+        ],
+    };
+    assert_eq!(
+        storage.flush_api_key_usage(&bulk_flush).await?,
+        ApiKeyUsageFlushResult::Applied
+    );
+    let bulk_buckets = storage
+        .query_api_key_usage_buckets(&ApiKeyUsageBucketQuery {
+            key_ids: vec!["key-bulk-1".to_owned(), "key-bulk-2".to_owned()],
+            since_unix_secs: NOW - 60,
+            until_unix_secs: NOW + 60,
+            exclude_writer_epoch: Uuid::now_v7(),
+        })
+        .await?;
+    assert_eq!(bulk_buckets.len(), 2);
+
+    // Duplicate keys in a single flush coalesce cleanly with additive semantics.
+    let duplicate_flush = ApiKeyUsageFlush {
+        writer_epoch: bulk_writer,
+        flush_id: Uuid::now_v7(),
+        lease_until_unix_secs: NOW + 300,
+        deltas: vec![
+            ApiKeyUsageBucketDelta {
+                key: ApiKeyUsageBucketKey {
+                    key_id: "key-dup".to_owned(),
+                    bucket_width_secs: 60,
+                    bucket_start_unix_secs: NOW,
+                },
+                usage: ApiKeyUsage {
+                    requests: 2,
+                    input_tokens: 25,
+                    output_tokens: 50,
+                    cost_usd_micros: 75,
+                },
+            },
+            ApiKeyUsageBucketDelta {
+                key: ApiKeyUsageBucketKey {
+                    key_id: "key-dup".to_owned(),
+                    bucket_width_secs: 60,
+                    bucket_start_unix_secs: NOW,
+                },
+                usage: ApiKeyUsage {
+                    requests: 3,
+                    input_tokens: 35,
+                    output_tokens: 70,
+                    cost_usd_micros: 105,
+                },
+            },
+        ],
+    };
+    assert_eq!(
+        storage.flush_api_key_usage(&duplicate_flush).await?,
+        ApiKeyUsageFlushResult::Applied
+    );
+    let dup_buckets = storage
+        .query_api_key_usage_buckets(&ApiKeyUsageBucketQuery {
+            key_ids: vec!["key-dup".to_owned()],
+            since_unix_secs: NOW - 60,
+            until_unix_secs: NOW + 60,
+            exclude_writer_epoch: Uuid::now_v7(),
+        })
+        .await?;
+    assert_eq!(dup_buckets.len(), 1);
+    assert_eq!(
+        dup_buckets[0].usage,
+        ApiKeyUsage {
+            requests: 5,
+            input_tokens: 60,
+            output_tokens: 120,
+            cost_usd_micros: 180,
+        }
+    );
+
+    // Duplicate deltas against a negative stored balance must apply sequentially in input order
+    // so intermediate prefixes like `stored (-1) + i64::MAX + 1 == i64::MAX` do not falsely fail.
+    let neg_seed = ApiKeyUsageFlush {
+        writer_epoch: bulk_writer,
+        flush_id: Uuid::now_v7(),
+        lease_until_unix_secs: NOW + 300,
+        deltas: vec![ApiKeyUsageBucketDelta {
+            key: ApiKeyUsageBucketKey {
+                key_id: "key-dup-neg-seed".to_owned(),
+                bucket_width_secs: 60,
+                bucket_start_unix_secs: NOW,
+            },
+            usage: ApiKeyUsage {
+                requests: -1,
+                input_tokens: -1,
+                output_tokens: -1,
+                cost_usd_micros: -1,
+            },
+        }],
+    };
+    assert_eq!(
+        storage.flush_api_key_usage(&neg_seed).await?,
+        ApiKeyUsageFlushResult::Applied
+    );
+    let boundary_dup = ApiKeyUsageFlush {
+        writer_epoch: bulk_writer,
+        flush_id: Uuid::now_v7(),
+        lease_until_unix_secs: NOW + 300,
+        deltas: vec![
+            ApiKeyUsageBucketDelta {
+                key: ApiKeyUsageBucketKey {
+                    key_id: "key-dup-neg-seed".to_owned(),
+                    bucket_width_secs: 60,
+                    bucket_start_unix_secs: NOW,
+                },
+                usage: ApiKeyUsage {
+                    requests: i64::MAX,
+                    input_tokens: i64::MAX,
+                    output_tokens: i64::MAX,
+                    cost_usd_micros: i64::MAX,
+                },
+            },
+            ApiKeyUsageBucketDelta {
+                key: ApiKeyUsageBucketKey {
+                    key_id: "key-dup-neg-seed".to_owned(),
+                    bucket_width_secs: 60,
+                    bucket_start_unix_secs: NOW,
+                },
+                usage: ApiKeyUsage {
+                    requests: 1,
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cost_usd_micros: 1,
+                },
+            },
+        ],
+    };
+    assert_eq!(
+        storage.flush_api_key_usage(&boundary_dup).await?,
+        ApiKeyUsageFlushResult::Applied
+    );
+    let boundary_buckets = storage
+        .query_api_key_usage_buckets(&ApiKeyUsageBucketQuery {
+            key_ids: vec!["key-dup-neg-seed".to_owned()],
+            since_unix_secs: NOW - 60,
+            until_unix_secs: NOW + 60,
+            exclude_writer_epoch: Uuid::now_v7(),
+        })
+        .await?;
+    assert_eq!(boundary_buckets.len(), 1);
+    assert_eq!(
+        boundary_buckets[0].usage,
+        ApiKeyUsage {
+            requests: i64::MAX,
+            input_tokens: i64::MAX,
+            output_tokens: i64::MAX,
+            cost_usd_micros: i64::MAX,
+        }
+    );
     Ok(())
 }
 

@@ -516,6 +516,102 @@ async fn old_worker_gaps_and_new_live_classification_remain_additive() -> TestRe
     teardown
 }
 
+#[tokio::test]
+async fn rollup_coalesces_upstream_renames_within_same_bucket_batch() -> TestResult {
+    let Some(fixture) = Fixture::create(168).await? else {
+        return Ok(());
+    };
+    let result: TestResult = async {
+        let pool = fixture.storage.pool();
+        let upstream_id = Uuid::new_v4();
+        let mut initial = cc_lb_storage_api::RequestEvent {
+            request_id: "rename-1".to_owned(),
+            event_id: Some("rename-1".to_owned()),
+            ts: 1_800_000_005,
+            ts_ms: Some(1_800_000_005_000),
+            principal_id: Some("default".to_owned()),
+            upstream_id: Some(upstream_id),
+            upstream_name: Some("before-rename".to_owned()),
+            model: Some("claude-sonnet-4-5".to_owned()),
+            status: 200,
+            input_tokens: Some(10),
+            cost_usd_micros: Some(100),
+            cost_input_micros: Some(40),
+            ..Default::default()
+        };
+        fixture.storage.append_request_event(&initial).await?;
+        initial.request_id = "rename-2".to_owned();
+        initial.event_id = Some("rename-2".to_owned());
+        initial.ts = 1_800_000_010;
+        initial.ts_ms = Some(1_800_000_010_000);
+        initial.upstream_name = Some("after-rename".to_owned());
+        initial.input_tokens = Some(15);
+        initial.cost_usd_micros = Some(200);
+        initial.cost_input_micros = Some(60);
+        fixture.storage.append_request_event(&initial).await?;
+
+        let last_xid: String = sqlx::query_scalar(
+            "SELECT tx_id::text FROM request_events_v1 ORDER BY tx_id DESC, seq DESC LIMIT 1",
+        )
+        .fetch_one(pool)
+        .await?;
+        wait_until_xid_below_xmin(pool, &last_xid).await?;
+
+        let run = fixture.storage.rollup_usage_once().await?;
+        assert_eq!(run.processed_events, 2);
+
+        for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
+            let rows = fixture
+                .storage
+                .query_usage_rollups_in_range(resolution, 1_800_000_000, 1_800_003_600)
+                .await?;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].upstream_name, "after-rename");
+            assert_eq!(rows[0].request_count, 2);
+            assert_eq!(rows[0].input_tokens, 25);
+            assert_eq!(rows[0].virtual_cost_micros, 300);
+            assert_eq!(rows[0].cost_input_micros, 100);
+        }
+
+        // Now exercise the cost-component backfill UPDATE FROM path across both
+        // pre-rename and post-rename events in the same bucket.
+        sqlx::query(
+            "UPDATE usage_rollups_v2 \
+             SET cost_input_micros = 0, cost_components_event_count = 0 \
+             WHERE upstream_id = $1",
+        )
+        .bind(upstream_id)
+        .execute(pool)
+        .await?;
+        sqlx::raw_sql(
+            "INSERT INTO usage_rollup_checkpoints_v1 (id, value, value_xid) \
+             SELECT 'cost_components_backfill_upper', seq, tx_id \
+             FROM request_events_v1 ORDER BY tx_id DESC, seq DESC LIMIT 1 \
+             ON CONFLICT (id) DO UPDATE SET value = EXCLUDED.value, value_xid = EXCLUDED.value_xid; \
+             INSERT INTO usage_rollup_checkpoints_v1 (id, value, value_xid) \
+             VALUES ('cost_components_backfill_cursor', 0, '0'::xid8) \
+             ON CONFLICT (id) DO UPDATE SET value = EXCLUDED.value, value_xid = EXCLUDED.value_xid;",
+        )
+        .execute(pool)
+        .await?;
+
+        let _backfill_run = fixture.storage.rollup_usage_once().await?;
+        let backfilled: (i64, i64) = sqlx::query_as(
+            "SELECT cost_input_micros, cost_components_event_count \
+             FROM usage_rollups_v2 WHERE resolution = 'minute' AND upstream_id = $1",
+        )
+        .bind(upstream_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(backfilled, (100, 2));
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
 async fn wait_until_xid_below_xmin(pool: &PgPool, xid: &str) -> TestResult {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {

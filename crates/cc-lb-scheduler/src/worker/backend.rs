@@ -167,46 +167,157 @@ pub(crate) type PostgresCronApalisStorage = apalis_core::backend::ext::poll_stra
 >;
 
 #[cfg(feature = "postgres")]
-type PgNotificationStream =
-    futures_util::stream::BoxStream<'static, Result<sqlx::postgres::PgNotification, sqlx::Error>>;
-
-#[cfg(feature = "postgres")]
-enum PostgresListenerState {
-    Starting,
-    Connecting(
-        apalis_core::backend::future::BoxSyncFuture<
-            Result<apalis_postgres::PgListener, sqlx::Error>,
-        >,
-    ),
-    Listening(std::sync::Mutex<PgNotificationStream>),
-    ReconnectDelay(std::pin::Pin<Box<tokio::time::Sleep>>),
+#[derive(Debug)]
+pub(crate) struct PostgresInsertFanout {
+    listener_pool: sqlx::PgPool,
+    subscribers: std::sync::Arc<std::sync::Mutex<Vec<tokio::sync::mpsc::Sender<String>>>>,
+    started: std::sync::atomic::AtomicBool,
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 #[cfg(feature = "postgres")]
-fn get_mut_unpoisoned<T>(mutex: &mut std::sync::Mutex<T>) -> &mut T {
-    match mutex.get_mut() {
-        Ok(inner) => inner,
-        Err(poisoned) => poisoned.into_inner(),
+impl Drop for PostgresInsertFanout {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl PostgresInsertFanout {
+    pub(crate) fn new(listener_pool: sqlx::PgPool) -> Self {
+        Self {
+            listener_pool,
+            subscribers: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            started: std::sync::atomic::AtomicBool::new(false),
+            cancel: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    fn subscribe(&self) -> tokio::sync::mpsc::Receiver<String> {
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        {
+            let mut subscribers = match self.subscribers.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            subscribers.push(tx);
+        }
+        if !self.started.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            let listener_pool = self.listener_pool.clone();
+            let subscribers = std::sync::Arc::clone(&self.subscribers);
+            let cancel = self.cancel.clone();
+            tokio::spawn(Self::run(listener_pool, subscribers, cancel));
+        }
+        rx
+    }
+
+    async fn run(
+        listener_pool: sqlx::PgPool,
+        subscribers: std::sync::Arc<std::sync::Mutex<Vec<tokio::sync::mpsc::Sender<String>>>>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) {
+        use backon::BackoffBuilder as _;
+
+        let make_backoff = || {
+            backon::ExponentialBuilder::default()
+                .with_min_delay(std::time::Duration::from_millis(50))
+                .with_max_delay(PUBSUB_RECONNECT_INTERVAL)
+                .with_jitter()
+                .without_max_times()
+                .build()
+        };
+        let mut backoff = make_backoff();
+        loop {
+            if cancel.is_cancelled() {
+                return;
+            }
+            let connect = async {
+                let mut listener =
+                    apalis_postgres::PgListener::connect_with(&listener_pool).await?;
+                // Disable sqlx's eager reconnect inside `try_recv()` so any dropped
+                // connection drops the `PgListener` (releasing its pool slot immediately)
+                // and goes through our cancellable backoff loop before reconnecting.
+                listener.eager_reconnect(false);
+                listener.listen("apalis::job::insert").await?;
+                Ok::<_, sqlx::Error>(listener)
+            };
+            let mut listener = tokio::select! {
+                _ = cancel.cancelled() => return,
+                res = connect => match res {
+                    Ok(listener) => listener,
+                    Err(_) => {
+                        let delay = backoff.next().unwrap_or(PUBSUB_RECONNECT_INTERVAL);
+                        tokio::select! {
+                            _ = cancel.cancelled() => return,
+                            _ = tokio::time::sleep(delay) => continue,
+                        }
+                    }
+                }
+            };
+            backoff = make_backoff();
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    item = listener.try_recv() => match item {
+                        Ok(Some(notification)) => {
+                            if let Ok(event) = serde_json::from_str::<apalis_postgres::InsertEvent>(
+                                notification.payload(),
+                            ) {
+                                let mut guard = match subscribers.lock() {
+                                    Ok(guard) => guard,
+                                    Err(poisoned) => poisoned.into_inner(),
+                                };
+                                guard.retain(|tx| match tx.try_send(event.job_type.clone()) {
+                                    Ok(())
+                                    | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+                                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+                                });
+                            }
+                        }
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+            }
+            drop(listener);
+            let delay = backoff.next().unwrap_or(PUBSUB_RECONNECT_INTERVAL);
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(delay) => {}
+            }
+        }
     }
 }
 
 #[cfg(feature = "postgres")]
 struct PostgresWorkerPollStrategy {
-    pool: sqlx::PgPool,
+    fanout: std::sync::Arc<PostgresInsertFanout>,
     queue: String,
     poll_interval: std::time::Duration,
-    listener: PostgresListenerState,
+    receiver: Option<tokio::sync::mpsc::Receiver<String>>,
     interval_delay: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
 }
 
 #[cfg(feature = "postgres")]
 impl PostgresWorkerPollStrategy {
+    #[cfg_attr(not(test), allow(dead_code))]
     fn new(pool: sqlx::PgPool, queue: String, poll_interval: std::time::Duration) -> Self {
-        Self {
-            pool,
+        Self::new_with_fanout(
+            std::sync::Arc::new(PostgresInsertFanout::new(pool)),
             queue,
             poll_interval,
-            listener: PostgresListenerState::Starting,
+        )
+    }
+
+    fn new_with_fanout(
+        fanout: std::sync::Arc<PostgresInsertFanout>,
+        queue: String,
+        poll_interval: std::time::Duration,
+    ) -> Self {
+        Self {
+            fanout,
+            queue,
+            poll_interval,
+            receiver: None,
             interval_delay: None,
         }
     }
@@ -219,7 +330,6 @@ impl apalis_core::backend::ext::poll_strategy::PollStrategy for PostgresWorkerPo
         cx: &mut std::task::Context<'_>,
         _snapshot: &apalis_core::backend::ext::poll_strategy::PollSnapshot,
     ) -> std::task::Poll<Option<()>> {
-        use futures_util::StreamExt as _;
         use std::task::Poll;
 
         let mut ready = false;
@@ -237,62 +347,16 @@ impl apalis_core::backend::ext::poll_strategy::PollStrategy for PostgresWorkerPo
             }
         }
 
+        let rx = self.receiver.get_or_insert_with(|| self.fanout.subscribe());
         let mut raw_notifications = 0usize;
-        loop {
-            match &mut self.listener {
-                PostgresListenerState::Starting => {
-                    let pool = self.pool.clone();
-                    let fut = Box::pin(async move {
-                        let mut listener = apalis_postgres::PgListener::connect_with(&pool).await?;
-                        listener.listen("apalis::job::insert").await?;
-                        Ok(listener)
-                    });
-                    self.listener = PostgresListenerState::Connecting(
-                        apalis_core::backend::future::BoxSyncFuture::new(fut),
-                    );
-                }
-                PostgresListenerState::Connecting(fut) => match fut.poll_unpin(cx) {
-                    Poll::Pending => break,
-                    Poll::Ready(Ok(listener)) => {
-                        self.listener = PostgresListenerState::Listening(std::sync::Mutex::new(
-                            listener.into_stream().boxed(),
-                        ));
-                    }
-                    Poll::Ready(Err(_)) => {
-                        self.listener = PostgresListenerState::ReconnectDelay(Box::pin(
-                            tokio::time::sleep(PUBSUB_RECONNECT_INTERVAL),
-                        ));
-                    }
-                },
-                PostgresListenerState::ReconnectDelay(delay) => match delay.as_mut().poll(cx) {
-                    Poll::Pending => break,
-                    Poll::Ready(()) => {
-                        self.listener = PostgresListenerState::Starting;
-                    }
-                },
-                PostgresListenerState::Listening(stream) => {
-                    match get_mut_unpoisoned(stream).poll_next_unpin(cx) {
-                        Poll::Pending => break,
-                        Poll::Ready(Some(Ok(notification))) => {
-                            if let Ok(event) = serde_json::from_str::<apalis_postgres::InsertEvent>(
-                                notification.payload(),
-                            ) && event.job_type == self.queue
-                            {
-                                ready = true;
-                            }
-                            raw_notifications = raw_notifications.saturating_add(1);
-                            if raw_notifications >= MAX_PUBSUB_NOTIFICATIONS_PER_DRIVE {
-                                cx.waker().wake_by_ref();
-                                break;
-                            }
-                        }
-                        Poll::Ready(Some(Err(_))) | Poll::Ready(None) => {
-                            self.listener = PostgresListenerState::ReconnectDelay(Box::pin(
-                                tokio::time::sleep(PUBSUB_RECONNECT_INTERVAL),
-                            ));
-                        }
-                    }
-                }
+        while let Poll::Ready(Some(job_type)) = rx.poll_recv(cx) {
+            if job_type == self.queue {
+                ready = true;
+            }
+            raw_notifications = raw_notifications.saturating_add(1);
+            if raw_notifications >= MAX_PUBSUB_NOTIFICATIONS_PER_DRIVE {
+                cx.waker().wake_by_ref();
+                break;
             }
         }
         if ready {
@@ -305,13 +369,20 @@ impl apalis_core::backend::ext::poll_strategy::PollStrategy for PostgresWorkerPo
 
 #[cfg(feature = "postgres")]
 fn postgres_worker_strategy(
-    pool: &sqlx::PgPool,
+    fanout: &std::sync::Arc<PostgresInsertFanout>,
     queue: &str,
 ) -> apalis_core::backend::ext::poll_strategy::Strategy {
-    postgres_worker_strategy_with_interval(pool, queue, DEFAULT_POSTGRES_POLL_INTERVAL)
+    apalis_core::backend::ext::poll_strategy::Strategy::new().apply(
+        PostgresWorkerPollStrategy::new_with_fanout(
+            std::sync::Arc::clone(fanout),
+            queue.to_owned(),
+            DEFAULT_POSTGRES_POLL_INTERVAL,
+        ),
+    )
 }
 
 #[cfg(feature = "postgres")]
+#[cfg_attr(not(test), allow(dead_code))]
 fn postgres_worker_strategy_with_interval(
     pool: &sqlx::PgPool,
     queue: &str,
@@ -326,16 +397,31 @@ fn postgres_worker_strategy_with_interval(
 #[derive(Clone)]
 pub struct PostgresSchedulerBackend {
     pool: sqlx::PgPool,
+    listener_pool: sqlx::PgPool,
+    fanout: std::sync::Arc<PostgresInsertFanout>,
 }
 
 #[cfg(feature = "postgres")]
 impl PostgresSchedulerBackend {
     pub fn new(pool: sqlx::PgPool) -> Self {
-        Self { pool }
+        Self::new_with_listener_pool(pool.clone(), pool)
+    }
+
+    pub fn new_with_listener_pool(pool: sqlx::PgPool, listener_pool: sqlx::PgPool) -> Self {
+        let fanout = std::sync::Arc::new(PostgresInsertFanout::new(listener_pool.clone()));
+        Self {
+            pool,
+            listener_pool,
+            fanout,
+        }
     }
 
     pub fn pool(&self) -> &sqlx::PgPool {
         &self.pool
+    }
+
+    pub fn listener_pool(&self) -> &sqlx::PgPool {
+        &self.listener_pool
     }
 
     pub(crate) fn adaptive_worker_storage(&self) -> PostgresApalisStorage {
@@ -347,7 +433,7 @@ impl PostgresSchedulerBackend {
                     .lock_tasks(false)
                     .persist_results(false),
             )
-            .poll_with_strategy(postgres_worker_strategy(&self.pool, ADAPTIVE_QUEUE))
+            .poll_with_strategy(postgres_worker_strategy(&self.fanout, ADAPTIVE_QUEUE))
     }
 
     pub(crate) fn keepalive_worker_storage(&self) -> PostgresApalisStorage {
@@ -359,7 +445,10 @@ impl PostgresSchedulerBackend {
                     .lock_tasks(false)
                     .persist_results(false),
             )
-            .poll_with_strategy(postgres_worker_strategy(&self.pool, CACHE_KEEPALIVE_QUEUE))
+            .poll_with_strategy(postgres_worker_strategy(
+                &self.fanout,
+                CACHE_KEEPALIVE_QUEUE,
+            ))
     }
 
     pub(crate) fn cron_worker_storage(&self) -> PostgresCronApalisStorage {
@@ -371,7 +460,7 @@ impl PostgresSchedulerBackend {
                     .lock_tasks(false)
                     .persist_results(false),
             )
-            .poll_with_strategy(postgres_worker_strategy(&self.pool, CRON_QUEUE))
+            .poll_with_strategy(postgres_worker_strategy(&self.fanout, CRON_QUEUE))
     }
 
     pub(crate) fn adaptive_operation_storage(
@@ -410,9 +499,7 @@ mod tests {
     use apalis_core::backend::ext::poll_strategy::{PollSnapshot, PollStrategy as _};
     use sqlx::postgres::PgPoolOptions;
 
-    use super::{
-        CACHE_KEEPALIVE_QUEUE, postgres_worker_strategy, postgres_worker_strategy_with_interval,
-    };
+    use super::{CACHE_KEEPALIVE_QUEUE, postgres_worker_strategy_with_interval};
 
     struct CountingWaker {
         wakes: AtomicUsize,
@@ -459,7 +546,11 @@ mod tests {
             .acquire_timeout(Duration::from_secs(30))
             .connect_lazy(&format!("postgres://postgres:postgres@{addr}/postgres"))
             .expect("lazy pool");
-        let mut strategy = postgres_worker_strategy(&pool, CACHE_KEEPALIVE_QUEUE);
+        let mut strategy = postgres_worker_strategy_with_interval(
+            &pool,
+            CACHE_KEEPALIVE_QUEUE,
+            Duration::from_secs(1),
+        );
         let snapshot = PollSnapshot::new();
         let initial_waker = CountingWaker::new();
         let waker = Waker::from(Arc::clone(&initial_waker));
@@ -493,7 +584,11 @@ mod tests {
             .acquire_timeout(Duration::from_millis(50))
             .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/postgres")
             .expect("lazy pool");
-        let mut strategy = postgres_worker_strategy(&pool, CACHE_KEEPALIVE_QUEUE);
+        let mut strategy = postgres_worker_strategy_with_interval(
+            &pool,
+            CACHE_KEEPALIVE_QUEUE,
+            Duration::from_secs(1),
+        );
         let snapshot = PollSnapshot::new();
 
         // Drive strategy until the initial Pubsub connection attempt fails and enters Closed.
@@ -671,6 +766,113 @@ mod tests {
         );
         drop(strategy);
         pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_scheduler_backend_shares_one_insert_listener_across_three_queues_outside_main_pool()
+     {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let app_name = format!("cclb_shared_listen_{}", ulid::Ulid::generate());
+        let connect_opts = database_url
+            .parse::<sqlx::postgres::PgConnectOptions>()
+            .expect("parse DATABASE_URL")
+            .application_name(&app_name);
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .min_connections(0)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect_lazy_with(connect_opts.clone());
+        let listener_pool = PgPoolOptions::new()
+            .max_connections(2)
+            .min_connections(0)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect_lazy_with(connect_opts);
+        let observer_pool = PgPoolOptions::new()
+            .max_connections(2)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&database_url)
+            .await
+            .expect("observer pool connects");
+
+        let backend = super::PostgresSchedulerBackend::new_with_listener_pool(
+            pool.clone(),
+            listener_pool.clone(),
+        );
+        let mut s_adaptive =
+            super::postgres_worker_strategy(&backend.fanout, super::ADAPTIVE_QUEUE);
+        let mut s_keepalive =
+            super::postgres_worker_strategy(&backend.fanout, super::CACHE_KEEPALIVE_QUEUE);
+        let mut s_cron = super::postgres_worker_strategy(&backend.fanout, super::CRON_QUEUE);
+        let snapshot = PollSnapshot::new();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                for strategy in [&mut s_adaptive, &mut s_keepalive, &mut s_cron] {
+                    let waker_state = CountingWaker::new();
+                    let waker = Waker::from(Arc::clone(&waker_state));
+                    let mut cx = Context::from_waker(&waker);
+                    let _ = strategy.poll_drive(&mut cx, &snapshot);
+                }
+                let listening: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND application_name = $1
+                       AND query ILIKE 'LISTEN %apalis::job::insert%'",
+                )
+                .bind(&app_name)
+                .fetch_one(&observer_pool)
+                .await
+                .expect("query listen count");
+                if listening > 0 {
+                    assert_eq!(listening, 1, "expected exactly 1 shared LISTEN session");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("shared insert fanout connects");
+
+        assert_eq!(
+            pool.size(),
+            0,
+            "shared insert listener must not occupy slots in the main scheduler pool"
+        );
+
+        let payload = serde_json::json!({
+            "job_type": super::CRON_QUEUE,
+            "id": ulid::Ulid::generate().to_string(),
+        });
+        sqlx::query("SELECT pg_notify('apalis::job::insert', $1)")
+            .bind(payload.to_string())
+            .execute(&observer_pool)
+            .await
+            .expect("notify cron queue");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waker = Waker::from(CountingWaker::new());
+                let mut cx = Context::from_waker(&waker);
+                if s_cron.poll_drive(&mut cx, &snapshot).is_ready() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cron strategy wakes on routed notification");
+
+        let waker = Waker::from(CountingWaker::new());
+        let mut cx = Context::from_waker(&waker);
+        assert!(s_adaptive.poll_drive(&mut cx, &snapshot).is_pending());
+        assert!(s_keepalive.poll_drive(&mut cx, &snapshot).is_pending());
+
+        drop((s_adaptive, s_keepalive, s_cron, backend));
+        listener_pool.close().await;
+        pool.close().await;
+        observer_pool.close().await;
     }
 }
 

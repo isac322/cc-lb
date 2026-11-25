@@ -97,6 +97,11 @@ fn environment_provenance_is_schema_filtered_and_excludes_secret_payload_envs() 
         assert!(overrides.iter().any(|entry| {
             entry.path == "storage.url" && entry.name == "CC_LB_STORAGE__URL" && entry.sensitive
         }));
+        assert!(overrides.iter().any(|entry| {
+            entry.path == "storage.pool.listener_url"
+                && entry.name == "CC_LB_STORAGE__POOL__LISTENER_URL"
+                && entry.sensitive
+        }));
         for secret in ["CC_LB_ADMIN_TOKEN", "CC_LB_MASTER_KEY"] {
             assert!(!overrides.iter().any(|entry| entry.name == secret));
         }
@@ -118,6 +123,10 @@ fn environment_provenance_is_schema_filtered_and_excludes_secret_payload_envs() 
             "fail_closed",
         )
         .env("CC_LB_STORAGE__URL", "postgres://secret@localhost/db")
+        .env(
+            "CC_LB_STORAGE__POOL__LISTENER_URL",
+            "postgres://listener-secret@localhost/db",
+        )
         .env("CC_LB_ADMIN_TOKEN", "secret-admin-token")
         .env("CC_LB_MASTER_KEY", "secret-master-key")
         .env("CC_LB_NOT_A_CONFIG_FIELD", "ignored")

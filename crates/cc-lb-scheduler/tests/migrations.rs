@@ -29,17 +29,8 @@ mod sqlite {
         let pool = SqlitePool::connect(":memory:").await?;
 
         SqliteStorage::setup(&pool).await?;
-        apply_post_setup_migrations(&pool).await?;
-        apply_post_setup_migrations(&pool).await?;
-
-        let index_sql: String = sqlx::query_scalar(
-            "SELECT sql FROM sqlite_master
-             WHERE type = 'index' AND name = 'idx_jobs_idempotency_key'",
-        )
-        .fetch_one(&pool)
-        .await?;
-        assert!(!index_sql.contains("WHERE"));
-
+        // Simulate an active-only partial unique index left behind by an older build
+        // so migration 0005 vacuums stale Done duplicates and restores the full unique index.
         sqlx::raw_sql(
             "DROP INDEX IF EXISTS idx_jobs_idempotency_key;
              CREATE UNIQUE INDEX idx_jobs_idempotency_key
@@ -60,9 +51,19 @@ mod sqlite {
             .bind("new-pending")
             .bind("q::email")
             .bind("vacuum-key")
-        .execute(&pool)
-        .await?;
+            .execute(&pool)
+            .await?;
+
         apply_post_setup_migrations(&pool).await?;
+        apply_post_setup_migrations(&pool).await?;
+
+        let applied_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM _cc_lb_scheduler_migrations WHERE success = 1",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(applied_count, 10);
+
         let index_sql: String = sqlx::query_scalar(
             "SELECT sql FROM sqlite_master
              WHERE type = 'index' AND name = 'idx_jobs_idempotency_key'",
@@ -75,6 +76,19 @@ mod sqlite {
             .fetch_one(&pool)
             .await?;
         assert_eq!(kept_id, "new-pending");
+
+        // Pre-ledger upgrade path: dropping the ledger table on an already-migrated DB
+        // must re-seed the ledger without re-running destructive DDL.
+        sqlx::query("DROP TABLE _cc_lb_scheduler_migrations")
+            .execute(&pool)
+            .await?;
+        apply_post_setup_migrations(&pool).await?;
+        let reseeded_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM _cc_lb_scheduler_migrations WHERE success = 1",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(reseeded_count, 10);
 
         assert_eq!(
             insert_job(&pool, "job-1", "q::email", "key-reuse").await?,
@@ -173,21 +187,6 @@ mod postgres {
         pool: &PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         PostgresStorage::setup(pool).await?;
-        apply_post_setup_migrations(pool).await?;
-        apply_post_setup_migrations(pool).await?;
-
-        let predicate: Option<String> = sqlx::query_scalar(
-            "SELECT pg_get_expr(indexes.indpred, indexes.indrelid)
-             FROM pg_index indexes
-             JOIN pg_class classes ON classes.oid = indexes.indexrelid
-             JOIN pg_namespace namespaces ON namespaces.oid = classes.relnamespace
-             WHERE namespaces.nspname = 'apalis'
-               AND classes.relname = 'idx_jobs_idempotency_key'",
-        )
-        .fetch_one(pool)
-        .await?;
-        assert!(predicate.is_none());
-
         sqlx::raw_sql(
             "DROP INDEX IF EXISTS apalis.idx_jobs_idempotency_key;
              CREATE UNIQUE INDEX idx_jobs_idempotency_key
@@ -210,7 +209,39 @@ mod postgres {
             .bind("vacuum-key")
             .execute(pool)
             .await?;
+
         apply_post_setup_migrations(pool).await?;
+        let index_oid_before: i64 = sqlx::query_scalar(
+            "SELECT classes.oid::bigint
+             FROM pg_class classes
+             JOIN pg_namespace namespaces ON namespaces.oid = classes.relnamespace
+             WHERE namespaces.nspname = 'apalis'
+               AND classes.relname = 'idx_jobs_idempotency_key'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        apply_post_setup_migrations(pool).await?;
+        let index_oid_after_repeat: i64 = sqlx::query_scalar(
+            "SELECT classes.oid::bigint
+             FROM pg_class classes
+             JOIN pg_namespace namespaces ON namespaces.oid = classes.relnamespace
+             WHERE namespaces.nspname = 'apalis'
+               AND classes.relname = 'idx_jobs_idempotency_key'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            index_oid_after_repeat, index_oid_before,
+            "re-running post-setup migrations must not drop or recreate idx_jobs_idempotency_key"
+        );
+        let applied_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cc_lb_scheduler._sqlx_post_setup_migrations WHERE success",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(applied_count, 10);
+
         let predicate: Option<String> = sqlx::query_scalar(
             "SELECT pg_get_expr(indexes.indpred, indexes.indrelid)
              FROM pg_index indexes
@@ -228,6 +259,26 @@ mod postgres {
                 .fetch_one(pool)
                 .await?;
         assert_eq!(kept_id, "new-pending");
+
+        // Pre-ledger upgrade path: dropping the ledger table on an already-migrated DB
+        // must backfill the ledger in skip mode without altering index OID.
+        sqlx::query("DROP TABLE cc_lb_scheduler._sqlx_post_setup_migrations")
+            .execute(pool)
+            .await?;
+        apply_post_setup_migrations(pool).await?;
+        let index_oid_after_preledger: i64 = sqlx::query_scalar(
+            "SELECT classes.oid::bigint
+             FROM pg_class classes
+             JOIN pg_namespace namespaces ON namespaces.oid = classes.relnamespace
+             WHERE namespaces.nspname = 'apalis'
+               AND classes.relname = 'idx_jobs_idempotency_key'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            index_oid_after_preledger, index_oid_before,
+            "pre-ledger upgrade must preserve existing idx_jobs_idempotency_key OID"
+        );
 
         assert_eq!(insert_job(pool, "job-1", "q::email", "key-reuse").await?, 1);
         sqlx::query("UPDATE apalis.jobs SET status = 'Done', done_at = now() WHERE id = $1")

@@ -236,6 +236,95 @@ async fn transient_storage_url_replacement_populates_an_absent_file_field() {
 }
 
 #[tokio::test]
+async fn storage_listener_url_sentinel_restores_from_file_or_requires_replacement() {
+    let (dir, storage) = temp_storage().await;
+    let secret = "postgres://user:pass@localhost/db";
+    let listener_secret = "postgres://listener-user:listener-pass@direct-db/db";
+    let raw = format!(
+        "[storage]\nkind = \"postgres\"\nurl = \"{secret}\"\n\n[storage.pool]\npgbouncer_transaction_pooling = true\nlistener_url = \"{listener_secret}\"\n"
+    );
+    let path = dir.path().join("cc-lb.toml");
+    std::fs::write(&path, &raw).unwrap();
+    let file_config = cc_lb_config::Config::from_stored_toml(&raw).unwrap();
+    let app_with_listener = config_admin_common::app(
+        config_admin_common::test_state_with_config_path(file_config, Some(storage), path),
+    );
+    let editor = authed_json(
+        app_with_listener.clone(),
+        "GET",
+        "/admin/v1/config/editor",
+        None,
+    )
+    .await
+    .2;
+    let mut draft = editor["file_config"].clone();
+    let _ = authed_json(
+        app_with_listener.clone(),
+        "PUT",
+        "/admin/v1/config/draft",
+        Some(put_body(draft.clone(), 0)),
+    )
+    .await;
+    let (_, _, restored, bytes) = authed_json(
+        app_with_listener,
+        "POST",
+        "/admin/v1/config/draft/validate",
+        Some(json!({ "expected_revision": 1 })),
+    )
+    .await;
+    assert_eq!(restored["file"]["valid"], true, "{restored}");
+    assert_eq!(restored["effective"]["valid"], true, "{restored}");
+    let body = String::from_utf8_lossy(&bytes);
+    assert!(!body.contains(secret));
+    assert!(!body.contains(listener_secret));
+
+    // When the current file has no storage.pool.listener_url, keeping the sentinel
+    // requires an explicit transient storage_listener_url_replacement.
+    let (dir2, storage2) = temp_storage().await;
+    let app_without_listener = app_with_file(&dir2, storage2);
+    draft["storage"]["pool"]["pgbouncer_transaction_pooling"] = json!(true);
+    let _ = authed_json(
+        app_without_listener.clone(),
+        "PUT",
+        "/admin/v1/config/draft",
+        Some(put_body(draft, 0)),
+    )
+    .await;
+    let (_, _, missing, _) = authed_json(
+        app_without_listener.clone(),
+        "POST",
+        "/admin/v1/config/draft/validate",
+        Some(json!({
+            "expected_revision": 1,
+            "storage_url_replacement": secret,
+        })),
+    )
+    .await;
+    assert_eq!(
+        missing["file"]["issues"][0]["path"],
+        "storage.pool.listener_url"
+    );
+    assert_eq!(
+        missing["file"]["issues"][0]["code"],
+        "secret_source_missing"
+    );
+
+    let (_, _, replaced, replaced_bytes) = authed_json(
+        app_without_listener,
+        "POST",
+        "/admin/v1/config/draft/validate",
+        Some(json!({
+            "expected_revision": 1,
+            "storage_url_replacement": secret,
+            "storage_listener_url_replacement": listener_secret,
+        })),
+    )
+    .await;
+    assert_eq!(replaced["file"]["valid"], true, "{replaced}");
+    assert!(!String::from_utf8_lossy(&replaced_bytes).contains(listener_secret));
+}
+
+#[tokio::test]
 async fn stale_validate_revision_returns_conflict() {
     let (dir, storage) = temp_storage().await;
     let app = app_with_file(&dir, storage);
@@ -329,4 +418,102 @@ async fn env_only_required_value_is_a_file_warning_and_valid_effective_value() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[tokio::test]
+async fn env_only_listener_url_is_a_file_warning_and_allows_saving() {
+    const LISTENER_CHILD: &str = "CC_LB_ADMIN_CONFIG_ENV_LISTENER_CHILD";
+    if let Ok(mode) = std::env::var(LISTENER_CHILD) {
+        let (dir, storage) = temp_storage().await;
+        let secret_url = "postgres://primary-user:primary-pass@pooler/db";
+        let raw = format!("[storage]\nkind = \"postgres\"\nurl = \"{secret_url}\"\n");
+        let path = dir.path().join("cc-lb.toml");
+        std::fs::write(&path, &raw).unwrap();
+        let file_config = cc_lb_config::Config::from_stored_toml(&raw).unwrap();
+        let app = config_admin_common::app(config_admin_common::test_state_with_config_path(
+            file_config,
+            Some(storage),
+            path.clone(),
+        ));
+        let (_, _, editor, _) =
+            authed_json(app.clone(), "GET", "/admin/v1/config/editor", None).await;
+        let expected_fingerprint = editor["file"]["fingerprint"].clone();
+        let mut draft = editor["file_config"].clone();
+        draft["storage"]["pool"] = json!({
+            "pgbouncer_transaction_pooling": true,
+        });
+        let _ = authed_json(
+            app.clone(),
+            "PUT",
+            "/admin/v1/config/draft",
+            Some(put_body(draft, 0)),
+        )
+        .await;
+        let (status, _, report, _) = authed_json(
+            app.clone(),
+            "POST",
+            "/admin/v1/config/draft/validate",
+            Some(json!({ "expected_revision": 1 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(report["file"]["valid"], true, "{report}");
+        assert!(
+            report["file"]["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|issue| {
+                    issue["path"] == "storage.pool.listener_url"
+                        && issue["code"] == "env_supplied_required_value"
+                        && issue["severity"] == "warning"
+                }),
+            "expected env_supplied_required_value warning: {report}"
+        );
+        if mode == "valid" {
+            assert_eq!(report["effective"]["valid"], true, "{report}");
+            let (save_status, _, saved, _) = authed_json(
+                app,
+                "POST",
+                "/admin/v1/config/save",
+                Some(json!({
+                    "expected_revision": 1,
+                    "expected_fingerprint": expected_fingerprint,
+                    "confirm_self_lockout": true,
+                })),
+            )
+            .await;
+            assert_eq!(save_status, StatusCode::OK, "{saved}");
+            let saved_toml = std::fs::read_to_string(&path).unwrap();
+            assert!(saved_toml.contains("pgbouncer_transaction_pooling = true"));
+            assert!(saved_toml.contains(secret_url));
+            assert!(!saved_toml.contains("listener_url"));
+            assert!(!saved_toml.contains("listener-pass"));
+        } else {
+            assert_eq!(report["effective"]["valid"], false, "{report}");
+        }
+        return;
+    }
+
+    for (mode, listener_env) in [
+        (
+            "valid",
+            "postgres://listener-user:listener-pass@direct-db/db",
+        ),
+        ("invalid", "not-a-postgres-url"),
+    ] {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("config_validate::env_only_listener_url_is_a_file_warning_and_allows_saving")
+            .env(LISTENER_CHILD, mode)
+            .env("CC_LB_STORAGE__POOL__LISTENER_URL", listener_env)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child ({mode}) failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

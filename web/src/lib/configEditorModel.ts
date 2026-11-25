@@ -190,7 +190,13 @@ export const CONFIG_EDITOR_SECTIONS = [
     description: 'PostgreSQL connection pool sizing and lifecycle.',
     paths: ['storage.pool.max_connections', 'storage.pool.min_connections'],
     advancedPaths: ['storage.pool.**'],
-    danger: [],
+    danger: [
+      {
+        path: 'storage.pool.listener_url',
+        impact:
+          'A wrong listener URL breaks LISTEN/NOTIFY sync or prevents migrations and startup validation.',
+      },
+    ],
   },
   {
     id: 'encryption',
@@ -1700,6 +1706,16 @@ const CONFIG_FIELD_GUIDANCE: readonly {
     },
   },
   {
+    pattern: 'storage.pool.listener_url',
+    guidance: {
+      description:
+        'Direct PostgreSQL connection URL bypassing PgBouncer for LISTEN/NOTIFY, migrations, and advisory locks.',
+      recommendation:
+        'Contains credentials — treat it as a secret; required when PgBouncer transaction pooling is enabled.',
+      impactDimensions: ['durability', 'security', 'availability'],
+    },
+  },
+  {
     pattern: 'storage.pool.max_connections',
     guidance: {
       description: 'Maximum connections the pool may open to the database.',
@@ -1732,6 +1748,18 @@ const CONFIG_FIELD_GUIDANCE: readonly {
     },
   },
   {
+    pattern: 'storage.pool.pgbouncer_transaction_pooling',
+    guidance: {
+      description:
+        'Enable when storage.url connects through PgBouncer in transaction pooling mode.',
+      enabled:
+        'Skips session-level SET in after_connect and requires listener_url for LISTEN/NOTIFY and migrations.',
+      disabled:
+        'Uses direct session configuration (statement_timeout and idle_in_transaction_session_timeout).',
+      impactDimensions: ['availability', 'latency'],
+    },
+  },
+  {
     pattern: 'storage.pool.sslmode',
     guidance: {
       description:
@@ -1739,6 +1767,18 @@ const CONFIG_FIELD_GUIDANCE: readonly {
       recommendation:
         "'require' or stronger protects credentials in transit; use 'disable' only on trusted networks.",
       impactDimensions: ['security', 'network'],
+    },
+  },
+  {
+    pattern: 'storage.pool.statement_cache_capacity',
+    guidance: {
+      description:
+        'SQLx prepared-statement cache capacity per PostgreSQL connection.',
+      lower:
+        'Zero disables caching (rejected under PgBouncer transaction pooling); smaller limits bound PostgreSQL memory.',
+      higher:
+        'Caches more statements per connection (defaults to 100 under PgBouncer transaction pooling).',
+      impactDimensions: ['latency', 'availability'],
     },
   },
   {

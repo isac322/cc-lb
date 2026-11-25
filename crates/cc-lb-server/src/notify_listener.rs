@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use backon::{BackoffBuilder as _, ExponentialBuilder};
 use cc_lb_aead::AeadService;
 use cc_lb_clock::ClockHandle;
 use cc_lb_control::DynamicViewHolder;
@@ -76,10 +77,44 @@ impl NotifyListener {
     }
 
     pub async fn run(self: Arc<Self>) {
-        let Some(rx) = self.subscribe_with_retry().await else {
-            return;
-        };
-        self.run_subscribed(rx).await;
+        let mut is_reconnect = false;
+        while !self.cancel.is_cancelled() {
+            let Some(rx) = self.subscribe_with_retry().await else {
+                return;
+            };
+            if is_reconnect {
+                let mut rx = rx;
+                self.debounce_and_rebuild(&mut rx).await;
+                self.clone().run_subscribed(rx).await;
+            } else {
+                self.clone().run_subscribed(rx).await;
+            }
+            is_reconnect = true;
+        }
+    }
+
+    pub(crate) async fn run_with_initial(
+        self: Arc<Self>,
+        initial: broadcast::Receiver<ChangeEvent>,
+    ) {
+        self.clone().run_subscribed(initial).await;
+        if !self.cancel.is_cancelled() {
+            self.run_reconnect_loop().await;
+        }
+    }
+
+    async fn run_reconnect_loop(self: Arc<Self>) {
+        while !self.cancel.is_cancelled() {
+            let Some(mut rx) = self.subscribe_with_retry().await else {
+                return;
+            };
+            self.debounce_and_rebuild(&mut rx).await;
+            self.clone().run_subscribed(rx).await;
+        }
+    }
+
+    pub(crate) async fn try_subscribe_once(&self) -> Option<broadcast::Receiver<ChangeEvent>> {
+        self.notifier.subscribe().await.ok()
     }
 
     pub(crate) async fn run_subscribed(self: Arc<Self>, mut rx: broadcast::Receiver<ChangeEvent>) {
@@ -105,19 +140,29 @@ impl NotifyListener {
     }
 
     pub(crate) async fn subscribe_with_retry(&self) -> Option<broadcast::Receiver<ChangeEvent>> {
-        match self.notifier.subscribe().await {
-            Ok(rx) => Some(rx),
-            Err(error) => {
-                tracing::warn!(error = %error, "runtime change notifier subscribe failed; retrying once");
-                tokio::select! {
-                    _ = self.cancel.cancelled() => None,
-                    _ = sleep(Duration::from_secs(1)) => match self.notifier.subscribe().await {
-                        Ok(rx) => Some(rx),
-                        Err(error) => {
-                            tracing::error!(error = %error, "runtime change notifier subscribe retry failed");
-                            None
-                        }
-                    },
+        let mut backoff = ExponentialBuilder::default()
+            .with_min_delay(Duration::from_millis(100))
+            .with_max_delay(Duration::from_secs(5))
+            .with_jitter()
+            .without_max_times()
+            .build();
+        loop {
+            if self.cancel.is_cancelled() {
+                return None;
+            }
+            match self.notifier.subscribe().await {
+                Ok(rx) => return Some(rx),
+                Err(error) => {
+                    let delay = backoff.next().unwrap_or_else(|| Duration::from_secs(5));
+                    tracing::warn!(
+                        error = %error,
+                        backoff_ms = delay.as_millis(),
+                        "runtime change notifier subscribe failed; retrying"
+                    );
+                    tokio::select! {
+                        _ = self.cancel.cancelled() => return None,
+                        _ = sleep(delay) => {}
+                    }
                 }
             }
         }

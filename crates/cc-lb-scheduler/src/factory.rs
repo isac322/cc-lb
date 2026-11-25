@@ -61,14 +61,31 @@ pub enum SchedulerFactoryError {
     StartupFailed { message: String },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SchedulerPoolRole {
+    Worker,
+    EnqueueOnly,
+}
+
 pub async fn open_scheduler_storage(
     storage: &StorageConfig,
     scheduler: &SchedulerConfig,
     clock: cc_lb_clock::ClockHandle,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
+    open_scheduler_storage_with_role(storage, scheduler, SchedulerPoolRole::Worker, clock).await
+}
+
+pub async fn open_scheduler_storage_with_role(
+    storage: &StorageConfig,
+    scheduler: &SchedulerConfig,
+    role: SchedulerPoolRole,
+    clock: cc_lb_clock::ClockHandle,
+) -> Result<OpenedScheduler, SchedulerFactoryError> {
     let opened = match storage {
         StorageConfig::Sqlite { path } => open_sqlite(path, scheduler, clock).await,
-        StorageConfig::Postgres { url, pool: _ } => open_postgres(url, scheduler, clock).await,
+        StorageConfig::Postgres { url, pool } => {
+            open_postgres(url, pool, scheduler, role, clock).await
+        }
     };
     crate::scheduler_metrics::set_scheduler_init_failure(opened.is_err());
     opened
@@ -145,7 +162,9 @@ fn scheduler_sqlite_path(path: &std::path::Path) -> std::path::PathBuf {
 #[cfg(not(feature = "postgres"))]
 async fn open_postgres(
     _url: &str,
+    _storage_pool: &cc_lb_config::PostgresPoolConfig,
     _scheduler: &SchedulerConfig,
+    _role: SchedulerPoolRole,
     _clock: cc_lb_clock::ClockHandle,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
     Err(SchedulerFactoryError::FeatureDisabled {
@@ -156,44 +175,111 @@ async fn open_postgres(
 #[cfg(feature = "postgres")]
 async fn open_postgres(
     url: &str,
+    storage_pool: &cc_lb_config::PostgresPoolConfig,
     scheduler: &SchedulerConfig,
+    role: SchedulerPoolRole,
     _clock: cc_lb_clock::ClockHandle,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
     use std::time::Duration;
 
     use sqlx::postgres::PgPoolOptions;
 
-    let connect_options =
+    let mut connect_options =
         postgres_connect_options(url, scheduler.separate_pool.sslmode.as_deref())?;
+    if let Some(cache_capacity) = storage_pool.effective_statement_cache_capacity() {
+        connect_options = connect_options.statement_cache_capacity(cache_capacity);
+    }
+    let acquire_timeout = Duration::from_secs(scheduler.separate_pool.acquire_timeout_secs);
+    let direct_listener_url = storage_pool.effective_listener_url(url);
+    let direct_connect_options = postgres_connect_options(
+        direct_listener_url,
+        scheduler.separate_pool.sslmode.as_deref(),
+    )?;
+    if storage_pool.listener_url.is_some() {
+        verify_same_postgres_database(
+            url,
+            &connect_options,
+            direct_listener_url,
+            &direct_connect_options,
+            acquire_timeout,
+        )
+        .await?;
+    }
+
+    let pgbouncer_tx_pooling = storage_pool.pgbouncer_transaction_pooling;
+    let pooled_search_path = if pgbouncer_tx_pooling {
+        Some(probe_pooled_search_path(url, &connect_options, acquire_timeout).await?)
+    } else {
+        None
+    };
+    let hstore_schema = run_postgres_scheduler_setup(
+        direct_listener_url,
+        &direct_connect_options,
+        pgbouncer_tx_pooling,
+        pooled_search_path.as_deref(),
+        acquire_timeout,
+    )
+    .await?;
+
+    let (max_connections, min_connections) = match role {
+        SchedulerPoolRole::Worker => (
+            scheduler.separate_pool.max_connections,
+            scheduler.separate_pool.min_connections,
+        ),
+        SchedulerPoolRole::EnqueueOnly => (scheduler.separate_pool.max_connections.min(2), 0),
+    };
     let statement_timeout_ms = scheduler.separate_pool.statement_timeout_secs * 1000;
-    let pool = PgPoolOptions::new()
-        .max_connections(scheduler.separate_pool.max_connections)
-        .min_connections(scheduler.separate_pool.min_connections)
-        .acquire_timeout(Duration::from_secs(
-            scheduler.separate_pool.acquire_timeout_secs,
-        ))
+    let mut builder = PgPoolOptions::new()
+        .max_connections(max_connections)
+        .min_connections(min_connections)
+        .acquire_timeout(acquire_timeout)
         .idle_timeout(Duration::from_secs(
             scheduler.separate_pool.idle_timeout_secs,
-        ))
-        .after_connect(move |connection, _metadata| {
+        ));
+    if !pgbouncer_tx_pooling {
+        let search_path_sql = scheduler_search_path_sql(&hstore_schema);
+        builder = builder.after_connect(move |connection, _metadata| {
+            let search_path_sql = search_path_sql.clone();
             Box::pin(async move {
                 let statement_timeout =
                     format!("SET statement_timeout = '{statement_timeout_ms}ms'");
                 sqlx::query(sqlx::AssertSqlSafe(statement_timeout))
                     .execute(&mut *connection)
                     .await?;
-                sqlx::query("SET search_path = cc_lb_scheduler, apalis, public")
+                let idle_in_tx_timeout =
+                    format!("SET idle_in_transaction_session_timeout = '{statement_timeout_ms}ms'");
+                sqlx::query(sqlx::AssertSqlSafe(idle_in_tx_timeout))
+                    .execute(&mut *connection)
+                    .await?;
+                sqlx::query(sqlx::AssertSqlSafe(search_path_sql))
                     .execute(&mut *connection)
                     .await?;
                 Ok(())
             })
-        })
-        .connect_with(connect_options.clone())
+        });
+    }
+    let pool = builder
+        .connect_with(connect_options)
         .await
         .map_err(|error| connection_error_with_host(url, error))?;
-    run_postgres_scheduler_setup(&connect_options, &pool).await?;
+    if pgbouncer_tx_pooling {
+        ensure_pooled_hstore_visible(&pool).await?;
+    }
+    let listener_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .min_connections(0)
+        .acquire_timeout(Duration::from_secs(
+            scheduler.separate_pool.acquire_timeout_secs,
+        ))
+        .idle_timeout(Duration::from_secs(
+            scheduler.separate_pool.idle_timeout_secs,
+        ))
+        .connect_lazy_with(direct_connect_options);
     Ok(OpenedScheduler {
-        backend: SchedulerBackend::Postgres(PostgresSchedulerBackend::new(pool)),
+        backend: SchedulerBackend::Postgres(PostgresSchedulerBackend::new_with_listener_pool(
+            pool,
+            listener_pool,
+        )),
     })
 }
 
@@ -248,42 +334,425 @@ fn parse_ssl_mode(value: &str) -> Result<sqlx::postgres::PgSslMode, SchedulerFac
 }
 
 #[cfg(feature = "postgres")]
-async fn run_postgres_scheduler_setup(
-    connect_options: &sqlx::postgres::PgConnectOptions,
-    pool: &sqlx::PgPool,
-) -> Result<(), SchedulerFactoryError> {
-    let connect_options = connect_options.clone();
-    let pool = pool.clone();
-    tokio::spawn(async move {
-        use sqlx::Connection as _;
+fn quote_pg_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
 
-        let mut conn = sqlx::PgConnection::connect_with(&connect_options)
+#[cfg(feature = "postgres")]
+fn scheduler_search_path_sql(hstore_schema: &str) -> String {
+    if matches!(hstore_schema, "cc_lb_scheduler" | "apalis" | "public") {
+        "SET search_path = cc_lb_scheduler, apalis, public".to_owned()
+    } else {
+        format!(
+            "SET search_path = cc_lb_scheduler, apalis, {}, public",
+            quote_pg_ident(hstore_schema)
+        )
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn random_advisory_lock_key() -> i64 {
+    let raw = uuid::Uuid::new_v4().as_u128();
+    let folded = ((raw >> 64) ^ raw) as i64;
+    if folded == 0 { 1 } else { folded }
+}
+
+#[cfg(feature = "postgres")]
+async fn connect_direct_postgres_with_timeout(
+    url: &str,
+    options: &sqlx::postgres::PgConnectOptions,
+    connect_timeout: std::time::Duration,
+    context: &str,
+) -> Result<sqlx::PgConnection, SchedulerFactoryError> {
+    use sqlx::Connection as _;
+
+    tokio::time::timeout(connect_timeout, sqlx::PgConnection::connect_with(options))
+        .await
+        .map_err(|_| SchedulerFactoryError::ConnectionFailed {
+            message: format!("{}: {context} timed out", host_only(url)),
+        })?
+        .map_err(|error| connection_error_with_host(url, error))
+}
+
+#[cfg(feature = "postgres")]
+async fn verify_same_postgres_database(
+    url: &str,
+    primary_options: &sqlx::postgres::PgConnectOptions,
+    listener_url: &str,
+    direct_options: &sqlx::postgres::PgConnectOptions,
+    acquire_timeout: std::time::Duration,
+) -> Result<(), SchedulerFactoryError> {
+    use std::time::Duration;
+
+    use sqlx::Connection as _;
+    use tokio::time::timeout;
+
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let mut primary_conn = connect_direct_postgres_with_timeout(
+        url,
+        primary_options,
+        acquire_timeout,
+        "scheduler probe",
+    )
+    .await?;
+    let mut direct_conn = connect_direct_postgres_with_timeout(
+        listener_url,
+        direct_options,
+        acquire_timeout,
+        "direct listener probe",
+    )
+    .await?;
+
+    let primary_db: String = timeout(
+        PROBE_TIMEOUT,
+        sqlx::query_scalar("SELECT current_database()").fetch_one(&mut primary_conn),
+    )
+    .await
+    .map_err(|_| SchedulerFactoryError::ConnectionFailed {
+        message: format!("{}: scheduler database check timed out", host_only(url)),
+    })?
+    .map_err(|error| connection_error_with_host(url, error))?;
+    let direct_db: String = timeout(
+        PROBE_TIMEOUT,
+        sqlx::query_scalar("SELECT current_database()").fetch_one(&mut direct_conn),
+    )
+    .await
+    .map_err(|_| SchedulerFactoryError::ConnectionFailed {
+        message: format!(
+            "{}: direct listener database check timed out",
+            host_only(listener_url)
+        ),
+    })?
+    .map_err(|error| connection_error_with_host(listener_url, error))?;
+    if primary_db != direct_db {
+        let _ = primary_conn.close().await;
+        let _ = direct_conn.close().await;
+        return Err(SchedulerFactoryError::ConnectionFailed {
+            message: format!(
+                "storage.url ({primary_db}) and storage.pool.listener_url ({direct_db}) resolve to different PostgreSQL databases"
+            ),
+        });
+    }
+
+    let mut probe_key = None;
+    for _ in 0..3 {
+        let candidate = random_advisory_lock_key();
+        let locked: bool = timeout(
+            PROBE_TIMEOUT,
+            sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+                .bind(candidate)
+                .fetch_one(&mut direct_conn),
+        )
+        .await
+        .map_err(|_| SchedulerFactoryError::ConnectionFailed {
+            message: format!(
+                "{}: direct listener advisory-lock handshake timed out",
+                host_only(listener_url)
+            ),
+        })?
+        .map_err(|error| connection_error_with_host(listener_url, error))?;
+        if locked {
+            probe_key = Some(candidate);
+            break;
+        }
+    }
+    let Some(probe_key) = probe_key else {
+        let _ = primary_conn.close().await;
+        let _ = direct_conn.close().await;
+        return Err(SchedulerFactoryError::ConnectionFailed {
+            message: format!(
+                "{}: failed to acquire advisory-lock probe on direct listener connection",
+                host_only(listener_url)
+            ),
+        });
+    };
+
+    let acquired_while_held = timeout(
+        PROBE_TIMEOUT,
+        sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(probe_key)
+            .fetch_one(&mut primary_conn),
+    )
+    .await;
+    let _ = timeout(
+        PROBE_TIMEOUT,
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(probe_key)
+            .execute(&mut direct_conn),
+    )
+    .await;
+    let _ = direct_conn.close().await;
+
+    let acquired_while_held = acquired_while_held
+        .map_err(|_| SchedulerFactoryError::ConnectionFailed {
+            message: format!("{}: advisory-lock handshake timed out", host_only(url)),
+        })?
+        .map_err(|error| connection_error_with_host(url, error))?;
+    if acquired_while_held {
+        let _ = primary_conn.close().await;
+        return Err(SchedulerFactoryError::ConnectionFailed {
+            message: format!(
+                "storage.url ({}) and storage.pool.listener_url ({}) do not reach the same PostgreSQL database instance",
+                host_only(url),
+                host_only(listener_url)
+            ),
+        });
+    }
+
+    let acquired_after_release = timeout(
+        PROBE_TIMEOUT,
+        sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(probe_key)
+            .fetch_one(&mut primary_conn),
+    )
+    .await
+    .map_err(|_| SchedulerFactoryError::ConnectionFailed {
+        message: format!(
+            "{}: advisory-lock release verification timed out",
+            host_only(url)
+        ),
+    })?
+    .map_err(|error| connection_error_with_host(url, error))?;
+    let _ = primary_conn.close().await;
+    if !acquired_after_release {
+        return Err(SchedulerFactoryError::ConnectionFailed {
+            message: format!(
+                "storage.url ({}) could not verify advisory-lock release from storage.pool.listener_url ({})",
+                host_only(url),
+                host_only(listener_url)
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+async fn find_hstore_schema(
+    conn: &mut sqlx::PgConnection,
+) -> Result<Option<String>, SchedulerFactoryError> {
+    sqlx::query_scalar(
+        "SELECT n.nspname::text \
+         FROM pg_extension e \
+         JOIN pg_namespace n ON n.oid = e.extnamespace \
+         WHERE e.extname = 'hstore'",
+    )
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(migration_error)
+}
+
+#[cfg(feature = "postgres")]
+async fn install_hstore_extension(
+    conn: &mut sqlx::PgConnection,
+) -> Result<String, SchedulerFactoryError> {
+    sqlx::query("CREATE EXTENSION IF NOT EXISTS hstore")
+        .execute(&mut *conn)
+        .await
+        .map_err(migration_error)?;
+    find_hstore_schema(conn)
+        .await?
+        .ok_or_else(|| SchedulerFactoryError::MigrationFailed {
+            message: "hstore extension was not found after CREATE EXTENSION IF NOT EXISTS hstore"
+                .to_owned(),
+        })
+}
+
+#[cfg(feature = "postgres")]
+async fn probe_pooled_search_path(
+    url: &str,
+    connect_options: &sqlx::postgres::PgConnectOptions,
+    acquire_timeout: std::time::Duration,
+) -> Result<Vec<String>, SchedulerFactoryError> {
+    let mut conn = connect_direct_postgres_with_timeout(
+        url,
+        connect_options,
+        acquire_timeout,
+        "scheduler pooled search_path probe",
+    )
+    .await?;
+    let schemas: Vec<String> = tokio::time::timeout(
+        acquire_timeout,
+        sqlx::query_scalar("SELECT current_schemas(false)::text[]").fetch_one(&mut conn),
+    )
+    .await
+    .map_err(|_| SchedulerFactoryError::ConnectionFailed {
+        message: format!("{}: pooled search_path check timed out", host_only(url)),
+    })?
+    .map_err(|error| connection_error_with_host(url, error))?;
+    Ok(schemas)
+}
+
+#[cfg(feature = "postgres")]
+async fn install_hstore_for_pooled_connections(
+    conn: &mut sqlx::PgConnection,
+    pooled_search_path: Option<&[String]>,
+) -> Result<String, SchedulerFactoryError> {
+    let search_path = match pooled_search_path {
+        Some(schemas) if !schemas.is_empty() => schemas.to_vec(),
+        _ => sqlx::query_scalar::<_, Vec<String>>("SELECT current_schemas(false)::text[]")
+            .fetch_one(&mut *conn)
             .await
-            .map_err(migration_error)?;
-        sqlx::query("SET search_path = cc_lb_scheduler, apalis, public")
-            .execute(&mut conn)
-            .await
-            .map_err(migration_error)?;
+            .map_err(migration_error)?,
+    };
+    // Prefer `public` when it is both on the pooled query role's search_path and writable
+    // by the setup connection so pooled and unpooled peers share one visible placement.
+    let mut candidates: Vec<&str> = Vec::with_capacity(search_path.len());
+    if search_path.iter().any(|s| s == "public") {
+        candidates.push("public");
+    }
+    for schema in &search_path {
+        if schema != "public" {
+            candidates.push(schema.as_str());
+        }
+    }
+    for schema in candidates {
+        let can_install_and_use: bool = sqlx::query_scalar(
+            "SELECT has_schema_privilege($1, 'CREATE') AND has_schema_privilege($1, 'USAGE')",
+        )
+        .bind(schema)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(migration_error)?;
+        if can_install_and_use {
+            let sql = format!(
+                "CREATE EXTENSION IF NOT EXISTS hstore SCHEMA {}",
+                quote_pg_ident(schema)
+            );
+            sqlx::query(sqlx::AssertSqlSafe(sql))
+                .execute(&mut *conn)
+                .await
+                .map_err(migration_error)?;
+            return find_hstore_schema(conn).await?.ok_or_else(|| {
+                SchedulerFactoryError::MigrationFailed {
+                    message: format!(
+                        "hstore extension was not found after CREATE EXTENSION IF NOT EXISTS hstore SCHEMA {schema}"
+                    ),
+                }
+            });
+        }
+    }
+    Err(SchedulerFactoryError::MigrationFailed {
+        message: format!(
+            "no schema in the pooled query role's search_path ({}) grants both CREATE and USAGE to the setup role to install `hstore`; install `hstore` in one of those schemas or grant CREATE and USAGE on `public`",
+            search_path.join(", ")
+        ),
+    })
+}
+
+#[cfg(feature = "postgres")]
+async fn ensure_pooled_hstore_visible(pool: &sqlx::PgPool) -> Result<(), SchedulerFactoryError> {
+    let hstore_visible: bool = sqlx::query_scalar("SELECT to_regtype('hstore') IS NOT NULL")
+        .fetch_one(pool)
+        .await
+        .map_err(migration_error)?;
+    if hstore_visible {
+        return Ok(());
+    }
+
+    let existing_schema: Option<String> = sqlx::query_scalar(
+        "SELECT n.nspname::text \
+         FROM pg_extension e \
+         JOIN pg_namespace n ON n.oid = e.extnamespace \
+         WHERE e.extname = 'hstore'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(migration_error)?;
+    let location_hint = match existing_schema.as_deref() {
+        Some(schema) => format!(
+            "`hstore` is currently installed in schema `{schema}`, which is not on the pooled role's `search_path`; append `{schema}` after the application schema on the pooled role's `search_path`, or relocate it manually with `ALTER EXTENSION hstore SET SCHEMA public;` after verifying every active unpooled role has `USAGE` on `public`"
+        ),
+        None => {
+            "install the PostgreSQL `hstore` extension into a schema on the pooled role's `search_path`"
+                .to_owned()
+        }
+    };
+    Err(SchedulerFactoryError::MigrationFailed {
+        message: format!(
+            "PostgreSQL `hstore` type is not visible on transaction-pooled scheduler connections; {location_hint}"
+        ),
+    })
+}
+
+#[cfg(feature = "postgres")]
+async fn run_postgres_scheduler_setup(
+    direct_listener_url: &str,
+    connect_options: &sqlx::postgres::PgConnectOptions,
+    pgbouncer_transaction_pooling: bool,
+    pooled_search_path: Option<&[String]>,
+    acquire_timeout: std::time::Duration,
+) -> Result<String, SchedulerFactoryError> {
+    let direct_listener_url = direct_listener_url.to_owned();
+    let connect_options = connect_options.clone();
+    let pooled_search_path = pooled_search_path.map(ToOwned::to_owned);
+    tokio::spawn(async move {
+        let mut conn = connect_direct_postgres_with_timeout(
+            &direct_listener_url,
+            &connect_options,
+            acquire_timeout,
+            "scheduler setup connection",
+        )
+        .await?;
         sqlx::query("SELECT pg_advisory_lock($1)")
             .bind(SCHEDULER_SETUP_LOCK_KEY)
             .execute(&mut conn)
             .await
             .map_err(migration_error)?;
-        sqlx::query("CREATE SCHEMA IF NOT EXISTS cc_lb_scheduler")
-            .execute(&mut conn)
-            .await
-            .map_err(migration_error)?;
-        let setup_result: Result<(), SchedulerFactoryError> = async {
+        let setup_result: Result<String, SchedulerFactoryError> = async {
+            let hstore_schema = if pgbouncer_transaction_pooling {
+                // Install BEFORE switching search_path, selecting a schema visible to the
+                // pooled query role's search_path so pooled connections resolve `hstore`
+                // without session `SET search_path`.
+                let schema = match find_hstore_schema(&mut conn).await? {
+                    Some(schema) => schema,
+                    None => {
+                        install_hstore_for_pooled_connections(
+                            &mut conn,
+                            pooled_search_path.as_deref(),
+                        )
+                        .await?
+                    }
+                };
+                sqlx::query("CREATE SCHEMA IF NOT EXISTS cc_lb_scheduler")
+                    .execute(&mut conn)
+                    .await
+                    .map_err(migration_error)?;
+                schema
+            } else {
+                // Preserve cc_lb_scheduler placement for fresh unpooled setups, while
+                // honoring any already-installed extension schema and exposing it via
+                // query-pool after_connect search_path.
+                sqlx::query("CREATE SCHEMA IF NOT EXISTS cc_lb_scheduler")
+                    .execute(&mut conn)
+                    .await
+                    .map_err(migration_error)?;
+                match find_hstore_schema(&mut conn).await? {
+                    Some(schema) => schema,
+                    None => {
+                        sqlx::query("SET search_path = cc_lb_scheduler, apalis, public")
+                            .execute(&mut conn)
+                            .await
+                            .map_err(migration_error)?;
+                        install_hstore_extension(&mut conn).await?
+                    }
+                }
+            };
+            let search_path = scheduler_search_path_sql(&hstore_schema);
+            sqlx::query(sqlx::AssertSqlSafe(search_path))
+                .execute(&mut conn)
+                .await
+                .map_err(migration_error)?;
             reconcile_pre_1_0_apalis_migration_history(&mut conn).await?;
             let migrator = apalis_postgres::PostgresStorage::<()>::migrations();
             migrator
                 .run_direct(None, &mut conn, false)
                 .await
                 .map_err(migration_error)?;
-            crate::migrations::apply_post_setup_migrations(&pool)
+            crate::migrations::apply_postgres_post_setup_migrations_on_conn(&mut conn)
                 .await
                 .map_err(migration_error)?;
-            Ok(())
+            Ok(hstore_schema)
         }
         .await;
         let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
@@ -434,4 +903,51 @@ fn host_only(url: &str) -> String {
         .ok()
         .and_then(|url| url.host_str().map(str::to_owned))
         .unwrap_or_else(|| "<unknown host>".to_owned())
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use cc_lb_clock::SystemClock;
+    use cc_lb_config::{PostgresPoolConfig, SchedulerConfig, StorageConfig};
+
+    use super::{SchedulerFactoryError, open_scheduler_storage};
+
+    #[tokio::test]
+    async fn open_postgres_bounds_stalled_direct_setup_connection_to_acquire_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local blackhole listener");
+        let addr = listener.local_addr().expect("listener address");
+        let accept_task = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("accept TCP connection");
+            // Keep the accepted socket open without sending a PostgreSQL startup reply.
+            tokio::time::sleep(Duration::from_secs(15)).await;
+        });
+
+        let mut scheduler = SchedulerConfig::default();
+        scheduler.separate_pool.acquire_timeout_secs = 1;
+        let storage = StorageConfig::Postgres {
+            url: format!("postgres://cclb:cclb@{addr}/cclb_test?sslmode=disable"),
+            pool: PostgresPoolConfig::default(),
+        };
+
+        let started = Instant::now();
+        let error = open_scheduler_storage(&storage, &scheduler, Arc::new(SystemClock))
+            .await
+            .expect_err("stalled PostgreSQL handshake must fail at acquire_timeout_secs");
+        let elapsed = started.elapsed();
+        accept_task.abort();
+
+        assert!(
+            matches!(error, SchedulerFactoryError::ConnectionFailed { .. }),
+            "expected ConnectionFailed on direct setup timeout, got {error:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "expected timeout near acquire_timeout_secs=1s, took {elapsed:?}"
+        );
+    }
 }

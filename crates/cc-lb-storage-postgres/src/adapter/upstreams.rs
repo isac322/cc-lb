@@ -853,6 +853,7 @@ async fn set_split_status(
         "last_warmup_at",
     )?;
 
+    let previous_last_apply_error = last_apply_error.clone();
     if let Some(value) = patch.last_apply_error
         && (!kind
             .is_some_and(|kind| has_sticky_credential_failure(kind, last_apply_error.as_deref()))
@@ -868,6 +869,7 @@ async fn set_split_status(
     if let Some(value) = patch.last_warmup_at_unix_secs {
         last_warmup_at = value;
     }
+    let apply_error_changed = last_apply_error != previous_last_apply_error;
 
     sqlx::query(
         "INSERT INTO upstream_status_v1 (upstream_id, last_apply_error, last_apply_at, last_warmup_at, updated_at)
@@ -889,6 +891,9 @@ async fn set_split_status(
     .execute(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
+    if apply_error_changed {
+        notify(&mut tx, id).await?;
+    }
     tx.commit().await.map_err(map_sqlx_error)?;
     Ok(())
 }
@@ -898,17 +903,21 @@ async fn soft_delete_split(
     id: Uuid,
     expected_revision: u64,
 ) -> StorageResult<()> {
+    let mut tx = pool.begin().await.map_err(map_sqlx_error)?;
     let row = sqlx::query(
         "UPDATE upstream_spec_v1 SET deleted_at = NOW(), spec_revision = spec_revision + 1, updated_at = NOW() WHERE id = $1 AND spec_revision = $2 AND deleted_at IS NULL RETURNING id",
     )
     .bind(id)
     .bind(u64_to_i64(expected_revision, "upstream spec revision")?)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
     if row.is_none() {
+        tx.rollback().await.map_err(map_sqlx_error)?;
         return Err(conflict("stale upstream revision"));
     }
+    notify(&mut tx, id).await?;
+    tx.commit().await.map_err(map_sqlx_error)?;
     Ok(())
 }
 
@@ -931,6 +940,7 @@ async fn clear_split_warmup_dialect_plugin(
         return Ok(None);
     }
     let record = get_split_by_id(&mut *tx, id).await?;
+    notify(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
     Ok(record)
 }

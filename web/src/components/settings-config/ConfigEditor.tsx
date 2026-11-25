@@ -133,6 +133,16 @@ const PHONE_TARGET_CLASS = 'max-md:h-10';
 const PHONE_TOOLBAR_CLASS = 'max-md:h-11';
 const INPUT_WITH_ERROR_CLASS = `${INPUT_CLASS} ${PHONE_TARGET_CLASS} aria-[invalid=true]:border-danger`;
 const OPAQUE_STORAGE_URL_PATH = 'storage.url';
+const OPAQUE_STORAGE_LISTENER_URL_PATH = 'storage.pool.listener_url';
+type OpaqueStorageUrlPath =
+  | typeof OPAQUE_STORAGE_URL_PATH
+  | typeof OPAQUE_STORAGE_LISTENER_URL_PATH;
+function isOpaqueStorageUrlPath(path: string): path is OpaqueStorageUrlPath {
+  return (
+    path === OPAQUE_STORAGE_URL_PATH ||
+    path === OPAQUE_STORAGE_LISTENER_URL_PATH
+  );
+}
 const ADMIN_PROVIDERS_PATH = 'admin.auth.providers';
 const RECURRING_JOBS_PATH = 'scheduler.recurring_jobs';
 const CONFIG_CATEGORY_HEADING_ID = 'config-category-heading';
@@ -268,11 +278,13 @@ function sectionGroupHomogeneous(
 }
 
 const StorageUrlReplacementContext = createContext<{
-  value: string | null;
-  onChange: (value: string | null) => void;
+  get: (path: OpaqueStorageUrlPath) => string | null;
+  set: (path: OpaqueStorageUrlPath, value: string | null) => void;
+  clearAll: () => void;
 }>({
-  value: null,
-  onChange: () => undefined,
+  get: () => null,
+  set: () => undefined,
+  clearAll: () => undefined,
 });
 
 const ConfigSourcesContext = createContext<{
@@ -755,6 +767,7 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
     revision: number;
     report: ConfigValidationReport;
     storageUrlReplacement: string | null;
+    storageListenerUrlReplacement: string | null;
   } | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<string>(
     CONFIG_EDITOR_CATEGORIES.some((entry) => entry.id === category)
@@ -774,6 +787,8 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
   const [storageUrlReplacement, setStorageUrlReplacement] = useState<
     string | null
   >(null);
+  const [storageListenerUrlReplacement, setStorageListenerUrlReplacement] =
+    useState<string | null>(null);
   const downloadLock = useRef(false);
   const validationSummaryRef = useRef<HTMLDivElement | null>(null);
   const handledFieldRef = useRef<string | null>(null);
@@ -850,11 +865,14 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
     localValidation !== null &&
     state !== null &&
     localValidation.revision === state.revision &&
-    localValidation.storageUrlReplacement === storageUrlReplacement;
+    localValidation.storageUrlReplacement === storageUrlReplacement &&
+    localValidation.storageListenerUrlReplacement ===
+      storageListenerUrlReplacement;
   const storedValidation = editorData?.last_validation ?? null;
   const storedValidatedRevision = editorData?.last_validated_revision ?? null;
   const serverReportMatches =
     storageUrlReplacement === null &&
+    storageListenerUrlReplacement === null &&
     state !== null &&
     storedValidation?.revision === state.revision;
   const validation = localValidationMatches
@@ -992,6 +1010,7 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
       sensitive: boolean;
       oldValue: unknown;
       newValue: unknown;
+      replacement?: boolean;
     }[] = model.leaves
       // Inactive-but-modified leaves are included: switching a union variant
       // deletes every path the old variant owned, and those removals must
@@ -1004,10 +1023,40 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
         dangerImpact: leaf.dangerImpact,
         sensitive:
           Boolean(leaf.override?.sensitive) ||
-          leaf.pathString === OPAQUE_STORAGE_URL_PATH,
+          isOpaqueStorageUrlPath(leaf.pathString),
         oldValue: leaf.fileValue,
         newValue: leaf.editorValue,
       }));
+    for (const [path, replacementValue] of [
+      [OPAQUE_STORAGE_URL_PATH, storageUrlReplacement],
+      [OPAQUE_STORAGE_LISTENER_URL_PATH, storageListenerUrlReplacement],
+    ] as const) {
+      if (replacementValue === null) continue;
+      const leaf = model.leaves.find(
+        (candidate) => candidate.pathString === path,
+      );
+      const classification = classifyConfigLeaf(path);
+      const existingIndex = entries.findIndex(
+        (entry) => entry.pathString === path,
+      );
+      const entry = {
+        pathString: path,
+        categoryId: leaf?.categoryId ?? classification.categoryId,
+        dangerous: leaf?.dangerous ?? classification.dangerous,
+        dangerImpact: leaf?.dangerImpact ?? classification.dangerImpact,
+        sensitive: true,
+        oldValue: leaf
+          ? leaf.fileValue
+          : getConfigValue(editorData.file_config, path),
+        newValue: replacementValue,
+        replacement: true,
+      };
+      if (existingIndex >= 0) {
+        entries[existingIndex] = entry;
+      } else {
+        entries.push(entry);
+      }
+    }
     // Container-level diffs for the specialized editors are added directly,
     // but only when no item leaf under the container already describes the
     // change — otherwise the row would repeat what the item rows say.
@@ -1043,7 +1092,7 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
         (categoryOrder.get(right.categoryId) ?? 99);
       return order || left.pathString.localeCompare(right.pathString);
     });
-  }, [model, editorData]);
+  }, [model, editorData, storageUrlReplacement, storageListenerUrlReplacement]);
 
   const updateValue = (next: unknown) => {
     if (!isJsonObject(next)) return;
@@ -1126,6 +1175,11 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
       {
         expected_revision: state.revision,
         storage_url_replacement: storageUrlReplacement ?? undefined,
+        ...(storageListenerUrlReplacement !== null
+          ? {
+              storage_listener_url_replacement: storageListenerUrlReplacement,
+            }
+          : {}),
       },
       {
         onSuccess: (report) => {
@@ -1133,6 +1187,7 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
             revision: report.revision,
             report,
             storageUrlReplacement,
+            storageListenerUrlReplacement,
           });
           if (reportIsValid(report)) {
             toast.success('Configuration is valid');
@@ -1158,6 +1213,11 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
         expected_revision: state.revision,
         expected_fingerprint: editorData.file.fingerprint,
         storage_url_replacement: storageUrlReplacement ?? undefined,
+        ...(storageListenerUrlReplacement !== null
+          ? {
+              storage_listener_url_replacement: storageListenerUrlReplacement,
+            }
+          : {}),
         confirm_self_lockout: requiresSelfLockoutConfirmation,
       },
       {
@@ -1166,6 +1226,7 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
           setSelfLockoutRequired(false);
           setSelfLockoutAcknowledged(false);
           setStorageUrlReplacement(null);
+          setStorageListenerUrlReplacement(null);
           toast.success('Configuration file saved');
           setState((current) =>
             current
@@ -1184,6 +1245,7 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
               revision: report.revision,
               report,
               storageUrlReplacement,
+              storageListenerUrlReplacement,
             });
           }
           if (
@@ -1221,6 +1283,9 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
       await downloadConfigDraft(
         state.revision,
         storageUrlReplacement ?? undefined,
+        ...(storageListenerUrlReplacement !== null
+          ? [storageListenerUrlReplacement]
+          : []),
       );
       toast.success('Validated TOML downloaded');
     } catch (error) {
@@ -1445,9 +1510,23 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
           ) : editorData && state && model && activeCategory ? (
             <StorageUrlReplacementContext.Provider
               value={{
-                value: storageUrlReplacement,
-                onChange: (next) => {
-                  setStorageUrlReplacement(next);
+                get: (path) =>
+                  path === OPAQUE_STORAGE_LISTENER_URL_PATH
+                    ? storageListenerUrlReplacement
+                    : storageUrlReplacement,
+                set: (path, next) => {
+                  if (path === OPAQUE_STORAGE_LISTENER_URL_PATH) {
+                    setStorageListenerUrlReplacement(next);
+                  } else {
+                    setStorageUrlReplacement(next);
+                  }
+                  setLocalValidation(null);
+                  setActionError(null);
+                  setDownloadError(null);
+                },
+                clearAll: () => {
+                  setStorageUrlReplacement(null);
+                  setStorageListenerUrlReplacement(null);
                   setLocalValidation(null);
                   setActionError(null);
                   setDownloadError(null);
@@ -1577,7 +1656,9 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
                             {entry.pathString}
                           </span>
                           : {displayValue(entry.oldValue, entry.sensitive)} →{' '}
-                          {displayValue(entry.newValue, entry.sensitive)}
+                          {entry.replacement
+                            ? 'Hidden (replacement)'
+                            : displayValue(entry.newValue, entry.sensitive)}
                           {entry.dangerous && entry.dangerImpact ? (
                             <span className="block text-caption text-warn-text">
                               {entry.dangerImpact}
@@ -2878,8 +2959,11 @@ function ScalarField({
   const modified = configured && !isSameJson(current, fileValue);
   const draftDiffers = !isSameJson(current ?? null, fileValue ?? null);
   const error = issues.find((issue) => issue.severity === 'error');
-  const isSensitive =
-    Boolean(override?.sensitive) || path === OPAQUE_STORAGE_URL_PATH;
+  const isOpaqueUrl = isOpaqueStorageUrlPath(path);
+  const opaqueReplacement = isOpaqueUrl
+    ? storageUrlReplacement.get(path)
+    : null;
+  const isSensitive = Boolean(override?.sensitive) || isOpaqueUrl;
   const label = configKeyLabel(path.split('.').at(-1) ?? path);
   const resolvedInput = resolveConfigSchema(rootSchema, schema);
   const schemaVariants = getConfigSchemaVariants(rootSchema, resolvedInput);
@@ -2959,21 +3043,20 @@ function ScalarField({
     typeof concrete.minimum === 'number' ? concrete.minimum : undefined;
   const maximum =
     typeof concrete.maximum === 'number' ? concrete.maximum : undefined;
-  const scalarCheck: ConfigScalarCheck | null =
-    path === OPAQUE_STORAGE_URL_PATH
-      ? null
-      : classification.presentation === 'address'
-        ? { kind: 'address' }
-        : leafKind === 'integer' || leafKind === 'number'
-          ? { kind: leafKind, minimum, maximum }
-          : leafKind === 'string'
-            ? {
-                kind: 'string',
-                required:
-                  typeof concrete.minLength === 'number' &&
-                  concrete.minLength >= 1,
-              }
-            : null;
+  const scalarCheck: ConfigScalarCheck | null = isOpaqueUrl
+    ? null
+    : classification.presentation === 'address'
+      ? { kind: 'address' }
+      : leafKind === 'integer' || leafKind === 'number'
+        ? { kind: leafKind, minimum, maximum }
+        : leafKind === 'string'
+          ? {
+              kind: 'string',
+              required:
+                typeof concrete.minLength === 'number' &&
+                concrete.minLength >= 1,
+            }
+          : null;
   const localError =
     blurred && scalarCheck ? checkConfigScalar(current, scalarCheck) : null;
   const localErrorId = `${inputId}-local-error`;
@@ -2997,10 +3080,10 @@ function ScalarField({
   ].filter((hint): hint is string => hint !== null);
 
   useEffect(() => {
-    if (storageUrlReplacement.value === null) {
+    if (opaqueReplacement === null) {
       setReplacingOpaque(false);
     }
-  }, [storageUrlReplacement.value]);
+  }, [opaqueReplacement]);
 
   const reset = () => {
     if (fileValue === undefined || fileValue === null) {
@@ -3032,16 +3115,16 @@ function ScalarField({
         </div>
         {suppressActions ? null : (
           <div className="flex shrink-0 flex-wrap justify-end gap-1">
-            {path === OPAQUE_STORAGE_URL_PATH ? (
+            {isOpaqueUrl ? (
               <>
-                {replacingOpaque || storageUrlReplacement.value !== null ? (
+                {replacingOpaque || opaqueReplacement !== null ? (
                   <Button
                     size="sm"
                     className={PHONE_TARGET_CLASS}
                     variant="ghost"
                     iconLeft={<X className="h-3 w-3" />}
                     onClick={() => {
-                      storageUrlReplacement.onChange(null);
+                      storageUrlReplacement.set(path, null);
                       setReplacingOpaque(false);
                     }}
                   >
@@ -3055,7 +3138,7 @@ function ScalarField({
                     variant="ghost"
                     iconLeft={<X className="h-3 w-3" />}
                     onClick={() => {
-                      storageUrlReplacement.onChange(null);
+                      storageUrlReplacement.set(path, null);
                       setReplacingOpaque(false);
                       onChange(unsetConfigValue(value, path));
                     }}
@@ -3095,7 +3178,10 @@ function ScalarField({
       </div>
       <p className="text-caption text-text-muted">{guidance.description}</p>
       <div className="mt-2">
-        {nullable && !configured && !(numeric && clearedWhileEditing) ? (
+        {!isOpaqueUrl &&
+        nullable &&
+        !configured &&
+        !(numeric && clearedWhileEditing) ? (
           <Button
             size="sm"
             className={PHONE_TARGET_CLASS}
@@ -3118,9 +3204,7 @@ function ScalarField({
           >
             Set value
           </Button>
-        ) : path === OPAQUE_STORAGE_URL_PATH &&
-          storageUrlReplacement.value === null &&
-          !replacingOpaque ? (
+        ) : isOpaqueUrl && opaqueReplacement === null && !replacingOpaque ? (
           <div className="flex flex-wrap items-center gap-2">
             <Badge tone="neutral">
               {configured
@@ -3194,13 +3278,7 @@ function ScalarField({
               id={inputId}
               data-field-control
               className={INPUT_WITH_ERROR_CLASS}
-              type={
-                path === OPAQUE_STORAGE_URL_PATH
-                  ? 'password'
-                  : numeric
-                    ? 'number'
-                    : 'text'
-              }
+              type={isOpaqueUrl ? 'password' : numeric ? 'number' : 'text'}
               step={schemaTypes.includes('integer') ? 1 : undefined}
               min={minimum}
               max={maximum}
@@ -3212,21 +3290,21 @@ function ScalarField({
               aria-invalid={Boolean(error) || localError !== null}
               aria-describedby={localError !== null ? localErrorId : undefined}
               value={
-                path === OPAQUE_STORAGE_URL_PATH
-                  ? (storageUrlReplacement.value ?? '')
+                isOpaqueUrl
+                  ? (opaqueReplacement ?? '')
                   : typeof current === 'string' || typeof current === 'number'
                     ? String(current)
                     : ''
               }
               placeholder={
-                path === OPAQUE_STORAGE_URL_PATH
+                isOpaqueUrl
                   ? 'Enter a replacement URL'
                   : `Inherited: ${displayValue(effectiveValue, isSensitive)}`
               }
               onChange={(event) => {
-                if (path === OPAQUE_STORAGE_URL_PATH) {
+                if (isOpaqueUrl) {
                   const replacement = event.target.value;
-                  storageUrlReplacement.onChange(replacement || null);
+                  storageUrlReplacement.set(path, replacement || null);
                   if (!replacement) setReplacingOpaque(false);
                   return;
                 }
@@ -3437,7 +3515,7 @@ function TaggedUnionEditor({
       [nextVariant.property]: nextVariant.kind,
     };
     if (path === 'storage') {
-      storageUrlReplacement.onChange(null);
+      storageUrlReplacement.clearAll();
     }
     onChange(setConfigValue(value, path, nextValue));
   };

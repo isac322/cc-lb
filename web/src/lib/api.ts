@@ -356,6 +356,7 @@ function attachmentFilename(response: Response): string {
 export function downloadConfigDraft(
   expectedRevision: number,
   storageUrlReplacement?: string,
+  storageListenerUrlReplacement?: string,
 ): Promise<void> {
   if (pendingConfigDraftDownload) return pendingConfigDraftDownload;
 
@@ -366,6 +367,11 @@ export function downloadConfigDraft(
       body: JSON.stringify({
         expected_revision: expectedRevision,
         storage_url_replacement: storageUrlReplacement,
+        ...(storageListenerUrlReplacement !== undefined
+          ? {
+              storage_listener_url_replacement: storageListenerUrlReplacement,
+            }
+          : {}),
       }),
     });
     const blob = await response.blob();

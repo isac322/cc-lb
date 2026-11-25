@@ -1922,6 +1922,215 @@ test('storage URL stays opaque and replacement is attached only to validate', ()
     expect.objectContaining({ onSuccess: expect.any(Function) }),
   );
 });
+
+test('storage listener URL stays opaque and attaches replacement across validate, save, and download', () => {
+  const validateMutate = vi.fn();
+  const saveFileMutate = vi.fn();
+  const saveDraftMutate = vi.fn();
+  queryMocks.useValidateConfig.mockReturnValue(mutationResult(validateMutate));
+  queryMocks.useSaveConfigFile.mockReturnValue(mutationResult(saveFileMutate));
+  queryMocks.useSaveDraft.mockReturnValue(mutationResult(saveDraftMutate));
+  const poolSchema = {
+    ...structuredClone(configSchema),
+    properties: {
+      ...structuredClone(configSchema.properties),
+      storage: {
+        ...structuredClone(configSchema.properties.storage),
+        oneOf: configSchema.properties.storage.oneOf.map((variant) =>
+          variant.properties.kind.const === 'postgres'
+            ? {
+                ...variant,
+                properties: {
+                  ...variant.properties,
+                  pool: {
+                    type: 'object',
+                    properties: {
+                      max_connections: {
+                        type: 'integer',
+                        minimum: 1,
+                        maximum: 64,
+                      },
+                      min_connections: { type: 'integer' },
+                      idle_timeout_secs: { type: 'integer' },
+                      max_lifetime_secs: { type: 'integer' },
+                      pgbouncer_transaction_pooling: { type: 'boolean' },
+                      listener_url: { type: ['string', 'null'] },
+                    },
+                  },
+                },
+              }
+            : variant,
+        ),
+      },
+    },
+  };
+  const listenerFileConfig = {
+    ...structuredClone(fileConfig),
+    storage: {
+      ...structuredClone(fileConfig.storage),
+      pool: {
+        ...structuredClone(fileConfig.storage.pool),
+        pgbouncer_transaction_pooling: true,
+        listener_url: '__CC_LB_STORAGE_URL_UNCHANGED__',
+      },
+    },
+  };
+  setSettingsLoaded(
+    editorResponse({
+      schema: poolSchema,
+      file_config: structuredClone(listenerFileConfig),
+      effective_config: structuredClone(listenerFileConfig),
+      draft: structuredClone(listenerFileConfig),
+    }),
+  );
+  const view = render(<SettingsComponent />);
+  showCategory(view, 'Storage & data');
+
+  expect(
+    screen.queryByDisplayValue('__CC_LB_STORAGE_URL_UNCHANGED__'),
+  ).toBeNull();
+  const listenerField = revealField('storage.pool.listener_url');
+  expect(
+    within(listenerField).queryByText('__CC_LB_STORAGE_URL_UNCHANGED__'),
+  ).toBeNull();
+  expect(within(listenerField).getByText('Stored value hidden')).toBeDefined();
+
+  fireEvent.click(
+    within(listenerField).getByRole('button', { name: 'Replace URL' }),
+  );
+  const listenerInput = within(listenerField).getByLabelText(
+    'Listener URL',
+  ) as HTMLInputElement;
+  expect(listenerInput.type).toBe('password');
+  fireEvent.change(listenerInput, {
+    target: { value: 'postgres://direct-user:direct-pass@direct-db/cc_lb' },
+  });
+
+  // Saving the draft must never include the cleartext replacement secret.
+  expect(
+    screen.getByRole('button', { name: 'Save draft' }).hasAttribute('disabled'),
+  ).toBe(true);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Validate' }));
+  expect(validateMutate).toHaveBeenLastCalledWith(
+    {
+      expected_revision: 7,
+      storage_url_replacement: undefined,
+      storage_listener_url_replacement:
+        'postgres://direct-user:direct-pass@direct-db/cc_lb',
+    },
+    expect.objectContaining({ onSuccess: expect.any(Function) }),
+  );
+  const validateOptions = validateMutate.mock.calls[0]?.[1] as {
+    onSuccess: (report: unknown) => void;
+  };
+  act(() => {
+    validateOptions.onSuccess({
+      ...structuredClone(validReport),
+      revision: 7,
+    });
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Download TOML' }));
+  expect(apiMocks.downloadConfigDraft).toHaveBeenLastCalledWith(
+    7,
+    undefined,
+    'postgres://direct-user:direct-pass@direct-db/cc_lb',
+  );
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save to config file' }));
+  const reviewList = screen.getByTestId('config-review-list');
+  expect(within(reviewList).getByText('Dangerous changes')).toBeDefined();
+  expect(
+    within(reviewList).getByText('storage.pool.listener_url'),
+  ).toBeDefined();
+  expect(
+    within(reviewList).getByText(
+      /wrong listener URL breaks LISTEN\/NOTIFY sync/i,
+    ),
+  ).toBeDefined();
+  expect(reviewList.textContent).not.toContain('direct-pass');
+  expect(reviewList.textContent).toContain('Hidden (replacement)');
+  fireEvent.click(screen.getByRole('button', { name: 'Overwrite file' }));
+  expect(saveFileMutate).toHaveBeenLastCalledWith(
+    {
+      expected_revision: 7,
+      expected_fingerprint: 'sha256:current',
+      storage_url_replacement: undefined,
+      storage_listener_url_replacement:
+        'postgres://direct-user:direct-pass@direct-db/cc_lb',
+      confirm_self_lockout: false,
+    },
+    expect.objectContaining({ onSuccess: expect.any(Function) }),
+  );
+});
+
+test('unset nullable listener URL renders opaque replacement control instead of Set value', () => {
+  const validateMutate = vi.fn();
+  queryMocks.useValidateConfig.mockReturnValue(mutationResult(validateMutate));
+  const poolSchema = {
+    ...structuredClone(configSchema),
+    properties: {
+      ...structuredClone(configSchema.properties),
+      storage: {
+        ...structuredClone(configSchema.properties.storage),
+        oneOf: configSchema.properties.storage.oneOf.map((variant) =>
+          variant.properties.kind.const === 'postgres'
+            ? {
+                ...variant,
+                properties: {
+                  ...variant.properties,
+                  pool: {
+                    type: 'object',
+                    properties: {
+                      max_connections: {
+                        type: 'integer',
+                        minimum: 1,
+                        maximum: 64,
+                      },
+                      min_connections: { type: 'integer' },
+                      idle_timeout_secs: { type: 'integer' },
+                      max_lifetime_secs: { type: 'integer' },
+                      listener_url: { type: ['string', 'null'] },
+                    },
+                  },
+                },
+              }
+            : variant,
+        ),
+      },
+    },
+  };
+  setSettingsLoaded(editorResponse({ schema: poolSchema }));
+  const view = render(<SettingsComponent />);
+  showCategory(view, 'Storage & data');
+
+  const listenerField = revealField('storage.pool.listener_url');
+  expect(
+    within(listenerField).queryByRole('button', { name: 'Set value' }),
+  ).toBeNull();
+  expect(within(listenerField).getByText('No stored URL')).toBeDefined();
+
+  fireEvent.click(
+    within(listenerField).getByRole('button', { name: 'Replace URL' }),
+  );
+  const listenerInput = within(listenerField).getByLabelText(
+    'Listener URL',
+  ) as HTMLInputElement;
+  expect(listenerInput.type).toBe('password');
+  fireEvent.change(listenerInput, {
+    target: { value: 'postgres://new-direct@direct-db/cc_lb' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Validate' }));
+  expect(validateMutate).toHaveBeenLastCalledWith(
+    {
+      expected_revision: 7,
+      storage_url_replacement: undefined,
+      storage_listener_url_replacement: 'postgres://new-direct@direct-db/cc_lb',
+    },
+    expect.objectContaining({ onSuccess: expect.any(Function) }),
+  );
+});
 test('opaque storage URL can be unset without exposing it or dropping pool settings', () => {
   const saveDraftMutate = vi.fn();
   queryMocks.useSaveDraft.mockReturnValue(mutationResult(saveDraftMutate));

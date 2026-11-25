@@ -291,7 +291,10 @@ impl Default for AeadConfig {
     }
 }
 
+pub const DEFAULT_PGBOUNCER_STATEMENT_CACHE_CAPACITY: usize = 100;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct PostgresPoolConfig {
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
@@ -310,6 +313,32 @@ pub struct PostgresPoolConfig {
     /// Optional SSL mode override; when omitted, inherit `sslmode` or `ssl-mode` from the PostgreSQL URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sslmode: Option<String>,
+    /// Optional direct PostgreSQL URL for dedicated session-pinned listeners (`LISTEN/NOTIFY`), migrations, and advisory locks when `url` goes through a transaction pooler such as PgBouncer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listener_url: Option<String>,
+    /// Optional SQLx prepared-statement cache capacity override (must be greater than `0` when `pgbouncer_transaction_pooling` is enabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statement_cache_capacity: Option<usize>,
+    /// Configure connections for PgBouncer transaction pooling (requires PgBouncer >= 1.21 with `max_prepared_statements > 0`, defaults `statement_cache_capacity` to `100` while rejecting `0`, and skips session-level `SET` statements in `after_connect`).
+    #[serde(default, skip_serializing_if = "is_false_bool")]
+    pub pgbouncer_transaction_pooling: bool,
+}
+
+fn is_false_bool(value: &bool) -> bool {
+    !*value
+}
+
+impl PostgresPoolConfig {
+    pub fn effective_listener_url<'a>(&'a self, primary_url: &'a str) -> &'a str {
+        self.listener_url.as_deref().unwrap_or(primary_url)
+    }
+
+    pub fn effective_statement_cache_capacity(&self) -> Option<usize> {
+        self.statement_cache_capacity.or_else(|| {
+            self.pgbouncer_transaction_pooling
+                .then_some(DEFAULT_PGBOUNCER_STATEMENT_CACHE_CAPACITY)
+        })
+    }
 }
 
 impl Default for PostgresPoolConfig {
@@ -323,6 +352,9 @@ impl Default for PostgresPoolConfig {
             statement_timeout_secs: default_statement_timeout_secs(),
             test_before_acquire: default_test_before_acquire(),
             sslmode: None,
+            listener_url: None,
+            statement_cache_capacity: None,
+            pgbouncer_transaction_pooling: false,
         }
     }
 }

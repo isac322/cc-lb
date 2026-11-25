@@ -1892,16 +1892,25 @@ export function useValidateConfig() {
     mutationFn: ({
       expected_revision,
       storage_url_replacement,
+      storage_listener_url_replacement,
     }: {
       expected_revision: number;
       storage_url_replacement?: string;
+      storage_listener_url_replacement?: string;
     }) =>
       postJson<
         ConfigValidationReport,
-        { expected_revision: number; storage_url_replacement?: string }
+        {
+          expected_revision: number;
+          storage_url_replacement?: string;
+          storage_listener_url_replacement?: string;
+        }
       >('/admin/v1/config/draft/validate', {
         expected_revision,
         storage_url_replacement,
+        ...(storage_listener_url_replacement !== undefined
+          ? { storage_listener_url_replacement }
+          : {}),
       }),
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: qk.configEditor });
@@ -1934,11 +1943,13 @@ export function useSaveConfigFile() {
       expected_revision,
       expected_fingerprint,
       storage_url_replacement,
+      storage_listener_url_replacement,
       confirm_self_lockout,
     }: {
       expected_revision: number;
       expected_fingerprint: string | null;
       storage_url_replacement?: string;
+      storage_listener_url_replacement?: string;
       confirm_self_lockout: boolean;
     }) =>
       postJson<
@@ -1947,12 +1958,16 @@ export function useSaveConfigFile() {
           expected_revision: number;
           expected_fingerprint: string | null;
           storage_url_replacement?: string;
+          storage_listener_url_replacement?: string;
           confirm_self_lockout: boolean;
         }
       >('/admin/v1/config/save', {
         expected_revision,
         expected_fingerprint,
         storage_url_replacement,
+        ...(storage_listener_url_replacement !== undefined
+          ? { storage_listener_url_replacement }
+          : {}),
         confirm_self_lockout,
       }),
     onSuccess: async () => {

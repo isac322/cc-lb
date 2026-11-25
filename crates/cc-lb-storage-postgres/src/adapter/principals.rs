@@ -123,10 +123,21 @@ impl PrincipalStore for PostgresStorage {
         if let Some(name) = update.name.as_deref() {
             validate_identifier("principal.name", name)?;
         }
-        let Some(current) = self.get_by_id(id).await? else {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let Some(row) = sqlx::query(
+            "SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive, openai_oauth_compat FROM principals_v1 WHERE id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?
+        else {
+            tx.rollback().await.map_err(map_sqlx_error)?;
             return Ok(None);
         };
+        let current = principal_from_row(row)?;
         if current.revision != expected_revision {
+            tx.rollback().await.map_err(map_sqlx_error)?;
             return Err(conflict(format!(
                 "stale postgres principal revision; current revision is {}",
                 current.revision
@@ -160,8 +171,7 @@ impl PrincipalStore for PostgresStorage {
             .map(serde_json::to_value)
             .transpose()?;
         let now = unix_secs_to_datetime(now_unix_secs, "principal.updated_at")?;
-        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let row = sqlx::query(
+        let Some(row) = sqlx::query(
             "UPDATE principals_v1 SET name = $2, allowed_models = $3, allowed_upstreams = $4, default_limits = $5, router_terminal_strategy = $6, cache_keepalive = $7, openai_oauth_compat = $8, revision = revision + 1, updated_at = $9 WHERE id = $1 AND revision = $10 RETURNING *",
         )
         .bind(id)
@@ -174,9 +184,13 @@ impl PrincipalStore for PostgresStorage {
         .bind(openai_oauth_compat_value)
         .bind(now)
         .bind(u64_to_i64(expected_revision, "principal.revision")?)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
-        .map_err(map_sqlx_error)?;
+        .map_err(map_sqlx_error)?
+        else {
+            tx.rollback().await.map_err(map_sqlx_error)?;
+            return Err(conflict("stale postgres principal revision"));
+        };
         let record = principal_from_row(row)?;
         notify_principal_changed(&mut tx, record.id).await?;
         tx.commit().await.map_err(map_sqlx_error)?;
@@ -259,28 +273,41 @@ impl PostgresStorage {
         field: &str,
         enabled: bool,
     ) -> StorageResult<Option<PrincipalRecord>> {
-        let Some(current) = self.get_by_id(id).await? else {
-            return Ok(None);
-        };
-        if current.revision != expected_revision {
-            return Err(conflict(format!(
-                "stale postgres principal revision; current revision is {}",
-                current.revision
-            )));
-        }
         let now = unix_secs_to_datetime(now_unix_secs, "principal.updated_at")?;
         let sql = format!(
             "UPDATE principals_v1 SET {field} = $3, updated_at = $4, revision = revision + 1 WHERE id = $1 AND revision = $2 RETURNING *"
         );
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let row = sqlx::query(AssertSqlSafe(sql))
+        let Some(current_revision) = sqlx::query_scalar::<_, i64>(
+            "SELECT revision FROM principals_v1 WHERE id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?
+        else {
+            tx.rollback().await.map_err(map_sqlx_error)?;
+            return Ok(None);
+        };
+        let current_revision = i64_to_u64(current_revision, "principal.revision")?;
+        if current_revision != expected_revision {
+            tx.rollback().await.map_err(map_sqlx_error)?;
+            return Err(conflict(format!(
+                "stale postgres principal revision; current revision is {current_revision}"
+            )));
+        }
+        let Some(row) = sqlx::query(AssertSqlSafe(sql))
             .bind(id)
             .bind(u64_to_i64(expected_revision, "principal.revision")?)
             .bind(enabled)
             .bind(now)
-            .fetch_one(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await
-            .map_err(map_sqlx_error)?;
+            .map_err(map_sqlx_error)?
+        else {
+            tx.rollback().await.map_err(map_sqlx_error)?;
+            return Err(conflict("stale postgres principal revision"));
+        };
         let record = principal_from_row(row)?;
         notify_principal_changed(&mut tx, record.id).await?;
         tx.commit().await.map_err(map_sqlx_error)?;

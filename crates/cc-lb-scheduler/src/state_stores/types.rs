@@ -6,19 +6,28 @@ macro_rules! define_store {
         #[derive(Debug)]
         pub struct $name<Db: Database> {
             pub(super) pool: Pool<Db>,
+            pub(super) schema: Option<&'static str>,
         }
 
         impl<Db: Database> Clone for $name<Db> {
             fn clone(&self) -> Self {
                 Self {
                     pool: self.pool.clone(),
+                    schema: self.schema,
                 }
             }
         }
 
         impl<Db: Database> $name<Db> {
             pub fn new(pool: Pool<Db>) -> Self {
-                Self { pool }
+                Self { pool, schema: None }
+            }
+
+            pub fn with_scheduler_schema(pool: Pool<Db>) -> Self {
+                Self {
+                    pool,
+                    schema: Some("cc_lb_scheduler"),
+                }
             }
         }
     };

@@ -64,12 +64,14 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
         };
         let stored_record = record.clone();
 
-        retry::with_retry(&self.retry_policy, || {
+        retry::with_retry_serialization(&self.retry_policy, || {
             let pool = self.pool.clone();
             let record = stored_record.clone();
             async move {
-                let mut tx = pool.begin().await?;
-                insert_record(principal_id, key_id, &record, &mut tx).await?;
+                let mut tx = pool.begin().await.map_err(map_sqlx_error)?;
+                insert_record(principal_id, key_id, &record, &mut tx)
+                    .await
+                    .map_err(map_sqlx_error)?;
                 sqlx::query(
                     "INSERT INTO managed_api_key_index_v1 (index_hash, principal_id, key_id) VALUES ($1, $2, $3)",
                 )
@@ -77,14 +79,16 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
                 .bind(principal_id)
                 .bind(key_id)
                 .execute(&mut *tx)
-                .await?;
-                notify_principal_changed(&mut tx, principal_id).await?;
-                tx.commit().await?;
+                .await
+                .map_err(map_sqlx_error)?;
+                notify_principal_changed(&mut tx, principal_id)
+                    .await
+                    .map_err(map_sqlx_error)?;
+                tx.commit().await.map_err(map_sqlx_error)?;
                 Ok(())
             }
         })
-        .await
-        .map_err(map_sqlx_error)?;
+        .await?;
 
         Ok(record)
     }

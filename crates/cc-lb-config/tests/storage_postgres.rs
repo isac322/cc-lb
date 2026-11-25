@@ -99,6 +99,100 @@ fn test_postgres_pool_defaults_are_usable() {
     assert_eq!(pool.max_lifetime_secs, 1800);
     assert_eq!(pool.statement_timeout_secs, 30);
     assert!(pool.test_before_acquire);
+    assert_eq!(pool.listener_url, None);
+    assert_eq!(pool.statement_cache_capacity, None);
+    assert!(!pool.pgbouncer_transaction_pooling);
+    assert_eq!(
+        pool.effective_listener_url("postgres://pooled/db"),
+        "postgres://pooled/db"
+    );
+    assert_eq!(pool.effective_statement_cache_capacity(), None);
+
+    let json = serde_json::to_value(&pool).unwrap();
+    assert!(json.get("listener_url").is_none());
+    assert!(json.get("statement_cache_capacity").is_none());
+    assert!(json.get("pgbouncer_transaction_pooling").is_none());
+}
+
+#[test]
+fn test_postgres_pgbouncer_pool_options_roundtrip_and_validation() {
+    let raw = r#"[storage]
+kind = "postgres"
+url = "postgres://pgbouncer.internal:6432/cclb"
+
+[storage.pool]
+listener_url = "postgres://primary.internal:5432/cclb"
+pgbouncer_transaction_pooling = true
+"#;
+    let config = Config::from_stored_toml(raw).unwrap();
+    config.validate().unwrap();
+    let StorageConfig::Postgres { ref url, ref pool } = config.storage else {
+        panic!("expected postgres storage");
+    };
+    assert_eq!(
+        pool.effective_listener_url(url),
+        "postgres://primary.internal:5432/cclb"
+    );
+    assert_eq!(
+        pool.effective_statement_cache_capacity(),
+        Some(cc_lb_config::DEFAULT_PGBOUNCER_STATEMENT_CACHE_CAPACITY)
+    );
+
+    let invalid = Config {
+        storage: StorageConfig::Postgres {
+            url: "postgres://pgbouncer.internal:6432/cclb".to_owned(),
+            pool: PostgresPoolConfig {
+                pgbouncer_transaction_pooling: true,
+                listener_url: None,
+                ..PostgresPoolConfig::default()
+            },
+        },
+        ..Config::default()
+    };
+    assert!(
+        invalid.validate().is_err(),
+        "pgbouncer_transaction_pooling without listener_url must fail validation"
+    );
+
+    let zero_cache = Config {
+        storage: StorageConfig::Postgres {
+            url: "postgres://pgbouncer.internal:6432/cclb".to_owned(),
+            pool: PostgresPoolConfig {
+                pgbouncer_transaction_pooling: true,
+                listener_url: Some("postgres://primary.internal:5432/cclb".to_owned()),
+                statement_cache_capacity: Some(0),
+                ..PostgresPoolConfig::default()
+            },
+        },
+        ..Config::default()
+    };
+    let error = zero_cache.validate().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ConfigError::Validation(ref validation)
+                if validation.field == "storage.pool.statement_cache_capacity"
+        ),
+        "pgbouncer_transaction_pooling with statement_cache_capacity = 0 must fail validation: {error}"
+    );
+
+    let bounded_cache = Config {
+        storage: StorageConfig::Postgres {
+            url: "postgres://pgbouncer.internal:6432/cclb".to_owned(),
+            pool: PostgresPoolConfig {
+                pgbouncer_transaction_pooling: true,
+                listener_url: Some("postgres://primary.internal:5432/cclb".to_owned()),
+                statement_cache_capacity: Some(64),
+                ..PostgresPoolConfig::default()
+            },
+        },
+        ..Config::default()
+    };
+    bounded_cache.validate().unwrap();
+    let StorageConfig::Postgres { ref pool, .. } = bounded_cache.storage else {
+        panic!("expected postgres storage");
+    };
+    assert_eq!(pool.effective_statement_cache_capacity(), Some(64));
 }
 
 #[test]

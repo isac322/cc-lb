@@ -136,22 +136,32 @@ other dispatch errors.
 
 ## 3. DB Pool Isolation
 
-To prevent background tasks from starving the main request-handling path, the scheduler uses a separate connection pool. This isolation is configured via the `separate_pool` setting in `SchedulerConfig`. On PostgreSQL, both pools use the same DSN with separate connection limits. On SQLite, the application pool uses the configured database file, while the scheduler pool uses the derived `path.with_extension("scheduler.sqlite")` file. Application-owned tables such as `cache_keepalive_sessions` stay in the application database; Apalis `Jobs` and `Workers` stay in the derived scheduler database.
+To prevent background tasks from starving the main request-handling path, the scheduler uses a separate connection pool configured via `scheduler.separate_pool`. On PostgreSQL, the pooled application and scheduler query pools use `storage.url`, while session-pinned direct connections (`LISTEN/NOTIFY` runtime change listener, live-tail fanout, shared scheduler `PostgresInsertFanout` listener, startup migrations, and advisory locks) use `storage.pool.listener_url` (defaulting to `storage.url` when omitted). Both `storage.url` and `storage.pool.listener_url` must resolve to the same PostgreSQL database and application schema. On SQLite, the application pool uses the configured database file, while the scheduler pool uses the derived `path.with_extension("scheduler.sqlite")` file. Application-owned tables such as `cache_keepalive_sessions` stay in the application database; Apalis `Jobs` and `Workers` stay in the derived scheduler database.
 
-Budget the configured pool limits across all replicas:
+When deploying behind PgBouncer in transaction pooling mode (`storage.pool.pgbouncer_transaction_pooling = true`):
+
+- Configure `storage.pool.listener_url` to a direct PostgreSQL DSN (bypassing PgBouncer) so `LISTEN/NOTIFY`, startup migrations, and advisory locks remain session-pinned.
+- Use PgBouncer 1.21 or newer with `max_prepared_statements > 0` (at least `storage.pool.statement_cache_capacity`, `>= 200` recommended) and a bounded non-zero `storage.pool.statement_cache_capacity` (defaults to `100`; `0` is rejected because SQLx 0.9 sends named `Parse`+`Sync` before `Bind`).
+- Session-level `SET` statements (`statement_timeout`, `idle_in_transaction_session_timeout`, and `search_path`) are skipped in `after_connect`. Enforce timeouts in PgBouncer or PostgreSQL, and keep `hstore` visible on the pooled role's default `search_path` (fresh PgBouncer setups install `hstore` in a writable schema on the pooled query role's `search_path`, preferring `public` when visible and writable, before switching to `cc_lb_scheduler`; legacy `cc_lb_scheduler.hstore` installations are never auto-relocated on startup—either include `cc_lb_scheduler` on the pooled role's `search_path` or run `ALTER EXTENSION hstore SET SCHEMA public;` after verifying every active unpooled role has `USAGE` on `public`, whereas unpooled setups keep fresh installations in `cc_lb_scheduler` and include any pre-installed `hstore` schema on query connections).
+
+Budget both pooled and direct sessions across all replicas:
 
 ```
-(main_pool + apalis_pool) * replicas <= 0.7 * max_connections
+pooled_connections_per_replica  = storage.pool.max_connections + scheduler_query_max_connections
+direct_connections_per_replica  = 6 (worker replica) or 5 (proxy/admin EnqueueOnly)
+total_postgres_connections     <= 0.7 * max_connections
 ```
 
-Set the main and scheduler pool limits against PostgreSQL's configured
+- `scheduler_query_max_connections` is `scheduler.separate_pool.max_connections` on worker/standalone processes and `min(scheduler.separate_pool.max_connections, 2)` (`min_connections = 0`) on proxy-only or standalone admin processes (`EnqueueOnly`).
+- Direct sessions per replica cover the storage `listener_pool` (`max_connections = 2`, `min_connections = 0`), the scheduler `listener_pool` (`max_connections = 2`, `min_connections = 0`), runtime change/live-tail `PgListener` session(s) (`1`), and on worker replicas `1` shared `PostgresInsertFanout` `PgListener` session serving all scheduler queues.
+
+Set the main, scheduler, and direct limits against PostgreSQL's configured
 `max_connections`. Leave the remaining capacity for other database clients
-and operational work; recheck the budget when changing pool limits or replica
-count.
+and operational work; recheck the budget when changing pool limits, `pgbouncer_transaction_pooling`, or replica count.
 
 ### PostgreSQL TLS
 
-Storage and scheduler connections use `storage.url`, but resolve TLS mode independently. Storage connections, including startup preflight, use `storage.pool.sslmode`. The scheduler uses `scheduler.separate_pool.sslmode`; it does not inherit `storage.pool.sslmode`.
+Storage connections (`storage.url` primary pool and `storage.pool.listener_url` direct `listener_pool`) and scheduler connections (`storage.url` query pool and `storage.pool.listener_url` direct setup/listener pool) resolve TLS mode independently. Storage connections, including startup preflight, use `storage.pool.sslmode`. Scheduler connections use `scheduler.separate_pool.sslmode`; they do not inherit `storage.pool.sslmode`.
 
 For each pool, TLS mode follows this precedence:
 

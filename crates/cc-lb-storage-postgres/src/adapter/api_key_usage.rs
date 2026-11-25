@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use cc_lb_clock::unix_secs;
 use cc_lb_storage_api::{
@@ -54,14 +56,88 @@ impl ApiKeyUsageBucketStore for PostgresStorage {
             tx.rollback().await.map_err(map_sqlx_error)?;
             return Ok(ApiKeyUsageFlushResult::AlreadyApplied);
         }
-        for delta in &flush.deltas {
-            validate_delta(delta)?;
-            sqlx::query("INSERT INTO api_key_usage_buckets_v1 (writer_epoch, key_id, bucket_width_secs, bucket_start_unix_secs, requests, input_tokens, output_tokens, cost_usd_micros) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT(writer_epoch, key_id, bucket_width_secs, bucket_start_unix_secs) DO UPDATE SET requests = api_key_usage_buckets_v1.requests + excluded.requests, input_tokens = api_key_usage_buckets_v1.input_tokens + excluded.input_tokens, output_tokens = api_key_usage_buckets_v1.output_tokens + excluded.output_tokens, cost_usd_micros = api_key_usage_buckets_v1.cost_usd_micros + excluded.cost_usd_micros")
-                .bind(flush.writer_epoch).bind(&delta.key.key_id)
-                .bind(u64_to_i64(delta.key.bucket_width_secs, "API-key usage bucket width")?)
-                .bind(u64_to_i64(delta.key.bucket_start_unix_secs, "API-key usage bucket start")?)
-                .bind(delta.usage.requests).bind(delta.usage.input_tokens).bind(delta.usage.output_tokens).bind(delta.usage.cost_usd_micros)
-                .execute(&mut *tx).await.map_err(map_sqlx_error)?;
+        if !flush.deltas.is_empty() {
+            let mut has_duplicate_key = false;
+            let mut seen_keys = HashSet::with_capacity(flush.deltas.len());
+            let mut prepared = Vec::with_capacity(flush.deltas.len());
+            for delta in &flush.deltas {
+                validate_delta(delta)?;
+                let bucket_width_secs =
+                    u64_to_i64(delta.key.bucket_width_secs, "API-key usage bucket width")?;
+                let bucket_start_unix_secs = u64_to_i64(
+                    delta.key.bucket_start_unix_secs,
+                    "API-key usage bucket start",
+                )?;
+                if !seen_keys.insert((
+                    delta.key.key_id.as_str(),
+                    bucket_width_secs,
+                    bucket_start_unix_secs,
+                )) {
+                    has_duplicate_key = true;
+                }
+                prepared.push((delta, bucket_width_secs, bucket_start_unix_secs));
+            }
+            if has_duplicate_key {
+                // Retain input-order sequential upserts when a flush contains duplicate bucket
+                // keys so signed BIGINT arithmetic preserves intermediate prefix bounds against
+                // the stored row.
+                for (delta, bucket_width_secs, bucket_start_unix_secs) in prepared {
+                    sqlx::query(
+                        "INSERT INTO api_key_usage_buckets_v1 (writer_epoch, key_id, bucket_width_secs, bucket_start_unix_secs, requests, input_tokens, output_tokens, cost_usd_micros) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT(writer_epoch, key_id, bucket_width_secs, bucket_start_unix_secs) DO UPDATE SET requests = api_key_usage_buckets_v1.requests + excluded.requests, input_tokens = api_key_usage_buckets_v1.input_tokens + excluded.input_tokens, output_tokens = api_key_usage_buckets_v1.output_tokens + excluded.output_tokens, cost_usd_micros = api_key_usage_buckets_v1.cost_usd_micros + excluded.cost_usd_micros",
+                    )
+                    .bind(flush.writer_epoch)
+                    .bind(&delta.key.key_id)
+                    .bind(bucket_width_secs)
+                    .bind(bucket_start_unix_secs)
+                    .bind(delta.usage.requests)
+                    .bind(delta.usage.input_tokens)
+                    .bind(delta.usage.output_tokens)
+                    .bind(delta.usage.cost_usd_micros)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(map_sqlx_error)?;
+                }
+            } else {
+                let mut key_ids = Vec::with_capacity(prepared.len());
+                let mut bucket_widths = Vec::with_capacity(prepared.len());
+                let mut bucket_starts = Vec::with_capacity(prepared.len());
+                let mut requests = Vec::with_capacity(prepared.len());
+                let mut input_tokens = Vec::with_capacity(prepared.len());
+                let mut output_tokens = Vec::with_capacity(prepared.len());
+                let mut cost_usd_micros = Vec::with_capacity(prepared.len());
+                for (delta, bucket_width_secs, bucket_start_unix_secs) in prepared {
+                    key_ids.push(delta.key.key_id.as_str());
+                    bucket_widths.push(bucket_width_secs);
+                    bucket_starts.push(bucket_start_unix_secs);
+                    requests.push(delta.usage.requests);
+                    input_tokens.push(delta.usage.input_tokens);
+                    output_tokens.push(delta.usage.output_tokens);
+                    cost_usd_micros.push(delta.usage.cost_usd_micros);
+                }
+                sqlx::query(
+                    "INSERT INTO api_key_usage_buckets_v1 \
+                     (writer_epoch, key_id, bucket_width_secs, bucket_start_unix_secs, requests, input_tokens, output_tokens, cost_usd_micros) \
+                     SELECT $1, t.key_id, t.bucket_width_secs, t.bucket_start_unix_secs, t.requests, t.input_tokens, t.output_tokens, t.cost_usd_micros \
+                     FROM UNNEST($2::text[], $3::bigint[], $4::bigint[], $5::bigint[], $6::bigint[], $7::bigint[], $8::bigint[]) \
+                       AS t(key_id, bucket_width_secs, bucket_start_unix_secs, requests, input_tokens, output_tokens, cost_usd_micros) \
+                     ON CONFLICT(writer_epoch, key_id, bucket_width_secs, bucket_start_unix_secs) DO UPDATE SET \
+                       requests = api_key_usage_buckets_v1.requests + excluded.requests, \
+                       input_tokens = api_key_usage_buckets_v1.input_tokens + excluded.input_tokens, \
+                       output_tokens = api_key_usage_buckets_v1.output_tokens + excluded.output_tokens, \
+                       cost_usd_micros = api_key_usage_buckets_v1.cost_usd_micros + excluded.cost_usd_micros",
+                )
+                .bind(flush.writer_epoch)
+                .bind(&key_ids)
+                .bind(&bucket_widths)
+                .bind(&bucket_starts)
+                .bind(&requests)
+                .bind(&input_tokens)
+                .bind(&output_tokens)
+                .bind(&cost_usd_micros)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+            }
         }
         sqlx::query("UPDATE api_key_usage_writers_v1 SET lease_until_unix_secs = $1, last_flush_id = $2 WHERE writer_epoch = $3")
             .bind(u64_to_i64(flush.lease_until_unix_secs, "API-key usage writer lease")?)

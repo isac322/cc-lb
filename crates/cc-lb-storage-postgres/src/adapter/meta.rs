@@ -85,19 +85,19 @@ pub(super) async fn lock_meta_value(conn: &mut sqlx::PgConnection, key: &str) ->
 #[async_trait]
 impl MetaStore for PostgresStorage {
     async fn initialize(&self) -> StorageResult<()> {
-        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let mut tx = self.listener_pool.begin().await.map_err(map_sqlx_error)?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
 
-        let (is_non_public, database_name): (bool, String) =
-            sqlx::query_as("SELECT current_schema() IS DISTINCT FROM 'public', current_database()")
+        let (schema_name, database_name): (String, String) =
+            sqlx::query_as("SELECT current_schema(), current_database()")
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(map_sqlx_error)?;
 
-        if is_non_public {
+        if schema_name != "public" {
             sqlx::query("SELECT pg_advisory_xact_lock($1)")
                 .bind(sqlx_migration_lock_id(&database_name))
                 .execute(&mut *tx)
@@ -126,7 +126,7 @@ impl MetaStore for PostgresStorage {
         tx.rollback().await.map_err(map_sqlx_error)?;
 
         MIGRATOR
-            .run(&self.pool)
+            .run(&self.listener_pool)
             .await
             .map_err(|error| StorageError::Fatal {
                 message: error.to_string(),
@@ -393,5 +393,22 @@ async fn finish_overview_error_attribution(storage: &PostgresStorage) -> Storage
             .map_err(map_sqlx_error)?;
         }
         tx.commit().await.map_err(map_sqlx_error)?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sqlx_migration_lock_id;
+
+    #[test]
+    fn sqlx_migration_lock_id_is_database_scoped() {
+        assert_eq!(
+            sqlx_migration_lock_id("cclb"),
+            sqlx_migration_lock_id("cclb")
+        );
+        assert_ne!(
+            sqlx_migration_lock_id("db_a"),
+            sqlx_migration_lock_id("db_b")
+        );
     }
 }

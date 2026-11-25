@@ -956,6 +956,13 @@
           "default": 600,
           "minimum": 0
         },
+        "listener_url": {
+          "description": "Optional direct PostgreSQL URL for dedicated session-pinned listeners (`LISTEN/NOTIFY`), migrations, and advisory locks when `url` goes through a transaction pooler such as PgBouncer.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "max_connections": {
           "type": "integer",
           "format": "uint32",
@@ -974,12 +981,25 @@
           "default": 1,
           "minimum": 0
         },
+        "pgbouncer_transaction_pooling": {
+          "description": "Configure connections for PgBouncer transaction pooling (requires PgBouncer >= 1.21 with `max_prepared_statements > 0`, defaults `statement_cache_capacity` to `100` while rejecting `0`, and skips session-level `SET` statements in `after_connect`).",
+          "type": "boolean"
+        },
         "sslmode": {
           "description": "Optional SSL mode override; when omitted, inherit `sslmode` or `ssl-mode` from the PostgreSQL URL.",
           "type": [
             "string",
             "null"
           ]
+        },
+        "statement_cache_capacity": {
+          "description": "Optional SQLx prepared-statement cache capacity override (must be greater than `0` when `pgbouncer_transaction_pooling` is enabled).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
         },
         "statement_timeout_secs": {
           "type": "integer",
@@ -991,7 +1011,8 @@
           "type": "boolean",
           "default": true
         }
-      }
+      },
+      "additionalProperties": false
     },
     "PriceCatalogConfig": {
       "type": "object",

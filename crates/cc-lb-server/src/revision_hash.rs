@@ -6,6 +6,7 @@ pub(crate) fn compute_revision_hash(
     principals: &[(Uuid, u64)],
     chains: &[(Uuid, u64)],
     registry_entries: &[(Uuid, u64, [u8; 32])],
+    plan_metadata_hash: u64,
 ) -> u64 {
     let mut upstreams = upstreams.to_vec();
     let mut principals = principals.to_vec();
@@ -17,12 +18,13 @@ pub(crate) fn compute_revision_hash(
     registry_entries.sort_by_key(|(id, _, _)| *id);
 
     let mut bytes = Vec::with_capacity(
-        (upstreams.len() + principals.len() + chains.len()) * 24 + registry_entries.len() * 88,
+        (upstreams.len() + principals.len() + chains.len()) * 24 + registry_entries.len() * 88 + 8,
     );
     append_triples(&mut bytes, &upstreams);
     append_triples(&mut bytes, &principals);
     append_triples(&mut bytes, &chains);
     append_registry_entries(&mut bytes, &registry_entries);
+    bytes.extend_from_slice(&plan_metadata_hash.to_le_bytes());
     xxh3_64(&bytes)
 }
 

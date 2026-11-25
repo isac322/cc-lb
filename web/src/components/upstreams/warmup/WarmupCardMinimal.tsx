@@ -1,5 +1,5 @@
 import { ChevronRight, HelpCircle, History, Zap } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { windowLabel } from '../../../lib/api';
 import { getWindowColor } from '../../../lib/colors';
@@ -386,6 +386,25 @@ function WarmupCardMinimalInner({
   const [historyLane, setHistoryLane] = useState<WarmupLane | 'all'>('all');
   const [configOpen, setConfigOpen] = useState(false);
 
+  const isMountedRef = useRef(true);
+  const cooldownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (cooldownTimerRef.current !== null) {
+        clearTimeout(cooldownTimerRef.current);
+        cooldownTimerRef.current = null;
+      }
+      if (focusTimerRef.current !== null) {
+        clearTimeout(focusTimerRef.current);
+        focusTimerRef.current = null;
+      }
+    };
+  }, []);
+
   const [confirmFireOpen, setConfirmFireOpen] = useState(false);
   const [confirmClearPluginOpen, setConfirmClearPluginOpen] = useState(false);
   const unavailableFireLane =
@@ -526,6 +545,7 @@ function WarmupCardMinimalInner({
   const handleFireNow = async () => {
     if (!summary || firing || unavailableFireLane || noEligibleFireLanes)
       return;
+    const upstreamName = upstream.name;
     setFiring(true);
     setLeasePanels([]);
     setErrorPanels([]);
@@ -541,7 +561,10 @@ function WarmupCardMinimalInner({
           fireWarmup.mutateAsync({ id: upstream.id, lane }),
         ),
       );
-      setConfirmFireOpen(false);
+      const mounted = isMountedRef.current;
+      if (mounted) {
+        setConfirmFireOpen(false);
+      }
       const leases: { lane: FireTarget; heldBy: string }[] = [];
       const errors: { lane: FireTarget; reason: FireErrorReason }[] = [];
       let firedAny = false;
@@ -550,32 +573,67 @@ function WarmupCardMinimalInner({
         const name = laneName(lane);
         if (result.status === 'rejected') {
           const message = errorMessage(result.reason, 'Failed to fire warmup');
-          toast.error(name ? `${name}: ${message}` : message);
+          const laneMessage = name ? `${name}: ${message}` : message;
+          toast.error(
+            mounted ? laneMessage : `${upstreamName}: ${laneMessage}`,
+          );
           return;
         }
         const res: FireNowResponse = result.value;
         if (res.fired) {
           firedAny = true;
-          toast.success(
-            name
-              ? COPY.fireSuccessLaneTemplate.replace('{lane}', name)
-              : COPY.fireSuccess,
-            { duration: TOAST_DURATIONS.success },
-          );
+          const message = name
+            ? COPY.fireSuccessLaneTemplate.replace('{lane}', name)
+            : COPY.fireSuccess;
+          toast.success(mounted ? message : `${upstreamName}: ${message}`, {
+            duration: TOAST_DURATIONS.success,
+          });
         } else if (res.reason === 'lease_held') {
           leases.push({ lane, heldBy: res.held_by });
         } else {
           errors.push({ lane, reason: res.reason });
         }
       });
+      if (!mounted) {
+        // Card unmounted (e.g. plugin key changed while request was in flight):
+        // skip component state/timers while preserving user-visible feedback.
+        for (const lease of leases) {
+          const name = laneName(lease.lane);
+          const detail = COPY.leaseHeldTemplate.replace(
+            '{heldBy}',
+            lease.heldBy,
+          );
+          toast.info(
+            `${upstreamName}: ${name ? `${name}: ${detail}` : detail}`,
+          );
+        }
+        for (const err of errors) {
+          const name = laneName(err.lane);
+          const detail = COPY.fireErrorReasons[err.reason];
+          toast.error(
+            `${upstreamName}: ${name ? `${name}: ${detail}` : detail}`,
+          );
+        }
+        return;
+      }
       setLeasePanels(leases);
       setErrorPanels(errors);
       if (firedAny) {
         setFireCooldown(true);
-        setTimeout(() => setFireCooldown(false), FIRE_NOW_COOLDOWN_MS);
+        if (cooldownTimerRef.current !== null) {
+          clearTimeout(cooldownTimerRef.current);
+        }
+        cooldownTimerRef.current = setTimeout(() => {
+          cooldownTimerRef.current = null;
+          if (isMountedRef.current) {
+            setFireCooldown(false);
+          }
+        }, FIRE_NOW_COOLDOWN_MS);
       }
     } finally {
-      setFiring(false);
+      if (isMountedRef.current) {
+        setFiring(false);
+      }
     }
   };
 
@@ -587,13 +645,16 @@ function WarmupCardMinimalInner({
   const handleConfirmFireOpenChange = (open: boolean) => {
     setConfirmFireOpen(open);
     if (!open) {
-      window.setTimeout(
-        () =>
-          document
-            .querySelector<HTMLButtonElement>('[data-testid="warmup-fire-now"]')
-            ?.focus(),
-        0,
-      );
+      if (focusTimerRef.current !== null) {
+        clearTimeout(focusTimerRef.current);
+      }
+      focusTimerRef.current = setTimeout(() => {
+        focusTimerRef.current = null;
+        if (!isMountedRef.current || typeof document === 'undefined') return;
+        document
+          .querySelector<HTMLButtonElement>('[data-testid="warmup-fire-now"]')
+          ?.focus();
+      }, 0);
     }
   };
 
