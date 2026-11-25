@@ -125,25 +125,13 @@ where
     }
 }
 
-pub(super) async fn request_refresh(
-    http: &JsonHttpClient,
+pub(super) fn build_refresh_request(
     oauth_cfg: &AnthropicOAuthConfig,
     google_config: &cc_lb_config::Config,
     oauth_kind: cc_lb_storage_api::upstream::UpstreamKind,
     oauth_profile: cc_lb_oauth_protocol::GeminiOAuthProfile,
-    cancel: &CancellationToken,
     refresh_token: &str,
-) -> Result<TokenEndpointResponse, RefreshRequestError> {
-    #[cfg(test)]
-    if DENIED_TOKEN_REFRESH_CALLS
-        .try_with(|calls| calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
-        .is_ok()
-    {
-        return Err(SchedulerError::Job(
-            "token refresh transport denied by scoped test".to_owned(),
-        )
-        .into());
-    }
+) -> SchedulerResult<Request<Full<Bytes>>> {
     let antigravity = google_config.oauth.antigravity.clone().unwrap_or_default();
     let (token_url, content_type, body) = match oauth_kind {
         cc_lb_storage_api::upstream::UpstreamKind::AnthropicOauth => (
@@ -162,8 +150,7 @@ pub(super) async fn request_refresh(
                     if antigravity.missing_client_credentials().is_some() {
                         return Err(SchedulerError::Job(
                             "oauth_client_not_configured: configure oauth.antigravity.client_id and oauth.antigravity.client_secret before refreshing Antigravity credentials".to_owned(),
-                        )
-                        .into());
+                        ));
                     }
                     (
                         antigravity.client_id.as_str(),
@@ -188,14 +175,33 @@ pub(super) async fn request_refresh(
             )
         }
         _ => {
-            return Err(SchedulerError::Job("unsupported oauth upstream kind".to_owned()).into());
+            return Err(SchedulerError::Job(
+                "unsupported oauth upstream kind".to_owned(),
+            ));
         }
     };
-    let request = Request::post(token_url)
+    Request::post(token_url)
         .header(http::header::CONTENT_TYPE, content_type)
         .header(http::header::CONTENT_LENGTH, body.len().to_string())
         .body(Full::new(Bytes::from(body)))
-        .map_err(|error| SchedulerError::Job(error.to_string()))?;
+        .map_err(|error| SchedulerError::Job(error.to_string()))
+}
+
+pub(super) async fn send_refresh_request(
+    http: &JsonHttpClient,
+    request: Request<Full<Bytes>>,
+    cancel: &CancellationToken,
+) -> Result<TokenEndpointResponse, RefreshRequestError> {
+    #[cfg(test)]
+    if DENIED_TOKEN_REFRESH_CALLS
+        .try_with(|calls| calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+        .is_ok()
+    {
+        return Err(SchedulerError::Job(
+            "token refresh transport denied by scoped test".to_owned(),
+        )
+        .into());
+    }
     let response = tokio::select! {
         _ = cancel.cancelled() => return Err(SchedulerError::Job("oauth refresh cancelled".to_owned()).into()),
         response = tokio::time::timeout(Duration::from_secs(30), http.request(request)) => response,
@@ -224,6 +230,26 @@ pub(super) async fn request_refresh(
     .await?;
     parse_token_endpoint_response(&body)
         .map_err(|error| SchedulerError::Job(error.to_string()).into())
+}
+
+#[cfg(test)]
+pub(super) async fn request_refresh(
+    http: &JsonHttpClient,
+    oauth_cfg: &AnthropicOAuthConfig,
+    google_config: &cc_lb_config::Config,
+    oauth_kind: cc_lb_storage_api::upstream::UpstreamKind,
+    oauth_profile: cc_lb_oauth_protocol::GeminiOAuthProfile,
+    cancel: &CancellationToken,
+    refresh_token: &str,
+) -> Result<TokenEndpointResponse, RefreshRequestError> {
+    let request = build_refresh_request(
+        oauth_cfg,
+        google_config,
+        oauth_kind,
+        oauth_profile,
+        refresh_token,
+    )?;
+    send_refresh_request(http, request, cancel).await
 }
 
 #[allow(clippy::too_many_arguments)]

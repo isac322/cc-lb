@@ -2385,3 +2385,141 @@ async fn scheduled_oauth_refresh_uses_persisted_lease_expiry_after_lost_renewal_
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn scheduled_antigravity_missing_config_releases_refresh_lease_immediately() {
+    use cc_lb_oauth_protocol::GeminiOAuthProfile;
+    use cc_lb_storage_api::MetaStore;
+
+    let mut fixture = DispatchFixture::new().await;
+    fixture.dispatch.replica_id = Some(Uuid::new_v4());
+    let upstream_id = Uuid::new_v4();
+    let created = UpstreamStore::create(
+        fixture.storage.as_ref(),
+        UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
+            id: upstream_id,
+            name: format!("antigravity-missing-cfg-{upstream_id}"),
+            kind: UpstreamKind::GeminiOauth,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await
+    .expect("create antigravity upstream");
+    let encrypted = EncryptedOAuthTokens::encrypt(
+        fixture.aead.as_ref(),
+        &OAuthTokenBundle {
+            access_token: "antigravity-old-access".to_owned(),
+            refresh_token: "antigravity-refresh-token".to_owned(),
+            expires_at_unix_secs: 1,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: Some("antigravity-project".to_owned()),
+            oauth_profile: GeminiOAuthProfile::Antigravity,
+            scopes: Vec::new(),
+            never_refresh: false,
+        },
+        created.id.as_bytes(),
+    )
+    .expect("encrypt antigravity bundle");
+    let upstream = UpstreamStore::store_oauth_tokens(
+        fixture.storage.as_ref(),
+        created.id,
+        created.revision,
+        encrypted,
+        false,
+    )
+    .await
+    .expect("store antigravity tokens");
+    let starting_gen = upstream.oauth_token_generation;
+    let lease_key = crate::refresh::oauth_refresh_lease_meta_key(upstream.id);
+
+    let denied_calls = Arc::new(AtomicUsize::new(0));
+    let direct_err = crate::scheduler_dispatch::http::with_denied_token_refresh(
+        denied_calls.clone(),
+        fixture.dispatch.refresh_upstream(upstream.clone()),
+    )
+    .await
+    .expect_err("missing antigravity config must fail before transport");
+    assert!(
+        direct_err
+            .to_string()
+            .contains("oauth_client_not_configured"),
+        "expected oauth_client_not_configured error, got {direct_err}"
+    );
+    assert_eq!(
+        denied_calls.load(Ordering::SeqCst),
+        0,
+        "pre-send missing config failure must not enter HTTP transport"
+    );
+
+    let outcome = fixture
+        .dispatch
+        .dispatch_oauth_refresh(OAuthRefreshJob::new(upstream.id))
+        .await
+        .expect("missing antigravity config returns retry");
+    assert_eq!(
+        outcome,
+        JobOutcome::Retry {
+            delay: Some(std::time::Duration::from_secs(30)),
+        }
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .get_meta_value(&lease_key)
+            .await
+            .expect("read lease meta")
+            .as_deref(),
+        Some(format!("idle:{starting_gen}").as_str()),
+        "pre-send missing config error must release the refresh lease immediately"
+    );
+
+    let now = cc_lb_clock::unix_secs(fixture.clock.now());
+    let reacquired = crate::refresh::try_acquire_oauth_refresh_lease_cancellation_safe(
+        fixture.storage.clone(),
+        fixture.storage.clone(),
+        upstream.id,
+        starting_gen,
+        now,
+    )
+    .await
+    .expect("immediate reacquisition check")
+    .expect("lease must be immediately reacquirable at the same timestamp");
+    crate::refresh::release_oauth_refresh_lease(
+        fixture.storage.as_ref(),
+        upstream.id,
+        &reacquired.token,
+        starting_gen,
+    )
+    .await
+    .expect("release reacquired lease");
+
+    let (token_url, calls, server) = token_server(
+        StatusCode::OK,
+        r#"{"access_token":"antigravity-new-access","refresh_token":"antigravity-new-refresh","token_type":"Bearer","expires_in":3600}"#,
+    )
+    .await;
+    configure_loopback_google(&mut fixture, &token_url, Some(&token_url));
+    let completed = fixture
+        .dispatch
+        .dispatch_oauth_refresh(OAuthRefreshJob::new(upstream.id))
+        .await
+        .expect("configured antigravity refresh succeeds immediately");
+    assert_eq!(completed, JobOutcome::Done);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let refreshed = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
+        .await
+        .expect("load refreshed upstream")
+        .expect("upstream exists");
+    assert_eq!(refreshed.oauth_token_generation, starting_gen + 1);
+    server.abort();
+}
