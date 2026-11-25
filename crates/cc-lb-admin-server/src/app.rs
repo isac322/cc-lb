@@ -90,11 +90,14 @@ pub enum AdminBuildError {
     PgNotifyPoolUnavailable,
     #[error("anthropic org api origin is invalid: {0}")]
     AnthropicOrgOrigin(#[source] url::ParseError),
+    #[error(transparent)]
+    WasmtimeRuntimeInit(#[from] cc_lb_runtime_wasmtime::WasmtimeRuntimeError),
 }
 
 impl AdminApp {
     pub async fn start(self) -> Result<(), AdminBuildError> {
         let listener = TcpListener::bind(self.admin_addr).await?;
+        cc_lb_runtime_sync::warn_if_container_loopback_bind("admin", self.admin_addr);
         tracing::info!(
             admin_addr = %self.admin_addr,
             "starting split cc-lb admin control-plane server",
@@ -418,6 +421,9 @@ async fn build_admin_app_with_storage_inner(
             })?,
         )),
     };
+    let runtime = cc_lb_runtime_sync::wasmtime_builder::build_wasmtime_runtime(
+        &admin_config.runtime.wasmtime,
+    )?;
     let meta = BuildMeta::current();
     let admin_state = AdminState {
         build: AdminBuildInfo {
@@ -437,7 +443,7 @@ async fn build_admin_app_with_storage_inner(
             replica_identity,
         }),
         lazy_refresher: None,
-        runtime: None,
+        runtime: Some(runtime),
         data_dir: Some(data_dir),
         warmup_dialect_dispatcher: None,
         warmup_window_verifier: None,

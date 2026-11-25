@@ -95,7 +95,7 @@ impl WebSocketError {
             .and_then(|extra| extra.response_id.as_deref())
     }
 
-    fn provider_headers(&self) -> &[(String, String)] {
+    pub(crate) fn provider_headers(&self) -> &[(String, String)] {
         self.extra
             .as_deref()
             .map_or(&[], |extra| &extra.provider_headers)

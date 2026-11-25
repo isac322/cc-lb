@@ -26,6 +26,21 @@ const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 /// `refresh_requires_reconnect` treats it as reconnect-required.
 const REJECTED_STATUS_401_REASON: &str = "status_401";
 
+#[derive(Clone)]
+pub struct AnthropicOAuthCachedState {
+    pub upstream_id: Uuid,
+    pub access_token: SecretString,
+    pub expires_at_unix_secs: u64,
+    pub never_refresh: bool,
+    pub oauth_token_generation: u64,
+    pub spec_revision: u64,
+    pub enabled: bool,
+    pub deleted: bool,
+    pub requires_reconnect: bool,
+}
+
+pub type SharedAnthropicOAuthState = Arc<RwLock<AnthropicOAuthCachedState>>;
+
 pub use single_flight::{
     ForcedRefreshGenerations, RefreshLocks, lock_for, new_forced_refresh_generations,
     new_refresh_locks,
@@ -308,6 +323,7 @@ pub struct AnthropicOAuthSignerFactory {
     forced_generations: ForcedRefreshGenerations,
     refresh_upstream_id: Option<Uuid>,
     allow_disabled_upstream: bool,
+    cached_state: Option<SharedAnthropicOAuthState>,
 }
 
 impl AnthropicOAuthSignerFactory {
@@ -327,7 +343,14 @@ impl AnthropicOAuthSignerFactory {
             forced_generations: new_forced_refresh_generations(),
             refresh_upstream_id: None,
             allow_disabled_upstream: false,
+            cached_state: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_cached_state(mut self, cached_state: SharedAnthropicOAuthState) -> Self {
+        self.cached_state = Some(cached_state);
+        self
     }
 
     #[must_use]
@@ -410,6 +433,9 @@ impl LazyRefreshConfigurable for AnthropicOAuthSignerFactory {
 impl ApiKeyAwareSignerFactory for AnthropicOAuthSignerFactory {
     fn with_router_choice(&self, router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {
         let mut factory = self.clone();
+        if factory.upstream_name != router_chosen_upstream_name {
+            factory.cached_state = None;
+        }
         factory.upstream_name = router_chosen_upstream_name;
         Arc::new(factory)
     }
@@ -418,7 +444,50 @@ impl ApiKeyAwareSignerFactory for AnthropicOAuthSignerFactory {
 #[async_trait]
 impl SignerFactory for AnthropicOAuthSignerFactory {
     async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
+        if let Some(cached) = &self.cached_state {
+            let guard = cached
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !guard.deleted
+                && (guard.enabled || self.allow_disabled_upstream)
+                && !guard.requires_reconnect
+                && persisted_token_is_usable(guard.expires_at_unix_secs, self.clock.as_ref())
+            {
+                let upstream_id = self.refresh_upstream_id.unwrap_or(guard.upstream_id);
+                return Ok(Arc::new(PersistedAnthropicOAuthSigner {
+                    access_token: guard.access_token.clone(),
+                    expires_at_unix_secs: guard.expires_at_unix_secs,
+                    never_refresh: guard.never_refresh,
+                    store: self.store.clone(),
+                    aead: self.aead.clone(),
+                    clock: self.clock.clone(),
+                    upstream_id,
+                    refresh_handle: self.refresh_handle.clone(),
+                    refresh_locks: self.refresh_locks.clone(),
+                    forced_generations: self.forced_generations.clone(),
+                    allow_disabled_upstream: self.allow_disabled_upstream,
+                    forced_refresh_generation: None,
+                    cached_state: Some(Arc::clone(cached)),
+                }));
+            }
+        }
         let (record, tokens) = self.load_record_and_tokens().await?;
+        if let Some(cached) = &self.cached_state {
+            let mut guard = cached
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if record.oauth_token_generation >= guard.oauth_token_generation {
+                guard.access_token =
+                    SecretString::new(tokens.access_token.clone().into_boxed_str());
+                guard.expires_at_unix_secs = tokens.expires_at_unix_secs;
+                guard.never_refresh = tokens.never_refresh;
+                guard.oauth_token_generation = record.oauth_token_generation;
+                guard.spec_revision = record.revision;
+                guard.enabled = record.enabled;
+                guard.deleted = record.deleted_at_unix_secs.is_some();
+                guard.requires_reconnect = false;
+            }
+        }
         Ok(Arc::new(PersistedAnthropicOAuthSigner {
             access_token: SecretString::new(tokens.access_token.into_boxed_str()),
             expires_at_unix_secs: tokens.expires_at_unix_secs,
@@ -432,6 +501,7 @@ impl SignerFactory for AnthropicOAuthSignerFactory {
             forced_generations: self.forced_generations.clone(),
             allow_disabled_upstream: self.allow_disabled_upstream,
             forced_refresh_generation: None,
+            cached_state: self.cached_state.clone(),
         }))
     }
 }
@@ -450,6 +520,7 @@ struct PersistedAnthropicOAuthSigner {
     forced_generations: ForcedRefreshGenerations,
     allow_disabled_upstream: bool,
     forced_refresh_generation: Option<u64>,
+    cached_state: Option<SharedAnthropicOAuthState>,
 }
 
 impl fmt::Debug for PersistedAnthropicOAuthSigner {
@@ -482,6 +553,7 @@ impl PersistedAnthropicOAuthSigner {
 
         let (oauth_token_generation, current) = self.load_current_tokens().await?;
         if self.storage_has_newer_usable_token(&current) {
+            self.sync_cached_state(oauth_token_generation, &current);
             let forced = self
                 .forced_generations
                 .get(&self.upstream_id)
@@ -519,6 +591,7 @@ impl PersistedAnthropicOAuthSigner {
 
         let (refreshed_generation, refreshed) = self.load_current_tokens().await?;
         if persisted_token_is_usable(refreshed.expires_at_unix_secs, self.clock.as_ref()) {
+            self.sync_cached_state(refreshed_generation, &refreshed);
             self.forced_generations
                 .insert(self.upstream_id, refreshed_generation);
             Ok((refreshed, Some(refreshed_generation)))
@@ -526,6 +599,22 @@ impl PersistedAnthropicOAuthSigner {
             Err(SignerError::ExpiredToken {
                 reason: "oauth access token expired".to_owned(),
             })
+        }
+    }
+
+    fn sync_cached_state(&self, oauth_token_generation: u64, tokens: &OAuthTokenBundle) {
+        if let Some(cached) = &self.cached_state {
+            let mut guard = cached
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if oauth_token_generation >= guard.oauth_token_generation {
+                guard.access_token =
+                    SecretString::new(tokens.access_token.clone().into_boxed_str());
+                guard.expires_at_unix_secs = tokens.expires_at_unix_secs;
+                guard.never_refresh = tokens.never_refresh;
+                guard.oauth_token_generation = oauth_token_generation;
+                guard.requires_reconnect = false;
+            }
         }
     }
 
@@ -568,6 +657,14 @@ impl PersistedAnthropicOAuthSigner {
                 "failed to record reconnect-required state for rejected oauth credential",
             ),
         }
+        if let Some(cached) = &self.cached_state {
+            let mut guard = cached
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guard.oauth_token_generation == oauth_token_generation {
+                guard.requires_reconnect = true;
+            }
+        }
     }
 
     fn storage_has_newer_usable_token(&self, current: &OAuthTokenBundle) -> bool {
@@ -593,6 +690,7 @@ impl PersistedAnthropicOAuthSigner {
             forced_generations: self.forced_generations.clone(),
             allow_disabled_upstream: self.allow_disabled_upstream,
             forced_refresh_generation,
+            cached_state: self.cached_state.clone(),
         }
     }
 

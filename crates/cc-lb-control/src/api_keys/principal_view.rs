@@ -76,6 +76,12 @@ pub enum DialectCache {
     Explicit(ShapePluginCache),
     /// Complete dialects, including native request shaping for response-only plugins.
     PerUpstream(HashMap<Uuid, Arc<dyn UpstreamDialect>>),
+    /// Shape plugin chain entry failed admission or instantiation; requests for
+    /// `providers` fail closed while unaffected providers continue native shaping.
+    InstantiationFailed {
+        reason: String,
+        providers: Vec<Provider>,
+    },
 }
 
 #[derive(Clone)]
@@ -297,9 +303,23 @@ impl PrincipalSpecCached {
 
     pub fn resolved_dialect(&self, upstream_id: Uuid) -> Option<&Arc<dyn UpstreamDialect>> {
         match &self.dialect {
-            DialectCache::Inherit => None,
+            DialectCache::Inherit | DialectCache::InstantiationFailed { .. } => None,
             DialectCache::Explicit(cache) => Some(&cache.dialect),
             DialectCache::PerUpstream(dialects) => dialects.get(&upstream_id),
+        }
+    }
+
+    pub fn dialect_instantiation_error(&self, provider: Provider) -> Option<&str> {
+        match &self.dialect {
+            DialectCache::InstantiationFailed { reason, providers }
+                if providers.contains(&provider) =>
+            {
+                Some(reason.as_str())
+            }
+            DialectCache::Inherit
+            | DialectCache::Explicit(_)
+            | DialectCache::PerUpstream(_)
+            | DialectCache::InstantiationFailed { .. } => None,
         }
     }
 

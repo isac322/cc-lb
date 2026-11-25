@@ -32,3 +32,33 @@ pub enum WasmtimeRuntimeError {
     #[error("plugin runtime saturated: {resource} limit reached")]
     PoolSaturated { resource: &'static str },
 }
+
+impl WasmtimeRuntimeError {
+    /// Returns `true` when this error represents a guest preemption via
+    /// Wasmtime epoch interruption (`Trap::Interrupt`).
+    pub fn is_epoch_interrupt(&self) -> bool {
+        match self {
+            Self::GuestTrap { source, .. } | Self::InstantiateFailed(source) => {
+                source.chain().any(|cause| {
+                    cause.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::Interrupt)
+                })
+            }
+            Self::ProbeFailed { reason, .. } => {
+                (reason.starts_with("guest trap during ")
+                    || reason.starts_with("failed to instantiate module:"))
+                    && reason.contains("wasm trap: interrupt")
+            }
+            _ => false,
+        }
+    }
+
+    /// Returns `true` when this error represents transient store-budget or
+    /// pooling-allocator saturation, including saturation wrapped in a probe error.
+    pub fn is_pool_saturated(&self) -> bool {
+        match self {
+            Self::PoolSaturated { .. } => true,
+            Self::ProbeFailed { reason, .. } => reason.starts_with("plugin runtime saturated:"),
+            _ => false,
+        }
+    }
+}

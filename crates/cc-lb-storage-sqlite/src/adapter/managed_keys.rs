@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use cc_lb_clock::{Clock, unix_secs};
 use cc_lb_storage_api::{
     ApiKeyMutation, IssueParams, KeyStatus, Limit, ManagedKeyStore, StorageError, StorageResult,
-    StoredApiKeyRecord, validate_identifier,
+    StoredApiKeyRecord, validate_identifier, validate_limits,
 };
 use sqlx::{Row, sqlite::SqliteRow};
 
@@ -24,6 +24,7 @@ impl ManagedKeyStore for SqliteStorage {
         if let Some(description) = &params.description {
             validate_identifier("description", description)?;
         }
+        validate_limits("limit_overrides", &params.limit_overrides)?;
 
         let record = StoredApiKeyRecord {
             label: params.label,
@@ -107,6 +108,9 @@ impl ManagedKeyStore for SqliteStorage {
     ) -> StorageResult<()> {
         validate_identifier("principal_id", principal_id)?;
         validate_identifier("key_id", key_id)?;
+        if let Some(limits) = mutation.limit_overrides.as_deref() {
+            validate_limits("limit_overrides", limits)?;
+        }
 
         let Some(mut record) = self.get(principal_id, key_id).await? else {
             return Ok(());

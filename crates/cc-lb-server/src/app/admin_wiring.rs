@@ -14,16 +14,19 @@ use cc_lb_admin::{
 use cc_lb_aead::AeadService;
 use cc_lb_clock::ClockHandle;
 use cc_lb_config::Config;
-use cc_lb_control::{DynamicView, PromptCacheObservationSinkLike};
+use cc_lb_control::{DynamicView, PromptCacheObservationSinkLike, UpstreamRateLimitCache};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle as _;
 use cc_lb_storage_api::{ManagedKeyStore, Storage};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::rt::TokioExecutor;
+use parking_lot::RwLock;
 
 use crate::admin_ports::{ServerSubscriptionQuotaIngestionPort, ServerWarmupPort};
 use crate::build_meta::BuildMeta;
-use crate::dynamic_view_builder::{Stores as DynamicStores, build_dynamic_view};
+use crate::dynamic_view_builder::{
+    Stores as DynamicStores, build_dynamic_view_with_rate_limit_cache,
+};
 use crate::refresh::{LazyRefreshClaimGuard, LazyRefresher};
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
@@ -224,6 +227,7 @@ async fn build_app_with_storage_inner(
             .config
             .subscription_quota
             .routing_max_staleness_secs,
+        upstream_rate_limit_cache: Arc::clone(&core.dynamic_view.load().upstream_rate_limit_cache),
         clock: clock.clone(),
         gemini_config: core.config.oauth.gemini.clone(),
         antigravity_config: core.config.oauth.antigravity.clone(),
@@ -479,6 +483,7 @@ struct ServerDynamicViewRebinder {
     prompt_cache_grace_margin_secs: u64,
     prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
     subscription_quota_routing_max_staleness_secs: u64,
+    upstream_rate_limit_cache: Arc<RwLock<UpstreamRateLimitCache>>,
     clock: ClockHandle,
     gemini_config: Option<cc_lb_config::GeminiOAuthConfig>,
     antigravity_config: Option<cc_lb_config::AntigravityOAuthConfig>,
@@ -490,7 +495,7 @@ impl DynamicViewRebinder for ServerDynamicViewRebinder {
         &self,
         current_generation: u64,
     ) -> anyhow::Result<Arc<DynamicView>> {
-        Ok(build_dynamic_view(
+        Ok(build_dynamic_view_with_rate_limit_cache(
             &self.stores,
             self.gemini_config.as_ref(),
             self.antigravity_config.as_ref(),
@@ -504,6 +509,7 @@ impl DynamicViewRebinder for ServerDynamicViewRebinder {
             self.prompt_cache_observation_sink.clone(),
             self.subscription_quota_routing_max_staleness_secs,
             self.clock.clone(),
+            Arc::clone(&self.upstream_rate_limit_cache),
         )
         .await?)
     }

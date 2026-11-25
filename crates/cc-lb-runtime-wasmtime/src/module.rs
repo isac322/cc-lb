@@ -105,8 +105,33 @@ pub fn admit_wasm(
     wasm_bytes: &[u8],
     config: &HotEngineConfig,
 ) -> Result<(Arc<wasmtime::InstancePre<HostState>>, ModuleInspection), WasmtimeRuntimeError> {
+    admit_wasm_with_deadline(
+        engine,
+        linker,
+        kind,
+        wasm_bytes,
+        config,
+        crate::epoch::DEFAULT_EPOCH_DEADLINE_TICKS,
+    )
+}
+
+pub(crate) fn admit_wasm_with_deadline(
+    engine: &Engine,
+    linker: &Linker<HostState>,
+    kind: HookKind,
+    wasm_bytes: &[u8],
+    config: &HotEngineConfig,
+    epoch_deadline_ticks: u64,
+) -> Result<(Arc<wasmtime::InstancePre<HostState>>, ModuleInspection), WasmtimeRuntimeError> {
     let inspection = inspect_wasm(kind, wasm_bytes)?;
-    admit_inspected_wasm(engine, linker, wasm_bytes, config, inspection)
+    admit_inspected_wasm(
+        engine,
+        linker,
+        wasm_bytes,
+        config,
+        inspection,
+        epoch_deadline_ticks,
+    )
 }
 
 /// Compile and probe every metadata-declared hook without selecting a slot.
@@ -116,8 +141,31 @@ pub fn admit_wasm_agnostic(
     wasm_bytes: &[u8],
     config: &HotEngineConfig,
 ) -> Result<(Arc<wasmtime::InstancePre<HostState>>, ModuleInspection), WasmtimeRuntimeError> {
+    admit_wasm_agnostic_with_deadline(
+        engine,
+        linker,
+        wasm_bytes,
+        config,
+        crate::epoch::DEFAULT_EPOCH_DEADLINE_TICKS,
+    )
+}
+
+pub(crate) fn admit_wasm_agnostic_with_deadline(
+    engine: &Engine,
+    linker: &Linker<HostState>,
+    wasm_bytes: &[u8],
+    config: &HotEngineConfig,
+    epoch_deadline_ticks: u64,
+) -> Result<(Arc<wasmtime::InstancePre<HostState>>, ModuleInspection), WasmtimeRuntimeError> {
     let inspection = inspect_wasm_agnostic(wasm_bytes)?;
-    admit_inspected_wasm(engine, linker, wasm_bytes, config, inspection)
+    admit_inspected_wasm(
+        engine,
+        linker,
+        wasm_bytes,
+        config,
+        inspection,
+        epoch_deadline_ticks,
+    )
 }
 
 fn admit_inspected_wasm(
@@ -126,6 +174,7 @@ fn admit_inspected_wasm(
     wasm_bytes: &[u8],
     config: &HotEngineConfig,
     inspection: ModuleInspection,
+    epoch_deadline_ticks: u64,
 ) -> Result<(Arc<wasmtime::InstancePre<HostState>>, ModuleInspection), WasmtimeRuntimeError> {
     let content_hash = compute_content_hash(engine, config, wasm_bytes);
     let compiled_modules = crate::compiled_cache::process_wide_compiled_module_cache();
@@ -149,6 +198,7 @@ fn admit_inspected_wasm(
             provider,
             &inspection.metadata,
             config.memory_max_pages,
+            epoch_deadline_ticks,
         )?;
     }
 

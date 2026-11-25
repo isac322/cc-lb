@@ -368,6 +368,18 @@ impl PluginRegistryStore for PostgresStorage {
                 .map_err(map_sqlx_error)?;
             result.rows_affected() > 0
         };
+        if removed {
+            use std::fmt::Write as _;
+            let mut sha_hex = String::with_capacity(64);
+            for byte in sha256 {
+                let _ = write!(sha_hex, "{byte:02x}");
+            }
+            sqlx::query("SELECT pg_notify('cclb_plugin_changed', $1)")
+                .bind(sha_hex)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+        }
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(removed)
     }
@@ -376,6 +388,7 @@ impl PluginRegistryStore for PostgresStorage {
         &self,
         input: PluginChainEntryInput,
     ) -> StorageResult<PluginChainEntry> {
+        cc_lb_storage_api::validate_plugin_chain_config(&input.config)?;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let sha: Vec<u8> =
             sqlx::query_scalar("SELECT sha256 FROM wasm_registry_v2 WHERE id = $1 FOR UPDATE")

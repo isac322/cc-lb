@@ -605,6 +605,65 @@ async fn rate_limits_uploads_via_shared_audit_store() {
     assert_eq!(value["error"], "rate_limited");
 }
 
+#[tokio::test]
+async fn upload_overwrites_corrupt_disk_cache_atomically() {
+    use axum::body::Body;
+    use axum::http::{Method, Request, header};
+    use sha2::{Digest, Sha256};
+    use std::sync::Arc;
+    use tower::ServiceExt as _;
+
+    let server = spawn_admin_server().await;
+    let wasm = filter_wasm_valid();
+    let sha256_hex = hex::encode(Sha256::digest(&wasm));
+    let cache_dir = server
+        ._dir
+        .path()
+        .join("plugins")
+        .join("wasm")
+        .join("cache");
+    let tmp_dir = cache_dir.join(".tmp");
+    std::fs::create_dir_all(&tmp_dir).expect("create cache dir");
+    let cache_path = cache_dir.join(format!("{sha256_hex}.wasm"));
+    std::fs::write(&cache_path, b"corrupted pre-existing cache bytes")
+        .expect("seed corrupt cache file");
+
+    let mut state = build_admin_state(&server).await;
+    let mut config = (*state.config).clone();
+    config.runtime.data_dir = Some(server._dir.path().to_path_buf());
+    state.config = Arc::new(config);
+    let body = multipart_body(&[
+        ("original_filename", b"atomic-overwrite.wasm"),
+        ("bytes", &wasm),
+    ]);
+    let response = cc_lb_admin::router(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/admin/v1/plugins/wasm")
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={BOUNDARY}"),
+                )
+                .body(Body::from(body))
+                .expect("request builds"),
+        )
+        .await
+        .expect("admin request succeeds");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        std::fs::read(&cache_path).expect("read healed cache file"),
+        wasm,
+        "upload materialize_cache must atomically replace corrupt cache file"
+    );
+    let remaining_tmp = std::fs::read_dir(&tmp_dir).expect("read tmp dir").count();
+    assert_eq!(
+        remaining_tmp, 0,
+        "no leftover .tmp files after atomic rename"
+    );
+}
+
 // === server hookup that bypasses the private AdminClient internals ===
 
 async fn upload(

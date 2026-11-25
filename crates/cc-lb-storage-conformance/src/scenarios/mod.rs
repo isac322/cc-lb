@@ -16,6 +16,7 @@ pub mod storage_roundtrips;
 pub mod storage_roundtrips_cache_split;
 pub mod storage_roundtrips_latency_stages;
 pub mod storage_roundtrips_upstream_diagnostics;
+pub mod thread_sticky_subagent_store;
 pub mod upstream_api_key_store;
 pub mod upstream_rate_limit_store;
 pub mod upstream_store;

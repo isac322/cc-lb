@@ -15,7 +15,7 @@
 //!   * `memory_max_pages` outside `1..=65_536` is rejected (65_536 =
 //!     wasm32 memory cap of 4 GiB; 0 pages is nonsensical).
 
-use cc_lb_config::{Config, WasmtimeAllocationStrategy};
+use cc_lb_config::{Config, ShapeOriginPolicy, WasmtimeAllocationStrategy};
 
 fn parse(toml_str: &str) -> Config {
     toml::from_str::<Config>(toml_str).expect("parse succeeds")
@@ -28,6 +28,11 @@ fn default_config_uses_ondemand_without_memory_overrides() {
         cfg.runtime.wasmtime.allocation_strategy,
         WasmtimeAllocationStrategy::OnDemand,
     );
+    assert_eq!(
+        cfg.runtime.wasmtime.shape_origin_policy,
+        ShapeOriginPolicy::SelectedUpstreamOrigin,
+    );
+    assert!(cfg.runtime.wasmtime.execution_timeout_ms.is_none());
     assert!(
         cfg.runtime.wasmtime.memory_max_pages.is_none(),
         "no default override — engine default is authoritative",
@@ -200,4 +205,39 @@ memory_max_pages = 65537
         err.to_string().contains("memory_max_pages"),
         "error mentions the offending field: {err}",
     );
+}
+
+#[test]
+fn wasmtime_shape_origin_unrestricted_is_explicit_opt_in_and_execution_timeout_validates() {
+    let unrestricted = parse(
+        r#"
+[runtime.wasmtime]
+shape_origin_policy = "unrestricted"
+execution_timeout_ms = 500
+"#,
+    );
+    unrestricted
+        .validate()
+        .expect("explicit unrestricted origin and 500ms timeout are valid");
+    assert_eq!(
+        unrestricted.runtime.wasmtime.shape_origin_policy,
+        ShapeOriginPolicy::Unrestricted,
+    );
+    assert_eq!(
+        unrestricted.runtime.wasmtime.execution_timeout_ms,
+        Some(500)
+    );
+
+    for bad in [9, 30_001] {
+        let cfg = parse(&format!(
+            "[runtime.wasmtime]\nexecution_timeout_ms = {bad}\n"
+        ));
+        let err = cfg
+            .validate()
+            .expect_err("out-of-range execution_timeout_ms must be rejected");
+        assert!(
+            err.to_string().contains("execution_timeout_ms"),
+            "error mentions execution_timeout_ms: {err}",
+        );
+    }
 }

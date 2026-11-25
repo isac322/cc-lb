@@ -76,7 +76,7 @@ pub struct HotEngineConfig {
     /// `Config::memory_guard_size`.
     pub memory_guard_bytes: u64,
     /// Runtime policy: whether shape plugins may cross origins.
-    /// Default preserves pre-Sprint-3 unrestricted behaviour.
+    /// Default enforces [`crate::policy::ShapeOriginPolicy::SelectedUpstreamOrigin`].
     pub shape_origin_policy: crate::policy::ShapeOriginPolicy,
     /// Wire I/O bounds — see [`crate::policy::PluginWireBounds`].
     pub wire_bounds: crate::policy::PluginWireBounds,
@@ -101,7 +101,7 @@ impl Default for HotEngineConfig {
             pool_total_core_instances: DEFAULT_POOL_TOTAL_CORE_INSTANCES,
             memory_reservation_bytes: DEFAULT_MEMORY_RESERVATION_BYTES,
             memory_guard_bytes: DEFAULT_MEMORY_GUARD_BYTES,
-            shape_origin_policy: crate::policy::ShapeOriginPolicy::Unrestricted,
+            shape_origin_policy: crate::policy::ShapeOriginPolicy::SelectedUpstreamOrigin,
             wire_bounds: crate::policy::PluginWireBounds::default(),
             cookie_redaction: false,
         }
@@ -142,6 +142,7 @@ pub fn build_hot_engine(cfg: &HotEngineConfig) -> Result<Engine, WasmtimeRuntime
         .wasm_tail_call(false)
         .wasm_relaxed_simd(false)
         .signals_based_traps(true)
+        .epoch_interruption(true)
         .memory_reservation(cfg.memory_reservation_bytes)
         .memory_guard_size(cfg.memory_guard_bytes)
         .memory_init_cow(true)
@@ -174,7 +175,10 @@ pub fn build_hot_engine(cfg: &HotEngineConfig) -> Result<Engine, WasmtimeRuntime
         }
     }
 
-    Engine::new(&wcfg).map_err(|e| WasmtimeRuntimeError::EngineInit(anyhow::Error::from(e)))
+    let engine =
+        Engine::new(&wcfg).map_err(|e| WasmtimeRuntimeError::EngineInit(anyhow::Error::from(e)))?;
+    crate::epoch::register_engine(&engine);
+    Ok(engine)
 }
 
 #[cfg(test)]

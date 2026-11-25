@@ -4,7 +4,7 @@ use cc_lb_domain::TerminalStrategy;
 use cc_lb_storage_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, CacheKeepaliveConfig, PrincipalCreate, PrincipalKind,
     PrincipalRecord, PrincipalStore, PrincipalUpdate, StorageError, StorageResult,
-    validate_identifier,
+    validate_identifier, validate_limits,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -27,6 +27,7 @@ impl PrincipalStore for PostgresStorage {
         now_unix_secs: u64,
     ) -> StorageResult<PrincipalRecord> {
         validate_identifier("principal.name", &input.name)?;
+        validate_limits("default_limits", &input.default_limits)?;
         let id = Uuid::new_v4();
         let now = unix_secs_to_datetime(now_unix_secs, "principal.now_unix_secs")?;
         let allowed_models = serde_json::to_value(&input.allowed_models)?;
@@ -122,6 +123,9 @@ impl PrincipalStore for PostgresStorage {
     ) -> StorageResult<Option<PrincipalRecord>> {
         if let Some(name) = update.name.as_deref() {
             validate_identifier("principal.name", name)?;
+        }
+        if let Some(limits) = update.default_limits.as_deref() {
+            validate_limits("default_limits", limits)?;
         }
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let Some(row) = sqlx::query(

@@ -1,10 +1,12 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use backon::{BackoffBuilder as _, ExponentialBuilder};
 use cc_lb_storage_api::{
-    ChangeChannel, ChangeEvent, RuntimeChangeNotifier, StorageError, StorageResult,
+    ChangeChannel, ChangeEvent, NotifierConnectionState, RuntimeChangeNotifier, StorageError,
+    StorageResult,
 };
 use sqlx::postgres::PgListener;
 use tokio::time::sleep;
@@ -34,6 +36,10 @@ fn reconnect_backoff() -> backon::ExponentialBackoff {
 impl RuntimeChangeNotifier for PostgresStorage {
     async fn subscribe(&self) -> StorageResult<tokio::sync::broadcast::Receiver<ChangeEvent>> {
         Ok(self.change_tx.subscribe())
+    }
+
+    fn connection_state(&self) -> Option<Arc<NotifierConnectionState>> {
+        Some(Arc::clone(&self.notifier_connection_state))
     }
 
     async fn run(&self, cancel: CancellationToken) -> StorageResult<()> {
@@ -94,6 +100,8 @@ impl PostgresStorage {
             )
             .await?;
         *established = true;
+        self.notifier_connection_state.mark_connected();
+        let _disconnect_guard = DisconnectGuard(&self.notifier_connection_state);
         // NOTIFY is not durable. Rebuild from storage after every LISTEN
         // establishment so changes committed during startup or reconnect are
         // observed even when their notification arrived before this session.
@@ -153,5 +161,13 @@ impl<'a> RunGuard<'a> {
 impl Drop for RunGuard<'_> {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Release);
+    }
+}
+
+struct DisconnectGuard<'a>(&'a NotifierConnectionState);
+
+impl Drop for DisconnectGuard<'_> {
+    fn drop(&mut self) {
+        self.0.mark_disconnected();
     }
 }

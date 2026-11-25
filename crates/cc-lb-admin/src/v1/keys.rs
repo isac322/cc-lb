@@ -13,8 +13,7 @@ use cc_lb_storage_api::{KeyStatus, RequestEventKeyLastUsedQuery, StorageError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::add_dynamic_rebind_headers;
-use super::post_commit::{PostCommitAborted, complete_after_commit, rebuild_after_audit_failure};
+use super::post_commit::{PostCommitAborted, complete_after_commit};
 use crate::audit::{AdminAuditEvent, record_admin_audit};
 use crate::{
     AdminState,
@@ -142,7 +141,6 @@ async fn issue_key(
                 .await
                 .is_err()
                 {
-                    rebuild_after_audit_failure(&state).await;
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({ "error": "audit_write_failed" })),
@@ -155,9 +153,7 @@ async fn issue_key(
                     plaintext_key: plaintext.expose().to_string(),
                     issued_at_unix_secs: record.issued_at_unix_secs,
                 };
-                let mut http_response = (StatusCode::CREATED, Json(response)).into_response();
-                add_dynamic_rebind_headers(&mut http_response, &state).await;
-                http_response
+                (StatusCode::CREATED, Json(response)).into_response()
             };
             match complete_after_commit(continuation).await {
                 Ok(response) => response,
@@ -385,7 +381,6 @@ async fn revoke_key(
                         action = "principal_key_revoke",
                         "admin audit write failed"
                     );
-                    rebuild_after_audit_failure(&state).await;
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({ "error": "audit_write_failed" })),
@@ -396,9 +391,7 @@ async fn revoke_key(
                     key_id,
                     revoked_at_unix_secs: now,
                 };
-                let mut http_response = Json(response).into_response();
-                add_dynamic_rebind_headers(&mut http_response, &state).await;
-                http_response
+                Json(response).into_response()
             };
             match complete_after_commit(continuation).await {
                 Ok(response) => response,

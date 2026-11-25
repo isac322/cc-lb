@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::PluginSlotKind;
+use crate::{PluginSlotKind, StorageError, StorageResult};
 
 pub use cc_lb_domain::{BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_NAME};
 
@@ -150,6 +150,134 @@ pub struct PluginChainEntryInput {
     pub order: i64,
     pub wasm_registry_id: Uuid,
     pub config: Value,
+}
+
+/// Maximum number of top-level keys forwarded from a plugin chain entry's
+/// `config` object into per-request WASM `principal.claims`.
+pub const MAX_PLUGIN_CHAIN_CONFIG_CLAIMS: usize = 64;
+/// Maximum byte length of a single plugin chain config claim key.
+pub const MAX_PLUGIN_CHAIN_CLAIM_KEY_BYTES: usize = 256;
+/// Maximum projected byte length of a single plugin chain config claim value.
+pub const MAX_PLUGIN_CHAIN_CLAIM_VALUE_BYTES: usize = 16 * 1024;
+/// Maximum aggregate byte length (keys + projected values) for all claims in
+/// one plugin chain entry config.
+pub const MAX_PLUGIN_CHAIN_CONFIG_TOTAL_BYTES: usize = 32 * 1024;
+
+/// Serializes one JSON claim value into deterministic claim bytes.
+///
+/// Canonical sorted-key serialization MUST stay on `serde_json` (ADR 0002).
+fn encode_plugin_claim_value(value: &Value) -> Vec<u8> {
+    match value {
+        Value::String(s) => s.as_bytes().to_vec(),
+        Value::Number(n) => n.to_string().into_bytes(),
+        Value::Bool(b) => {
+            if *b {
+                b"true".to_vec()
+            } else {
+                b"false".to_vec()
+            }
+        }
+        Value::Null => b"null".to_vec(),
+        Value::Array(_) | Value::Object(_) => serde_json::to_vec(value).unwrap_or_default(),
+    }
+}
+
+/// Validates that a plugin chain entry's `config` stays within bounded claim
+/// count and byte budgets before persisting into storage.
+pub fn validate_plugin_chain_config(config: &Value) -> StorageResult<()> {
+    let invalid = |reason: String| StorageError::InvalidInput {
+        field: "config".to_owned(),
+        reason,
+    };
+    let Some(object) = config.as_object() else {
+        let encoded_len = serde_json::to_vec(config).map_or(0, |bytes| bytes.len());
+        if encoded_len > MAX_PLUGIN_CHAIN_CONFIG_TOTAL_BYTES {
+            return Err(invalid(format!(
+                "plugin chain config exceeds maximum {MAX_PLUGIN_CHAIN_CONFIG_TOTAL_BYTES} bytes"
+            )));
+        }
+        return Ok(());
+    };
+    if object.len() > MAX_PLUGIN_CHAIN_CONFIG_CLAIMS {
+        return Err(invalid(format!(
+            "plugin chain config has {} keys, exceeding maximum {MAX_PLUGIN_CHAIN_CONFIG_CLAIMS}",
+            object.len()
+        )));
+    }
+    let mut total_bytes = 0usize;
+    for (key, value) in object {
+        if key.len() > MAX_PLUGIN_CHAIN_CLAIM_KEY_BYTES {
+            return Err(invalid(format!(
+                "plugin chain claim key exceeds maximum {MAX_PLUGIN_CHAIN_CLAIM_KEY_BYTES} bytes"
+            )));
+        }
+        let encoded = encode_plugin_claim_value(value);
+        if encoded.len() > MAX_PLUGIN_CHAIN_CLAIM_VALUE_BYTES {
+            return Err(invalid(format!(
+                "plugin chain claim value for '{key}' is {} bytes, exceeding maximum {MAX_PLUGIN_CHAIN_CLAIM_VALUE_BYTES}",
+                encoded.len()
+            )));
+        }
+        total_bytes = total_bytes
+            .saturating_add(key.len())
+            .saturating_add(encoded.len());
+        if total_bytes > MAX_PLUGIN_CHAIN_CONFIG_TOTAL_BYTES {
+            return Err(invalid(format!(
+                "plugin chain config projected claims exceed maximum {MAX_PLUGIN_CHAIN_CONFIG_TOTAL_BYTES} bytes"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Deterministically projects a `PluginChainEntry.config` JSON object into
+/// bounded `(key, value_bytes)` pairs for WASM `principal.claims`.
+pub fn project_plugin_config_claims_bounded(config: &Value) -> Vec<(String, Vec<u8>)> {
+    let Some(object) = config.as_object() else {
+        return Vec::new();
+    };
+    let mut claims = Vec::with_capacity(object.len().min(MAX_PLUGIN_CHAIN_CONFIG_CLAIMS));
+    let mut total_bytes = 0usize;
+    for (key, value) in object {
+        if claims.len() >= MAX_PLUGIN_CHAIN_CONFIG_CLAIMS {
+            tracing::warn!(
+                max_claims = MAX_PLUGIN_CHAIN_CONFIG_CLAIMS,
+                "truncating plugin chain config claims beyond claim count bound"
+            );
+            break;
+        }
+        if key.len() > MAX_PLUGIN_CHAIN_CLAIM_KEY_BYTES {
+            tracing::warn!(
+                key_bytes = key.len(),
+                max_key_bytes = MAX_PLUGIN_CHAIN_CLAIM_KEY_BYTES,
+                "skipping oversized plugin chain claim key"
+            );
+            continue;
+        }
+        let bytes = encode_plugin_claim_value(value);
+        if bytes.len() > MAX_PLUGIN_CHAIN_CLAIM_VALUE_BYTES {
+            tracing::warn!(
+                key = key.as_str(),
+                value_bytes = bytes.len(),
+                max_value_bytes = MAX_PLUGIN_CHAIN_CLAIM_VALUE_BYTES,
+                "skipping oversized plugin chain claim value"
+            );
+            continue;
+        }
+        let next_total = total_bytes
+            .saturating_add(key.len())
+            .saturating_add(bytes.len());
+        if next_total > MAX_PLUGIN_CHAIN_CONFIG_TOTAL_BYTES {
+            tracing::warn!(
+                max_total_bytes = MAX_PLUGIN_CHAIN_CONFIG_TOTAL_BYTES,
+                "truncating plugin chain config claims beyond aggregate byte bound"
+            );
+            break;
+        }
+        total_bytes = next_total;
+        claims.push((key.clone(), bytes));
+    }
+    claims
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

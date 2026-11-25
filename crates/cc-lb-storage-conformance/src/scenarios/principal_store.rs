@@ -38,7 +38,8 @@ where
     soft_delete_excludes_default_list(Arc::clone(&backend)).await?;
     recreate_same_name_after_soft_delete_creates_new_principal(Arc::clone(&backend)).await?;
     soft_delete_cascades_plugin_chains(Arc::clone(&backend)).await?;
-    validate_identifier_rejects_invalid_name(backend).await?;
+    validate_identifier_rejects_invalid_name(Arc::clone(&backend)).await?;
+    validate_limits_rejects_invalid_input(backend).await?;
     Ok(())
 }
 
@@ -619,4 +620,110 @@ where
         );
     }
     Ok(())
+}
+
+async fn validate_limits_rejects_invalid_input<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+{
+    with_fixture(backend, |storage| async move {
+        let mut bad_zero = principal_create(90);
+        bad_zero.default_limits = vec![cc_lb_storage_api::Limit {
+            kind: cc_lb_storage_api::LimitKind::Requests,
+            window_secs: 0,
+            cap_micros: 10,
+        }];
+        let err = match PrincipalStore::create(&*storage, bad_zero, 1_800_000_000).await {
+            Ok(_) => return Err(anyhow::anyhow!("zero window_secs must be rejected")),
+            Err(err) => err,
+        };
+        ensure!(
+            matches!(
+                err,
+                cc_lb_storage_api::StorageError::InvalidInput { ref field, .. }
+                if field == "default_limits[0].window_secs"
+            ),
+            "expected InvalidInput for default_limits[0].window_secs, got {err:?}"
+        );
+
+        let mut bad_over_max = principal_create(91);
+        bad_over_max.default_limits = vec![cc_lb_storage_api::Limit {
+            kind: cc_lb_storage_api::LimitKind::Requests,
+            window_secs: cc_lb_storage_api::MAX_LIMIT_WINDOW_SECS + 1,
+            cap_micros: 10,
+        }];
+        let err = match PrincipalStore::create(&*storage, bad_over_max, 1_800_000_000).await {
+            Ok(_) => return Err(anyhow::anyhow!("over-max window_secs must be rejected")),
+            Err(err) => err,
+        };
+        ensure!(
+            matches!(
+                err,
+                cc_lb_storage_api::StorageError::InvalidInput { ref field, .. }
+                if field == "default_limits[0].window_secs"
+            ),
+            "expected InvalidInput for default_limits[0].window_secs, got {err:?}"
+        );
+
+        let mut bad_cap = principal_create(92);
+        bad_cap.default_limits = vec![cc_lb_storage_api::Limit {
+            kind: cc_lb_storage_api::LimitKind::CostUsd,
+            window_secs: 60,
+            cap_micros: -1,
+        }];
+        let err = match PrincipalStore::create(&*storage, bad_cap, 1_800_000_000).await {
+            Ok(_) => return Err(anyhow::anyhow!("negative cap_micros must be rejected")),
+            Err(err) => err,
+        };
+        ensure!(
+            matches!(
+                err,
+                cc_lb_storage_api::StorageError::InvalidInput { ref field, .. }
+                if field == "default_limits[0].cap_micros"
+            ),
+            "expected InvalidInput for default_limits[0].cap_micros, got {err:?}"
+        );
+
+        let mut valid_max = principal_create(93);
+        valid_max.default_limits = vec![cc_lb_storage_api::Limit {
+            kind: cc_lb_storage_api::LimitKind::Requests,
+            window_secs: cc_lb_storage_api::MAX_LIMIT_WINDOW_SECS,
+            cap_micros: 10,
+        }];
+        let created = PrincipalStore::create(&*storage, valid_max, 1_800_000_000).await?;
+
+        let err = match PrincipalStore::update(
+            &*storage,
+            created.id,
+            created.revision,
+            cc_lb_storage_api::PrincipalUpdate {
+                default_limits: Some(vec![cc_lb_storage_api::Limit {
+                    kind: cc_lb_storage_api::LimitKind::Requests,
+                    window_secs: cc_lb_storage_api::MAX_LIMIT_WINDOW_SECS + 1,
+                    cap_micros: 10,
+                }]),
+                ..cc_lb_storage_api::PrincipalUpdate::default()
+            },
+            1_800_000_001,
+        )
+        .await
+        {
+            Ok(_) => {
+                return Err(anyhow::anyhow!(
+                    "update with invalid limits must be rejected"
+                ));
+            }
+            Err(err) => err,
+        };
+        ensure!(
+            matches!(
+                err,
+                cc_lb_storage_api::StorageError::InvalidInput { ref field, .. }
+                if field == "default_limits[0].window_secs"
+            ),
+            "expected InvalidInput for default_limits[0].window_secs on update, got {err:?}"
+        );
+        Ok(())
+    })
+    .await
 }

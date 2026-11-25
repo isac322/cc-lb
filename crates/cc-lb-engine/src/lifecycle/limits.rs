@@ -362,7 +362,8 @@ pub(super) fn limit_rejection_response(
         RejectReason::RequestsRateLimit
         | RejectReason::TokenRateLimit { .. }
         | RejectReason::CostRateLimit
-        | RejectReason::ConcurrentRateLimit => Some("true"),
+        | RejectReason::ConcurrentRateLimit
+        | RejectReason::ConcurrentLimitUnavailable => Some("true"),
         _ => None,
     };
     let (status, error_type, message, limit_kind) = match reason {
@@ -418,6 +419,12 @@ pub(super) fn limit_rejection_response(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limit_error",
             "concurrent request cap exceeded".to_owned(),
+            Some("concurrent"),
+        ),
+        RejectReason::ConcurrentLimitUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "concurrent request limit backend unavailable".to_owned(),
             Some("concurrent"),
         ),
         RejectReason::Unsatisfiable {
@@ -483,9 +490,11 @@ pub(super) fn limit_rejection_response(
             .headers_mut()
             .insert("x-should-retry", HeaderValue::from_static(value));
     }
-    if status == StatusCode::TOO_MANY_REQUESTS
-        && let Some(value) =
-            retry_after_seconds.and_then(|sec| HeaderValue::from_str(&sec.to_string()).ok())
+    if matches!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+    ) && let Some(value) =
+        retry_after_seconds.and_then(|sec| HeaderValue::from_str(&sec.to_string()).ok())
     {
         response.headers_mut().insert(RETRY_AFTER, value);
     }
@@ -494,7 +503,7 @@ pub(super) fn limit_rejection_response(
 
 pub(super) fn limit_retry_after_secs(reason: RejectReason) -> Option<u64> {
     match reason {
-        RejectReason::ConcurrentRateLimit => Some(1),
+        RejectReason::ConcurrentRateLimit | RejectReason::ConcurrentLimitUnavailable => Some(1),
         RejectReason::RequestsRateLimit
         | RejectReason::TokenRateLimit { .. }
         | RejectReason::CostRateLimit => Some(60),
@@ -520,6 +529,7 @@ pub(super) fn limit_violation_name(reason: &RejectReason) -> Option<&'static str
         }
         RejectReason::CostRateLimit => Some("CostUsd"),
         RejectReason::ConcurrentRateLimit => Some("Concurrent"),
+        RejectReason::ConcurrentLimitUnavailable => Some("Concurrent"),
         RejectReason::PrincipalMissing
         | RejectReason::PrincipalDisabled
         | RejectReason::KeyRevoked

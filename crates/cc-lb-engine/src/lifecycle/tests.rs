@@ -5828,7 +5828,7 @@ impl SignerFactory for RefreshingSignerFactory {
     }
 }
 
-/// Dialect whose shaping always fails, forcing the raw-passthrough fallback.
+/// Dialect whose shaping always fails, failing the attempt closed.
 struct FailingDialect;
 
 impl UpstreamDialect for FailingDialect {
@@ -5894,7 +5894,7 @@ impl UpstreamAffinityStore for FailingAffinityStore {
 }
 
 /// Filter plugin that returns an upstream id outside the candidate set,
-/// tripping output validation and the invalid-output passthrough.
+/// tripping output validation and failing closed.
 struct InvalidOutputFilter;
 
 impl FilterPlugin for InvalidOutputFilter {
@@ -5918,6 +5918,40 @@ impl FilterPlugin for InvalidOutputFilter {
 
     fn plugin_name(&self) -> &str {
         "invalid-output-filter"
+    }
+}
+
+/// Filter plugin returning valid kept candidates alongside mismatched
+/// per-candidate reasons so non-fatal output sanitization precedes dispatch.
+struct SanitizedReasonsFilter;
+
+impl FilterPlugin for SanitizedReasonsFilter {
+    fn filter(
+        &self,
+        _ctx: &cc_lb_routing::RoutingContext,
+        _principal: &Principal,
+        candidates: &[UpstreamCandidate],
+    ) -> Result<FilterOutput, FilterError> {
+        Ok(FilterOutput {
+            kept_upstream_ids: candidates
+                .iter()
+                .map(|candidate| candidate.upstream_id)
+                .collect(),
+            reason: "kept with mismatched per-candidate reasons".to_owned(),
+            per_candidate_reasons: vec![
+                cc_lb_routing::PerCandidateReason::RejectedByPlugin,
+                cc_lb_routing::PerCandidateReason::Unhealthy,
+            ],
+            subscription_preference: None,
+        })
+    }
+
+    fn plugin_id(&self) -> Uuid {
+        Uuid::nil()
+    }
+
+    fn plugin_name(&self) -> &str {
+        "sanitized-reasons-filter"
     }
 }
 
@@ -6414,15 +6448,15 @@ async fn router_pipeline_instantiation_error_records_router_config() {
     );
 }
 
-/// QA-ROUTE-04: a filter stage fails validation, candidates pass through,
-/// and the non-fatal diagnostic must precede the terminal dispatch cause.
+/// QA-ROUTE-04: a filter stage emits a non-fatal sanitization diagnostic,
+/// candidates remain routed, and the diagnostic precedes the terminal dispatch cause.
 #[tokio::test]
 async fn filter_invalid_output_history_precedes_terminal_dispatch_cause() {
     let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
     let mut rx = subscribe_lifecycle(&bus);
     let upstream_id = Uuid::new_v4();
     let pipeline = cc_lb_control::api_keys::principal_view::RouterPipelineCache {
-        user_filters: vec![Arc::new(InvalidOutputFilter)],
+        user_filters: vec![Arc::new(SanitizedReasonsFilter)],
         terminal: TerminalStrategy::FirstPick,
         instantiation_error: None,
         provider_filters: None,
@@ -6479,6 +6513,68 @@ async fn filter_invalid_output_history_precedes_terminal_dispatch_cause() {
         InternalErrorKind::InvalidOutput
     );
     assert_eq!(terminal.internal_errors[1].stage, InternalErrorStage::Relay);
+}
+
+#[tokio::test]
+async fn filter_unknown_upstream_output_fails_closed_without_dispatching() {
+    let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+    let mut rx = subscribe_lifecycle(&bus);
+    let upstream_id = Uuid::new_v4();
+    let pipeline = cc_lb_control::api_keys::principal_view::RouterPipelineCache {
+        user_filters: vec![Arc::new(InvalidOutputFilter)],
+        terminal: TerminalStrategy::FirstPick,
+        instantiation_error: None,
+        provider_filters: None,
+    };
+    let view = provenance_view(
+        failure_principal_view(
+            "principal-test",
+            (
+                Some(Arc::new(pipeline)),
+                cc_lb_control::api_keys::principal_view::DialectCache::Inherit,
+            ),
+        ),
+        Arc::new(TestSignerFactory),
+        vec![upstream_record(upstream_id)],
+    );
+    let dispatcher = Arc::new(QueueDispatch::new(vec![]));
+    let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus);
+
+    let request = failure_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("request authenticates");
+    let response = lifecycle
+        .handle(request, &auth)
+        .await
+        .expect("lifecycle handles request");
+    let (status, _body) = collect_response_body(response).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(dispatcher.call_count(), 0);
+
+    let events = drain_events(&mut rx);
+    let terminal = terminal_snapshot(&events);
+    expect_error_code(
+        &terminal.reason,
+        error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER,
+    );
+    assert_eq!(
+        terminal.internal_errors.len(),
+        1,
+        "fail-closed filter error must emit one RouterFilter/InvalidOutput failure: {:?}",
+        terminal.internal_errors
+    );
+    assert_eq!(
+        terminal.internal_errors[0].stage,
+        InternalErrorStage::RouterFilter
+    );
+    assert_eq!(
+        terminal.internal_errors[0].kind,
+        InternalErrorKind::InvalidOutput
+    );
 }
 
 /// QA-SIGN-01: the signer factory cannot build a signer for the route.
@@ -7278,10 +7374,27 @@ async fn retry_after_401_keeps_provider_error_out_of_internal_errors() {
     );
 }
 
-/// QA-CTRL-09: a dialect shape failure falls back to raw passthrough and
-/// the request still succeeds; the non-fatal shape diagnostic persists.
+/// Dialect whose shaping always returns `PoolSaturated`.
+struct SaturatedDialect;
+
+impl UpstreamDialect for SaturatedDialect {
+    fn shape(
+        &self,
+        _context: &DialectShapeContext,
+        _upstream: &Upstream,
+        _principal: &Principal,
+        _builder: &mut ShapedRequestBuilder,
+    ) -> Result<ShapedRequest, DialectError> {
+        Err(DialectError::PoolSaturated {
+            reason: "store pool saturated".to_owned(),
+        })
+    }
+}
+
+/// QA-CTRL-09: a dialect shape failure fails closed without dispatching
+/// upstream and records the Shape diagnostic.
 #[tokio::test]
-async fn shape_fallback_success_keeps_shape_diagnostic() {
+async fn shape_failure_fails_closed_with_shape_diagnostic() {
     let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
     let mut rx = subscribe_lifecycle(&bus);
     let upstream_id = Uuid::new_v4();
@@ -7300,10 +7413,7 @@ async fn shape_fallback_success_keeps_shape_diagnostic() {
         Arc::new(TestSignerFactory),
         vec![upstream_record(upstream_id)],
     );
-    let dispatcher = Arc::new(QueueDispatch::new(vec![Ok(upstream_response(
-            StatusCode::OK,
-            br#"{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-test","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
-        ))]));
+    let dispatcher = Arc::new(QueueDispatch::new(vec![]));
     let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus);
 
     let request = failure_request(Bytes::from_static(
@@ -7318,19 +7428,18 @@ async fn shape_fallback_success_keeps_shape_diagnostic() {
         .await
         .expect("lifecycle handles request");
     let (status, _body) = collect_response_body(response).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(dispatcher.call_count(), 1);
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(dispatcher.call_count(), 0);
 
     let events = drain_events(&mut rx);
     let terminal = terminal_snapshot(&events);
-    assert!(
-        matches!(terminal.reason, cc_lb_lifecycle::TerminationReason::Success),
-        "fallback success must terminate as success, got {:?}",
-        terminal.reason
-    );
+    expect_error_code(&terminal.reason, error_codes::UPSTREAM_DISPATCH_FAILED);
     assert_eq!(terminal.internal_errors.len(), 1);
     assert_eq!(terminal.internal_errors[0].stage, InternalErrorStage::Shape);
-    assert_eq!(terminal.internal_errors[0].kind, InternalErrorKind::Trap);
+    assert_eq!(
+        terminal.internal_errors[0].kind,
+        InternalErrorKind::PluginError
+    );
     assert!(
         terminal.internal_errors[0]
             .message
@@ -7339,6 +7448,65 @@ async fn shape_fallback_success_keeps_shape_diagnostic() {
         "shape diagnostic must carry the dialect failure: {:?}",
         terminal.internal_errors[0].message
     );
+}
+
+#[tokio::test]
+async fn websocket_shape_failure_fails_closed_with_502_or_503() {
+    for (dialect, expected_status, expected_code) in [
+        (
+            Arc::new(FailingDialect) as Arc<dyn UpstreamDialect>,
+            502_u16,
+            "api_error",
+        ),
+        (
+            Arc::new(SaturatedDialect) as Arc<dyn UpstreamDialect>,
+            503_u16,
+            "overloaded_error",
+        ),
+    ] {
+        let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+        let upstream_id = Uuid::new_v4();
+        let view = provenance_view(
+            failure_principal_view(
+                "principal-test",
+                (
+                    None,
+                    cc_lb_control::api_keys::principal_view::DialectCache::Explicit(
+                        cc_lb_control::api_keys::principal_view::ShapePluginCache { dialect },
+                    ),
+                ),
+            ),
+            Arc::new(TestSignerFactory),
+            vec![upstream_record(upstream_id)],
+        );
+        let dispatcher = Arc::new(QueueDispatch::new(vec![]));
+        let lifecycle = provenance_lifecycle(view, dispatcher, &bus);
+
+        let request = failure_request(Bytes::new());
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("request authenticates");
+        let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
+        let frame = Bytes::from_static(br#"{"model":"gpt-test","store":false}"#);
+        let err = match lifecycle.shape_websocket_frame_with_surface(
+            &auth,
+            WebSocketIngress {
+                headers: request.headers(),
+                frame: &frame,
+                query: None,
+            },
+            upstream_id,
+            &request_id,
+            observer.as_ref(),
+            false,
+        ) {
+            Ok(_) => panic!("websocket frame shaping failure must fail closed"),
+            Err(err) => err,
+        };
+        assert_eq!(err.status, expected_status);
+        assert_eq!(err.code, expected_code);
+    }
 }
 
 /// QA-UPSTR-06 (negative gate): a 200 body containing an "error" key must
@@ -9234,5 +9402,310 @@ async fn responses_websocket_subscription_preference_keeps_multiple_api_keys_rea
             .iter()
             .any(|c| c.upstream_id == api_key_2 && c.is_api_key),
         "second API-key fallback must remain reachable when 15 OAuth + 1 API key already fill ordinary fallbacks"
+    );
+}
+
+#[tokio::test]
+async fn thread_sticky_subagent_latch_async_replicates_via_l2_and_caches_l1_without_repeat_reads() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct StubStickyStore {
+        rows: std::sync::Mutex<std::collections::HashMap<(String, String), u64>>,
+        lookups: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl cc_lb_storage_api::ThreadStickySubagentStore for StubStickyStore {
+        async fn seed_thread_sticky_subagent(
+            &self,
+            principal_id: &str,
+            observed_session_id: &str,
+            now_unix_secs: u64,
+            ttl_secs: u64,
+        ) -> cc_lb_storage_api::StorageResult<()> {
+            let expires_at = now_unix_secs.saturating_add(ttl_secs);
+            self.rows
+                .lock()
+                .unwrap()
+                .entry((principal_id.to_owned(), observed_session_id.to_owned()))
+                .and_modify(|existing| *existing = (*existing).max(expires_at))
+                .or_insert(expires_at);
+            Ok(())
+        }
+
+        async fn is_thread_sticky_subagent(
+            &self,
+            principal_id: &str,
+            observed_session_id: &str,
+            now_unix_secs: u64,
+        ) -> cc_lb_storage_api::StorageResult<Option<u64>> {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .get(&(principal_id.to_owned(), observed_session_id.to_owned()))
+                .copied()
+                .filter(|expires_at| *expires_at > now_unix_secs))
+        }
+
+        async fn purge_expired_thread_sticky_subagents(
+            &self,
+            _now_unix_secs: u64,
+            _batch_size: usize,
+        ) -> cc_lb_storage_api::StorageResult<u64> {
+            Ok(0)
+        }
+    }
+
+    let clock = cc_lb_clock::TestClock::new_at_secs(1_700_000_000);
+    let shared_store = StubStickyStore {
+        rows: std::sync::Mutex::new(std::collections::HashMap::new()),
+        lookups: AtomicUsize::new(0),
+    };
+    let replica_a = ThreadStickySubagentLatch::default();
+    let replica_b = ThreadStickySubagentLatch::default();
+
+    // Negative miss on Replica B before Replica A seeds gets cached in L1.
+    let mut pre_seed = sticky_metadata("cross-replica-thread", "main", None);
+    apply_thread_sticky_subagent_latch_async(
+        &replica_b,
+        Some(&shared_store),
+        &clock,
+        "principal-a",
+        None,
+        &mut pre_seed,
+    )
+    .await;
+    assert_eq!(pre_seed.request_kind.as_deref(), Some("main"));
+    assert_eq!(shared_store.lookups.load(Ordering::SeqCst), 1);
+
+    // Repeat miss on Replica B hits negative L1 with 0 DB lookups.
+    let mut pre_seed_2 = sticky_metadata("cross-replica-thread", "main", None);
+    apply_thread_sticky_subagent_latch_async(
+        &replica_b,
+        Some(&shared_store),
+        &clock,
+        "principal-a",
+        None,
+        &mut pre_seed_2,
+    )
+    .await;
+    assert_eq!(pre_seed_2.request_kind.as_deref(), Some("main"));
+    assert_eq!(shared_store.lookups.load(Ordering::SeqCst), 1);
+
+    // Replica A seeds L1 + L2.
+    let seed = json!({
+        "messages": [{"role": "user", "content": "Complete assignment thoroughly:\n\n# Target"}]
+    });
+    let mut seed_meta = sticky_metadata("cross-replica-thread", "subagent", None);
+    apply_thread_sticky_subagent_latch_async(
+        &replica_a,
+        Some(&shared_store),
+        &clock,
+        "principal-a",
+        Some(&seed),
+        &mut seed_meta,
+    )
+    .await;
+
+    // Even if notification was dropped (only clearing negatives), Replica B consults L2 and promotes to L1.
+    replica_b.clear_negative_entries();
+    let mut follow_1 = sticky_metadata("cross-replica-thread", "main", None);
+    apply_thread_sticky_subagent_latch_async(
+        &replica_b,
+        Some(&shared_store),
+        &clock,
+        "principal-a",
+        None,
+        &mut follow_1,
+    )
+    .await;
+    assert_eq!(follow_1.request_kind.as_deref(), Some("subagent"));
+    assert_eq!(shared_store.lookups.load(Ordering::SeqCst), 2);
+
+    // Next turn on Replica B hits positive L1 with 0 DB queries.
+    let mut follow_2 = sticky_metadata("cross-replica-thread", "main", None);
+    apply_thread_sticky_subagent_latch_async(
+        &replica_b,
+        Some(&shared_store),
+        &clock,
+        "principal-a",
+        None,
+        &mut follow_2,
+    )
+    .await;
+    assert_eq!(follow_2.request_kind.as_deref(), Some("subagent"));
+    assert_eq!(shared_store.lookups.load(Ordering::SeqCst), 2);
+
+    // Advancing past the stored expiry must expire Replica B's positive L1 entry instead of
+    // extending it by another 24h from Replica B's lookup timestamp.
+    shared_store.rows.lock().unwrap().insert(
+        ("principal-a".to_owned(), "expiring-thread".to_owned()),
+        1_700_000_010,
+    );
+    let mut before_expiry = sticky_metadata("expiring-thread", "main", None);
+    apply_thread_sticky_subagent_latch_async(
+        &replica_b,
+        Some(&shared_store),
+        &clock,
+        "principal-a",
+        None,
+        &mut before_expiry,
+    )
+    .await;
+    assert_eq!(before_expiry.request_kind.as_deref(), Some("subagent"));
+
+    clock.set_unix_secs(1_700_000_011);
+    let mut after_expiry = sticky_metadata("expiring-thread", "main", None);
+    apply_thread_sticky_subagent_latch_async(
+        &replica_b,
+        Some(&shared_store),
+        &clock,
+        "principal-a",
+        None,
+        &mut after_expiry,
+    )
+    .await;
+    assert_eq!(after_expiry.request_kind.as_deref(), Some("main"));
+}
+
+#[tokio::test]
+async fn failed_shape_instantiation_fails_closed_for_http_and_websocket() {
+    use cc_lb_control::api_keys::principal_view::DialectCache;
+
+    let up_id = Uuid::from_u128(0xABCD_0001);
+    let openai_id = Uuid::from_u128(0xABCD_0002);
+    let record = upstream_record(up_id);
+    let mut openai_record = upstream_record(openai_id);
+    openai_record.kind = StorageRecordKind::OpenaiApiKey;
+    let pview = failure_principal_view(
+        "principal-test",
+        (
+            None,
+            DialectCache::InstantiationFailed {
+                reason: "shape plugin instantiation failed: admission timeout".to_owned(),
+                providers: vec![Provider::Anthropic],
+            },
+        ),
+    );
+    let cached = pview.get("principal-test").expect("principal cached");
+    let http_err = match super::routing::route_for_record(&record, cached) {
+        Ok(_) => panic!("HTTP route must fail closed when shape instantiation failed"),
+        Err(err) => err,
+    };
+    assert!(
+        http_err.contains("shape plugin instantiation failed"),
+        "unexpected error: {http_err}"
+    );
+    assert!(
+        super::routing::route_for_record(&openai_record, cached).is_ok(),
+        "unaffected providers must continue native routing when a shape plugin is scoped to Anthropic"
+    );
+
+    let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+    let view = provenance_view(pview, Arc::new(TestSignerFactory), vec![record]);
+    let lifecycle = provenance_lifecycle(view, Arc::new(QueueDispatch::new(Vec::new())), &bus);
+    let request = failure_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("request authenticates");
+    let ws_err = match lifecycle.shape_websocket_frame_with_surface(
+        &auth,
+        WebSocketIngress {
+            headers: &HeaderMap::new(),
+            frame: &Bytes::from_static(br#"{"type":"response.create","model":"claude-3"}"#),
+            query: None,
+        },
+        up_id,
+        "req-ws-fail-closed",
+        None,
+        false,
+    ) {
+        Ok(_) => panic!("WS shaping must fail closed when shape instantiation failed"),
+        Err(err) => err,
+    };
+    assert_eq!(ws_err.status, 502);
+    assert!(ws_err.message.contains("shape plugin instantiation failed"));
+}
+
+#[tokio::test]
+async fn realtime_filter_saturation_attaches_retry_after_header() {
+    use cc_lb_control::api_keys::principal_view::{DialectCache, RouterPipelineCache};
+    use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RoutingContext};
+
+    struct SaturatedFilter;
+    impl FilterPlugin for SaturatedFilter {
+        fn filter(
+            &self,
+            _: &RoutingContext,
+            _: &Principal,
+            _: &[cc_lb_domain::UpstreamCandidate],
+        ) -> Result<FilterOutput, FilterError> {
+            Err(FilterError::PoolSaturated {
+                reason: "instance pool saturated".to_owned(),
+            })
+        }
+
+        fn plugin_id(&self) -> Uuid {
+            Uuid::nil()
+        }
+
+        fn plugin_name(&self) -> &str {
+            "saturated-filter"
+        }
+    }
+
+    let up_id = Uuid::from_u128(0x5A7);
+    let mut record = upstream_record(up_id);
+    record.kind = StorageRecordKind::OpenaiApiKey;
+    let pview = failure_principal_view(
+        "principal-test",
+        (
+            Some(Arc::new(RouterPipelineCache {
+                user_filters: vec![Arc::new(SaturatedFilter)],
+                terminal: TerminalStrategy::FirstPick,
+                instantiation_error: None,
+                provider_filters: None,
+            })),
+            DialectCache::Inherit,
+        ),
+    );
+    let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+    let view = provenance_view(pview, Arc::new(TestSignerFactory), vec![record]);
+    let lifecycle = provenance_lifecycle(view, Arc::new(QueueDispatch::new(Vec::new())), &bus);
+    let request = failure_request(Bytes::from_static(br"{}"));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("request authenticates");
+    let obs = lifecycle.begin_realtime_websocket(&auth, "/v1/realtime");
+    let err = lifecycle
+        .prepare_realtime_websocket(
+            &auth,
+            obs,
+            crate::realtime_websocket::RealtimeWebSocketKind::Openai,
+            &HeaderMap::new(),
+            crate::realtime_websocket::RealtimeWebSocketTarget {
+                path: "/v1/realtime",
+                query: Some("model=gpt-realtime"),
+                model: Some("gpt-realtime"),
+                codex_backend: false,
+            },
+            Bytes::new(),
+        )
+        .await
+        .err()
+        .expect("filter saturation must fail closed with 503");
+    assert_eq!(err.status, 503);
+    assert!(
+        err.provider_headers()
+            .iter()
+            .any(|(name, value)| name == "retry-after" && value == "1"),
+        "expected retry-after: 1 on 503 saturation error, got {:?}",
+        err.provider_headers()
     );
 }

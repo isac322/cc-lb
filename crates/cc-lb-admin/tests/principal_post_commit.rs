@@ -385,7 +385,7 @@ async fn principal_disable_completes_after_request_dropped_during_rebuild() {
 }
 
 #[tokio::test]
-async fn key_issue_audit_failure_revokes_key_and_rebuilds_view() {
+async fn key_issue_audit_failure_revokes_key_without_rebuilding_view() {
     let (_dir, sqlite) = sqlite_backend().await;
     let key_store = admin_test_common::key_store(sqlite.clone());
     let harness = Harness::new(sqlite.clone(), Some(key_store));
@@ -416,9 +416,10 @@ async fn key_issue_audit_failure_revokes_key_and_rebuilds_view() {
         KeyStatus::Revoked,
         "audit failure revokes the issued key"
     );
-    assert!(
-        harness.holder.generation() > generation_before,
-        "the view is rebuilt from the post-revocation state"
+    assert_eq!(
+        harness.holder.generation(),
+        generation_before,
+        "key issue and audit-failure revocation must not rebuild the dynamic view"
     );
 }
 

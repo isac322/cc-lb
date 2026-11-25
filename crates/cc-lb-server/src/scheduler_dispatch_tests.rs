@@ -6203,3 +6203,235 @@ async fn assert_keepalive_terminal_cap_counts_all_dispatched_renewals(
         Some(terminal)
     );
 }
+
+#[tokio::test]
+async fn usage_prune_schedules_continuation_when_compaction_hits_batch_cap() {
+    use cc_lb_scheduler::jobs::usage_prune::UsagePruneJob;
+    use cc_lb_scheduler::worker::SchedulerBackend;
+    use cc_lb_storage_api::{
+        ApiKeyUsage, ApiKeyUsageBucketDelta, ApiKeyUsageBucketKey, ApiKeyUsageBucketStore,
+        ApiKeyUsageFlush, ApiKeyUsageFlushResult,
+    };
+
+    let fixture = Fixture::new().await;
+    let dispatch = fixture.dispatch(Arc::new(FailingPusher));
+    let writer_epoch = Uuid::now_v7();
+    let now_secs = cc_lb_clock::unix_secs(cc_lb_clock::Clock::now(&SystemClock));
+    fixture
+        .storage
+        .register_api_key_usage_writer(writer_epoch, now_secs + 60)
+        .await
+        .expect("register writer");
+
+    let batch_size = LimitEngine::durable_usage_compaction_batch_size();
+    let expired_bucket_start = now_secs
+        .saturating_sub(LimitEngine::durable_usage_retention_secs())
+        .saturating_sub(120);
+    let deltas = (0..=batch_size)
+        .map(|idx| ApiKeyUsageBucketDelta {
+            key: ApiKeyUsageBucketKey {
+                key_id: format!("prune-key-{idx}"),
+                bucket_width_secs: 60,
+                bucket_start_unix_secs: expired_bucket_start,
+            },
+            usage: ApiKeyUsage {
+                requests: 1,
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd_micros: 0,
+            },
+        })
+        .collect();
+    assert_eq!(
+        fixture
+            .storage
+            .flush_api_key_usage(&ApiKeyUsageFlush {
+                writer_epoch,
+                flush_id: Uuid::now_v7(),
+                lease_until_unix_secs: now_secs + 60,
+                deltas,
+            })
+            .await
+            .expect("flush expired buckets"),
+        ApiKeyUsageFlushResult::Applied
+    );
+
+    let outcome = dispatch
+        .dispatch_singleton(CronJob::UsagePrune(UsagePruneJob::default()))
+        .await
+        .expect("usage_prune dispatch succeeds");
+    assert_eq!(outcome, JobOutcome::Done);
+
+    let queued_continuations: Vec<String> = match fixture.backend.backend {
+        SchedulerBackend::Sqlite(ref sqlite) => sqlx::query_scalar(
+            "SELECT idempotency_key FROM Jobs WHERE idempotency_key LIKE 'usage_prune_continuation:%'",
+        )
+        .fetch_all(sqlite.pool())
+        .await
+        .expect("query scheduled continuations"),
+        #[cfg(feature = "storage-postgres")]
+        SchedulerBackend::Postgres(_) => panic!("expected sqlite scheduler backend"),
+    };
+    assert_eq!(
+        queued_continuations.len(),
+        1,
+        "saturated usage_prune run must enqueue exactly one continuation task"
+    );
+}
+
+#[tokio::test]
+async fn usage_prune_continuation_duplicate_idempotency_key_returns_done() {
+    use cc_lb_scheduler::jobs::usage_prune::UsagePruneJob;
+    use cc_lb_scheduler::worker::SchedulerPushTask;
+    use cc_lb_storage_api::{
+        ApiKeyUsage, ApiKeyUsageBucketDelta, ApiKeyUsageBucketKey, ApiKeyUsageBucketStore,
+        ApiKeyUsageFlush, ApiKeyUsageFlushResult,
+    };
+
+    let fixture = Fixture::new().await;
+    let dispatch = fixture.dispatch(Arc::new(FailingPusher));
+    let writer_epoch = Uuid::now_v7();
+    let now_secs = cc_lb_clock::unix_secs(cc_lb_clock::Clock::now(&SystemClock));
+    fixture
+        .storage
+        .register_api_key_usage_writer(writer_epoch, now_secs + 60)
+        .await
+        .expect("register writer");
+
+    let batch_size = LimitEngine::durable_usage_compaction_batch_size();
+    let expired_bucket_start = now_secs
+        .saturating_sub(LimitEngine::durable_usage_retention_secs())
+        .saturating_sub(120);
+    let deltas = (0..=batch_size)
+        .map(|idx| ApiKeyUsageBucketDelta {
+            key: ApiKeyUsageBucketKey {
+                key_id: format!("dup-prune-key-{idx}"),
+                bucket_width_secs: 60,
+                bucket_start_unix_secs: expired_bucket_start,
+            },
+            usage: ApiKeyUsage {
+                requests: 1,
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd_micros: 0,
+            },
+        })
+        .collect();
+    assert_eq!(
+        fixture
+            .storage
+            .flush_api_key_usage(&ApiKeyUsageFlush {
+                writer_epoch,
+                flush_id: Uuid::now_v7(),
+                lease_until_unix_secs: now_secs + 60,
+                deltas,
+            })
+            .await
+            .expect("flush expired buckets"),
+        ApiKeyUsageFlushResult::Applied
+    );
+
+    // Pre-seed the continuation key across a multi-second window so a second
+    // boundary between pre-seeding and dispatch still exercises Conflict(_).
+    for offset in 4..=10 {
+        let run_at = now_secs + offset;
+        fixture
+            .backend
+            .backend
+            .push_cron_task(SchedulerPushTask {
+                args: CronJob::UsagePrune(UsagePruneJob {
+                    traceparent: None,
+                    api_key_usage_continuation: true,
+                }),
+                idempotency_key: Some(format!("usage_prune_continuation:{run_at}")),
+                run_at_unix_secs: Some(run_at),
+                max_attempts: Some(3),
+            })
+            .await
+            .expect("pre-seed continuation task");
+    }
+
+    let outcome = dispatch
+        .dispatch_singleton(CronJob::UsagePrune(UsagePruneJob::default()))
+        .await
+        .expect("duplicate continuation idempotency key must treat existing task as done");
+    assert_eq!(outcome, JobOutcome::Done);
+}
+
+#[tokio::test]
+async fn usage_prune_continuation_enqueue_failure_returns_retryable_error() {
+    use cc_lb_scheduler::jobs::usage_prune::UsagePruneJob;
+    use cc_lb_scheduler::retry::RetryErrorClassify;
+    use cc_lb_scheduler::worker::SchedulerBackend;
+    use cc_lb_storage_api::{
+        ApiKeyUsage, ApiKeyUsageBucketDelta, ApiKeyUsageBucketKey, ApiKeyUsageBucketStore,
+        ApiKeyUsageFlush, ApiKeyUsageFlushResult,
+    };
+
+    let fixture = Fixture::new().await;
+    let dispatch = fixture.dispatch(Arc::new(FailingPusher));
+    let writer_epoch = Uuid::now_v7();
+    let now_secs = cc_lb_clock::unix_secs(cc_lb_clock::Clock::now(&SystemClock));
+    fixture
+        .storage
+        .register_api_key_usage_writer(writer_epoch, now_secs + 60)
+        .await
+        .expect("register writer");
+
+    let batch_size = LimitEngine::durable_usage_compaction_batch_size();
+    let expired_bucket_start = now_secs
+        .saturating_sub(LimitEngine::durable_usage_retention_secs())
+        .saturating_sub(120);
+    let deltas = (0..=batch_size)
+        .map(|idx| ApiKeyUsageBucketDelta {
+            key: ApiKeyUsageBucketKey {
+                key_id: format!("fail-prune-key-{idx}"),
+                bucket_width_secs: 60,
+                bucket_start_unix_secs: expired_bucket_start,
+            },
+            usage: ApiKeyUsage {
+                requests: 1,
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd_micros: 0,
+            },
+        })
+        .collect();
+    assert_eq!(
+        fixture
+            .storage
+            .flush_api_key_usage(&ApiKeyUsageFlush {
+                writer_epoch,
+                flush_id: Uuid::now_v7(),
+                lease_until_unix_secs: now_secs + 60,
+                deltas,
+            })
+            .await
+            .expect("flush expired buckets"),
+        ApiKeyUsageFlushResult::Applied
+    );
+
+    match fixture.backend.backend {
+        SchedulerBackend::Sqlite(ref sqlite) => {
+            sqlx::query(
+                "CREATE TRIGGER fail_usage_prune_continuation BEFORE INSERT ON Jobs \
+                 WHEN NEW.idempotency_key LIKE 'usage_prune_continuation:%' \
+                 BEGIN SELECT RAISE(ABORT, 'simulated scheduler write failure'); END;",
+            )
+            .execute(sqlite.pool())
+            .await
+            .expect("install sqlite trigger");
+        }
+        #[cfg(feature = "storage-postgres")]
+        SchedulerBackend::Postgres(_) => panic!("expected sqlite scheduler backend"),
+    }
+
+    let err = dispatch
+        .dispatch_singleton(CronJob::UsagePrune(UsagePruneJob::default()))
+        .await
+        .expect_err("enqueue write failure must surface to maintenance retry policy");
+    assert!(
+        !err.is_fatal_retry_error(),
+        "continuation enqueue failure must remain retryable: {err:?}"
+    );
+}

@@ -421,9 +421,11 @@ export const CONFIG_EDITOR_SECTIONS = [
     id: 'wasmtime-behavior',
     categoryId: 'runtime',
     label: 'Wasmtime behavior',
-    description: 'Plugin allocation strategy and origin policy.',
+    description:
+      'Plugin allocation strategy, execution timeout, and origin policy.',
     paths: [
       'runtime.wasmtime.allocation_strategy',
+      'runtime.wasmtime.execution_timeout_ms',
       'runtime.wasmtime.shape_origin_policy',
       'runtime.wasmtime.cookie_redaction',
     ],
@@ -1403,6 +1405,18 @@ const CONFIG_FIELD_GUIDANCE: readonly {
       disabled:
         'Plugins receive cookies — needed only by plugins that inspect them.',
       impactDimensions: ['security'],
+    },
+  },
+  {
+    pattern: 'runtime.wasmtime.execution_timeout_ms',
+    guidance: {
+      description:
+        'Per-call Wasmtime epoch preemption timeout in milliseconds (default 1000ms, valid range 10..=30000; 10ms ticker rounds up to ceil(timeout/10)+1 ticks for 10ms phase rounding and partial initial tick, plus OS scheduling delay).',
+      lower:
+        'Aborts runaway plugins sooner but may interrupt complex legitimate hooks.',
+      higher:
+        'Allows slower plugin hooks to finish at the cost of holding worker capacity longer.',
+      impactDimensions: ['latency', 'availability'],
     },
   },
   {

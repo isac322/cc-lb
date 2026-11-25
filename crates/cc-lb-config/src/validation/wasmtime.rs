@@ -59,6 +59,14 @@ pub(super) fn validate_wasmtime_runtime(config: &Config) -> Result<(), Validatio
     if let Some(total) = config.runtime.wasmtime.pool_total_core_instances {
         validate_wasmtime_pool_total("runtime.wasmtime.pool_total_core_instances", total)?;
     }
+    if let Some(timeout_ms) = config.runtime.wasmtime.execution_timeout_ms
+        && !(10..=30_000).contains(&timeout_ms)
+    {
+        return Err(ValidationError::new(
+            "runtime.wasmtime.execution_timeout_ms",
+            format!("must be in range 10..=30000 (got {timeout_ms})"),
+        ));
+    }
     validate_wire_bounds(config)
 }
 

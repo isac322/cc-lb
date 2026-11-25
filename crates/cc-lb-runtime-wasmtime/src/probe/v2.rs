@@ -8,7 +8,9 @@ use crate::cache::call_hook_export_scoped;
 use crate::cell::PluginCell;
 use crate::error::WasmtimeRuntimeError;
 
-use super::{copy_aligned, probe_failed, sample_body, sample_model, sample_path};
+use super::{
+    copy_aligned, map_probe_call_error, probe_failed, sample_body, sample_model, sample_path,
+};
 
 macro_rules! probe {
     ($name:ident, $sample:ident, $hook:ident, $response:ty) => {
@@ -27,7 +29,7 @@ macro_rules! probe {
                 export,
                 copy_aligned,
             )
-            .map_err(|error| probe_failed(HookKind::$hook, error.to_string()))?;
+            .map_err(|error| map_probe_call_error(HookKind::$hook, error))?;
             rkyv::access::<$response, RkyvError>(&output).map_err(|error| {
                 probe_failed(HookKind::$hook, format!("decode V2 response: {error}"))
             })?;

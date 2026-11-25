@@ -486,60 +486,82 @@ pub(super) fn readiness(state: &ProxyState) -> Readiness {
     if !view.principal_view.has_any_active_principal() {
         return Readiness::NotReady("no_ready_principal");
     }
-    let aead = state.aead.as_ref();
-    if !view
-        .upstreams_snapshot()
-        .iter()
-        .any(|upstream| upstream_usable(&view, aead, upstream))
-    {
+    let summary = view.readiness_summary(|v| {
+        compute_upstream_readiness_summary(
+            v.upstreams_snapshot(),
+            &v.upstream_status_snapshot,
+            state.aead.as_ref(),
+        )
+    });
+    if !summary.has_usable_upstream {
         return Readiness::NotReady("no_ready_upstream");
     }
-    let oauth_credentials_broken = view.upstreams_snapshot().iter().any(|upstream| {
-        upstream_live(upstream)
-            && matches!(
-                upstream.kind,
-                UpstreamKind::AnthropicOauth
-                    | UpstreamKind::OpenaiOauth
-                    | UpstreamKind::GeminiOauth
-            )
-            && !oauth_credentials_decryptable(aead, upstream)
-    });
 
     Readiness::Ready {
-        degraded: oauth_credentials_broken.then_some("oauth_credentials_not_decryptable"),
+        degraded: summary
+            .oauth_credentials_broken
+            .then_some("oauth_credentials_not_decryptable"),
+    }
+}
+
+pub(crate) fn compute_upstream_readiness_summary(
+    upstreams: &[UpstreamRecord],
+    statuses: &cc_lb_control::UpstreamStatusSnapshot,
+    aead: &AeadService,
+) -> cc_lb_control::UpstreamReadinessSummary {
+    let mut has_usable_upstream = false;
+    let mut oauth_credentials_broken = false;
+    for upstream in upstreams {
+        if !upstream_live(upstream) {
+            continue;
+        }
+        let applied = statuses
+            .entries
+            .get(&upstream.name)
+            .is_some_and(|entry| entry.status == cc_lb_control::ApplyStatus::Active);
+        match upstream.kind {
+            UpstreamKind::AnthropicApiKey
+            | UpstreamKind::OpenaiApiKey
+            | UpstreamKind::GeminiApiKey
+            | UpstreamKind::VertexApiKey => {
+                if applied {
+                    has_usable_upstream = true;
+                }
+            }
+            UpstreamKind::AnthropicOauth
+            | UpstreamKind::OpenaiOauth
+            | UpstreamKind::GeminiOauth => {
+                let decryptable = oauth_credentials_decryptable(aead, upstream);
+                if !decryptable {
+                    oauth_credentials_broken = true;
+                } else if applied
+                    && !cc_lb_oauth_protocol::refresh_requires_reconnect(
+                        upstream.last_apply_error.as_deref(),
+                    )
+                {
+                    has_usable_upstream = true;
+                }
+            }
+            UpstreamKind::VertexCredential => {
+                if applied
+                    && !cc_lb_domain::vertex::vertex_credential_requires_replacement(
+                        upstream.last_apply_error.as_deref(),
+                    )
+                    && upstream.api_key_ciphertext.is_some()
+                {
+                    has_usable_upstream = true;
+                }
+            }
+        }
+    }
+    cc_lb_control::UpstreamReadinessSummary {
+        has_usable_upstream,
+        oauth_credentials_broken,
     }
 }
 
 fn upstream_live(upstream: &UpstreamRecord) -> bool {
     upstream.enabled && upstream.deleted_at_unix_secs.is_none()
-}
-
-/// An upstream routing can select: applied, and for OAuth, holding
-/// decryptable credentials that do not need an operator reconnect.
-fn upstream_usable(view: &DynamicView, aead: &AeadService, upstream: &UpstreamRecord) -> bool {
-    let applied = view
-        .upstream_status_snapshot
-        .entries
-        .get(&upstream.name)
-        .is_some_and(|entry| entry.status == cc_lb_control::ApplyStatus::Active);
-    if !upstream_live(upstream) || !applied {
-        return false;
-    }
-    match upstream.kind {
-        UpstreamKind::AnthropicApiKey | UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey => {
-            true
-        }
-        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth => {
-            !cc_lb_oauth_protocol::refresh_requires_reconnect(upstream.last_apply_error.as_deref())
-                && oauth_credentials_decryptable(aead, upstream)
-        }
-        UpstreamKind::VertexApiKey => true,
-        UpstreamKind::VertexCredential => {
-            !cc_lb_domain::vertex::vertex_credential_requires_replacement(
-                upstream.last_apply_error.as_deref(),
-            ) && upstream.api_key_ciphertext.is_some()
-        }
-    }
 }
 
 fn oauth_credentials_decryptable(aead: &AeadService, upstream: &UpstreamRecord) -> bool {

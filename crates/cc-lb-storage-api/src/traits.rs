@@ -14,6 +14,7 @@ use crate::{
     oauth_pkce::OAuthPkceStore,
     organization_metadata::OrganizationMetadataStore,
     prompt_cache_observation::PromptCacheObservationStore,
+    thread_sticky_subagent::ThreadStickySubagentStore,
     upstream_affinity::UpstreamAffinityStore,
     upstream_rate_limit::UpstreamRateLimitStateStore,
     upstream_subscription_metadata::UpstreamSubscriptionMetadataStore,
@@ -255,6 +256,17 @@ pub trait ApiKeyUsageBucketStore: Send + Sync {
         retain_for_secs: u64,
         batch_size: usize,
     ) -> StorageResult<crate::ApiKeyUsageCompactionRun>;
+
+    /// Deletes up to `batch_size` expired rows from `api_key_usage_flushes_v1`
+    /// older than `retain_for_secs` relative to storage clock `now`.
+    async fn prune_expired_api_key_usage_flush_markers(
+        &self,
+        retain_for_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        let _ = (retain_for_secs, batch_size);
+        Ok(0)
+    }
 }
 
 /// Cluster-wide concurrent-request hold store (issue 807).
@@ -270,6 +282,19 @@ pub trait ApiKeyConcurrencyHoldStore: Send + Sync {
     ) -> StorageResult<()>;
 
     async fn delete_api_key_concurrency_hold(&self, hold_id: uuid::Uuid) -> StorageResult<()>;
+
+    /// Deletes a hold whose admission commit outcome is uncertain (e.g. caller
+    /// dropped or connection failed around `COMMIT`) after serializing on the
+    /// same key-scoped admission lock so an in-flight commit cannot remain
+    /// invisible and survive cleanup.
+    async fn delete_uncertain_api_key_concurrency_hold(
+        &self,
+        hold_id: uuid::Uuid,
+        key_id: &str,
+    ) -> StorageResult<()> {
+        let _ = key_id;
+        self.delete_api_key_concurrency_hold(hold_id).await
+    }
 
     /// Counts live holds for `key_id`, excluding rows older than
     /// `max_age_secs` relative to `now_unix_secs` (crash leftovers).
@@ -296,6 +321,20 @@ pub trait ApiKeyConcurrencyHoldStore: Send + Sync {
         hold_ids: &[uuid::Uuid],
         now_unix_secs: u64,
     ) -> StorageResult<u64>;
+
+    /// Atomically purges expired holds for `key_id`, checks live hold count
+    /// against `cap` under a key-scoped transaction lock using database time,
+    /// and inserts `hold_id` if admitted. Returns `true` when admitted and
+    /// `false` when at or above `cap`. SQLite returns `Ok(true)` because local
+    /// in-process tracking is authoritative on single-instance deployments.
+    async fn try_acquire_api_key_concurrency_hold(
+        &self,
+        hold_id: uuid::Uuid,
+        key_id: &str,
+        writer_epoch: uuid::Uuid,
+        cap: u32,
+        max_age_secs: u64,
+    ) -> StorageResult<bool>;
 }
 
 #[async_trait]
@@ -437,6 +476,7 @@ pub trait Storage:
     + crate::upstream::UpstreamStore
     + crate::upstream_api_key::UpstreamApiKeyStore
     + UpstreamAffinityStore
+    + ThreadStickySubagentStore
     + RequestEventStore
     + CacheKeepaliveProjectionStore
     + UpstreamRateLimitStateStore
@@ -473,6 +513,7 @@ impl<T> Storage for T where
         + crate::upstream::UpstreamStore
         + crate::upstream_api_key::UpstreamApiKeyStore
         + UpstreamAffinityStore
+        + ThreadStickySubagentStore
         + RequestEventStore
         + CacheKeepaliveProjectionStore
         + UpstreamRateLimitStateStore

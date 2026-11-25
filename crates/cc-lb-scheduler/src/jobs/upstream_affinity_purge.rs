@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use cc_lb_storage_api::{StorageResult, UpstreamAffinityStore};
+use cc_lb_storage_api::{StorageResult, ThreadStickySubagentStore, UpstreamAffinityStore};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
@@ -18,11 +18,19 @@ pub trait UpstreamAffinityPurgeStore: Send + Sync {
         ttl_secs: u64,
         batch_size: usize,
     ) -> impl Future<Output = StorageResult<u64>> + Send + '_;
+
+    fn purge_expired_thread_sticky_subagents(
+        &self,
+        _now_unix_secs: u64,
+        _batch_size: usize,
+    ) -> impl Future<Output = StorageResult<u64>> + Send + '_ {
+        async { Ok(0) }
+    }
 }
 
 impl<Store> UpstreamAffinityPurgeStore for Store
 where
-    Store: UpstreamAffinityStore + ?Sized,
+    Store: UpstreamAffinityStore + ThreadStickySubagentStore + ?Sized,
 {
     async fn purge_expired_upstream_affinities(
         &self,
@@ -34,6 +42,19 @@ where
             self,
             now_unix_secs,
             ttl_secs,
+            batch_size,
+        )
+        .await
+    }
+
+    async fn purge_expired_thread_sticky_subagents(
+        &self,
+        now_unix_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        ThreadStickySubagentStore::purge_expired_thread_sticky_subagents(
+            self,
+            now_unix_secs,
             batch_size,
         )
         .await
@@ -147,17 +168,7 @@ where
                     )
                     .increment(batch_rows_removed);
                     if batch_rows_removed < UPSTREAM_AFFINITY_PURGE_BATCH_SIZE as u64 {
-                        tracing::info!(
-                            rows_removed,
-                            batches,
-                            ttl_secs,
-                            "upstream affinity purge job complete",
-                        );
-                        return UpstreamAffinityPurgeJobResult::Done {
-                            rows_removed,
-                            batches,
-                            limit_reached: false,
-                        };
+                        break;
                     }
                     tokio::task::yield_now().await;
                 }
@@ -177,6 +188,79 @@ where
                     };
                 }
             }
+        }
+
+        let mut sticky_batches = 0_usize;
+        let mut sticky_rows_removed = 0_u64;
+        let mut sticky_limit_reached = false;
+        loop {
+            if cancel.is_cancelled() {
+                tracing::debug!(
+                    rows_removed,
+                    batches,
+                    sticky_rows_removed,
+                    "thread sticky subagent purge cancelled"
+                );
+                return UpstreamAffinityPurgeJobResult::Cancelled {
+                    rows_removed: rows_removed.saturating_add(sticky_rows_removed),
+                    batches,
+                };
+            }
+            if sticky_batches == UPSTREAM_AFFINITY_PURGE_MAX_BATCHES_PER_JOB {
+                sticky_limit_reached = true;
+                break;
+            }
+            match self
+                .store
+                .purge_expired_thread_sticky_subagents(
+                    now_unix_secs,
+                    UPSTREAM_AFFINITY_PURGE_BATCH_SIZE,
+                )
+                .await
+            {
+                Ok(batch_rows_removed) => {
+                    sticky_rows_removed = sticky_rows_removed.saturating_add(batch_rows_removed);
+                    sticky_batches += 1;
+                    ::metrics::counter!(
+                        crate::scheduler_metrics::PRUNE_ROWS_REMOVED_TOTAL,
+                        "table" => "thread_sticky_subagent",
+                    )
+                    .increment(batch_rows_removed);
+                    if batch_rows_removed < UPSTREAM_AFFINITY_PURGE_BATCH_SIZE as u64 {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        rows_removed,
+                        batches,
+                        sticky_rows_removed,
+                        "thread sticky subagent purge failed",
+                    );
+                    return UpstreamAffinityPurgeJobResult::Retry {
+                        delay: UPSTREAM_AFFINITY_PURGE_RETRY_DELAY,
+                        error: error.to_string(),
+                        rows_removed,
+                        batches,
+                    };
+                }
+            }
+        }
+
+        tracing::info!(
+            rows_removed,
+            batches,
+            sticky_rows_removed,
+            sticky_batches,
+            ttl_secs,
+            "upstream affinity purge job complete",
+        );
+        UpstreamAffinityPurgeJobResult::Done {
+            rows_removed,
+            batches,
+            limit_reached: sticky_limit_reached,
         }
     }
 }

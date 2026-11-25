@@ -13,7 +13,9 @@ use cc_lb_scheduler::jobs::pool_quota_snapshot::PoolQuotaSnapshotCronJob;
 use cc_lb_scheduler::jobs::price_catalog::PriceCatalogRefreshJobHandler;
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeJobHandler;
 use cc_lb_scheduler::jobs::upstream_affinity_purge::UpstreamAffinityPurgeJobHandler;
-use cc_lb_scheduler::jobs::usage_prune::handle_usage_prune_job;
+use cc_lb_scheduler::jobs::usage_prune::{
+    UsagePruneJob, UsagePruneJobResult, handle_usage_prune_job,
+};
 use cc_lb_scheduler::jobs::usage_rollup::handle_usage_rollup_job;
 use cc_lb_scheduler::jobs::watchdog::{
     OAuthRefreshWatchdogJob, WarmupWatchdogJob, WatchdogEntityKind, run_entity_watchdog,
@@ -23,7 +25,7 @@ use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::state_stores::{
     AnthropicCompatEtagsStore, OAuthUsagePollCursorsStore, PriceCatalogVersionsStore,
 };
-use cc_lb_scheduler::worker::{CronJob, SchedulerBackend};
+use cc_lb_scheduler::worker::{CronJob, SchedulerBackend, SchedulerPushTask};
 use cc_lb_storage_api::WarmupLane;
 use uuid::Uuid;
 
@@ -52,6 +54,38 @@ impl SchedulerDispatch {
                 )
                 .await
                 .map_err(storage_scheduler_error)?;
+                if matches!(
+                    result,
+                    UsagePruneJobResult::Done {
+                        has_more_api_key_usage_work: true,
+                        ..
+                    }
+                ) {
+                    let run_at = unix_secs(self.clock.now()).saturating_add(5);
+                    let continuation = UsagePruneJob {
+                        traceparent: None,
+                        api_key_usage_continuation: true,
+                    };
+                    match self
+                        .backend
+                        .push_cron_task(SchedulerPushTask {
+                            args: CronJob::UsagePrune(continuation),
+                            idempotency_key: Some(format!("usage_prune_continuation:{run_at}")),
+                            run_at_unix_secs: Some(run_at),
+                            max_attempts: Some(3),
+                        })
+                        .await
+                    {
+                        Ok(()) | Err(cc_lb_scheduler::error::SchedulerError::Conflict(_)) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "failed to schedule api_key_usage continuation prune task"
+                            );
+                            return Err(error);
+                        }
+                    }
+                }
                 usage_prune_outcome(result)
             }
             CronJob::PromptCachePurge(job) => prompt_cache_purge_outcome(

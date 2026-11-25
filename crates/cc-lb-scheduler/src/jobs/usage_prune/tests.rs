@@ -65,11 +65,65 @@ async fn zero_general_retention_still_compacts_api_key_usage() {
     assert_eq!(runner.audit_entry_count(), 2);
 }
 
+#[tokio::test]
+async fn continuation_pass_skips_general_prune_and_flags_remaining_markers() {
+    let clock = test_clock();
+    let runner = RecordingUsagePruneRunner::default();
+    runner.seed_usage_rows(expired_ms(&*clock, 100), 3);
+    runner.set_remaining_flush_markers(2);
+
+    let initial = run_job(&runner, RETENTION_DAYS, clock.clone()).await;
+    assert_eq!(runner.prune_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runner.compaction_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(initial, done_result_with_more(3, 3, 0, 0, true));
+
+    runner.seed_usage_rows(expired_ms(&*clock, 100), 2);
+    let cont_1 = handle_usage_prune_job(
+        UsagePruneJob {
+            traceparent: None,
+            api_key_usage_continuation: true,
+        },
+        &runner,
+        RETENTION_DAYS,
+        clock.clone(),
+        WRITER_INACTIVE_AFTER_SECS,
+        API_KEY_USAGE_RETAIN_FOR_SECS,
+        COMPACTION_BATCH_SIZE,
+    )
+    .await
+    .expect("first continuation run");
+    assert_eq!(
+        runner.prune_calls.load(Ordering::SeqCst),
+        1,
+        "continuation run must skip general retention pruning"
+    );
+    assert_eq!(runner.compaction_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(cont_1, done_result_with_more(0, 0, 0, 0, true));
+    assert_eq!(runner.request_event_count(), 2);
+
+    let cont_2 = handle_usage_prune_job(
+        UsagePruneJob {
+            traceparent: None,
+            api_key_usage_continuation: true,
+        },
+        &runner,
+        RETENTION_DAYS,
+        clock,
+        WRITER_INACTIVE_AFTER_SECS,
+        API_KEY_USAGE_RETAIN_FOR_SECS,
+        COMPACTION_BATCH_SIZE,
+    )
+    .await
+    .expect("final continuation run");
+    assert_eq!(cont_2, done_result_with_more(0, 0, 0, 0, false));
+}
+
 struct RecordingUsagePruneRunner {
     prune_calls: AtomicUsize,
     compaction_calls: AtomicUsize,
     compaction_args: Mutex<Vec<(u64, u64, usize)>>,
     compaction_result: Mutex<ApiKeyUsageCompactionRun>,
+    remaining_flush_markers: AtomicUsize,
     request_event_timestamps_ms: Mutex<Vec<u64>>,
     audit_log_timestamps_secs: Mutex<Vec<u64>>,
 }
@@ -84,6 +138,7 @@ impl Default for RecordingUsagePruneRunner {
                 folded_rows: 0,
                 pruned_rows: 0,
             }),
+            remaining_flush_markers: AtomicUsize::new(0),
             request_event_timestamps_ms: Mutex::new(Vec::new()),
             audit_log_timestamps_secs: Mutex::new(Vec::new()),
         }
@@ -91,6 +146,10 @@ impl Default for RecordingUsagePruneRunner {
 }
 
 impl RecordingUsagePruneRunner {
+    fn set_remaining_flush_markers(&self, count: usize) {
+        self.remaining_flush_markers.store(count, Ordering::SeqCst);
+    }
+
     fn seed_usage_rows(&self, timestamp_ms: u64, count: usize) {
         let mut request_events = self
             .request_event_timestamps_ms
@@ -185,6 +244,27 @@ impl UsagePruneRunner for RecordingUsagePruneRunner {
             .expect("compaction result lock");
         future::ready(Ok(result))
     }
+
+    fn prune_expired_api_key_usage_flush_markers(
+        &self,
+        _retain_for_secs: u64,
+        batch_size: usize,
+    ) -> impl future::Future<Output = StorageResult<u64>> + Send + '_ {
+        let mut current = self.remaining_flush_markers.load(Ordering::SeqCst);
+        let removed = loop {
+            let take = current.min(batch_size);
+            match self.remaining_flush_markers.compare_exchange(
+                current,
+                current - take,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break take as u64,
+                Err(actual) => current = actual,
+            }
+        };
+        future::ready(Ok(removed))
+    }
 }
 
 async fn run_job(
@@ -218,6 +298,22 @@ fn done_result(
     folded_rows: u64,
     pruned_rows: u64,
 ) -> UsagePruneJobResult {
+    done_result_with_more(
+        request_events_removed,
+        audit_log_removed,
+        folded_rows,
+        pruned_rows,
+        false,
+    )
+}
+
+fn done_result_with_more(
+    request_events_removed: u64,
+    audit_log_removed: u64,
+    folded_rows: u64,
+    pruned_rows: u64,
+    has_more_api_key_usage_work: bool,
+) -> UsagePruneJobResult {
     UsagePruneJobResult::Done {
         result: PruneResult {
             request_events_removed,
@@ -228,6 +324,7 @@ fn done_result(
             folded_rows,
             pruned_rows,
         },
+        has_more_api_key_usage_work,
     }
 }
 

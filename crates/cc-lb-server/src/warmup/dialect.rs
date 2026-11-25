@@ -26,7 +26,7 @@ use serde_json::json;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::dynamic_view_builder::{Stores, materialize_wasm, upstream_identity};
+use crate::dynamic_view_builder::{Stores, read_verified_wasm, upstream_identity};
 use crate::refresh::LazyRefresher;
 use crate::warmup::request::{
     ProviderWarmupDispatchParams, WARMUP_MAX_TOKENS, WARMUP_MODEL, WARMUP_RESPONSE_TIMEOUT,
@@ -142,12 +142,10 @@ pub async fn dispatch_warmup_with_dialect(
     let slot = match params.runtime.get_slot(&slot_key) {
         Some(slot) => slot,
         None => {
-            let wasm_path = materialize_wasm(params.stores, params.data_dir, registry_entry.sha256)
-                .await
-                .map_err(|error| WarmupDispatchError::Materialize(error.to_string()))?;
-            let wasm_bytes = tokio::fs::read(&wasm_path)
-                .await
-                .map_err(|error| WarmupDispatchError::Materialize(error.to_string()))?;
+            let (_wasm_path, wasm_bytes) =
+                read_verified_wasm(params.stores, params.data_dir, registry_entry.sha256)
+                    .await
+                    .map_err(|error| WarmupDispatchError::Materialize(error.to_string()))?;
             params
                 .runtime
                 .register_shape(slot_key, registry_entry.name.clone(), &wasm_bytes)?

@@ -29,6 +29,9 @@ use worker::{WorkerInstance, build_worker_instance};
 // on `cc_lb_plugin_trap_total`. Kept bounded so cardinality stays
 // small; extend only when a new failure mode is genuinely distinct.
 fn trap_phase_label(err: &WasmtimeRuntimeError) -> &'static str {
+    if err.is_epoch_interrupt() {
+        return "timeout";
+    }
     match err {
         WasmtimeRuntimeError::GuestTrap { phase, .. } => phase,
         WasmtimeRuntimeError::ModuleRejected { .. } => "reject",

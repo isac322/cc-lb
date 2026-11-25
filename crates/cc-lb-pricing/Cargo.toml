@@ -31,10 +31,10 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "fs"] }
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 cc-lb-workspace-hack.workspace = true
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 tempfile.workspace = true
-uuid.workspace = true
 wiremock = "0.6"

@@ -23,6 +23,7 @@ cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-control = { path = "../cc-lb-control" }
 cc-lb-lifecycle.workspace = true
 cc-lb-request-log.workspace = true
+cc-lb-runtime-wasmtime = { workspace = true }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres", optional = true }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite", optional = true }

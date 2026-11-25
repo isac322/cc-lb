@@ -514,3 +514,82 @@ async fn create_principal(
 fn created_id(body: &Value) -> String {
     body["id"].as_str().unwrap().to_owned()
 }
+
+#[tokio::test]
+async fn create_and_update_validate_default_limits_window_and_cap() {
+    let server = admin_test_common::spawn_admin_server().await;
+
+    for (label, invalid_limit, expected_field) in [
+        (
+            "over-max-window",
+            json!({ "kind": "requests", "window_secs": 604_801, "cap_micros": 10 }),
+            "default_limits[0].window_secs",
+        ),
+        (
+            "zero-window",
+            json!({ "kind": "requests", "window_secs": 0, "cap_micros": 10 }),
+            "default_limits[0].window_secs",
+        ),
+        (
+            "negative-cap",
+            json!({ "kind": "cost_usd", "window_secs": 60, "cap_micros": -1 }),
+            "default_limits[0].cap_micros",
+        ),
+    ] {
+        let (status, _, body) = server
+            .client
+            .post_json(
+                "/admin/v1/principals",
+                json!({
+                    "name": format!("bad-create-{label}"),
+                    "kind": "machine",
+                    "allowed_models": [],
+                    "default_limits": [invalid_limit]
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {body}");
+        assert_eq!(body["error"], "invalid_input");
+        assert_eq!(body["field"], expected_field);
+    }
+
+    // Exact 7-day bound is accepted on create.
+    let (status, headers, created) = server
+        .client
+        .post_json(
+            "/admin/v1/principals",
+            json!({
+                "name": "valid-7d-principal",
+                "kind": "machine",
+                "allowed_models": [],
+                "default_limits": [
+                    { "kind": "requests", "window_secs": 604_800, "cap_micros": 100 }
+                ]
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created_id(&created);
+    let etag = server
+        .client
+        .header_str(&headers, header::ETAG.as_str())
+        .to_owned();
+
+    // Update rejects out-of-bounds window and preserves revision.
+    let (status, _, body) = server
+        .client
+        .json(
+            "PATCH",
+            &format!("/admin/v1/principals/{id}"),
+            Some(json!({
+                "default_limits": [
+                    { "kind": "requests", "window_secs": 604_801, "cap_micros": 100 }
+                ]
+            })),
+            &[(header::IF_MATCH.as_str(), etag.as_str())],
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "invalid_input");
+    assert_eq!(body["field"], "default_limits[0].window_secs");
+}

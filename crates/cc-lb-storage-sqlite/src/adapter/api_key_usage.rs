@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::{SqliteStorage, map_sqlx_error};
 
 const RETIRED_WRITER_EPOCH: &str = "00000000-0000-0000-0000-000000000000";
+const MAX_FLUSH_MARKER_PRUNE_BATCHES: usize = 256;
 
 #[async_trait]
 impl ApiKeyUsageBucketStore for SqliteStorage {
@@ -35,7 +36,23 @@ impl ApiKeyUsageBucketStore for SqliteStorage {
         &self,
         flush: &ApiKeyUsageFlush,
     ) -> StorageResult<ApiKeyUsageFlushResult> {
+        let now = unix_secs(self.clock().now());
         let mut tx = self.begin_immediate().await?;
+        let flush_id = flush.flush_id.to_string();
+        if !flush.deltas.is_empty() {
+            let already_recorded =
+                sqlx::query("SELECT 1 FROM api_key_usage_flushes_v1 WHERE flush_id = ? LIMIT 1")
+                    .bind(&flush_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(map_sqlx_error)?
+                    .is_some();
+            if already_recorded {
+                tx.rollback().await.map_err(map_sqlx_error)?;
+                return Ok(ApiKeyUsageFlushResult::AlreadyApplied);
+            }
+        }
+
         let writer_epoch = flush.writer_epoch.to_string();
         let row = sqlx::query(
             "SELECT lease_until_unix_secs, last_flush_id FROM api_key_usage_writers_v1 WHERE writer_epoch = ?",
@@ -48,34 +65,44 @@ impl ApiKeyUsageBucketStore for SqliteStorage {
             tx.rollback().await.map_err(map_sqlx_error)?;
             return Ok(ApiKeyUsageFlushResult::LeaseLost);
         };
+        let last_flush_id: Option<String> = row.try_get("last_flush_id").map_err(map_sqlx_error)?;
+        if last_flush_id.as_deref() == Some(flush_id.as_str()) {
+            tx.rollback().await.map_err(map_sqlx_error)?;
+            return Ok(ApiKeyUsageFlushResult::AlreadyApplied);
+        }
         let lease_until = i64_to_u64(
             row.try_get("lease_until_unix_secs")
                 .map_err(map_sqlx_error)?,
             "API-key usage writer lease",
         )?;
-        if lease_until < unix_secs(self.clock().now()) {
+        if lease_until < now {
             tx.rollback().await.map_err(map_sqlx_error)?;
             return Ok(ApiKeyUsageFlushResult::LeaseLost);
         }
-        let last_flush_id: Option<String> = row.try_get("last_flush_id").map_err(map_sqlx_error)?;
-        if last_flush_id.as_deref() == Some(flush.flush_id.to_string().as_str()) {
-            tx.rollback().await.map_err(map_sqlx_error)?;
-            return Ok(ApiKeyUsageFlushResult::AlreadyApplied);
-        }
 
-        for delta in &flush.deltas {
-            validate_delta(delta)?;
+        if !flush.deltas.is_empty() {
+            for delta in &flush.deltas {
+                validate_delta(delta)?;
+                sqlx::query(
+                    "INSERT INTO api_key_usage_buckets_v1 (writer_epoch, key_id, bucket_width_secs, bucket_start_unix_secs, requests, input_tokens, output_tokens, cost_usd_micros) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(writer_epoch, key_id, bucket_width_secs, bucket_start_unix_secs) DO UPDATE SET requests = requests + excluded.requests, input_tokens = input_tokens + excluded.input_tokens, output_tokens = output_tokens + excluded.output_tokens, cost_usd_micros = cost_usd_micros + excluded.cost_usd_micros",
+                )
+                .bind(&writer_epoch)
+                .bind(&delta.key.key_id)
+                .bind(u64_to_i64(delta.key.bucket_width_secs, "API-key usage bucket width")?)
+                .bind(u64_to_i64(delta.key.bucket_start_unix_secs, "API-key usage bucket start")?)
+                .bind(delta.usage.requests)
+                .bind(delta.usage.input_tokens)
+                .bind(delta.usage.output_tokens)
+                .bind(delta.usage.cost_usd_micros)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+            }
             sqlx::query(
-                "INSERT INTO api_key_usage_buckets_v1 (writer_epoch, key_id, bucket_width_secs, bucket_start_unix_secs, requests, input_tokens, output_tokens, cost_usd_micros) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(writer_epoch, key_id, bucket_width_secs, bucket_start_unix_secs) DO UPDATE SET requests = requests + excluded.requests, input_tokens = input_tokens + excluded.input_tokens, output_tokens = output_tokens + excluded.output_tokens, cost_usd_micros = cost_usd_micros + excluded.cost_usd_micros",
+                "INSERT INTO api_key_usage_flushes_v1 (flush_id, applied_at_unix_secs) VALUES (?, ?) ON CONFLICT(flush_id) DO NOTHING",
             )
-            .bind(&writer_epoch)
-            .bind(&delta.key.key_id)
-            .bind(u64_to_i64(delta.key.bucket_width_secs, "API-key usage bucket width")?)
-            .bind(u64_to_i64(delta.key.bucket_start_unix_secs, "API-key usage bucket start")?)
-            .bind(delta.usage.requests)
-            .bind(delta.usage.input_tokens)
-            .bind(delta.usage.output_tokens)
-            .bind(delta.usage.cost_usd_micros)
+            .bind(&flush_id)
+            .bind(u64_to_i64(now, "API-key usage flush timestamp")?)
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
@@ -84,7 +111,7 @@ impl ApiKeyUsageBucketStore for SqliteStorage {
             "UPDATE api_key_usage_writers_v1 SET lease_until_unix_secs = ?, last_flush_id = ? WHERE writer_epoch = ?",
         )
         .bind(u64_to_i64(flush.lease_until_unix_secs, "API-key usage writer lease")?)
-        .bind(flush.flush_id.to_string())
+        .bind(&flush_id)
         .bind(&writer_epoch)
         .execute(&mut *tx)
         .await
@@ -182,10 +209,43 @@ impl ApiKeyUsageBucketStore for SqliteStorage {
             .bind(i64::try_from(batch_size).unwrap_or(i64::MAX))
             .execute(&mut *tx).await.map_err(map_sqlx_error)?.rows_affected();
         tx.commit().await.map_err(map_sqlx_error)?;
+        let marker_chunk_size = batch_size.max(1);
+        for _ in 0..MAX_FLUSH_MARKER_PRUNE_BATCHES {
+            let removed = self
+                .prune_expired_api_key_usage_flush_markers(retain_for_secs, marker_chunk_size)
+                .await?;
+            if removed < u64::try_from(marker_chunk_size).unwrap_or(u64::MAX) {
+                break;
+            }
+        }
         Ok(ApiKeyUsageCompactionRun {
             folded_rows: stale.len() as u64,
             pruned_rows: pruned,
         })
+    }
+
+    async fn prune_expired_api_key_usage_flush_markers(
+        &self,
+        retain_for_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        if batch_size == 0 {
+            return Ok(0);
+        }
+        let now = unix_secs(self.clock().now());
+        let retain_since = now.saturating_sub(retain_for_secs);
+        let retain_since_i64 = u64_to_i64(retain_since, "API-key usage retention cutoff")?;
+        let limit_i64 = i64::try_from(batch_size).unwrap_or(i64::MAX);
+        let removed = sqlx::query(
+            "DELETE FROM api_key_usage_flushes_v1 WHERE rowid IN (SELECT rowid FROM api_key_usage_flushes_v1 WHERE applied_at_unix_secs <= ? ORDER BY applied_at_unix_secs LIMIT ?)",
+        )
+        .bind(retain_since_i64)
+        .bind(limit_i64)
+        .execute(self.pool())
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+        Ok(removed)
     }
 }
 
@@ -233,6 +293,18 @@ impl ApiKeyConcurrencyHoldStore for SqliteStorage {
     ) -> StorageResult<u64> {
         let _ = (hold_ids, now_unix_secs);
         Ok(0)
+    }
+
+    async fn try_acquire_api_key_concurrency_hold(
+        &self,
+        hold_id: Uuid,
+        key_id: &str,
+        writer_epoch: Uuid,
+        cap: u32,
+        max_age_secs: u64,
+    ) -> StorageResult<bool> {
+        let _ = (hold_id, key_id, writer_epoch, cap, max_age_secs);
+        Ok(true)
     }
 }
 

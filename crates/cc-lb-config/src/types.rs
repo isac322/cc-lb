@@ -738,6 +738,9 @@ pub struct WasmtimeConfig {
     pub wire_bounds: PluginWireBounds,
     #[serde(default)]
     pub cookie_redaction: bool,
+    /// Per-call Wasmtime epoch preemption timeout in milliseconds (default 1000ms, valid range 10..=30000).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_timeout_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -750,16 +753,16 @@ pub enum WasmtimeAllocationStrategy {
 }
 
 /// Whether a shape plugin may return a URL whose origin
-/// (scheme+host+port) differs from the selected upstream. Historical
-/// behaviour is `Unrestricted`; deployments where a compromised or
-/// buggy shape plugin misrouting to a wrong host is a concern can
-/// opt into `SelectedUpstreamOrigin` to reject any URL that does not
-/// match the selected upstream's `base_url` origin.
+/// (scheme+host+port) differs from the selected upstream. The default
+/// is `SelectedUpstreamOrigin`, which rejects any URL that does not
+/// match the selected upstream's `base_url` origin; deployments that
+/// intentionally redirect requests to another host can opt into
+/// `Unrestricted`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ShapeOriginPolicy {
-    #[default]
     Unrestricted,
+    #[default]
     SelectedUpstreamOrigin,
 }
 

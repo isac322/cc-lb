@@ -29,7 +29,6 @@ use bytes::{Bytes, BytesMut};
 use cc_lb_aead::AeadService;
 #[cfg(all(test, feature = "admin"))]
 use cc_lb_clock::ClockHandle;
-use cc_lb_control::DynamicView;
 use cc_lb_engine::realtime_websocket::{
     RealtimeStreamMetrics, RealtimeUsage, RealtimeWebSocketKind, RealtimeWebSocketSession,
     RealtimeWebSocketTarget, RealtimeWebSocketTermination, gemini_setup_model,
@@ -71,7 +70,7 @@ mod bootstrap;
 #[path = "input_tokens_ws.rs"]
 mod input_tokens_ws;
 #[path = "app/proxy_router.rs"]
-mod proxy_router;
+pub(crate) mod proxy_router;
 #[path = "app_realtime_websocket.rs"]
 mod realtime_websocket;
 #[path = "app/responses_request_body.rs"]

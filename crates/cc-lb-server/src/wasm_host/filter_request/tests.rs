@@ -71,6 +71,7 @@ fn v3_encoding_includes_requested_service_tier_provider_kind_and_quota_sample() 
     FilterWireRequest {
         ctx: &context,
         principal: &principal,
+        claims: &[],
         candidates: &[candidate],
         cookie_redaction: false,
     }
@@ -123,6 +124,7 @@ fn v3_encoding_carries_provider_native_pricing_and_explicit_unknown_fallback() {
     FilterWireRequest {
         ctx: &native_ctx,
         principal: &principal,
+        claims: &[],
         candidates: &[],
         cookie_redaction: false,
     }
@@ -154,6 +156,7 @@ fn v3_encoding_carries_provider_native_pricing_and_explicit_unknown_fallback() {
     FilterWireRequest {
         ctx: &fallback_ctx,
         principal: &principal,
+        claims: &[],
         candidates: &[],
         cookie_redaction: false,
     }

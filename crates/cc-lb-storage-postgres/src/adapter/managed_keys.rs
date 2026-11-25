@@ -3,8 +3,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cc_lb_clock::{ClockHandle, unix_secs};
 use cc_lb_storage_api::{
-    ApiKeyMutation, IssueParams, KeyStatus, Limit, ManagedKeyStore, StorageError, StorageResult,
-    StoredApiKeyRecord, validate_identifier,
+    ApiKeyMutation, ChangeChannel, IssueParams, KeyStatus, Limit, MAX_CHANGE_PAYLOAD_LEN,
+    ManagedKeyStore, StorageError, StorageResult, StoredApiKeyRecord, validate_identifier,
+    validate_limits,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Row, postgres::PgRow};
@@ -47,6 +48,7 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
         if let Some(desc) = &params.description {
             validate_identifier("description", desc)?;
         }
+        validate_limits("limit_overrides", &params.limit_overrides)?;
 
         let record = StoredApiKeyRecord {
             label: params.label,
@@ -81,7 +83,7 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
                 .execute(&mut *tx)
                 .await
                 .map_err(map_sqlx_error)?;
-                notify_principal_changed(&mut tx, principal_id)
+                notify_managed_key_changed(&mut tx, principal_id, key_id)
                     .await
                     .map_err(map_sqlx_error)?;
                 tx.commit().await.map_err(map_sqlx_error)?;
@@ -195,6 +197,9 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
     ) -> StorageResult<()> {
         validate_identifier("principal_id", principal_id)?;
         validate_identifier("key_id", key_id)?;
+        if let Some(limits) = mutation.limit_overrides.as_deref() {
+            validate_limits("limit_overrides", limits)?;
+        }
 
         retry::with_retry(&self.retry_policy, || {
             let pool = self.pool.clone();
@@ -214,7 +219,7 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
 
                 apply_mutation(&mut record, mutation);
                 update_record(principal_id, key_id, &record, &mut tx).await?;
-                notify_principal_changed(&mut tx, principal_id).await?;
+                notify_managed_key_changed(&mut tx, principal_id, key_id).await?;
                 tx.commit().await?;
                 Ok(())
             }
@@ -257,7 +262,7 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
                     .bind(captured_index_hash.as_slice())
                     .execute(&mut *tx)
                     .await?;
-                notify_principal_changed(&mut tx, principal_id).await?;
+                notify_managed_key_changed(&mut tx, principal_id, key_id).await?;
                 tx.commit().await?;
                 Ok(())
             }
@@ -267,12 +272,29 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
     }
 }
 
-async fn notify_principal_changed(
+fn encode_managed_key_notify_payload(principal_id: &str, key_id: &str) -> String {
+    if !principal_id.contains('\t')
+        && !key_id.contains('\t')
+        && principal_id.chars().count() + 1 + key_id.chars().count() <= MAX_CHANGE_PAYLOAD_LEN
+    {
+        format!("{principal_id}\t{key_id}")
+    } else if !principal_id.contains('\t') && principal_id.chars().count() <= MAX_CHANGE_PAYLOAD_LEN
+    {
+        principal_id.to_owned()
+    } else {
+        String::new()
+    }
+}
+
+async fn notify_managed_key_changed(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     principal_id: &str,
+    key_id: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_notify('cclb_principal_changed', $1)")
-        .bind(principal_id)
+    let payload = encode_managed_key_notify_payload(principal_id, key_id);
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(ChangeChannel::ManagedKey.postgres_channel())
+        .bind(payload)
         .execute(&mut **tx)
         .await?;
     Ok(())

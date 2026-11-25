@@ -31,9 +31,12 @@ use self::cache::{
     prompt_cache_token_scope, publish_provider_cache_observation,
     request_cache_metadata_from_value_with_analysis_for_capability,
 };
+pub use self::identity::ThreadStickySubagentLatch;
+#[cfg(test)]
+use self::identity::apply_thread_sticky_subagent_latch;
 use self::identity::{
-    OpenaiSessionHintCache, ThreadStickySubagentLatch, apply_thread_sticky_subagent_latch,
-    is_openai_prewarm_request, request_identity_metadata,
+    OpenaiSessionHintCache, apply_thread_sticky_subagent_latch_async, is_openai_prewarm_request,
+    request_identity_metadata,
 };
 use self::limits::{
     ActiveLimit, LimitRequest, admission_fanout_multiplier, attach_limit_headers_from_engine,
@@ -71,18 +74,18 @@ pub(crate) use self::streaming::{
     abnormal_stop_error_message, keepalive_event_reaches_upstream_terminal,
     sse_event_completes_response,
 };
+pub(crate) use self::types::to_usage_snapshot;
 use self::types::{
     AttemptFailure, AttemptResponse, CompatBodyTimingGuard, ConcurrentAttemptFuture,
     ConcurrentAttemptInputs, LimitRejectionErr, LimitRejectionInfo, RawPassthroughDialect,
-    RawPassthroughError, RequestAffinityFailure, RequestAffinityResolution, RequestBodyView,
-    ResponseAffinityContext, ResponseBodyFuture, apply_prompt_cache_timings,
-    bind_upstream_affinity_keys, body_cap_for_path, canonical_model_for_capability,
-    db_principal_kind_as_str, duration_to_ms, gemini_model_from_path, header_snapshot_from,
-    header_to_string, lifecycle_request_model, multipart_request_model, next_request_id,
-    principal_kind_lite, push_buffered_data, raw_passthrough_request, record_shape_internal_error,
-    reduce_fanout, response_start_unix_secs, responses_usage_value_to_counts,
-    rewrite_json_request_body_headers, signer_error_kind, store_setup_timings,
-    system_time_to_unix_millis, to_usage_snapshot, unix_now_ms, unsupported_operation_response,
+    RequestAffinityFailure, RequestAffinityResolution, RequestBodyView, ResponseAffinityContext,
+    ResponseBodyFuture, apply_prompt_cache_timings, bind_upstream_affinity_keys, body_cap_for_path,
+    canonical_model_for_capability, db_principal_kind_as_str, duration_to_ms,
+    gemini_model_from_path, header_snapshot_from, header_to_string, lifecycle_request_model,
+    multipart_request_model, next_request_id, principal_kind_lite, push_buffered_data,
+    raw_passthrough_request, record_shape_internal_error, reduce_fanout, response_start_unix_secs,
+    responses_usage_value_to_counts, rewrite_json_request_body_headers, signer_error_kind,
+    store_setup_timings, system_time_to_unix_millis, unix_now_ms, unsupported_operation_response,
 };
 pub(crate) use self::types::{AttemptTimings, DEFAULT_MAX_INPUT_ESTIMATE, RequestEventContext};
 pub use self::types::{
@@ -130,8 +133,8 @@ use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RouteDecision};
 use cc_lb_routing_trace::{RoutingTrace, StageDecision, TerminalDecision};
 use cc_lb_storage_api::{
     PrincipalKind as DbPrincipalKind, PrincipalKindLite, PromptCacheObservationRecord,
-    ProviderPromptCacheObservationRecord, StoredApiKeyRecord, UpstreamAffinityBinding,
-    UpstreamAffinityKey, UpstreamAffinityKind, UpstreamAffinityStore,
+    ProviderPromptCacheObservationRecord, StoredApiKeyRecord, ThreadStickySubagentStore,
+    UpstreamAffinityBinding, UpstreamAffinityKey, UpstreamAffinityKind, UpstreamAffinityStore,
     UpstreamRateLimitObservationRecord, UpstreamRecord,
     upstream::UpstreamKind as StorageUpstreamKind,
 };
@@ -271,6 +274,7 @@ pub struct Lifecycle {
     cache_keepalive: crate::cache_keepalive::LifecycleKeepalive,
     thread_sticky_subagent_latch: ThreadStickySubagentLatch,
     openai_session_hint: OpenaiSessionHintCache,
+    thread_sticky_subagent_store: Option<Arc<dyn ThreadStickySubagentStore>>,
     prompt_cache_analysis_executor: PromptCacheAnalysisExecutor,
     completion_observer: Arc<CompletionObserver>,
     clock: ClockHandle,
@@ -304,6 +308,7 @@ impl Lifecycle {
             ),
             thread_sticky_subagent_latch: ThreadStickySubagentLatch::default(),
             openai_session_hint: OpenaiSessionHintCache::default(),
+            thread_sticky_subagent_store: None,
             prompt_cache_analysis_executor: PromptCacheAnalysisExecutor::default(),
             completion_observer: Arc::new(CompletionObserver::new()),
             clock,
@@ -321,6 +326,22 @@ impl Lifecycle {
 
     pub fn with_upstream_affinity_store(mut self, store: Arc<dyn UpstreamAffinityStore>) -> Self {
         self.upstream_affinity_store = Some(store);
+        self
+    }
+
+    pub fn with_thread_sticky_subagent_latch(
+        mut self,
+        latch: Arc<ThreadStickySubagentLatch>,
+    ) -> Self {
+        self.thread_sticky_subagent_latch = (*latch).clone();
+        self
+    }
+
+    pub fn with_thread_sticky_subagent_store(
+        mut self,
+        store: Arc<dyn ThreadStickySubagentStore>,
+    ) -> Self {
+        self.thread_sticky_subagent_store = Some(store);
         self
     }
 
@@ -721,15 +742,24 @@ impl Lifecycle {
                 id: auth.principal_id().to_owned(),
                 kind: PrincipalKind::InternalKey,
             };
+            let cache_structure_started = Instant::now();
+            let mut cache_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                ingress.headers,
+                Some(body.as_ref()),
+                None,
+                Some(ProviderCapability::OpenaiResponses),
+                None,
+            );
+            apply_thread_sticky_subagent_latch_async(
+                &self.thread_sticky_subagent_latch,
+                self.thread_sticky_subagent_store.as_deref(),
+                self.clock.as_ref(),
+                &principal.id,
+                Some(body.as_ref()),
+                &mut cache_metadata,
+            )
+            .await;
             if let Some(observer) = observer.as_ref() {
-                let cache_structure_started = Instant::now();
-                let cache_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
-                    ingress.headers,
-                    Some(body.as_ref()),
-                    None,
-                    Some(ProviderCapability::OpenaiResponses),
-                    None,
-                );
                 setup_timings.cache_structure_ms =
                     Some(cache_structure_started.elapsed().as_secs_f64() * 1_000.0);
                 observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
@@ -1431,6 +1461,21 @@ impl Lifecycle {
                 .iter()
                 .any(|filter| filter.plugin_id() == BUILTIN_SUBSCRIPTION_PREFERENCE_ID))
         .then(|| candidates.clone());
+        let websocket_filter_error = |failure: &self::routing::FilterPipelineFailure| {
+            WebSocketError::new(
+                if failure.is_pool_saturated() {
+                    503
+                } else {
+                    502
+                },
+                if failure.is_pool_saturated() {
+                    "overloaded_error"
+                } else {
+                    "api_error"
+                },
+                failure.message().to_owned(),
+            )
+        };
         let mut result = if let Some(hint_id) = prewarm_hint_id {
             let hinted: Vec<UpstreamCandidate> = candidates
                 .iter()
@@ -1438,6 +1483,9 @@ impl Lifecycle {
                 .cloned()
                 .collect();
             let hinted_result = execute_filter_pipeline(filters, &ctx, &principal, hinted);
+            if let Some(ref failure) = hinted_result.failure {
+                return Err(websocket_filter_error(failure));
+            }
             if !hinted_result.candidates.is_empty()
                 && !subscription_hard_blocked(
                     ctx.canonical_model_id.as_str(),
@@ -1452,6 +1500,9 @@ impl Lifecycle {
         } else {
             execute_filter_pipeline(filters, &ctx, &principal, candidates)
         };
+        if let Some(ref failure) = result.failure {
+            return Err(websocket_filter_error(failure));
+        }
         if let Some(target) = target {
             result
                 .candidates
@@ -1509,6 +1560,9 @@ impl Lifecycle {
                     break;
                 }
                 let next_result = execute_filter_pipeline(filters, &ctx, &principal, remaining);
+                if let Some(ref failure) = next_result.failure {
+                    return Err(websocket_filter_error(failure));
+                }
                 let terminal = self
                     .select_terminal_upstream(pipeline.terminal.clone(), &next_result.candidates);
                 let Some(next_id) = terminal.upstream_id else {
@@ -1557,6 +1611,9 @@ impl Lifecycle {
                     }
                     let next_result =
                         execute_filter_pipeline(filters, &ctx, &principal, remaining_api_keys);
+                    if let Some(ref failure) = next_result.failure {
+                        return Err(websocket_filter_error(failure));
+                    }
                     let terminal = self.select_terminal_upstream(
                         pipeline.terminal.clone(),
                         &next_result.candidates,
@@ -1644,6 +1701,10 @@ impl Lifecycle {
                     "upstream is no longer available",
                 )
             })?;
+        if let Some(reason) = cached.dialect_instantiation_error(record.kind.provider()) {
+            record_shape_internal_error(observer, reason);
+            return Err(WebSocketError::new(502, "api_error", reason.to_owned()));
+        }
         let plugin_dialect = cached.resolved_dialect(upstream_id).cloned();
         let openai_oauth = record.kind == StorageUpstreamKind::OpenaiOauth;
         if plugin_dialect.is_none() && !openai_oauth {
@@ -1673,9 +1734,13 @@ impl Lifecycle {
                 match shape_request(dialect.as_ref(), &context, &upstream, &principal) {
                     Ok(shaped) => (shaped.body().clone(), shaped.headers().clone()),
                     Err(error) => {
-                        tracing::warn!(%error, "websocket shape_request failed; forwarding raw frame");
+                        tracing::warn!(%error, "websocket shape_request failed; failing closed");
                         record_shape_internal_error(observer, &error.to_string());
-                        (ingress.frame.clone(), context.downstream_headers)
+                        let (status, error_type) = match &error {
+                            DialectError::PoolSaturated { .. } => (503, "overloaded_error"),
+                            _ => (502, "api_error"),
+                        };
+                        return Err(WebSocketError::new(status, error_type, error.to_string()));
                     }
                 }
             }
@@ -2289,12 +2354,15 @@ impl Lifecycle {
             Some(request_capability),
             path_model.as_deref(),
         );
-        apply_thread_sticky_subagent_latch(
+        apply_thread_sticky_subagent_latch_async(
             &self.thread_sticky_subagent_latch,
+            self.thread_sticky_subagent_store.as_deref(),
+            self.clock.as_ref(),
             &principal.id,
             body_view.value(),
             &mut cache_metadata,
-        );
+        )
+        .await;
         if let Some(o) = observer.as_ref() {
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                 event_id: o.event_id().to_owned(),
@@ -2644,6 +2712,70 @@ impl Lifecycle {
             &principal,
             candidates,
         );
+        if let Some(failure) = pipeline_result.failure.take() {
+            if let Some(o) = observer.as_ref() {
+                for error in pipeline_result.internal_errors.drain(..) {
+                    o.record_internal_error(error);
+                }
+            }
+            let terminal_decision = self.select_terminal_upstream(
+                router_pipeline.terminal.clone(),
+                &pipeline_result.candidates,
+            );
+            route_span.record(
+                "cc_lb.route.candidate_count",
+                numeric_attribute(Some(0)).as_value(),
+            );
+            route_span.record("cc_lb.route.outcome", "error");
+            route_span.record("otel.status_code", "ERROR");
+            route_span.record("error.type", error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER);
+            let (status, error_type, client_message, retry_after_secs) =
+                if failure.is_pool_saturated() {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "overloaded_error",
+                        "plugin runtime saturated",
+                        Some(1_u64),
+                    )
+                } else {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        "api_error",
+                        "routing filter plugin failed",
+                        None,
+                    )
+                };
+            if let Some(o) = observer.as_ref() {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
+                    event_id: o.event_id().to_owned(),
+                    result: Err(cc_lb_lifecycle::RouteFailure::RouteNoUpstreamAfterFilter),
+                    routing_trace: Some(pipeline_result.routing_trace(terminal_decision)),
+                });
+                o.terminate_failure(InternalFailure {
+                    status,
+                    error_code: error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER,
+                    error: failure.internal_error(),
+                });
+            }
+            return Ok(if let Some(retry_after_secs) = retry_after_secs {
+                provider_error_response_with_retry_after(
+                    request_capability,
+                    status,
+                    error_type,
+                    client_message,
+                    None,
+                    retry_after_secs,
+                )
+            } else {
+                provider_error_response(
+                    request_capability,
+                    status,
+                    error_type,
+                    client_message,
+                    None,
+                )
+            });
+        }
         // Hard affinity: provider-owned state lives on exactly one upstream.
         // Filters may only narrow the candidate set; if they (or the eligible
         // candidate set itself) exclude the owner, the request cannot be
@@ -3845,8 +3977,8 @@ impl Lifecycle {
         let native_sse_framing_error =
             gemini_native::rejects_json_success(&ctx, routed.record.kind, &response);
         // Renewal capture is optional; ownership acquired at dispatch is not.
-        // In particular, shaping fallback or a dynamic config change can leave
-        // an owner even when the initial response-tracking decision was false.
+        // In particular, a dynamic config change can leave an owner even when
+        // the initial response-tracking decision was false.
         let compaction_response_enabled = keepalive_response_enabled && !track_keepalive_response;
         let keepalive_shaped_body = keepalive_shaped_body.filter(|_| track_keepalive_response);
         let (request_dispatched_at, request_start_order) = keepalive_request_started
@@ -4071,15 +4203,18 @@ impl Lifecycle {
             })
         };
 
-        match limit_engine.reserve(
-            view,
-            &subject.record,
-            &subject.principal_id,
-            &limit_request.model,
-            limit_request.max_tokens,
-            max_input_estimate,
-            cost_estimate,
-        ) {
+        match limit_engine
+            .reserve_async(
+                view,
+                &subject.record,
+                &subject.principal_id,
+                &limit_request.model,
+                limit_request.max_tokens,
+                max_input_estimate,
+                cost_estimate,
+            )
+            .await
+        {
             Ok(reservation) => {
                 tracing::Span::current().record("cc_lb.limit.decision", "allowed");
                 Ok(Some(ActiveLimit {
@@ -5633,7 +5768,7 @@ impl Lifecycle {
         route: &RouteDecision,
         upstream_kind: StorageUpstreamKind,
         signer: Arc<dyn Signer>,
-        raw_passthrough_base_url: Option<&Url>,
+        _raw_passthrough_base_url: Option<&Url>,
         observer: Option<&LifecycleContext>,
         timings: &mut AttemptTimings,
         shaped_body_out: &mut Option<Bytes>,
@@ -5733,50 +5868,29 @@ impl Lifecycle {
         let realtime_hangup = upstream_kind == StorageUpstreamKind::OpenaiOauth
             && classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope)
                 == Some(ProviderCapability::OpenaiRealtimeHangup);
-        let (shaped, capture_shaped_body) = match tracing::info_span!("proxy.shape").in_scope(
-            || {
-                if realtime_hangup {
-                    return shape_request(
-                        &RawPassthroughDialect {
-                            base_url: self.config.openai_realtime_origin.clone(),
-                            openai_oauth: false,
-                        },
-                        &shape_context,
-                        &route.upstream,
-                        principal,
-                    );
-                }
-                shape_request(
-                    route.dialect.as_ref(),
+        let shaped = match tracing::info_span!("proxy.shape").in_scope(|| {
+            if realtime_hangup {
+                return shape_request(
+                    &RawPassthroughDialect {
+                        base_url: self.config.openai_realtime_origin.clone(),
+                        openai_oauth: false,
+                    },
                     &shape_context,
                     &route.upstream,
                     principal,
-                )
-            },
-        ) {
-            Ok(shaped) => (shaped, true),
+                );
+            }
+            shape_request(
+                route.dialect.as_ref(),
+                &shape_context,
+                &route.upstream,
+                principal,
+            )
+        }) {
+            Ok(shaped) => shaped,
             Err(source) => {
-                let message = source.to_string();
-                tracing::warn!(%source, "shape_request failed; falling back to raw passthrough");
-                record_shape_internal_error(observer, &message);
-                if matches!(
-                    upstream_kind,
-                    StorageUpstreamKind::VertexApiKey | StorageUpstreamKind::VertexCredential
-                ) {
-                    return Err(AttemptFailure::RawPassthrough(RawPassthroughError::Shape(
-                        source,
-                    )));
-                }
-                (
-                    raw_passthrough_request(
-                        raw_passthrough_base_url,
-                        &shaped_ctx,
-                        principal,
-                        &route.upstream,
-                        upstream_kind == StorageUpstreamKind::OpenaiOauth,
-                    )?,
-                    false,
-                )
+                tracing::warn!(%source, "shape_request failed; failing closed");
+                return Err(AttemptFailure::Shape(source));
             }
         };
         timings.shape_ms = Some(duration_to_ms(shape_start.elapsed()));
@@ -5786,9 +5900,7 @@ impl Lifecycle {
                 numeric_attribute(Some(shape_ms)).as_value(),
             );
         }
-        if capture_shaped_body {
-            *shaped_body_out = Some(shaped.body().clone());
-        }
+        *shaped_body_out = Some(shaped.body().clone());
 
         let sign_start = Instant::now();
         let signed = attempt_scope
@@ -6180,6 +6292,9 @@ impl Lifecycle {
                 .precomputed_usage
                 .clone()
                 .unwrap_or_default();
+            if usage.has_billable_usage() {
+                downstream_drop_guard.record_observed_usage(&usage);
+            }
             let mut responses_error_context = ResponsesSseErrorContext::default();
             let mut first_chunk_at: Option<Instant> = None;
             let mut last_chunk_at: Option<Instant> = None;
@@ -6631,6 +6746,7 @@ impl Lifecycle {
                                             })
                                     },
                                 );
+                                downstream_drop_guard.record_observed_usage(&usage);
                                 downstream_drop_guard.set_keepalive_cached_tokens(
                                     usage
                                         .cache_read_input_tokens
@@ -6850,6 +6966,12 @@ impl Lifecycle {
                                     &parsed_event,
                                 );
                                 if semantic_content_frame {
+                                    if status.is_success()
+                                        && !upstream_error_status
+                                        && !stream_provider_error_seen
+                                    {
+                                        downstream_drop_guard.mark_response_content_started();
+                                    }
                                     if first_content_delta_at.is_none() {
                                         first_content_delta_at = Some(now);
                                         if let Some(o) = observer.as_ref() {
@@ -7421,6 +7543,14 @@ impl Lifecycle {
                                         if provider_error_in_chunk {
                                             stream_provider_error_forwarded = true;
                                         }
+                                        if !upstream_is_sse
+                                            && status.is_success()
+                                            && !upstream_error_status
+                                            && !provider_error_in_chunk
+                                            && !data.is_empty()
+                                        {
+                                            downstream_drop_guard.mark_response_content_started();
+                                        }
                                         yield Ok::<Bytes, Infallible>(data);
                                     }
                                     if unsolicited_sse_affinity_hold_eligible {
@@ -7582,6 +7712,7 @@ impl Lifecycle {
                                         })
                                 },
                             );
+                            downstream_drop_guard.record_observed_usage(&usage);
                             downstream_drop_guard.set_keepalive_cached_tokens(
                                 usage
                                     .cache_read_input_tokens

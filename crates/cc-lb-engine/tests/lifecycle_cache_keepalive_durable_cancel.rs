@@ -179,20 +179,98 @@ async fn compaction_block_precedes_tool_use_without_enqueue_json_and_sse() {
 
 #[tokio::test]
 async fn compaction_response_without_current_breakpoint_fences_generation_json_and_sse() {
-    assert_no_breakpoint_compaction(false, &[false, true]).await;
+    assert_no_breakpoint_compaction(&[false, true]).await;
 }
 
-#[tokio::test]
-async fn shape_fallback_without_breakpoint_buffered_compaction_fences_generation() {
-    assert_no_breakpoint_compaction(true, &[false]).await;
+#[tokio::test(start_paused = true)]
+async fn shape_failure_fails_closed_before_dispatch_and_leaves_keepalive_untouched() {
+    use cc_lb_control::api_keys::principal_view::{
+        DialectCache, RouterPipelineCache, ShapePluginCache,
+    };
+
+    let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+    let principal = principal_with_keepalive();
+    let main_headers = [
+        ("x-claude-code-session-id", "shape-fail-closed"),
+        ("x-claude-code-agent-id", "main"),
+    ];
+    let sibling_headers = [
+        ("x-claude-code-session-id", "shape-fail-closed"),
+        ("x-claude-code-request-class", "subagent"),
+    ];
+    establish_scoped_keepalive(&enqueuer, principal.clone(), &main_headers).await;
+    establish_scoped_keepalive(&enqueuer, principal.clone(), &sibling_headers).await;
+    let before = enqueuer.snapshot();
+    assert_eq!(before.generations.len(), 2);
+
+    let principal_name = principal.name.clone();
+    let mut chains = HashMap::new();
+    chains.insert(
+        principal_name.clone(),
+        (
+            Some(Arc::new(RouterPipelineCache::empty(
+                cc_lb_domain::TerminalStrategy::FirstPick,
+            ))),
+            DialectCache::Explicit(ShapePluginCache {
+                dialect: Arc::new(FailingKeepaliveShape {
+                    fail: true,
+                    transform_sse: false,
+                    on_shape: Mutex::new(None),
+                    buffered_transform: None,
+                }),
+            }),
+        ),
+    );
+    let principal_view = Arc::new(PrincipalView::from_db(&[principal], chains));
+    let mut authn = TestAuthn::with_principal_view(TestState::default(), principal_view);
+    authn.authn = common::managed_authn(&principal_name);
+    let dispatch = Arc::new(CompletionFallbackDispatch {
+        pending: PendingFollowupDispatch {
+            streaming: false,
+            body: Bytes::new(),
+            entered: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+            calls: AtomicUsize::new(0),
+        },
+        response: CompletionFallbackResponse::HttpFailure,
+    });
+    let lifecycle = lifecycle_with_parts(authn, dispatch.clone(), LifecycleConfig::default())
+        .with_cache_keepalive_enqueuer(enqueuer.clone());
+
+    let request = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/messages")
+        .header("x-api-key", managed_api_key())
+        .header("anthropic-version", "2023-06-01")
+        .header("x-claude-code-session-id", "shape-fail-closed")
+        .body(standard_keepalive_request())
+        .expect("shape failure request");
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("auth");
+    let response = lifecycle.handle(request, &auth).await.expect("response");
+    let (status, _headers, _body) = collect_body(response).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        dispatch.pending.calls.load(Ordering::SeqCst),
+        0,
+        "fail-closed shaping error must prevent upstream dispatch"
+    );
+
+    let after = enqueuer.snapshot();
+    assert_eq!(
+        after.generations, before.generations,
+        "fail-closed shaping error must leave existing keepalive generations untouched"
+    );
+    assert_eq!(
+        after.operations.len(),
+        before.operations.len(),
+        "fail-closed shaping error must not emit keepalive start or cancel ops"
+    );
 }
 
-#[tokio::test]
-async fn shape_fallback_without_breakpoint_sse_compaction_fences_generation() {
-    assert_no_breakpoint_compaction(true, &[true]).await;
-}
-
-async fn assert_no_breakpoint_compaction(shape_fallback: bool, streaming_modes: &[bool]) {
+async fn assert_no_breakpoint_compaction(streaming_modes: &[bool]) {
     for (stop_reason, content) in [
         (
             "compaction",
@@ -228,14 +306,13 @@ async fn assert_no_breakpoint_compaction(shape_fallback: bool, streaming_modes: 
                 .expect("response JSON"),
             );
             let expected_body = response_body.clone();
-            let (response, _) = observed_keepalive_response_with_shape(
+            let (response, _) = observed_keepalive_response(
                 response_body,
                 Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
                 principal,
                 no_breakpoint_request(),
                 &main_headers,
                 streaming,
-                shape_fallback,
             )
             .await;
             assert_keepalive_response_fidelity(response, &expected_body, streaming).await;
@@ -1716,7 +1793,7 @@ async fn completion_fallback_incomplete_transport_body_and_abort_remain_neutral(
     assert!(violations.is_empty(), "{}", violations.join("\n"));
 }
 #[tokio::test(start_paused = true)]
-async fn completion_fallback_shape_failure_buffered_retires_captured_owners() {
+async fn completion_fallback_dynamic_start_buffered_retires_captured_owners() {
     let mut violations = Vec::new();
     for replace in [false, true] {
         violations.extend(
@@ -1732,7 +1809,7 @@ async fn completion_fallback_shape_failure_buffered_retires_captured_owners() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn completion_fallback_shape_failure_sse_retires_captured_owners() {
+async fn completion_fallback_dynamic_start_sse_retires_captured_owners() {
     let mut violations = Vec::new();
     for replace in [false, true] {
         for response in [
@@ -1747,7 +1824,7 @@ async fn completion_fallback_shape_failure_sse_retires_captured_owners() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn completion_fallback_shape_failure_incomplete_remains_neutral() {
+async fn completion_fallback_dynamic_start_incomplete_remains_neutral() {
     let mut violations = Vec::new();
     for response in [
         CompletionFallbackResponse::ShapeFallbackBodyFailure,
@@ -2189,6 +2266,14 @@ async fn assert_completion_fallback(
         response,
         CompletionFallbackResponse::DynamicStartBuffered
             | CompletionFallbackResponse::DynamicStartSse
+            | CompletionFallbackResponse::ShapeFallbackBuffered
+            | CompletionFallbackResponse::ShapeFallbackSse
+            | CompletionFallbackResponse::ShapeFallbackTransformedSse
+            | CompletionFallbackResponse::ShapeFallbackSseDropAfterTerminal
+            | CompletionFallbackResponse::ShapeFallbackSseAbortBeforeTerminal
+            | CompletionFallbackResponse::ShapeFallbackBodyFailure
+            | CompletionFallbackResponse::ShapeFallbackTransportFailure
+            | CompletionFallbackResponse::ShapeFallbackAbort
     );
     let dialect = Arc::new(FailingKeepaliveShape {
         fail: !dynamic_start
@@ -2198,6 +2283,7 @@ async fn assert_completion_fallback(
                     | CompletionFallbackResponse::BufferedHookFailure
                     | CompletionFallbackResponse::BufferedCapFinalFrame
                     | CompletionFallbackResponse::BufferedCapBeforeFinalFrame
+                    | CompletionFallbackResponse::SseTransformedHttpErrorJsonDrop
             ),
         transform_sse: matches!(
             response,

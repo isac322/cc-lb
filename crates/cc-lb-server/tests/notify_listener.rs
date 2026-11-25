@@ -278,6 +278,8 @@ async fn spawn_listener(
         prompt_cache_grace_margin_secs: 0,
         prompt_cache_observation_sink: Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         subscription_quota_routing_max_staleness_secs: 1800,
+        key_store: None,
+        thread_sticky_subagent_latch: None,
         clock: Arc::new(cc_lb_clock::SystemClock),
         gemini_config: Some(fixture.gemini_config.clone()),
         antigravity_config: Some(fixture.antigravity_config.clone()),
@@ -702,6 +704,8 @@ async fn notify_listener_persists_across_repeated_subscribe_failures_and_channel
         prompt_cache_grace_margin_secs: 30,
         prompt_cache_observation_sink: Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         subscription_quota_routing_max_staleness_secs: 1800,
+        key_store: None,
+        thread_sticky_subagent_latch: None,
         gemini_config: Some(fixture.gemini_config.clone()),
         antigravity_config: Some(fixture.antigravity_config.clone()),
         clock: Arc::new(cc_lb_clock::SystemClock),
@@ -724,6 +728,673 @@ async fn notify_listener_persists_across_repeated_subscribe_failures_and_channel
 
     cancel.cancel();
     task.await.expect("listener task exits cleanly");
+}
+
+#[tokio::test]
+async fn managed_key_change_notification_invalidates_key_store_immediately_without_rebuild() {
+    use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+    use cc_lb_storage_api::{
+        NotifierConnectionState, PrincipalCreate, PrincipalKind, PrincipalStore,
+    };
+
+    let fixture = fixture().await;
+    let start_generation = fixture.holder.generation();
+    let _principal = PrincipalStore::create(
+        &*fixture.storage,
+        PrincipalCreate {
+            name: "p-key-notify".to_owned(),
+            kind: PrincipalKind::Machine,
+            allowed_models: Vec::new(),
+            allowed_upstreams: Vec::new(),
+            default_limits: Vec::new(),
+            cache_keepalive: None,
+            openai_oauth_compat: None,
+        },
+        1,
+    )
+    .await
+    .expect("create principal");
+    let conn_state = Arc::new(NotifierConnectionState::new_always_connected());
+    let key_store =
+        Arc::new(KeyStore::new(fixture.storage.clone()).with_positive_cache(conn_state));
+    let (record, plaintext) = key_store
+        .create(
+            "p-key-notify",
+            CreateParams {
+                label: "test".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("issue key");
+    let key_id = record.index_hash;
+    assert!(
+        key_store
+            .lookup_by_index_hash(&key_id)
+            .await
+            .expect("lookup")
+            .is_some()
+    );
+
+    // Directly revoke in backing storage so the positive cache still holds the stale entry.
+    let (parsed_key_id, _) =
+        cc_lb_control::api_keys::secret::parse(plaintext.expose()).expect("parse key");
+    cc_lb_storage_api::ManagedKeyStore::revoke_zero_secrets(
+        &*fixture.storage,
+        "p-key-notify",
+        &parsed_key_id,
+    )
+    .await
+    .expect("direct revoke");
+    assert!(
+        key_store
+            .lookup_by_index_hash(&key_id)
+            .await
+            .expect("cached hit before notify")
+            .is_some()
+    );
+
+    let notifier = Arc::new(MockNotifier::new());
+    let cancel = CancellationToken::new();
+    let listener = Arc::new(NotifyListener::new(NotifyListenerParams {
+        notifier: notifier.clone(),
+        cancel: cancel.clone(),
+        holder: fixture.holder.clone(),
+        stores: fixture.stores.clone(),
+        runtime: fixture.runtime.clone(),
+        aead: fixture.aead.clone(),
+        data_dir: fixture._dir.path().to_path_buf(),
+        lazy_refresher: None,
+        subscription_quota_cache: fixture.quota_cache.clone(),
+        prompt_cache_grace_margin_secs: 0,
+        prompt_cache_observation_sink: Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
+        subscription_quota_routing_max_staleness_secs: 1800,
+        key_store: Some(Arc::clone(&key_store)),
+        thread_sticky_subagent_latch: None,
+        clock: Arc::new(cc_lb_clock::SystemClock),
+        gemini_config: Some(fixture.gemini_config.clone()),
+        antigravity_config: Some(fixture.antigravity_config.clone()),
+    }));
+    let task = tokio::spawn(listener.run());
+    notifier.wait_for_subscriber().await;
+
+    let _ = notifier.tx.send(ChangeEvent::new(
+        ChangeChannel::ManagedKey,
+        format!("p-key-notify\t{parsed_key_id}"),
+        std::time::UNIX_EPOCH,
+    ));
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if key_store
+                .lookup_by_index_hash(&key_id)
+                .await
+                .expect("lookup after notify")
+                .is_none()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("managed key notification invalidates positive cache without debounce");
+    assert_eq!(
+        fixture.holder.generation(),
+        start_generation,
+        "managed key notification must not rebuild DynamicView"
+    );
+
+    cancel.cancel();
+    task.await.expect("listener task exits cleanly");
+}
+
+#[tokio::test]
+async fn notify_rebuild_shares_rate_limit_cache_and_prevents_stale_db_regression() {
+    let fixture = fixture().await;
+    let upstream = UpstreamStore::create(
+        &*fixture.storage,
+        UpstreamCreate {
+            vertex: None,
+            vertex_credential_type: None,
+            vertex_quota_project_id: None,
+            id: Uuid::new_v4(),
+            name: "rate-limit-shared-upstream".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await
+    .expect("upstream created");
+    let upstream_id = upstream.id;
+    let initial_cache = Arc::clone(&fixture.holder.load().upstream_rate_limit_cache);
+    let start = fixture.holder.generation();
+
+    // Seed an older observation in storage before an in-memory live header arrives.
+    fixture
+        .stores
+        .upstream_rate_limits
+        .put_observation(&UpstreamRateLimitObservationRecord {
+            upstream_id,
+            window: "default".to_owned(),
+            kind: RateLimitKind::Requests,
+            limit: Some(1000),
+            remaining: Some(10),
+            reset: Some("2026-05-29T00:00:00Z".to_owned()),
+            observed_at_unix_secs: 100,
+        })
+        .await
+        .expect("seed stale DB rate-limit observation");
+
+    // Live header subscriber updates the shared cache with a newer timestamp.
+    initial_cache
+        .write()
+        .upsert_record(UpstreamRateLimitObservationRecord {
+            upstream_id,
+            window: "default".to_owned(),
+            kind: RateLimitKind::Requests,
+            limit: Some(1000),
+            remaining: Some(500),
+            reset: Some("2026-05-29T00:01:00Z".to_owned()),
+            observed_at_unix_secs: 200,
+        });
+
+    let notifier = Arc::new(MockNotifier::new());
+    let cancel = CancellationToken::new();
+    let task = spawn_listener(
+        &fixture,
+        notifier.clone(),
+        cancel.clone(),
+        fixture.stores.clone(),
+    )
+    .await;
+
+    // Trigger a rebuild via upstream change notification.
+    notifier.send(ChangeChannel::Upstream);
+    wait_for_generation(&fixture.holder, start + 1).await;
+
+    let rebuilt = fixture.holder.load();
+    assert!(Arc::ptr_eq(
+        &initial_cache,
+        &rebuilt.upstream_rate_limit_cache
+    ));
+    {
+        let cache = rebuilt.upstream_rate_limit_cache.read();
+        let obs = cache
+            .snapshots
+            .get(&upstream_id)
+            .expect("upstream snapshots present");
+        assert!(obs.iter().any(|o| o.remaining == Some(500)));
+        assert_eq!(cache.observed_at_for_upstream(upstream_id), 200);
+    }
+
+    // Header update AFTER the rebuild (mutating `initial_cache`) is visible immediately on `rebuilt`.
+    initial_cache
+        .write()
+        .upsert_record(UpstreamRateLimitObservationRecord {
+            upstream_id,
+            window: "default".to_owned(),
+            kind: RateLimitKind::Requests,
+            limit: Some(1000),
+            remaining: Some(450),
+            reset: Some("2026-05-29T00:02:00Z".to_owned()),
+            observed_at_unix_secs: 300,
+        });
+    assert!(
+        rebuilt
+            .upstream_rate_limit_cache
+            .read()
+            .snapshots
+            .get(&upstream_id)
+            .expect("upstream snapshots present")
+            .iter()
+            .any(|o| o.remaining == Some(450))
+    );
+    assert_eq!(
+        rebuilt
+            .upstream_rate_limit_cache
+            .read()
+            .observed_at_for_upstream(upstream_id),
+        300
+    );
+
+    cancel.cancel();
+    task.await.expect("listener task exits cleanly");
+}
+
+#[tokio::test]
+async fn thread_sticky_subagent_notification_warms_latch_and_overrides_negative() {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::body::Body;
+    use bytes::Bytes;
+    use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+    use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+    use cc_lb_control::api_keys::principal_view::PrincipalView;
+    use cc_lb_control::{DynamicViewBuilder, new_in_memory_bus};
+    use cc_lb_domain::Upstream;
+    use cc_lb_engine::{
+        ApiKeyAwareSignerFactory, DispatchError, Lifecycle, LifecycleConfig,
+        ThreadStickySubagentLatch, UpstreamDispatch,
+    };
+    use cc_lb_lifecycle::LifecycleEvent;
+    use cc_lb_storage_api::{
+        PrincipalCreate, PrincipalKind, PrincipalStore, ThreadStickySubagentStore,
+    };
+    use cc_lb_upstream::{
+        RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
+        SigningCapability, UpstreamError,
+    };
+    use http::header::CONTENT_TYPE;
+    use http::{HeaderValue, Method, Request, Response, StatusCode};
+
+    struct StubSigner;
+
+    #[async_trait]
+    impl Signer for StubSigner {
+        async fn sign(
+            &self,
+            shaped: ShapedRequest,
+            capability: &mut SigningCapability,
+        ) -> Result<SignedRequest, SignerError> {
+            Ok(SignedRequest::from_shaped(shaped, capability))
+        }
+
+        async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+            RetryDecision::Fail
+        }
+    }
+
+    struct StubSignerFactory;
+
+    impl ApiKeyAwareSignerFactory for StubSignerFactory {
+        fn with_router_choice(
+            &self,
+            _router_chosen_upstream_name: String,
+        ) -> Arc<dyn SignerFactory> {
+            Arc::new(Self)
+        }
+    }
+
+    #[async_trait]
+    impl SignerFactory for StubSignerFactory {
+        async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
+            Ok(Arc::new(StubSigner))
+        }
+    }
+
+    struct StubDispatch;
+
+    #[async_trait]
+    impl UpstreamDispatch for StubDispatch {
+        async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+            let mut resp = Response::new(Body::from(Bytes::from_static(
+                br#"{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
+            )));
+            *resp.status_mut() = StatusCode::OK;
+            resp.headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            Ok(resp)
+        }
+    }
+
+    struct CountingStickyStore {
+        rows: Mutex<HashMap<(String, String), u64>>,
+        lookups: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ThreadStickySubagentStore for CountingStickyStore {
+        async fn seed_thread_sticky_subagent(
+            &self,
+            principal_id: &str,
+            observed_session_id: &str,
+            now_unix_secs: u64,
+            ttl_secs: u64,
+        ) -> StorageResult<()> {
+            let expires_at = now_unix_secs.saturating_add(ttl_secs);
+            self.rows
+                .lock()
+                .expect("rows lock")
+                .entry((principal_id.to_owned(), observed_session_id.to_owned()))
+                .and_modify(|existing| *existing = (*existing).max(expires_at))
+                .or_insert(expires_at);
+            Ok(())
+        }
+
+        async fn is_thread_sticky_subagent(
+            &self,
+            principal_id: &str,
+            observed_session_id: &str,
+            now_unix_secs: u64,
+        ) -> StorageResult<Option<u64>> {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .rows
+                .lock()
+                .expect("rows lock")
+                .get(&(principal_id.to_owned(), observed_session_id.to_owned()))
+                .copied()
+                .filter(|expires_at| *expires_at > now_unix_secs))
+        }
+
+        async fn purge_expired_thread_sticky_subagents(
+            &self,
+            _now_unix_secs: u64,
+            _batch_size: usize,
+        ) -> StorageResult<u64> {
+            Ok(0)
+        }
+    }
+
+    async fn send_main_and_read_kind(
+        lifecycle: &Lifecycle,
+        api_key: &str,
+        session_id: &str,
+        rx: &mut broadcast::Receiver<LifecycleEvent>,
+    ) -> Option<String> {
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/messages")
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("x-session-affinity", session_id)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Bytes::from_static(
+                br#"{"model":"claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
+            ))
+            .expect("request builds");
+        let auth = lifecycle.authenticate(req.headers()).await.expect("auth");
+        let resp = lifecycle.handle(req, &auth).await.expect("handle");
+        assert_eq!(resp.status(), StatusCode::OK);
+        loop {
+            match rx.try_recv() {
+                Ok(LifecycleEvent::ParseCompleted {
+                    result: Ok(info), ..
+                }) => return info.request_kind,
+                Ok(_) => {}
+                Err(broadcast::error::TryRecvError::Empty) => return None,
+                Err(err) => panic!("unexpected lifecycle bus state: {err:?}"),
+            }
+        }
+    }
+
+    let fixture = fixture().await;
+    PrincipalStore::create(
+        &*fixture.storage,
+        PrincipalCreate {
+            name: "p-sticky-notify".to_owned(),
+            kind: PrincipalKind::Machine,
+            allowed_models: Vec::new(),
+            allowed_upstreams: Vec::new(),
+            default_limits: Vec::new(),
+            cache_keepalive: None,
+            openai_oauth_compat: None,
+        },
+        1,
+    )
+    .await
+    .expect("create principal");
+    let key_store = Arc::new(KeyStore::new(fixture.storage.clone()));
+    let (_record, plaintext) = key_store
+        .create(
+            "p-sticky-notify",
+            CreateParams {
+                label: "sticky".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("issue key");
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(StubSignerFactory))
+        .principal_view(Arc::new(PrincipalView::for_tests(
+            "p-sticky-notify",
+            true,
+            vec!["*".to_owned()],
+            Vec::new(),
+            HashMap::new(),
+        )))
+        .upstream_records(vec![UpstreamRecord {
+            id: Uuid::new_v4(),
+            name: "ant-sticky".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            enabled: true,
+            revision: 1,
+            ..UpstreamRecord::default()
+        }])
+        .build();
+    fixture.holder.store(view);
+    let start_generation = fixture.holder.generation();
+
+    let latch = Arc::new(ThreadStickySubagentLatch::new());
+    let sticky_store = Arc::new(CountingStickyStore {
+        rows: Mutex::new(HashMap::new()),
+        lookups: AtomicUsize::new(0),
+    });
+    let bus = new_in_memory_bus();
+    let mut lifecycle_rx = bus.subscribe_lifecycle();
+    let authn = Arc::new(BuiltinAuthn::new(
+        Arc::clone(&key_store),
+        Arc::new(cc_lb_clock::SystemClock),
+    ));
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        authn,
+        fixture.holder.clone(),
+        Arc::new(StubDispatch),
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .with_event_bus(bus)
+    .with_thread_sticky_subagent_latch(Arc::clone(&latch))
+    .with_thread_sticky_subagent_store(sticky_store.clone());
+
+    let notifier = Arc::new(MockNotifier::new());
+    let cancel = CancellationToken::new();
+    let listener = Arc::new(NotifyListener::new(NotifyListenerParams {
+        notifier: notifier.clone(),
+        cancel: cancel.clone(),
+        holder: fixture.holder.clone(),
+        stores: fixture.stores.clone(),
+        runtime: fixture.runtime.clone(),
+        aead: fixture.aead.clone(),
+        data_dir: fixture._dir.path().to_path_buf(),
+        lazy_refresher: None,
+        subscription_quota_cache: fixture.quota_cache.clone(),
+        prompt_cache_grace_margin_secs: 0,
+        prompt_cache_observation_sink: Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
+        subscription_quota_routing_max_staleness_secs: 1800,
+        key_store: None,
+        thread_sticky_subagent_latch: Some(Arc::clone(&latch)),
+        clock: Arc::new(cc_lb_clock::SystemClock),
+        gemini_config: Some(fixture.gemini_config.clone()),
+        antigravity_config: Some(fixture.antigravity_config.clone()),
+    }));
+    let task = tokio::spawn(listener.run());
+    notifier.wait_for_subscriber().await;
+
+    let api_key = plaintext.expose();
+    assert_eq!(
+        send_main_and_read_kind(&lifecycle, api_key, "sess-sticky", &mut lifecycle_rx)
+            .await
+            .as_deref(),
+        Some("unknown")
+    );
+    assert_eq!(sticky_store.lookups.load(Ordering::SeqCst), 1);
+
+    // Negative L1 entry prevents duplicate L2 lookup.
+    assert_eq!(
+        send_main_and_read_kind(&lifecycle, api_key, "sess-sticky", &mut lifecycle_rx)
+            .await
+            .as_deref(),
+        Some("unknown")
+    );
+    assert_eq!(sticky_store.lookups.load(Ordering::SeqCst), 1);
+
+    // Positive notification with stored expiry seeds L1 directly with 0 DB lookups.
+    let future_expiry = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    let _ = notifier.tx.send(ChangeEvent::new(
+        ChangeChannel::ThreadStickySubagent,
+        format!("p-sticky-notify\tsess-sticky\t{future_expiry}"),
+        std::time::UNIX_EPOCH,
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if send_main_and_read_kind(&lifecycle, api_key, "sess-sticky", &mut lifecycle_rx)
+                .await
+                .as_deref()
+                == Some("subagent")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("sticky subagent notification warms latch immediately");
+    assert_eq!(sticky_store.lookups.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture.holder.generation(),
+        start_generation,
+        "thread sticky subagent notification must not rebuild DynamicView"
+    );
+
+    // Notification without expiry (legacy 2-field payload) invalidates L1 and reloads expiry from DB.
+    assert_eq!(
+        send_main_and_read_kind(&lifecycle, api_key, "sess-sticky-legacy", &mut lifecycle_rx)
+            .await
+            .as_deref(),
+        Some("unknown")
+    );
+    assert_eq!(sticky_store.lookups.load(Ordering::SeqCst), 2);
+    sticky_store.rows.lock().expect("rows lock").insert(
+        (
+            "p-sticky-notify".to_owned(),
+            "sess-sticky-legacy".to_owned(),
+        ),
+        future_expiry,
+    );
+    let _ = notifier.tx.send(ChangeEvent::new(
+        ChangeChannel::ThreadStickySubagent,
+        "p-sticky-notify\tsess-sticky-legacy",
+        std::time::UNIX_EPOCH,
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if send_main_and_read_kind(&lifecycle, api_key, "sess-sticky-legacy", &mut lifecycle_rx)
+                .await
+                .as_deref()
+                == Some("subagent")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("2-field sticky subagent notification invalidates negative L1 and reloads L2");
+    assert_eq!(sticky_store.lookups.load(Ordering::SeqCst), 3);
+
+    // Empty-payload fallback clears negative L1 entries so L2 lookup succeeds on next request.
+    assert_eq!(
+        send_main_and_read_kind(&lifecycle, api_key, "sess-sticky-2", &mut lifecycle_rx)
+            .await
+            .as_deref(),
+        Some("unknown")
+    );
+    assert_eq!(sticky_store.lookups.load(Ordering::SeqCst), 4);
+    sticky_store.rows.lock().expect("rows lock").insert(
+        ("p-sticky-notify".to_owned(), "sess-sticky-2".to_owned()),
+        future_expiry,
+    );
+    let _ = notifier.tx.send(ChangeEvent::new(
+        ChangeChannel::ThreadStickySubagent,
+        "",
+        std::time::UNIX_EPOCH,
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if send_main_and_read_kind(&lifecycle, api_key, "sess-sticky-2", &mut lifecycle_rx)
+                .await
+                .as_deref()
+                == Some("subagent")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("empty sticky subagent notification clears negative L1 entries");
+    assert_eq!(sticky_store.lookups.load(Ordering::SeqCst), 5);
+    assert_eq!(fixture.holder.generation(), start_generation);
+
+    cancel.cancel();
+    task.await.expect("listener task exits cleanly");
+}
+
+#[tokio::test]
+async fn warmup_only_notify_listener_ignores_plugin_chain_and_rebuilds_on_upstream() {
+    let fixture = fixture().await;
+    let start = fixture.holder.generation();
+    let notifier = Arc::new(MockNotifier::new());
+    let cancel = CancellationToken::new();
+    let listener = Arc::new(
+        NotifyListener::new(NotifyListenerParams {
+            notifier: notifier.clone(),
+            cancel: cancel.clone(),
+            holder: fixture.holder.clone(),
+            stores: fixture.stores.clone(),
+            runtime: fixture.runtime.clone(),
+            aead: fixture.aead.clone(),
+            data_dir: fixture._dir.path().to_path_buf(),
+            lazy_refresher: None,
+            subscription_quota_cache: fixture.quota_cache.clone(),
+            prompt_cache_grace_margin_secs: 0,
+            prompt_cache_observation_sink: Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
+            subscription_quota_routing_max_staleness_secs: 1800,
+            key_store: None,
+            thread_sticky_subagent_latch: None,
+            clock: Arc::new(cc_lb_clock::SystemClock),
+            gemini_config: Some(fixture.gemini_config.clone()),
+            antigravity_config: Some(fixture.antigravity_config.clone()),
+        })
+        .with_plugin_scope(cc_lb_server::dynamic_view_builder::DynamicViewPluginScope::WarmupOnly),
+    );
+    let task = tokio::spawn(async move {
+        listener.run().await;
+    });
+    notifier.wait_for_subscriber().await;
+
+    notifier.send(ChangeChannel::PluginChain);
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(
+        fixture.holder.generation(),
+        start,
+        "WarmupOnly notify listener must ignore PluginChain notifications"
+    );
+
+    notifier.send(ChangeChannel::Upstream);
+    wait_for_generation(&fixture.holder, start + 1).await;
+
+    cancel.cancel();
+    task.await.expect("listener exits");
 }
 
 fn labeled_counter_value(handle: &PrometheusHandle, name: &str, label: &str, value: &str) -> f64 {

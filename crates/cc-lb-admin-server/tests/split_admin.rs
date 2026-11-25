@@ -530,4 +530,108 @@ mod sqlite_tests {
         let downloaded = String::from_utf8(dl_bytes.to_vec()).expect("download utf8");
         assert!(downloaded.contains("upstream_total_secs = 456"));
     }
+
+    #[tokio::test]
+    async fn split_admin_wires_configured_wasmtime_runtime() {
+        // SAFETY/isolation note: dedicated test-only env var name not shared with other crates.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var(TEST_TOKEN_ENV, TEST_TOKEN);
+        }
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let sqlite_path = dir.path().join("storage.sqlite");
+        let aead = Arc::new(AeadService::from_master_key([0u8; 32]));
+        let clock: ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+        let database_url = format!("sqlite://{}", sqlite_path.display());
+        let storage_arc = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+                .await
+                .expect("open sqlite"),
+        );
+        storage_arc.initialize().await.expect("init sqlite");
+
+        let mut bad_cfg = Config {
+            storage: StorageConfig::Sqlite {
+                path: sqlite_path.clone(),
+            },
+            ..Config::default()
+        };
+        bad_cfg.aead.key_env = "__CC_LB_TEST_SPLIT_ADMIN_KEY__".to_owned();
+        bad_cfg.runtime.data_dir = Some(dir.path().to_path_buf());
+        bad_cfg.admin.auth.providers = vec![AdminAuthProviderConfig::StaticToken {
+            id: "split-test-token".to_owned(),
+            token_env: TEST_TOKEN_ENV.to_owned(),
+        }];
+        bad_cfg.runtime.wasmtime.allocation_strategy =
+            cc_lb_config::WasmtimeAllocationStrategy::Pooling;
+        bad_cfg.runtime.wasmtime.memory_max_pages = Some(64);
+        bad_cfg.runtime.wasmtime.memory_reservation_bytes = Some(4096);
+
+        let err = match build_admin_app_with_storage(
+            bad_cfg.clone(),
+            None,
+            storage_arc.clone(),
+            storage_arc.clone(),
+            aead.clone(),
+            clock.clone(),
+        )
+        .await
+        {
+            Ok(_) => {
+                panic!(
+                    "pooling reservation smaller than max memory must fail WasmtimeRuntime init in split admin"
+                )
+            }
+            Err(err) => err,
+        };
+        assert!(
+            matches!(
+                err,
+                cc_lb_admin_server::AdminBuildError::WasmtimeRuntimeInit(_)
+            ),
+            "expected AdminBuildError::WasmtimeRuntimeInit when configured wasmtime runtime is invalid, got {err}"
+        );
+
+        let mut ok_cfg = bad_cfg;
+        ok_cfg.runtime.wasmtime = cc_lb_config::WasmtimeConfig {
+            execution_timeout_ms: Some(50),
+            ..Default::default()
+        };
+        let app = build_admin_app_with_storage(
+            ok_cfg,
+            None,
+            storage_arc.clone(),
+            storage_arc,
+            aead,
+            clock,
+        )
+        .await
+        .expect("split admin builds with configured WasmtimeRuntime");
+        let boundary = "----split-admin-wasm-test";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"original_filename\"\r\n\r\nbad.wasm\r\n").as_bytes(),
+        );
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"bytes\"; filename=\"bad.wasm\"\r\nContent-Type: application/octet-stream\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(b"\0asm\x01\x00\x00\x00");
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let resp = app
+            .admin_router
+            .oneshot(
+                Request::post("/admin/v1/plugins/wasm")
+                    .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("upload request"),
+            )
+            .await
+            .expect("upload response");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
 }

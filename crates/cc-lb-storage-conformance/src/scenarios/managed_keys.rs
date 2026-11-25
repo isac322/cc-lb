@@ -58,6 +58,7 @@ where
     managed_keys_happy_path(Arc::clone(&backend)).await?;
     managed_keys_empty_label_roundtrip(Arc::clone(&backend)).await?;
     managed_keys_nul_byte_rejected(Arc::clone(&backend)).await?;
+    managed_keys_invalid_limits_rejected(Arc::clone(&backend)).await?;
     managed_keys_concurrent_issue_no_index_collision(Arc::clone(&backend)).await?;
     managed_keys_equivalent_records(backend).await?;
 
@@ -553,4 +554,96 @@ fn base64_url_no_pad(bytes: &[u8; 32]) -> String {
         }
     }
     out
+}
+
+pub async fn managed_keys_invalid_limits_rejected<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ManagedKeyBackend,
+{
+    with_fixture(backend, |store| async move {
+        let zero_window = IssueParams {
+            limit_overrides: vec![Limit {
+                kind: LimitKind::Requests,
+                window_secs: 0,
+                cap_micros: 10,
+            }],
+            ..issue_params(41)
+        };
+        let err = match store
+            .issue("principal-a", "bad-win-zero", zero_window)
+            .await
+        {
+            Ok(_) => return Err(anyhow::anyhow!("zero window_secs must fail validation")),
+            Err(err) => err,
+        };
+        assert_invalid_field_reason(err, "limit_overrides[0].window_secs", "limit window")?;
+
+        let over_window = IssueParams {
+            limit_overrides: vec![Limit {
+                kind: LimitKind::Requests,
+                window_secs: cc_lb_storage_api::MAX_LIMIT_WINDOW_SECS + 1,
+                cap_micros: 10,
+            }],
+            ..issue_params(42)
+        };
+        let err = match store
+            .issue("principal-a", "bad-win-over", over_window)
+            .await
+        {
+            Ok(_) => return Err(anyhow::anyhow!("over-max window_secs must fail validation")),
+            Err(err) => err,
+        };
+        assert_invalid_field_reason(err, "limit_overrides[0].window_secs", "limit window")?;
+
+        let negative_cap = IssueParams {
+            limit_overrides: vec![Limit {
+                kind: LimitKind::CostUsd,
+                window_secs: 60,
+                cap_micros: -1,
+            }],
+            ..issue_params(43)
+        };
+        let err = match store
+            .issue("principal-a", "bad-cap-neg", negative_cap)
+            .await
+        {
+            Ok(_) => return Err(anyhow::anyhow!("negative cap_micros must fail validation")),
+            Err(err) => err,
+        };
+        assert_invalid_field_reason(err, "limit_overrides[0].cap_micros", "non-negative")?;
+
+        let valid = IssueParams {
+            limit_overrides: vec![Limit {
+                kind: LimitKind::Requests,
+                window_secs: cc_lb_storage_api::MAX_LIMIT_WINDOW_SECS,
+                cap_micros: 10,
+            }],
+            ..issue_params(44)
+        };
+        store.issue("principal-a", "valid-max-win", valid).await?;
+
+        let bad_update = store
+            .update(
+                "principal-a",
+                "valid-max-win",
+                ApiKeyMutation {
+                    label: None,
+                    description: None,
+                    expires_at_unix_secs: None,
+                    limit_overrides: Some(vec![Limit {
+                        kind: LimitKind::Requests,
+                        window_secs: cc_lb_storage_api::MAX_LIMIT_WINDOW_SECS + 1,
+                        cap_micros: 10,
+                    }]),
+                },
+            )
+            .await;
+        let err = match bad_update {
+            Ok(_) => return Err(anyhow::anyhow!("update with invalid limit must fail")),
+            Err(err) => err,
+        };
+        assert_invalid_field_reason(err, "limit_overrides[0].window_secs", "limit window")?;
+        Ok(())
+    })
+    .await
 }

@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, OnceLock},
+};
 
 use arc_swap::ArcSwap;
 use cc_lb_domain::{PlanInfo, RateLimitObservation};
@@ -28,6 +31,14 @@ pub struct DynamicView {
     pub plan_info_by_upstream: HashMap<Uuid, PlanInfo>,
     pub generation: u64,
     upstream_records: Vec<UpstreamRecord>,
+    readiness_summary: OnceLock<UpstreamReadinessSummary>,
+    has_retryable_plugin_failure: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UpstreamReadinessSummary {
+    pub has_usable_upstream: bool,
+    pub oauth_credentials_broken: bool,
 }
 
 impl DynamicView {
@@ -40,11 +51,24 @@ impl DynamicView {
     ) -> Option<&Arc<dyn PromptCacheObservationStore>> {
         self.prompt_cache_observation_store.as_ref()
     }
+
+    pub fn readiness_summary(
+        &self,
+        compute: impl FnOnce(&Self) -> UpstreamReadinessSummary,
+    ) -> UpstreamReadinessSummary {
+        *self.readiness_summary.get_or_init(|| compute(self))
+    }
+
+    pub fn has_retryable_plugin_failure(&self) -> bool {
+        self.has_retryable_plugin_failure
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UpstreamRateLimitCache {
     pub snapshots: HashMap<Uuid, Vec<RateLimitObservation>>,
+    pub observed_at_by_upstream: HashMap<Uuid, u64>,
+    slot_observed_at: HashMap<(Uuid, cc_lb_domain::RateLimitKind, String), u64>,
     pub updated_at_unix_secs: u64,
 }
 
@@ -52,6 +76,14 @@ impl UpstreamRateLimitCache {
     pub fn upsert_record(&mut self, record: UpstreamRateLimitObservationRecord) {
         let upstream_id = record.upstream_id;
         let observed_at_unix_secs = record.observed_at_unix_secs;
+        let slot_key = (upstream_id, record.kind, record.window.clone());
+        if let Some(&existing_observed_at) = self.slot_observed_at.get(&slot_key)
+            && observed_at_unix_secs < existing_observed_at
+        {
+            return;
+        }
+        self.slot_observed_at
+            .insert(slot_key, observed_at_unix_secs);
         let observation = rate_limit_observation_from_record(record);
         let snapshots = self.snapshots.entry(upstream_id).or_default();
         match snapshots.iter_mut().find(|snapshot| {
@@ -60,7 +92,49 @@ impl UpstreamRateLimitCache {
             Some(snapshot) => *snapshot = observation,
             None => snapshots.push(observation),
         }
-        self.updated_at_unix_secs = observed_at_unix_secs;
+        self.observed_at_by_upstream
+            .entry(upstream_id)
+            .and_modify(|ts| *ts = (*ts).max(observed_at_unix_secs))
+            .or_insert(observed_at_unix_secs);
+        self.updated_at_unix_secs = self.updated_at_unix_secs.max(observed_at_unix_secs);
+    }
+
+    pub fn merge_records(&mut self, records: Vec<UpstreamRateLimitObservationRecord>) {
+        for record in records {
+            self.upsert_record(record);
+        }
+    }
+
+    pub fn hydrate_from_records(
+        &mut self,
+        records: Vec<UpstreamRateLimitObservationRecord>,
+        live_upstream_ids: &[Uuid],
+    ) {
+        let live: HashSet<Uuid> = live_upstream_ids.iter().copied().collect();
+        self.snapshots.retain(|id, _| live.contains(id));
+        self.observed_at_by_upstream
+            .retain(|id, _| live.contains(id));
+        self.slot_observed_at
+            .retain(|(id, _, _), _| live.contains(id));
+        for record in records {
+            if live.contains(&record.upstream_id) {
+                self.upsert_record(record);
+            }
+        }
+    }
+
+    pub fn observed_at_for_upstream(&self, upstream_id: Uuid) -> u64 {
+        if !self
+            .snapshots
+            .get(&upstream_id)
+            .is_some_and(|snapshots| !snapshots.is_empty())
+        {
+            return 0;
+        }
+        self.observed_at_by_upstream
+            .get(&upstream_id)
+            .copied()
+            .unwrap_or(self.updated_at_unix_secs)
     }
 }
 
@@ -96,6 +170,7 @@ fn rate_limit_observation_from_record(
 pub struct DynamicViewHolder {
     inner: ArcSwap<DynamicView>,
     rebuild_lock: tokio::sync::Mutex<()>,
+    transient_retry_notify: tokio::sync::Notify,
 }
 
 impl DynamicViewHolder {
@@ -103,6 +178,7 @@ impl DynamicViewHolder {
         Self {
             inner: ArcSwap::from(initial),
             rebuild_lock: tokio::sync::Mutex::new(()),
+            transient_retry_notify: tokio::sync::Notify::new(),
         }
     }
 
@@ -118,8 +194,16 @@ impl DynamicViewHolder {
         self.inner.load_full()
     }
 
+    pub async fn wait_for_retryable_plugin_failure(&self) {
+        self.transient_retry_notify.notified().await;
+    }
+
     pub fn store(&self, view: Arc<DynamicView>) {
+        let notify = view.has_retryable_plugin_failure();
         self.inner.store(view);
+        if notify {
+            self.transient_retry_notify.notify_one();
+        }
     }
 
     /// Store `view` only if its `generation` is strictly greater than
@@ -134,13 +218,17 @@ impl DynamicViewHolder {
         if new_generation <= self.inner.load().generation {
             return false;
         }
-        self.inner.rcu(|current| {
+        let notify = view.has_retryable_plugin_failure();
+        let prev = self.inner.rcu(|current| {
             if current.generation < new_generation {
                 Arc::clone(&view)
             } else {
                 Arc::clone(current)
             }
         });
+        if prev.generation < new_generation && notify {
+            self.transient_retry_notify.notify_one();
+        }
         self.inner.load().generation >= new_generation
     }
 
@@ -183,6 +271,8 @@ pub struct DynamicViewBuilder {
     prompt_cache_grace_margin_secs: Option<u64>,
     plan_info_by_upstream: HashMap<Uuid, PlanInfo>,
     upstream_records: Vec<UpstreamRecord>,
+    readiness_summary: Option<UpstreamReadinessSummary>,
+    has_retryable_plugin_failure: bool,
 }
 
 impl DynamicViewBuilder {
@@ -200,6 +290,8 @@ impl DynamicViewBuilder {
             prompt_cache_grace_margin_secs: None,
             plan_info_by_upstream: HashMap::new(),
             upstream_records: Vec::new(),
+            readiness_summary: None,
+            has_retryable_plugin_failure: false,
         }
     }
 
@@ -219,6 +311,9 @@ impl DynamicViewBuilder {
             prompt_cache_grace_margin_secs: Some(view.prompt_cache_grace_margin_secs),
             plan_info_by_upstream: view.plan_info_by_upstream.clone(),
             upstream_records: view.upstreams_snapshot().to_vec(),
+            // Recompute on next read when a test/caller mutates snapshot/upstreams from a view.
+            readiness_summary: None,
+            has_retryable_plugin_failure: view.has_retryable_plugin_failure,
         }
     }
 
@@ -286,7 +381,21 @@ impl DynamicViewBuilder {
         self
     }
 
+    pub fn readiness_summary(mut self, summary: UpstreamReadinessSummary) -> Self {
+        self.readiness_summary = Some(summary);
+        self
+    }
+
+    pub fn has_retryable_plugin_failure(mut self, value: bool) -> Self {
+        self.has_retryable_plugin_failure = value;
+        self
+    }
+
     pub fn build(self) -> Arc<DynamicView> {
+        let readiness_summary = OnceLock::new();
+        if let Some(summary) = self.readiness_summary {
+            let _ = readiness_summary.set(summary);
+        }
         Arc::new(DynamicView {
             signer_factory: self
                 .signer_factory
@@ -312,6 +421,8 @@ impl DynamicViewBuilder {
             plan_info_by_upstream: self.plan_info_by_upstream,
             generation: self.previous_generation.saturating_add(1),
             upstream_records: self.upstream_records,
+            readiness_summary,
+            has_retryable_plugin_failure: self.has_retryable_plugin_failure,
         })
     }
 }
@@ -479,5 +590,35 @@ mod tests {
             "independent holders must not share a rebuild lock"
         );
         drop(first_guard);
+    }
+
+    #[test]
+    fn merge_records_preserves_observations_for_upstreams_absent_from_batch() {
+        let existing_id = Uuid::from_u128(10);
+        let new_concurrent_id = Uuid::from_u128(20);
+        let mut cache = UpstreamRateLimitCache::default();
+        cache.upsert_record(UpstreamRateLimitObservationRecord {
+            upstream_id: new_concurrent_id,
+            observed_at_unix_secs: 200,
+            kind: cc_lb_domain::RateLimitKind::Requests,
+            window: "5h".to_owned(),
+            limit: Some(100),
+            remaining: Some(99),
+            reset: Some("300".to_owned()),
+        });
+        cache.merge_records(vec![UpstreamRateLimitObservationRecord {
+            upstream_id: existing_id,
+            observed_at_unix_secs: 150,
+            kind: cc_lb_domain::RateLimitKind::Requests,
+            window: "5h".to_owned(),
+            limit: Some(100),
+            remaining: Some(50),
+            reset: Some("300".to_owned()),
+        }]);
+        assert!(cache.snapshots.contains_key(&existing_id));
+        assert!(
+            cache.snapshots.contains_key(&new_concurrent_id),
+            "merge_records must not prune concurrent upstreams absent from an older hydration batch"
+        );
     }
 }

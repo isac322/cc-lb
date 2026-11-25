@@ -13,7 +13,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use cc_lb_control::AuditPayload;
 use cc_lb_plugin_wire::schema::HookKind;
-use cc_lb_runtime_wasmtime::{ModuleInspection, WasmtimeRuntime, WasmtimeRuntimeError};
+use cc_lb_runtime_wasmtime::{ModuleInspection, WasmtimeRuntimeError};
 use cc_lb_storage_api::{
     MAX_WASM_BLOB_BYTES, PluginSlotKind, StorageError, WasmBlob, WasmRegistryEntry,
     WasmRegistryEntryInput,
@@ -725,9 +725,11 @@ async fn inspect_with_wasmtime(
 ) -> Result<ModuleInspection, Box<Response>> {
     let bytes = bytes.to_vec();
     let runtime = state.runtime.clone();
+    let wasmtime_cfg = state.config.runtime.wasmtime;
     let inspection = tokio::task::spawn_blocking(move || match runtime {
         Some(runtime) => runtime.admit_wasm_agnostic(&bytes),
-        None => WasmtimeRuntime::with_defaults()?.admit_wasm_agnostic(&bytes),
+        None => cc_lb_runtime_sync::wasmtime_builder::build_wasmtime_runtime(&wasmtime_cfg)?
+            .admit_wasm_agnostic(&bytes),
     })
     .await
     .map_err(|error| {
@@ -780,10 +782,7 @@ async fn materialize_cache(state: &AdminState, sha256_hex: &str, bytes: &[u8]) -
     set_dir_mode(&cache_dir).await?;
     set_dir_mode(&tmp_dir).await?;
     let target = cache_dir.join(format!("{sha256_hex}.wasm"));
-    if target.exists() {
-        return Ok(());
-    }
-    let tmp = tmp_dir.join(format!("{}.wasm", Uuid::new_v4()));
+    let tmp = tmp_dir.join(format!("{sha256_hex}.{}.wasm", Uuid::new_v4()));
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -795,11 +794,6 @@ async fn materialize_cache(state: &AdminState, sha256_hex: &str, bytes: &[u8]) -
     drop(file);
     match tokio::fs::rename(&tmp, &target).await {
         Ok(()) => Ok(()),
-        Err(error) if target.exists() => {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            let _ = error;
-            Ok(())
-        }
         Err(error) => {
             let _ = tokio::fs::remove_file(&tmp).await;
             Err(error)

@@ -407,6 +407,7 @@ impl PluginRegistryStore for SqliteStorage {
         &self,
         input: PluginChainEntryInput,
     ) -> StorageResult<PluginChainEntry> {
+        cc_lb_storage_api::validate_plugin_chain_config(&input.config)?;
         let mut tx = self.begin_immediate().await?;
         if sha_for_registry_id_in_tx(&mut tx, input.wasm_registry_id)
             .await?

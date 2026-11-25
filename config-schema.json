@@ -128,7 +128,7 @@
         "wasmtime": {
           "allocation_strategy": "ondemand",
           "cookie_redaction": false,
-          "shape_origin_policy": "unrestricted",
+          "shape_origin_policy": "selected_upstream_origin",
           "wire_bounds": {
             "max_header_value_bytes": 8192,
             "max_headers": 100,
@@ -1077,7 +1077,7 @@
           "default": {
             "allocation_strategy": "ondemand",
             "cookie_redaction": false,
-            "shape_origin_policy": "unrestricted",
+            "shape_origin_policy": "selected_upstream_origin",
             "wire_bounds": {
               "max_header_value_bytes": 8192,
               "max_headers": 100,
@@ -1249,7 +1249,7 @@
       "additionalProperties": false
     },
     "ShapeOriginPolicy": {
-      "description": "Whether a shape plugin may return a URL whose origin\n(scheme+host+port) differs from the selected upstream. Historical\nbehaviour is `Unrestricted`; deployments where a compromised or\nbuggy shape plugin misrouting to a wrong host is a concern can\nopt into `SelectedUpstreamOrigin` to reject any URL that does not\nmatch the selected upstream's `base_url` origin.",
+      "description": "Whether a shape plugin may return a URL whose origin\n(scheme+host+port) differs from the selected upstream. The default\nis `SelectedUpstreamOrigin`, which rejects any URL that does not\nmatch the selected upstream's `base_url` origin; deployments that\nintentionally redirect requests to another host can opt into\n`Unrestricted`.",
       "type": "string",
       "enum": [
         "unrestricted",
@@ -1448,6 +1448,15 @@
           "type": "boolean",
           "default": false
         },
+        "execution_timeout_ms": {
+          "description": "Per-call Wasmtime epoch preemption timeout in milliseconds (default 1000ms, valid range 10..=30000).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
         "memory_guard_bytes": {
           "type": [
             "integer",
@@ -1490,7 +1499,7 @@
         },
         "shape_origin_policy": {
           "$ref": "#/$defs/ShapeOriginPolicy",
-          "default": "unrestricted"
+          "default": "selected_upstream_origin"
         },
         "wire_bounds": {
           "$ref": "#/$defs/PluginWireBounds",

@@ -38,10 +38,58 @@ pub fn observe_rate_limits(
     observations
 }
 
+#[derive(Clone, Debug)]
+pub(super) enum FilterPipelineFailure {
+    PoolSaturated {
+        stage: InternalErrorStage,
+        kind: InternalErrorKind,
+        message: String,
+    },
+    PluginError {
+        stage: InternalErrorStage,
+        kind: InternalErrorKind,
+        message: String,
+    },
+}
+
+impl FilterPipelineFailure {
+    pub(super) fn is_pool_saturated(&self) -> bool {
+        matches!(self, Self::PoolSaturated { .. })
+    }
+
+    pub(super) fn message(&self) -> &str {
+        match self {
+            Self::PoolSaturated { message, .. } | Self::PluginError { message, .. } => {
+                message.as_str()
+            }
+        }
+    }
+
+    pub(super) fn internal_error(&self) -> InternalError {
+        match self {
+            Self::PoolSaturated {
+                stage,
+                kind,
+                message,
+            }
+            | Self::PluginError {
+                stage,
+                kind,
+                message,
+            } => InternalError {
+                stage: stage.clone(),
+                kind: kind.clone(),
+                message: Some(message.clone()),
+            },
+        }
+    }
+}
+
 pub(super) struct FilterPipelineResult {
     pub(super) candidates: Vec<UpstreamCandidate>,
     pub(super) stages: Vec<StageDecision>,
     pub(super) internal_errors: Vec<InternalError>,
+    pub(super) failure: Option<FilterPipelineFailure>,
 }
 
 impl FilterPipelineResult {
@@ -84,6 +132,7 @@ pub(super) fn execute_filter_pipeline(
     let mut current = candidates;
     let mut stages = Vec::with_capacity(filters.len());
     let mut internal_errors = Vec::new();
+    let mut failure: Option<FilterPipelineFailure> = None;
 
     for filter in filters {
         let stage_name = filter.plugin_name().to_owned();
@@ -100,21 +149,22 @@ pub(super) fn execute_filter_pipeline(
                             stage = stage_name.as_str(),
                             duration_ms,
                             error = message.as_str(),
-                            "router filter returned invalid output; passing candidates through"
+                            "router filter returned invalid output; failing closed"
                         );
                         stages.push(StageDecision {
                             stage_name,
-                            upstream_id: current.first().map(|candidate| candidate.upstream_id),
+                            upstream_id: None,
                             reason: Some(message.clone()),
                             duration_us: duration_to_us(stage_elapsed),
                             subscription_preference: None,
                         });
-                        internal_errors.push(InternalError {
+                        current.clear();
+                        failure = Some(FilterPipelineFailure::PluginError {
                             stage: InternalErrorStage::RouterFilter,
                             kind: InternalErrorKind::InvalidOutput,
-                            message: Some(message),
+                            message,
                         });
-                        continue;
+                        break;
                     }
                 };
                 tracing::debug!(
@@ -133,6 +183,31 @@ pub(super) fn execute_filter_pipeline(
                 });
                 current = keep_filter_candidates(&current, &output.kept_upstream_ids);
             }
+            Err(error @ FilterError::PoolSaturated { .. }) => {
+                let stage_elapsed = stage_started.elapsed();
+                let duration_ms = duration_to_ms(stage_elapsed);
+                let message = error.to_string();
+                tracing::warn!(
+                    stage = stage_name.as_str(),
+                    duration_ms,
+                    error = message.as_str(),
+                    "router filter pool saturated; failing closed"
+                );
+                stages.push(StageDecision {
+                    stage_name,
+                    upstream_id: None,
+                    reason: Some(message.clone()),
+                    duration_us: duration_to_us(stage_elapsed),
+                    subscription_preference: None,
+                });
+                current.clear();
+                failure = Some(FilterPipelineFailure::PoolSaturated {
+                    stage: InternalErrorStage::Router,
+                    kind: InternalErrorKind::Unavailable,
+                    message,
+                });
+                break;
+            }
             Err(error @ (FilterError::Trap { .. } | FilterError::Runtime { .. })) => {
                 let stage_elapsed = stage_started.elapsed();
                 let duration_ms = duration_to_ms(stage_elapsed);
@@ -141,20 +216,22 @@ pub(super) fn execute_filter_pipeline(
                     stage = stage_name.as_str(),
                     duration_ms,
                     error = message.as_str(),
-                    "router filter stage failed; passing candidates through"
+                    "router filter stage failed; failing closed"
                 );
                 stages.push(StageDecision {
                     stage_name,
-                    upstream_id: current.first().map(|candidate| candidate.upstream_id),
+                    upstream_id: None,
                     reason: Some(message.clone()),
                     duration_us: duration_to_us(stage_elapsed),
                     subscription_preference: None,
                 });
-                internal_errors.push(InternalError {
+                current.clear();
+                failure = Some(FilterPipelineFailure::PluginError {
                     stage: InternalErrorStage::Router,
                     kind: InternalErrorKind::PluginError,
-                    message: Some(message),
+                    message,
                 });
+                break;
             }
         }
     }
@@ -163,6 +240,7 @@ pub(super) fn execute_filter_pipeline(
         candidates: current,
         stages,
         internal_errors,
+        failure,
     }
 }
 
@@ -436,6 +514,9 @@ pub(super) fn route_for_record(
         return Err("Vertex route has no configured origin".to_owned());
     }
     let upstream = upstream_for_record(record)?;
+    if let Some(reason) = cached.dialect_instantiation_error(record.kind.provider()) {
+        return Err(reason.to_owned());
+    }
     let dialect = cached
         .resolved_dialect(record.id)
         .cloned()

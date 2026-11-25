@@ -2238,3 +2238,39 @@ test('bulk revoke reports partial failures in exactly one toast', async () => {
     appQueryClient.clear();
   }
 });
+
+test('LimitsEditor displays 7-day hint and clamps window_secs above 604,800', () => {
+  const updateLimits = vi.fn();
+  vi.mocked(queries.useUpdatePrincipalDefaultLimits).mockReturnValue({
+    mutate: updateLimits,
+    isPending: false,
+  } as never);
+  const selected = principalFixture({
+    id: 'principal-window-clamp',
+    revision: 4,
+    default_limits: [{ kind: 'requests', window_secs: 60, cap_micros: 100 }],
+  });
+
+  renderPrincipalDetail(selected);
+  const defaultLimits = cardNamed('Default limits');
+  fireEvent.click(defaultLimits.getByRole('button', { name: 'Edit' }));
+
+  expect(defaultLimits.getByText('Max 7d (604,800s)')).toBeDefined();
+  const [windowInput] = defaultLimits.getAllByRole(
+    'textbox',
+  ) as HTMLInputElement[];
+  fireEvent.change(windowInput, { target: { value: '999999' } });
+  fireEvent.blur(windowInput);
+  fireEvent.click(defaultLimits.getByRole('button', { name: 'Save' }));
+
+  expect(updateLimits).toHaveBeenCalledWith(
+    {
+      id: selected.id,
+      default_limits: [
+        { kind: 'requests', window_secs: 604_800, cap_micros: 100 },
+      ],
+      expected_revision: 4,
+    },
+    expect.anything(),
+  );
+});

@@ -141,3 +141,47 @@ fn shape_origin_mismatch_is_rejected_by_selected_upstream_policy() {
     // Then
     assert!(error.to_string().contains("URL origin"), "{error}");
 }
+
+#[test]
+fn hot_engine_defaults_reject_cross_origin_shape_redirect() {
+    let runtime = Arc::new(WasmtimeRuntime::new(HotEngineConfig::default()).expect("engine build"));
+    let slot = runtime
+        .register_shape(
+            RuntimeSlotKey::global("origin-mismatch-default", RuntimeSlotRole::Shape),
+            "origin-mismatch-default",
+            &origin_mismatch_plugin(),
+        )
+        .expect("register shape fixture");
+    let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc())
+        .for_provider(ProviderFamily::Anthropic)
+        .expect("anthropic shape hook");
+    let dialect =
+        WasmtimeUpstreamDialect::new(Arc::new(dispatch)).with_upstream_identity(UpstreamIdentity {
+            provider: Provider::Anthropic,
+            credential_kind: "anthropic_api_key".to_owned(),
+            upstream_id: "origin-mismatch-default".to_owned(),
+            name: "origin-mismatch-default".to_owned(),
+            base_url: Some("https://example.test".to_owned()),
+            gemini_oauth_profile: None,
+            code_assist_project_id: None,
+        });
+    let context = DialectShapeContext {
+        request_id: "req-origin-default".to_owned(),
+        downstream_headers: HeaderMap::new(),
+        method: Method::POST,
+        path: "/v1/messages".to_owned(),
+        query: None,
+        body_bytes: Bytes::from_static(b"{}"),
+    };
+    let upstream = Upstream::AnthropicDirect {
+        base_url: Some(url::Url::parse("https://example.test").expect("fixture URL")),
+    };
+    let principal = Principal {
+        id: "tenant-origin".to_owned(),
+        kind: PrincipalKind::ApiKey,
+    };
+
+    let error = shape_request(&dialect, &context, &upstream, &principal)
+        .expect_err("default SelectedUpstreamOrigin policy must reject cross-origin shape URL");
+    assert!(error.to_string().contains("URL origin"), "{error}");
+}

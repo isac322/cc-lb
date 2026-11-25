@@ -257,7 +257,6 @@ fn apply_observations(
         for record in records.iter().cloned() {
             guard.upsert_record(record);
         }
-        guard.updated_at_unix_secs = observed_at;
     }
 
     if let Some(sink) = sink {

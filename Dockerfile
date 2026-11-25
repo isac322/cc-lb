@@ -327,6 +327,7 @@ USER 65532:65532
 
 # ---- Split runtime target: proxy/worker data plane ----
 FROM distroless-runtime AS proxy
+# cc-lb binds listeners to 127.0.0.1 by default; pass CC_LB_LISTENER__PROXY_ADDR=0.0.0.0:8080 (or configure listener.proxy_addr) when publishing ports.
 EXPOSE 8080 9091
 COPY --link --from=builder-proxy /out/cc-lb-proxy /usr/local/bin/cc-lb-proxy
 ENTRYPOINT ["/usr/local/bin/cc-lb-proxy"]
@@ -334,6 +335,7 @@ CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
 
 # ---- Split runtime target: admin control plane ----
 FROM distroless-runtime AS admin
+# cc-lb binds listeners to 127.0.0.1 by default; pass CC_LB_LISTENER__ADMIN_ADDR=0.0.0.0:9090 (or configure listener.admin_addr) when publishing ports.
 EXPOSE 9090 9091
 COPY --link --from=builder-admin /out/cc-lb-admin /usr/local/bin/cc-lb-admin
 ENTRYPOINT ["/usr/local/bin/cc-lb-admin"]
@@ -341,6 +343,7 @@ CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
 
 # ---- Final base: distroless monolith runtime metadata ----
 FROM distroless-runtime AS distroless-base
+# cc-lb binds listeners to 127.0.0.1 by default; set CC_LB_LISTENER__PROXY_ADDR / CC_LB_LISTENER__ADMIN_ADDR (or listener config) when publishing container ports.
 EXPOSE 8080 9090 9091
 ENTRYPOINT ["/usr/local/bin/cc-lb"]
 CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]

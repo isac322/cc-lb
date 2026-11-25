@@ -26,6 +26,7 @@ enum LocalPollStorage {
     Unchanged,
     Error,
     Corrupted,
+    CorruptedAny,
 }
 
 impl PriceCatalogCache for LocalPollStorage {
@@ -71,6 +72,9 @@ impl PriceCatalogCache for LocalPollStorage {
                         message: "test price catalog payload hash mismatch".to_owned(),
                     })
                 }
+                Self::CorruptedAny => Err(StorageError::Corrupted {
+                    message: "test price catalog payload hash mismatch".to_owned(),
+                }),
             }
         })
     }
@@ -303,6 +307,92 @@ async fn install_latest_local_propagates_corruption_without_installing_payload()
             if message.contains("test price catalog payload hash mismatch")
     ));
     assert!(Arc::ptr_eq(&before, &catalog.current()));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn write_disk_cache_concurrent_persist_leaves_valid_json_and_no_temp_files()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let cache_path = dir.path().join("litellm-cache.json");
+    let storage = Arc::new(sqlite_storage(&dir, "concurrent-cache.sqlite").await?);
+    let payload_bytes = SAMPLE_LITELLM_JSON.as_bytes().to_vec();
+    let expected_hash = hex::encode(Sha256::digest(&payload_bytes));
+
+    let mut handles = Vec::new();
+    for _ in 0..16 {
+        let loader = LiteLlmLoader::new(
+            PriceCatalog::new_empty(),
+            storage.clone(),
+            "http://unused.invalid/prices".to_owned(),
+            cache_path.clone(),
+            Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000)),
+        );
+        let fetched = cc_lb_pricing::FetchedCatalog {
+            fetched_at_ms: 1_700_000_000_000,
+            fingerprint: expected_hash.clone(),
+            bytes: payload_bytes.clone(),
+        };
+        handles.push(tokio::spawn(async move {
+            loader.persist_snapshot(&fetched).await
+        }));
+    }
+
+    for handle in handles {
+        handle.await??;
+    }
+
+    let persisted = tokio::fs::read(&cache_path).await?;
+    let parsed: serde_json::Value = serde_json::from_slice(&persisted)?;
+    assert!(parsed.get("claude-3-5-sonnet-20241022").is_some());
+
+    let mut entries = tokio::fs::read_dir(dir.path()).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        assert!(
+            !name.ends_with(".tmp"),
+            "concurrent persist leaked temporary file {name}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn install_latest_local_uses_disk_fallback_before_real_snapshot_on_storage_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let cache_path = dir.path().join("litellm-cache.json");
+    tokio::fs::write(&cache_path, SAMPLE_LITELLM_JSON).await?;
+
+    // Uninitialized catalog (or default fallback with empty payload_hash) recovers from disk.
+    let catalog = PriceCatalog::new_empty();
+    let loader = LiteLlmLoader::new(
+        Arc::clone(&catalog),
+        Arc::new(LocalPollStorage::Error),
+        "http://unused.invalid/prices".to_owned(),
+        cache_path.clone(),
+        Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000)),
+    );
+    assert!(loader.install_latest_local().await?);
+    assert_eq!(
+        catalog.current().payload_hash,
+        hex::encode(Sha256::digest(SAMPLE_LITELLM_JSON.as_bytes()))
+    );
+
+    // Corrupted storage still fails fast even when uninitialized.
+    let uninit_catalog = PriceCatalog::new_empty();
+    let corrupt_loader = LiteLlmLoader::new(
+        Arc::clone(&uninit_catalog),
+        Arc::new(LocalPollStorage::CorruptedAny),
+        "http://unused.invalid/prices".to_owned(),
+        cache_path,
+        Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000)),
+    );
+    let err = corrupt_loader
+        .install_latest_local()
+        .await
+        .expect_err("corruption must fail");
+    assert!(err.to_string().contains("mismatch"));
     Ok(())
 }
 
