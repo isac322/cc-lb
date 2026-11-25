@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Mutex, MutexGuard, Once};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -15,21 +15,11 @@ use crate::lifecycle::{Body, DispatchError, UpstreamDispatch};
 use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 
 const HALF_OPEN_INITIALIZING: u32 = u32::MAX;
-const FAILURE_COUNT_BITS: u32 = 24;
-const FAILURE_COUNT_MASK: u64 = (1u64 << FAILURE_COUNT_BITS) - 1;
-const MAX_FAILURE_COUNT: u32 = FAILURE_COUNT_MASK as u32;
-const MAX_FAILURE_TS: u64 = u64::MAX >> FAILURE_COUNT_BITS;
 
-fn pack_failure_state(last_failure_ts: u64, count: u32) -> u64 {
-    let ts = last_failure_ts.min(MAX_FAILURE_TS);
-    let count = u64::from(count.min(MAX_FAILURE_COUNT));
-    (ts << FAILURE_COUNT_BITS) | count
-}
-
-fn unpack_failure_state(packed: u64) -> (u64, u32) {
-    let ts = packed >> FAILURE_COUNT_BITS;
-    let count = (packed & FAILURE_COUNT_MASK) as u32;
-    (ts, count)
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FailureWindowState {
+    last_failure_ts: u64,
+    count: u32,
 }
 
 static REGISTER_CIRCUIT_BREAKER_METRICS: Once = Once::new();
@@ -93,7 +83,7 @@ pub struct CircuitBreaker {
     pub upstream_name: String,
     pub config: BreakerRuntimeConfig,
     pub state: ArcSwap<BreakerState>,
-    failure_state: AtomicU64,
+    failure_state: Mutex<FailureWindowState>,
     pub last_open_ts: AtomicU64,
     pub half_open_in_flight: AtomicU32,
     clock: Arc<dyn Clock>,
@@ -110,7 +100,7 @@ impl CircuitBreaker {
             upstream_name: upstream_name.into(),
             config,
             state: ArcSwap::from_pointee(BreakerState::Closed),
-            failure_state: AtomicU64::new(0),
+            failure_state: Mutex::new(FailureWindowState::default()),
             last_open_ts: AtomicU64::new(0),
             half_open_in_flight: AtomicU32::new(0),
             clock,
@@ -132,7 +122,13 @@ impl CircuitBreaker {
     }
 
     pub fn failure_count(&self) -> u32 {
-        unpack_failure_state(self.failure_state.load(Ordering::SeqCst)).1
+        self.lock_failure_state().count
+    }
+
+    fn lock_failure_state(&self) -> MutexGuard<'_, FailureWindowState> {
+        self.failure_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn half_open_in_flight(&self) -> u32 {
@@ -218,36 +214,22 @@ impl CircuitBreaker {
     }
 
     fn increment_failures(&self, now: u64) -> u32 {
-        let now_clamped = now.min(MAX_FAILURE_TS);
         let window_secs = self.config.failure_window.as_secs();
-        let mut current = self.failure_state.load(Ordering::SeqCst);
-        loop {
-            let (last_failure, count) = unpack_failure_state(current);
-            let elapsed = now_clamped.saturating_sub(last_failure);
-            let outside_window = count == 0 || elapsed > window_secs;
-            let (next_ts, next_count) = if outside_window {
-                (now_clamped, 1)
-            } else {
-                (
-                    last_failure.max(now_clamped),
-                    count.saturating_add(1).min(MAX_FAILURE_COUNT),
-                )
-            };
-            let next = pack_failure_state(next_ts, next_count);
-            match self.failure_state.compare_exchange_weak(
-                current,
-                next,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => return next_count,
-                Err(observed) => current = observed,
-            }
+        let mut state = self.lock_failure_state();
+        let elapsed = now.saturating_sub(state.last_failure_ts);
+        let outside_window = state.count == 0 || elapsed > window_secs;
+        if outside_window {
+            state.last_failure_ts = now;
+            state.count = 1;
+        } else {
+            state.last_failure_ts = state.last_failure_ts.max(now);
+            state.count = state.count.saturating_add(1);
         }
+        state.count
     }
 
     fn reset_closed_counters(&self) {
-        self.failure_state.store(0, Ordering::SeqCst);
+        *self.lock_failure_state() = FailureWindowState::default();
         self.last_open_ts.store(0, Ordering::SeqCst);
         self.half_open_in_flight.store(0, Ordering::SeqCst);
     }
@@ -709,20 +691,52 @@ mod tests {
     }
 
     #[test]
-    fn pack_and_unpack_failure_state_saturates_without_cross_field_corruption() {
-        assert_eq!(unpack_failure_state(pack_failure_state(0, 0)), (0, 0));
-        assert_eq!(
-            unpack_failure_state(pack_failure_state(1_750_000_000, 42)),
-            (1_750_000_000, 42)
+    fn high_u32_failure_thresholds_and_u64_timestamps_are_preserved() {
+        let large_threshold = 16_777_216_u32;
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(100));
+        let breaker = CircuitBreaker::new(
+            "large-threshold",
+            BreakerRuntimeConfig {
+                failures_to_open: large_threshold,
+                failure_window: Duration::from_secs(10),
+                half_open_after: Duration::from_secs(30),
+                half_open_max_in_flight: 1,
+            },
+            Arc::clone(&clock) as ClockHandle,
         );
-        assert_eq!(
-            unpack_failure_state(pack_failure_state(MAX_FAILURE_TS, MAX_FAILURE_COUNT)),
-            (MAX_FAILURE_TS, MAX_FAILURE_COUNT)
+        *breaker.lock_failure_state() = FailureWindowState {
+            last_failure_ts: 100,
+            count: large_threshold - 1,
+        };
+        breaker.permit().expect("closed permit").record_failure();
+        assert_eq!(breaker.failure_count(), large_threshold);
+        assert_eq!(breaker.current_state(), BreakerState::Open);
+
+        let far_future_ts = 1_u64 << 42;
+        let max_clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(far_future_ts));
+        let max_breaker = CircuitBreaker::new(
+            "max-u32-threshold",
+            BreakerRuntimeConfig {
+                failures_to_open: u32::MAX,
+                failure_window: Duration::from_secs(10),
+                half_open_after: Duration::from_secs(30),
+                half_open_max_in_flight: 1,
+            },
+            max_clock,
         );
-        assert_eq!(
-            unpack_failure_state(pack_failure_state(u64::MAX, u32::MAX)),
-            (MAX_FAILURE_TS, MAX_FAILURE_COUNT)
-        );
+        *max_breaker.lock_failure_state() = FailureWindowState {
+            last_failure_ts: far_future_ts,
+            count: u32::MAX - 1,
+        };
+        max_breaker
+            .permit()
+            .expect("closed permit")
+            .record_failure();
+        assert_eq!(max_breaker.failure_count(), u32::MAX);
+        assert_eq!(max_breaker.current_state(), BreakerState::Open);
+        assert_eq!(max_breaker.increment_failures(far_future_ts), u32::MAX);
+        assert_eq!(max_breaker.increment_failures(u64::MAX - 5), 1);
+        assert_eq!(max_breaker.increment_failures(u64::MAX), 2);
     }
 
     #[test]
