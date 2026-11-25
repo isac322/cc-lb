@@ -97,9 +97,7 @@ async fn backend_api_not_found(
         }
     };
     if let Some(observer) = observer.as_ref() {
-        state
-            .lifecycle
-            .record_authentication_completed(&auth, observer);
+        state.lifecycle.record_local_auth_succeeded(&auth, observer);
         observer.terminate_local(TerminalClassification::OPERATION_NOT_SUPPORTED);
     }
     provider_scope_error_response(

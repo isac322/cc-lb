@@ -220,7 +220,7 @@ pub struct RedactingWriter<Inner> {
 }
 
 impl<Inner> RedactingWriter<Inner> {
-    fn new(inner: Inner, policy: RedactionPolicy) -> Self {
+    pub(crate) fn new(inner: Inner, policy: RedactionPolicy) -> Self {
         Self {
             inner,
             policy,

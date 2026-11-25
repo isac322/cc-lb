@@ -79,7 +79,20 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
         tokens_expire_in: 3600,
         ..AppConfig::default()
     };
-    start_tls_app_with_fake_config(fake_config).await
+    start_tls_app_with_fake_config_and_timeout(fake_config, 10).await
+}
+
+pub async fn start_tls_app_with_handshake_timeout(
+    slow_mode_bps: u64,
+    handshake_timeout_secs: u64,
+) -> RunningTlsApp {
+    let fake_config = AppConfig {
+        slow_mode_bps,
+        files_cap_bytes: 104_857_600,
+        tokens_expire_in: 3600,
+        ..AppConfig::default()
+    };
+    start_tls_app_with_fake_config_and_timeout(fake_config, handshake_timeout_secs).await
 }
 
 pub async fn start_tls_app_with_stream_pause(
@@ -92,10 +105,13 @@ pub async fn start_tls_app_with_stream_pause(
         stream_pause_after_first_delta: Some(pause),
         ..AppConfig::default()
     };
-    start_tls_app_with_fake_config(fake_config).await
+    start_tls_app_with_fake_config_and_timeout(fake_config, 10).await
 }
 
-async fn start_tls_app_with_fake_config(fake_config: AppConfig) -> RunningTlsApp {
+async fn start_tls_app_with_fake_config_and_timeout(
+    fake_config: AppConfig,
+    handshake_timeout_secs: u64,
+) -> RunningTlsApp {
     let dir = tempfile::tempdir().expect("temp dir");
     let cert_path = dir.path().join("server-cert.pem");
     let key_path = dir.path().join("server-key.pem");
@@ -122,9 +138,9 @@ async fn start_tls_app_with_fake_config(fake_config: AppConfig) -> RunningTlsApp
         proxy_addr,
         admin_addr,
         metrics_addr,
-        upstream_addr,
         &cert_path,
         &key_path,
+        handshake_timeout_secs,
     );
     let config = Config::load(&config_path).expect("load config");
     let clock: cc_lb_clock::ClockHandle = std::sync::Arc::new(cc_lb_clock::SystemClock);
@@ -681,9 +697,9 @@ fn write_config(
     proxy_addr: SocketAddr,
     admin_addr: SocketAddr,
     metrics_addr: SocketAddr,
-    _upstream_addr: SocketAddr,
     cert_path: &Path,
     key_path: &Path,
+    handshake_timeout_secs: u64,
 ) {
     unsafe {
         std::env::set_var(
@@ -704,6 +720,7 @@ metrics_addr = "{metrics_addr}"
 cert_path = "{}"
 key_path = "{}"
 reload_on_sighup = true
+handshake_timeout_secs = {handshake_timeout_secs}
 
 
 

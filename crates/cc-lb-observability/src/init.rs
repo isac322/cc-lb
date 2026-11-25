@@ -18,7 +18,7 @@ use crate::cclb_metrics::{
     touch_prometheus14_metric_handles,
 };
 use crate::panic_hook::install_panic_hook;
-use crate::redaction::{RedactingMakeWriter, RedactionPolicy};
+use crate::redaction::RedactionPolicy;
 
 type BoxedRegistryLayer = Box<dyn Layer<Registry> + Send + Sync>;
 
@@ -57,9 +57,19 @@ impl Default for ObservabilityConfig {
 pub struct TracingGuard {
     tracer_provider: Option<SdkTracerProvider>,
     otlp_runtime: Option<tokio::runtime::Runtime>,
+    log_worker: Option<crate::non_blocking::LogWorkerGuard>,
 }
 
 impl TracingGuard {
+    #[cfg(test)]
+    pub(crate) fn for_log_worker_test(log_worker: crate::non_blocking::LogWorkerGuard) -> Self {
+        Self {
+            tracer_provider: None,
+            otlp_runtime: None,
+            log_worker: Some(log_worker),
+        }
+    }
+
     fn shutdown(&mut self) {
         if let Some(provider) = self.tracer_provider.take() {
             let _ = provider.shutdown();
@@ -70,6 +80,9 @@ impl TracingGuard {
             // background form is bounded and valid in both sync and async
             // callers; the provider has already drained its batch processor.
             runtime.shutdown_background();
+        }
+        if let Some(mut worker) = self.log_worker.take() {
+            worker.shutdown();
         }
     }
 }
@@ -402,20 +415,15 @@ pub fn init(cfg: &ObservabilityConfig) -> Result<TracingGuard, InitError> {
         .or_else(|_| EnvFilter::try_new(&cfg.tracing_level))
         .map_err(|source| InitError::TracingFilter { source })?;
 
-    let mut layers: Vec<BoxedRegistryLayer> = if cfg.log_redaction {
-        let fmt_layer = tracing_subscriber::fmt::layer()
+    let (log_make_writer, log_worker) =
+        crate::non_blocking::spawn_stdout_log_worker(cfg.log_redaction.then_some(policy));
+    let mut layers: Vec<BoxedRegistryLayer> = vec![
+        tracing_subscriber::fmt::layer()
             .json()
             .with_ansi(false)
-            .with_writer(RedactingMakeWriter::new(std::io::stdout, policy));
-        vec![fmt_layer.boxed()]
-    } else {
-        vec![
-            tracing_subscriber::fmt::layer()
-                .json()
-                .with_ansi(false)
-                .boxed(),
-        ]
-    };
+            .with_writer(log_make_writer)
+            .boxed(),
+    ];
 
     let (tracer_provider, otlp_runtime) = if let Some(endpoint) = cfg.otlp_endpoint.as_deref() {
         let (provider, runtime) = build_otlp_pipeline(endpoint)?;
@@ -430,6 +438,7 @@ pub fn init(cfg: &ObservabilityConfig) -> Result<TracingGuard, InitError> {
     let mut guard = TracingGuard {
         tracer_provider,
         otlp_runtime,
+        log_worker: Some(log_worker),
     };
     if let Err(source) = tracing::subscriber::set_global_default(subscriber) {
         guard.shutdown();
@@ -874,6 +883,7 @@ mod tests {
             drop(TracingGuard {
                 tracer_provider: Some(provider),
                 otlp_runtime: Some(runtime),
+                log_worker: None,
             });
             assert!(matches!(
                 provider_handle.shutdown(),

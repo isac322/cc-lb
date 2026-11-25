@@ -215,8 +215,11 @@ pub(crate) async fn inspect_truncation_response(
         let Ok(data) = frame.into_data() else {
             continue;
         };
+        let remaining_cap = cap.saturating_sub(held.len());
+        let inspect_len = data.len().min(remaining_cap);
+        let inspect_slice = &data[..inspect_len];
         held.extend_from_slice(&data);
-        scan.extend_from_slice(&data);
+        scan.extend_from_slice(inspect_slice);
         let mut output_started = false;
         while let Some(end) = sse_event_end(&scan) {
             let event = scan.drain(..end).collect::<Vec<_>>();
@@ -861,6 +864,33 @@ data: [DONE]\r\n\r\n";
             .await
             .expect_err("cap");
         assert_eq!(error, CollectError::BodyTooLarge);
+    }
+
+    #[tokio::test]
+    async fn truncation_prefix_allows_coalesced_chunk_when_first_output_fits_cap() {
+        let first_output = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n";
+        let trailing = format!(
+            "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"{}\"}}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{}}}}\n\n",
+            "x".repeat(256)
+        );
+        let full_chunk = format!("{first_output}{trailing}");
+        let cap = first_output.len() + 16;
+        assert!(full_chunk.len() > cap);
+        let response = Response::builder()
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(Body::from(full_chunk.clone()))
+            .expect("response");
+        let (relayed, overflow) = inspect_truncation_response(response, cap)
+            .await
+            .expect("first output within prefix cap should relay full chunk");
+        assert!(!overflow);
+        let collected = relayed
+            .into_body()
+            .collect()
+            .await
+            .expect("body collects")
+            .to_bytes();
+        assert_eq!(collected, Bytes::from(full_chunk));
     }
 
     #[tokio::test]

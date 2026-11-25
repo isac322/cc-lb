@@ -7,6 +7,7 @@ mod cclb_metrics;
 mod dropped_events;
 mod engine_hook;
 mod init;
+mod non_blocking;
 mod panic_hook;
 mod propagation;
 mod redaction;

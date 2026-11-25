@@ -76,7 +76,7 @@ pub use authn_rail::{Authenticated, authenticate_first, reject_unauthenticated_f
 #[cfg(not(loom))]
 pub use bulkhead::{
     Bulkhead, BulkheadDispatch, BulkheadError, BulkheadRegistry, BulkheadRuntimeConfig,
-    ExecuteError, OwnedBulkheadGuard, make_default_dispatcher,
+    ExecuteError, OwnedBulkheadGuard, make_default_dispatcher, make_shared_dispatcher,
 };
 #[cfg(not(loom))]
 pub use cc_lb_upstream::ApiKeyAwareSignerFactory;
@@ -85,6 +85,8 @@ pub use circuit_breaker::{
     BreakerError, BreakerRegistry, BreakerRuntimeConfig, BreakerState, CircuitBreaker,
     CircuitBreakerDispatch, Permit,
 };
+#[cfg(not(loom))]
+pub use dns_cache::MetricDnsResolver;
 #[cfg(not(loom))]
 pub use drain::{DrainController, proxy_drain_middleware};
 #[cfg(not(loom))]

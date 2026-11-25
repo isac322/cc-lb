@@ -249,6 +249,7 @@ impl Harness {
             token_env: "CARGO_PKG_NAME".to_owned(),
         }];
         config.timeouts.upstream_total_secs = 1;
+        config.timeouts.upstream_connect_secs = 1;
         let app =
             build_app_with_storage(config, None, storage.clone(), storage.clone(), aead, clock)
                 .await?;

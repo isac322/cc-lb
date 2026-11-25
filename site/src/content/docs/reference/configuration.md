@@ -191,3 +191,24 @@ shape_origin_policy = "selected_upstream_origin"
 - `execution_timeout_ms` sets the per-call Wasmtime epoch preemption timeout in milliseconds (default `1000`, valid range `10..=30000`) for both admission probes and proxy-path hook calls. The 10ms epoch ticker sets a deadline of `ceil(execution_timeout_ms / 10) + 1` ticks to account for 10ms rounding and the partial initial tick (for example, `11ms` yields 3 ticks), so nominal preemption occurs between `(ceil(execution_timeout_ms / 10)) * 10ms` and `(ceil(execution_timeout_ms / 10) + 1) * 10ms` depending on ticker phase (e.g. `20–30ms` for `11ms`), plus OS ticker scheduling delay.
 - `shape_origin_policy` defaults to `"selected_upstream_origin"`, rejecting any shaped URL whose origin differs from the selected upstream's `base_url`; set `"unrestricted"` only when shape plugins must redirect requests cross-origin.
 - Router filter and request-shaping stages fail closed: Wasmtime store/instance pool saturation returns HTTP `503` with `Retry-After: 1`, and plugin traps, timeouts, runtime errors, or invalid filter outputs return HTTP `502` without dispatching upstream or falling back to raw passthrough.
+
+## Proxy ingress, body, and upstream timeouts
+
+Optional startup bounds protect the proxy accept path, response-transformation buffering, and outbound TCP/WebSocket connects:
+
+```toml
+[listener.tls]
+handshake_timeout_secs = 10
+
+[body]
+max_buffered_response_bytes = 104857600
+
+[timeouts]
+upstream_connect_secs = 30
+```
+
+| Key | Default | Constraint | Effect |
+| --- | --- | --- | --- |
+| `listener.tls.handshake_timeout_secs` | `10` | `>= 1` | Bounds each incoming TLS handshake off the accept loop. |
+| `body.max_buffered_response_bytes` | `104857600` (`100 MiB`) | `>= 1` | Caps ordinary buffered response transforms so malformed huge responses fail closed with `502`. |
+| `timeouts.upstream_connect_secs` | `min(30, max(1, timeouts.upstream_total_secs))` (`30` with default `600`) | `>= 1` and `<= max(1, timeouts.upstream_total_secs)` | Bounds TCP and WebSocket connect attempts across shared HTTP and WebSocket upstreams; omitted values clamp to the effective total timeout so legacy `upstream_total_secs = 0` keeps a `1` s connect timeout. |

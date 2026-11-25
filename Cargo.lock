@@ -1689,6 +1689,7 @@ dependencies = [
  "http",
  "thiserror 2.0.21",
  "url",
+ "uuid",
 ]
 
 [[package]]

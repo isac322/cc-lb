@@ -1,7 +1,8 @@
 use cc_lb_config::{
-    Config, DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV,
-    DEFAULT_SQLITE_PATH, DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS, StorageConfig,
-    UnknownOpenaiReasoningPolicy,
+    Config, DEFAULT_FILES_CAP_BYTES, DEFAULT_MAX_BUFFERED_RESPONSE_BYTES,
+    DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV, DEFAULT_SQLITE_PATH,
+    DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS, DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS,
+    DEFAULT_UPSTREAM_CONNECT_SECS, StorageConfig, TlsConfig, UnknownOpenaiReasoningPolicy,
 };
 
 #[test]
@@ -15,6 +16,18 @@ fn load_minimal_toml_applies_plan_defaults() {
     assert_eq!(config.listener.metrics_addr, "[::1]:9091".parse().unwrap());
     assert_eq!(config.body.messages_cap_bytes, DEFAULT_MESSAGES_CAP_BYTES);
     assert_eq!(config.body.files_cap_bytes, DEFAULT_FILES_CAP_BYTES);
+    assert_eq!(
+        config.body.max_buffered_response_bytes,
+        DEFAULT_MAX_BUFFERED_RESPONSE_BYTES
+    );
+    assert_eq!(
+        TlsConfig::default().handshake_timeout_secs,
+        DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS
+    );
+    assert_eq!(
+        config.timeouts.upstream_connect_secs,
+        DEFAULT_UPSTREAM_CONNECT_SECS
+    );
     assert_eq!(
         config.storage,
         StorageConfig::Sqlite {
@@ -44,6 +57,39 @@ fn load_minimal_toml_applies_plan_defaults() {
         config.price_catalog.cache_path,
         std::path::Path::new("/var/lib/cc-lb/litellm.json")
     );
+}
+
+#[test]
+fn omitted_connect_timeout_clamps_to_short_upstream_total_timeout() {
+    let (_dir, path) = crate::common::temp_config(
+        r#"[timeouts]
+upstream_total_secs = 10
+"#,
+    );
+
+    let config = Config::load(&path).expect("short total timeout with omitted connect stays valid");
+    assert_eq!(config.timeouts.upstream_total_secs, 10);
+    assert_eq!(config.timeouts.upstream_connect_secs, 10);
+
+    let json_config: Config =
+        serde_json::from_str(r#"{"timeouts":{"upstream_total_secs":12}}"#).expect("JSON decodes");
+    json_config.validate().expect("JSON validates");
+    assert_eq!(json_config.timeouts.upstream_connect_secs, 12);
+
+    let (_dir_zero, zero_path) = crate::common::temp_config(
+        r#"[timeouts]
+upstream_total_secs = 0
+"#,
+    );
+    let zero_config =
+        Config::load(&zero_path).expect("zero total timeout with omitted connect stays valid");
+    assert_eq!(zero_config.timeouts.upstream_total_secs, 0);
+    assert_eq!(zero_config.timeouts.upstream_connect_secs, 1);
+
+    let zero_json: Config =
+        serde_json::from_str(r#"{"timeouts":{"upstream_total_secs":0}}"#).expect("JSON decodes");
+    zero_json.validate().expect("zero JSON validates");
+    assert_eq!(zero_json.timeouts.upstream_connect_secs, 1);
 }
 
 #[test]

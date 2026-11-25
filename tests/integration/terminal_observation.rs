@@ -577,6 +577,7 @@ async fn terminal_tower_timeout() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut config = base_config(sqlite_path.clone(), litellm.uri());
     config.config.timeouts.upstream_total_secs = 1;
+    config.config.timeouts.upstream_connect_secs = 1;
     let server = StartedServer::start(config).await?;
     wait_for_price_catalog().await?;
 
@@ -2123,6 +2124,7 @@ fn base_config(sqlite_path: std::path::PathBuf, litellm_url: String) -> Reserved
     config.listener.admin_addr = admin_reservation.local_addr().expect("admin addr");
     config.listener.metrics_addr = metrics_addr;
     config.timeouts.upstream_total_secs = 10;
+    config.timeouts.upstream_connect_secs = 10;
     config.storage = StorageConfig::Sqlite { path: sqlite_path };
     config.aead.key_env = MASTER_KEY_ENV.to_owned();
     config.price_catalog.url = format!("{litellm_url}/prices");

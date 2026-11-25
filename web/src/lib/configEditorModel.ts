@@ -1068,11 +1068,12 @@ const CONFIG_FIELD_GUIDANCE: readonly {
   {
     pattern: 'bulkhead.max_conns_per_upstream',
     guidance: {
-      description: 'Maximum simultaneous connections opened to one upstream.',
+      description:
+        'Maximum idle connections retained per upstream host in the shared HTTP client pool.',
       lower:
-        'Protects upstreams from connection floods but queues or rejects excess traffic.',
+        'Reduces idle sockets held open per upstream host at the cost of more TCP/TLS handshakes.',
       higher:
-        'Allows more parallel upstream traffic but can overwhelm a weak upstream.',
+        'Keeps more warm HTTP sockets pooled per host to avoid handshake latency under bursts.',
       impactDimensions: ['throughput', 'availability'],
     },
   },
@@ -1080,11 +1081,11 @@ const CONFIG_FIELD_GUIDANCE: readonly {
     pattern: 'bulkhead.semaphore_per_upstream',
     guidance: {
       description:
-        'Maximum in-flight requests permitted per upstream before new ones are shed.',
+        'Maximum concurrent in-flight HTTP requests and active WebSocket connections permitted per upstream UUID (enforced in separate HTTP and WebSocket registries).',
       lower:
-        'Sheds load earlier, protecting upstreams at the cost of more rejected requests.',
+        'Sheds load earlier, protecting each upstream from concurrency spikes at the cost of more rejected requests.',
       higher:
-        'Admits more concurrent work but weakens isolation when an upstream degrades.',
+        'Admits more concurrent HTTP requests and WebSocket connections per upstream UUID.',
       impactDimensions: ['throughput', 'availability'],
     },
   },

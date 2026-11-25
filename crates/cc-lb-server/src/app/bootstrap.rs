@@ -22,8 +22,9 @@ use cc_lb_control::{
 use cc_lb_engine::{
     BreakerRegistry, BreakerRuntimeConfig, BulkheadDispatch, BulkheadRegistry,
     BulkheadRuntimeConfig, CircuitBreakerDispatch, DrainController, Lifecycle, LifecycleConfig,
-    SubscriptionQuotaSink, UpstreamDispatch, cache_keepalive::AnthropicKeepaliveDispatcher,
-    make_default_dispatcher,
+    MetricDnsResolver, SubscriptionQuotaSink, UpstreamDispatch,
+    cache_keepalive::AnthropicKeepaliveDispatcher, dns_cache::DnsResolverConfig,
+    make_shared_dispatcher,
 };
 use cc_lb_event_pipeline::{
     SubscriptionQuotaWriterConfig, UpstreamRateLimitSink, start_subscription_quota_writer,
@@ -102,6 +103,7 @@ pub(super) struct ShutdownRuntime {
     pub(super) signals: signal::SignalHandle,
     pub(super) drain_controller: DrainController,
     pub(super) tls_state: Option<Arc<TlsState>>,
+    pub(super) tls_handshake_timeout: std::time::Duration,
     pub(super) server_state: Arc<ServerStateHandle>,
 }
 
@@ -258,6 +260,7 @@ pub(super) async fn serve_runtime(
         signals,
         drain_controller: _,
         tls_state,
+        tls_handshake_timeout,
         server_state,
     } = shutdown;
     server_state.wait_for_ready().await;
@@ -280,7 +283,11 @@ pub(super) async fn serve_runtime(
     let proxy_shutdown = signals.subscribe();
     let mut proxy = if let Some(tls_state) = tls_state {
         tokio::spawn(async move {
-            let proxy_listener = ReloadableListener::new(proxy_listener, tls_state);
+            let proxy_listener = ReloadableListener::with_handshake_timeout(
+                proxy_listener,
+                tls_state,
+                tls_handshake_timeout,
+            );
             axum::serve(proxy_listener, router)
                 .with_graceful_shutdown(signal::wait_for_shutdown(proxy_shutdown))
                 .await
@@ -644,13 +651,16 @@ pub(super) async fn build_runtime_with_storage_core(
         >,
     > = Arc::new(tokio::sync::Mutex::new(limit_reservation_ttl_handle));
     let builtin_authn = Arc::new(BuiltinAuthn::new(key_store.clone(), clock.clone()));
-    let (
+    let DispatcherParts {
         dispatcher,
+        dns_resolver,
+        upstream_connect_timeout,
         breaker_registry,
         breaker_config,
+        http_bulkheads,
         websocket_bulkheads,
         websocket_bulkhead_config,
-    ) = dispatcher(&config, clock.clone());
+    } = dispatcher(&config, clock.clone());
     let replica_identity = Some(cc_lb_domain::ReplicaIdentity {
         id: replica::load_or_create_replica_id_or_ephemeral(&data_dir),
     });
@@ -768,7 +778,12 @@ pub(super) async fn build_runtime_with_storage_core(
         plugin_scope,
     )
     .await?;
-    let dynamic_view_holder = Arc::new(DynamicViewHolder::new(initial_view.clone()));
+    let dynamic_view_holder = Arc::new(wire_dynamic_view_eviction(
+        DynamicViewHolder::new(initial_view.clone()),
+        Arc::clone(&breaker_registry),
+        Arc::clone(&http_bulkheads),
+        Arc::clone(&websocket_bulkheads),
+    ));
     let notify_cancel = CancellationToken::new();
     let notifier: Arc<dyn RuntimeChangeNotifier> = storage_for_dynamic.clone();
     let notify_listener = Arc::new(
@@ -1348,12 +1363,13 @@ pub(super) async fn build_runtime_with_storage_core(
         aead: aead.clone(),
         storage: storage.clone(),
         dynamic_view: dynamic_view.clone(),
-        builtin_authn: builtin_authn.clone(),
         clock: clock.clone(),
         breaker_registry,
         breaker_config,
         websocket_bulkheads,
         websocket_bulkhead_config,
+        dns_resolver,
+        upstream_connect_timeout,
     };
 
     let router = match role {
@@ -1388,6 +1404,9 @@ pub(super) async fn build_runtime_with_storage_core(
             signals,
             drain_controller,
             tls_state,
+            tls_handshake_timeout: active_tls_config(&config)
+                .map(|tls| std::time::Duration::from_secs(tls.handshake_timeout_secs))
+                .unwrap_or(crate::tls::DEFAULT_TLS_HANDSHAKE_TIMEOUT),
             server_state,
         },
         #[cfg(feature = "admin")]
@@ -1548,6 +1567,7 @@ pub(super) fn lifecycle_config_from_config(
     LifecycleConfig {
         messages_body_cap_bytes: body_caps.messages,
         files_body_cap_bytes: body_caps.files,
+        max_buffered_response_bytes: cap_to_usize(config.body.max_buffered_response_bytes),
         replica_identity,
         upstream_affinity_ttl: std::time::Duration::from_secs(config.upstream_affinity.ttl_secs()),
         unknown_openai_reasoning: config.upstream_affinity.unknown_openai_reasoning,
@@ -1597,12 +1617,13 @@ pub(super) struct ProxyState {
     pub(super) aead: Arc<AeadService>,
     pub(super) storage: Arc<dyn Storage>,
     pub(super) dynamic_view: Arc<DynamicViewHolder>,
-    pub(super) builtin_authn: Arc<BuiltinAuthn>,
     pub(super) clock: ClockHandle,
     pub(super) breaker_registry: Arc<BreakerRegistry>,
     pub(super) breaker_config: BreakerRuntimeConfig,
     pub(super) websocket_bulkheads: Arc<BulkheadRegistry>,
     pub(super) websocket_bulkhead_config: BulkheadRuntimeConfig,
+    pub(super) dns_resolver: MetricDnsResolver,
+    pub(super) upstream_connect_timeout: Duration,
 }
 
 pub(super) async fn spawn_price_catalog_local_installer(
@@ -1893,53 +1914,87 @@ pub async fn open_storage_for_role(
     ))
 }
 
-pub(super) fn dispatcher(
-    config: &Config,
-    clock: ClockHandle,
-) -> (
-    Arc<dyn UpstreamDispatch>,
-    Arc<BreakerRegistry>,
-    BreakerRuntimeConfig,
-    Arc<BulkheadRegistry>,
-    BulkheadRuntimeConfig,
-) {
+pub(super) fn wire_dynamic_view_eviction(
+    holder: DynamicViewHolder,
+    breaker_registry: Arc<BreakerRegistry>,
+    http_bulkheads: Arc<BulkheadRegistry>,
+    websocket_bulkheads: Arc<BulkheadRegistry>,
+) -> DynamicViewHolder {
+    holder.with_on_store(Arc::new(move |view| {
+        let snapshot = view.upstreams_snapshot();
+        let live_http: std::collections::HashSet<String> =
+            snapshot.iter().map(|u| u.id.to_string()).collect();
+        let live_ws: std::collections::HashSet<String> = snapshot
+            .iter()
+            .map(|u| websocket_breaker_key(u.id))
+            .collect();
+        breaker_registry.retain_keys(|key| live_http.contains(key) || live_ws.contains(key));
+        http_bulkheads.retain_keys(|key| live_http.contains(key));
+        websocket_bulkheads.retain_keys(|key| live_ws.contains(key));
+    }))
+}
+
+pub(super) struct DispatcherParts {
+    pub(super) dispatcher: Arc<dyn UpstreamDispatch>,
+    pub(super) dns_resolver: MetricDnsResolver,
+    pub(super) upstream_connect_timeout: Duration,
+    pub(super) breaker_registry: Arc<BreakerRegistry>,
+    pub(super) breaker_config: BreakerRuntimeConfig,
+    pub(super) http_bulkheads: Arc<BulkheadRegistry>,
+    pub(super) websocket_bulkheads: Arc<BulkheadRegistry>,
+    pub(super) websocket_bulkhead_config: BulkheadRuntimeConfig,
+}
+
+pub(super) fn dispatcher(config: &Config, clock: ClockHandle) -> DispatcherParts {
     let bulkhead_config = BulkheadRuntimeConfig::from(config.bulkhead.clone());
     let breaker_config = BreakerRuntimeConfig::from(config.circuit_breaker.clone());
+    let upstream_connect_timeout =
+        Duration::from_secs(config.timeouts.upstream_connect_secs.max(1));
+    let dns_resolver =
+        MetricDnsResolver::new(&DnsResolverConfig::default()).expect("default DNS resolver builds");
     let upstream_name = Arc::new(|request: &SignedRequest| {
         request
-            .url()
-            .host_str()
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| "unknown".to_owned())
+            .upstream_id()
+            .map(|id| id.to_string())
+            .or_else(|| request.url().host_str().map(ToOwned::to_owned))
+            .unwrap_or_else(|| cc_lb_observability::UNRESOLVED_ATTRIBUTION_LABEL.to_owned())
     });
     let breaker_registry = Arc::new(BreakerRegistry::new());
-    let bulkhead_registry = Arc::new(BulkheadRegistry::new());
-    let breaker_upstream_name = upstream_name.clone();
-    let breaker_registry_for_dispatcher = breaker_registry.clone();
-    let breaker_clock = clock;
-    let dispatcher_factory = Arc::new(move |max_idle_per_host| {
-        let base = make_default_dispatcher(max_idle_per_host);
-        let base = Arc::new(input_tokens_ws::InputTokensWebsocketDispatch::new(base));
-        Arc::new(CircuitBreakerDispatch::new(
-            base,
-            breaker_registry_for_dispatcher.clone(),
-            breaker_config,
-            breaker_upstream_name.clone(),
-            breaker_clock.clone(),
-        )) as Arc<dyn UpstreamDispatch>
-    });
-    (
-        Arc::new(BulkheadDispatch::with_dispatcher_factory(
-            bulkhead_registry.clone(),
+    let http_bulkheads = Arc::new(BulkheadRegistry::new());
+    let websocket_bulkheads = Arc::new(BulkheadRegistry::new());
+    let base = make_shared_dispatcher(
+        dns_resolver.clone(),
+        Some(upstream_connect_timeout),
+        bulkhead_config.max_conns_per_upstream as usize,
+    );
+    let base = Arc::new(input_tokens_ws::InputTokensWebsocketDispatch::new(
+        base,
+        dns_resolver.clone(),
+        upstream_connect_timeout,
+    ));
+    let shared_inner: Arc<dyn UpstreamDispatch> = Arc::new(CircuitBreakerDispatch::new(
+        base,
+        breaker_registry.clone(),
+        breaker_config,
+        upstream_name.clone(),
+        clock,
+    ));
+    let dispatcher_factory = Arc::new(move |_| Arc::clone(&shared_inner));
+    DispatcherParts {
+        dispatcher: Arc::new(BulkheadDispatch::with_dispatcher_factory(
+            http_bulkheads.clone(),
             bulkhead_config,
-            upstream_name.clone(),
+            upstream_name,
             dispatcher_factory,
         )),
+        dns_resolver,
+        upstream_connect_timeout,
         breaker_registry,
         breaker_config,
-        bulkhead_registry,
-        bulkhead_config,
-    )
+        http_bulkheads,
+        websocket_bulkheads,
+        websocket_bulkhead_config: bulkhead_config,
+    }
 }
 
 #[cfg(all(test, feature = "storage-sqlite"))]

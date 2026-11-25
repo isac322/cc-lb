@@ -300,6 +300,18 @@ struct ReservedAmount {
     kind: LimitKind,
     window_sec: u64,
     amount: i64,
+    bucket_start: u64,
+}
+
+impl ReservedAmount {
+    fn is_live_at(&self, now_sec: u64) -> bool {
+        self.bucket_start.saturating_add(self.window_sec) > now_sec
+    }
+}
+
+fn rolling_bucket_start(now_sec: u64, window_sec: u64) -> u64 {
+    let bucket_width = durable_bucket_width(window_sec).unwrap_or(window_sec.max(1));
+    now_sec - now_sec % bucket_width
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -364,8 +376,7 @@ impl RingCounter {
     }
 
     pub fn record(&mut self, now_sec: u64, delta: i64) {
-        let bucket_width = durable_bucket_width(self.window_sec).unwrap_or(self.window_sec.max(1));
-        let bucket_start = now_sec - now_sec % bucket_width;
+        let bucket_start = rolling_bucket_start(now_sec, self.window_sec);
         match self.buckets.back().copied() {
             None => self.buckets.push_back((bucket_start, delta)),
             Some((last_start, _)) if last_start == bucket_start => {
@@ -389,6 +400,23 @@ impl RingCounter {
             }
         }
         self.evict_old(now_sec);
+    }
+
+    fn remove_from_bucket(&mut self, bucket_start: u64, amount: i64, now_sec: u64) {
+        self.evict_old(now_sec);
+        if bucket_start.saturating_add(self.window_sec) <= now_sec {
+            return;
+        }
+        if let Some(index) = self
+            .buckets
+            .iter()
+            .position(|(existing_start, _)| *existing_start == bucket_start)
+        {
+            self.buckets[index].1 = self.buckets[index].1.saturating_sub(amount).max(0);
+            if self.buckets[index].1 == 0 {
+                self.buckets.remove(index);
+            }
+        }
     }
 
     fn oldest_bucket_sec(&mut self, now_sec: u64) -> Option<u64> {
@@ -917,6 +945,7 @@ impl LimitEngine {
                         kind: limit.kind,
                         window_sec: limit.window_secs,
                         amount: *amount,
+                        bucket_start: rolling_bucket_start(now_sec, limit.window_secs),
                     });
                 }
             }
@@ -1050,6 +1079,120 @@ impl LimitEngine {
         true
     }
 
+    /// Resize an active reservation's rolling token and cost holds after the
+    /// final request body is settled, while keeping request counts and
+    /// concurrency guards from admission intact. Returns `Ok(false)` if the
+    /// reservation expired or was already reconciled.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resize_reservation_estimates_by_id(
+        &self,
+        view: &PrincipalView,
+        record: &StoredApiKeyRecord,
+        principal_id: &str,
+        id: &str,
+        model: &str,
+        max_tokens: Option<i64>,
+        max_input_estimate: i64,
+        cost_estimate_micros: Option<i64>,
+    ) -> Result<bool, RejectReason> {
+        let plan = self.prepare_reservation_plan(
+            view,
+            record,
+            principal_id,
+            model,
+            max_tokens,
+            max_input_estimate,
+            cost_estimate_micros,
+        )?;
+        let caps = self.compute_admission_caps(
+            plan.durable_usage.as_ref(),
+            &plan.key_id,
+            &plan.planned_rolling,
+            plan.now_sec,
+        );
+        {
+            let mut reservations = self.inner.reservations.lock();
+            let Some(res) = reservations.get_mut(id) else {
+                return Ok(false);
+            };
+            {
+                let mut rolling = self.inner.rolling.write();
+                {
+                    let remote = self.inner.remote_rolling.read();
+                    for ((limit, new_amount), cap) in plan.planned_rolling.iter().zip(caps.iter()) {
+                        let live_old_amount = res
+                            .reserved
+                            .iter()
+                            .find(|r| r.kind == limit.kind && r.window_sec == limit.window_secs)
+                            .filter(|r| r.is_live_at(plan.now_sec))
+                            .map_or(0, |r| r.amount);
+                        let delta = new_amount.saturating_sub(live_old_amount);
+                        if delta > 0 {
+                            let key = (res.key_id.clone(), limit.kind, limit.window_secs);
+                            let local = rolling.get(&key).map_or(0, |c| c.total_at(plan.now_sec));
+                            let remote_total =
+                                remote.get(&key).map_or(0, |c| c.total_at(plan.now_sec));
+                            if local.saturating_add(remote_total).saturating_add(delta) > *cap {
+                                return Err(reject_reason_for_limit_kind(limit.kind));
+                            }
+                        }
+                    }
+                }
+                for old in &res.reserved {
+                    if old.is_live_at(plan.now_sec)
+                        && !plan.planned_rolling.iter().any(|(limit, _)| {
+                            limit.kind == old.kind && limit.window_secs == old.window_sec
+                        })
+                    {
+                        remove_reserved_bucket_locked(&mut rolling, &res.key_id, old, plan.now_sec);
+                    }
+                }
+                let mut next_reserved = Vec::with_capacity(plan.planned_rolling.len());
+                for (limit, new_amount) in &plan.planned_rolling {
+                    let live_old = res
+                        .reserved
+                        .iter()
+                        .find(|r| r.kind == limit.kind && r.window_sec == limit.window_secs)
+                        .filter(|r| r.is_live_at(plan.now_sec));
+                    if let Some(old) = live_old {
+                        if old.amount == *new_amount {
+                            next_reserved.push(old.clone());
+                            continue;
+                        }
+                        remove_reserved_bucket_locked(&mut rolling, &res.key_id, old, plan.now_sec);
+                    }
+                    if *new_amount != 0 {
+                        record_amount_locked(
+                            &mut rolling,
+                            &res.key_id,
+                            limit.kind,
+                            limit.window_secs,
+                            *new_amount,
+                            plan.now_sec,
+                        );
+                    }
+                    next_reserved.push(ReservedAmount {
+                        kind: limit.kind,
+                        window_sec: limit.window_secs,
+                        amount: *new_amount,
+                        bucket_start: rolling_bucket_start(plan.now_sec, limit.window_secs),
+                    });
+                }
+                res.reserved = next_reserved;
+                res.admitted_input_estimate = plan.estimated_input_tokens;
+                res.admitted_output_estimate = plan.estimated_output_tokens;
+                res.admitted_cost_estimate_micros = cost_estimate_micros;
+                res.durable_bucket_widths = plan.durable_bucket_widths;
+                res.last_activity_at = Instant::now();
+            }
+        }
+        self.inner.effective_limits.write().insert(
+            (plan.key_id, principal_id.to_owned()),
+            plan.effective_limits,
+        );
+        Ok(true)
+    }
+
     /// Reconcile a reservation by ID.
     ///
     /// Used by the `LimitReconcileSubscriber` to reconcile out of
@@ -1109,9 +1252,11 @@ impl LimitEngine {
         true
     }
 
-    /// Commit a reservation without altering its already-recorded rolling
-    /// usage (e.g. an HTTP stream terminated after content began without a
-    /// usage event). Releases concurrency guards and records durable usage.
+    /// Commit a reservation without altering live rolling holds, while posting
+    /// admitted estimates into `now_sec` for any window hold that already
+    /// expired (e.g. an HTTP stream terminated after content began without a
+    /// usage event or an expired hold was skipped across handoff). Releases
+    /// concurrency guards and records durable usage.
     pub fn commit_reserved_by_id(&self, id: &str) -> bool {
         let durable_usage = self.inner.durable_usage.read().clone();
         let concurrent_guards = {
@@ -1121,6 +1266,24 @@ impl LimitEngine {
             };
             let concurrent_guards = std::mem::take(&mut record.concurrent_guards);
             let now_sec = unix_secs(self.inner.clock.now());
+            {
+                let mut rolling = self.inner.rolling.write();
+                for amount in &record.reserved {
+                    if amount.kind != LimitKind::Concurrent
+                        && !amount.is_live_at(now_sec)
+                        && amount.amount != 0
+                    {
+                        record_amount_locked(
+                            &mut rolling,
+                            &record.key_id,
+                            amount.kind,
+                            amount.window_sec,
+                            amount.amount,
+                            now_sec,
+                        );
+                    }
+                }
+            }
             if let Some(state) = durable_usage.as_ref()
                 && !record.durable_bucket_widths.is_empty()
             {
@@ -1159,14 +1322,7 @@ impl LimitEngine {
             {
                 let mut rolling = self.inner.rolling.write();
                 for amount in &record.reserved {
-                    record_amount_locked(
-                        &mut rolling,
-                        &record.key_id,
-                        amount.kind,
-                        amount.window_sec,
-                        -amount.amount,
-                        now_sec,
-                    );
+                    remove_reserved_bucket_locked(&mut rolling, &record.key_id, amount, now_sec);
                 }
             }
             concurrent_guards
@@ -1181,14 +1337,7 @@ impl LimitEngine {
         {
             let mut rolling = self.inner.rolling.write();
             for amount in &record.reserved {
-                record_amount_locked(
-                    &mut rolling,
-                    &record.key_id,
-                    amount.kind,
-                    amount.window_sec,
-                    -amount.amount,
-                    now_sec,
-                );
+                remove_reserved_bucket_locked(&mut rolling, &record.key_id, amount, now_sec);
             }
         }
         drop(concurrent_guards);
@@ -1452,6 +1601,21 @@ fn record_amount_locked(
         .entry((key_id.to_owned(), kind, window_sec))
         .or_insert_with(|| RingCounter::new(window_sec))
         .record(now_sec, delta);
+}
+
+fn remove_reserved_bucket_locked(
+    rolling: &mut HashMap<RollingKey, RingCounter>,
+    key_id: &str,
+    reserved: &ReservedAmount,
+    now_sec: u64,
+) {
+    if !reserved.is_live_at(now_sec) {
+        return;
+    }
+    if let Some(counter) = rolling.get_mut(&(key_id.to_owned(), reserved.kind, reserved.window_sec))
+    {
+        counter.remove_from_bucket(reserved.bucket_start, reserved.amount, now_sec);
+    }
 }
 
 fn add_usage(aggregate: &mut ApiKeyUsage, usage: ApiKeyUsage) {
@@ -1906,13 +2070,16 @@ fn rebuild_local_usage_after_handoff(
             continue;
         }
         for amount in reserved {
+            if !amount.is_live_at(now_sec) {
+                continue;
+            }
             record_amount_locked(
                 &mut rolling,
                 &key_id,
                 amount.kind,
                 amount.window_sec,
                 amount.amount,
-                now_sec,
+                amount.bucket_start,
             );
         }
     }
@@ -2201,14 +2368,7 @@ impl Drop for Reservation {
             {
                 let mut rolling = engine.rolling.write();
                 for amount in &record.reserved {
-                    record_amount_locked(
-                        &mut rolling,
-                        &record.key_id,
-                        amount.kind,
-                        amount.window_sec,
-                        -amount.amount,
-                        now_sec,
-                    );
+                    remove_reserved_bucket_locked(&mut rolling, &record.key_id, amount, now_sec);
                 }
             }
             concurrent_guards
@@ -2229,23 +2389,25 @@ fn refund_difference_locked(
     for amount in reserved {
         let actual = match amount.kind {
             LimitKind::Requests => 1,
-            LimitKind::InputTokens => actual_input as i64,
-            LimitKind::OutputTokens => actual_output as i64,
-            LimitKind::TotalTokens => actual_input.saturating_add(actual_output) as i64,
+            LimitKind::InputTokens => u64_to_i64_saturating(actual_input),
+            LimitKind::OutputTokens => u64_to_i64_saturating(actual_output),
+            LimitKind::TotalTokens => {
+                u64_to_i64_saturating(actual_input.saturating_add(actual_output))
+            }
             LimitKind::CostUsd => match actual_cost_micros {
                 Some(cost) => cost,
                 None => continue,
             },
             LimitKind::Concurrent => continue,
         };
-        let delta = actual.saturating_sub(amount.amount);
-        if delta != 0 {
+        remove_reserved_bucket_locked(rolling, key_id, amount, now_sec);
+        if actual != 0 {
             record_amount_locked(
                 rolling,
                 key_id,
                 amount.kind,
                 amount.window_sec,
-                delta,
+                actual,
                 now_sec,
             );
         }
@@ -5197,5 +5359,785 @@ mod tests {
         .await
         .expect("uncertain error deletes committed hold");
         assert!(store2.committed.lock().is_empty());
+    }
+
+    #[test]
+    fn resize_reservation_estimates_by_id_enforces_caps_atomically_and_preserves_concurrency() {
+        let concurrency = Arc::new(KeyConcurrencyManager::new());
+        let engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
+        let view = PrincipalView::for_tests(
+            "principal-resize",
+            true,
+            vec!["gpt-5".to_owned()],
+            vec![
+                Limit {
+                    kind: LimitKind::Concurrent,
+                    window_secs: 0,
+                    cap_micros: 1,
+                },
+                Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 1,
+                },
+                Limit {
+                    kind: LimitKind::TotalTokens,
+                    window_secs: 60,
+                    cap_micros: 1_000,
+                },
+                Limit {
+                    kind: LimitKind::CostUsd,
+                    window_secs: 60,
+                    cap_micros: 500,
+                },
+            ],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            key_hash_b64: "resize-key".to_owned(),
+            ..Default::default()
+        };
+        let baseline = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-resize",
+                "gpt-5",
+                Some(100),
+                200,
+                Some(100),
+            )
+            .expect("baseline admission succeeds");
+        let now = unix_secs(engine.inner.clock.now());
+        assert_eq!(concurrency.current(&record.key_hash_b64), 1);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::Requests, 60, now),
+            1
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, now),
+            300
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::CostUsd, 60, now),
+            100
+        );
+
+        // Unsatisfiable CostUsd (> 500) must reject atomically without mutating TotalTokens.
+        assert_eq!(
+            engine.resize_reservation_estimates_by_id(
+                &view,
+                &record,
+                "principal-resize",
+                baseline.id(),
+                "gpt-5",
+                Some(100),
+                800,
+                Some(600),
+            ),
+            Err(RejectReason::Unsatisfiable {
+                kind: LimitKind::CostUsd,
+                cap: 500,
+                requested: 600,
+            })
+        );
+        // Rolling-window rejection: simulate existing rolling CostUsd usage pushing delta over cap
+        // even when per-request CostUsd=450 is below 500.
+        {
+            let mut rolling = engine.inner.rolling.write();
+            record_amount_locked(
+                &mut rolling,
+                &record.key_hash_b64,
+                LimitKind::CostUsd,
+                60,
+                100,
+                now,
+            );
+        }
+        assert_eq!(
+            engine.resize_reservation_estimates_by_id(
+                &view,
+                &record,
+                "principal-resize",
+                baseline.id(),
+                "gpt-5",
+                Some(100),
+                800,
+                Some(450),
+            ),
+            Err(RejectReason::CostRateLimit)
+        );
+        {
+            let mut rolling = engine.inner.rolling.write();
+            record_amount_locked(
+                &mut rolling,
+                &record.key_hash_b64,
+                LimitKind::CostUsd,
+                60,
+                -100,
+                now,
+            );
+        }
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, now),
+            300,
+            "failed resize must leave previously reserved TotalTokens unchanged"
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::CostUsd, 60, now),
+            100,
+            "failed resize must leave previously reserved CostUsd unchanged"
+        );
+        assert_eq!(concurrency.current(&record.key_hash_b64), 1);
+
+        // Scaling up within caps succeeds even when Requests=1/1 and Concurrent=1/1 are full.
+        assert_eq!(
+            engine.resize_reservation_estimates_by_id(
+                &view,
+                &record,
+                "principal-resize",
+                baseline.id(),
+                "gpt-5",
+                Some(100),
+                800,
+                Some(400),
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, now),
+            900
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::CostUsd, 60, now),
+            400
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::Requests, 60, now),
+            1
+        );
+        assert_eq!(concurrency.current(&record.key_hash_b64), 1);
+
+        // Scaling back down refunds the token and cost delta.
+        assert_eq!(
+            engine.resize_reservation_estimates_by_id(
+                &view,
+                &record,
+                "principal-resize",
+                baseline.id(),
+                "gpt-5",
+                Some(100),
+                250,
+                Some(120),
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, now),
+            350
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::CostUsd, 60, now),
+            120
+        );
+
+        drop(baseline);
+        assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, now),
+            0
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::CostUsd, 60, now),
+            0
+        );
+        assert_eq!(
+            engine.resize_reservation_estimates_by_id(
+                &view,
+                &record,
+                "principal-resize",
+                "missing-id",
+                "gpt-5",
+                Some(100),
+                200,
+                Some(100),
+            ),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn resize_reservation_after_bucket_expiry_checks_full_amount_and_never_credits_new_window() {
+        let concurrency = Arc::new(KeyConcurrencyManager::new());
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let engine = LimitEngine::new(concurrency, clock.clone());
+        let view = PrincipalView::for_tests(
+            "principal-resize-expiry",
+            true,
+            vec!["gpt-5".to_owned()],
+            vec![
+                Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 10,
+                },
+                Limit {
+                    kind: LimitKind::TotalTokens,
+                    window_secs: 60,
+                    cap_micros: 1_000,
+                },
+                Limit {
+                    kind: LimitKind::CostUsd,
+                    window_secs: 60,
+                    cap_micros: 500,
+                },
+            ],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            key_hash_b64: "resize-expiry-key".to_owned(),
+            ..Default::default()
+        };
+
+        // 1. Reserve baseline hold at t0 (300 TotalTokens = 200 in + 100 out, 100 CostUsd, 1 Request).
+        let baseline = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-resize-expiry",
+                "gpt-5",
+                Some(100),
+                200,
+                Some(100),
+            )
+            .expect("baseline admission succeeds");
+        let t0 = unix_secs(clock.now());
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t0),
+            300
+        );
+
+        // 2. Advance past the 60s rolling bucket so baseline's original bucket expires.
+        clock.advance_secs(60);
+        let t1 = unix_secs(clock.now());
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            0
+        );
+
+        // Another request consumes 800/1000 TotalTokens in the fresh window.
+        let other = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-resize-expiry",
+                "gpt-5",
+                Some(100),
+                700,
+                Some(50),
+            )
+            .expect("other request admission succeeds");
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            800
+        );
+
+        // 3. Resizing UP from expired 300 to 400 (200+200) must check full 400 against 800+400 > 1000
+        // rather than subtracting expired 300 (`delta=100` -> 900 <= 1000).
+        assert_eq!(
+            engine.resize_reservation_estimates_by_id(
+                &view,
+                &record,
+                "principal-resize-expiry",
+                baseline.id(),
+                "gpt-5",
+                Some(200),
+                200,
+                Some(100),
+            ),
+            Err(RejectReason::TokenRateLimit {
+                kind: LimitKind::TotalTokens,
+            })
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            800,
+            "rejected cross-window resize must not mutate live rolling totals"
+        );
+
+        // 4. Resizing DOWN from expired 300 to 100 (50+50) must re-admit full +100 into t1 (total 900),
+        // rather than crediting -200 into the new window.
+        assert_eq!(
+            engine.resize_reservation_estimates_by_id(
+                &view,
+                &record,
+                "principal-resize-expiry",
+                baseline.id(),
+                "gpt-5",
+                Some(50),
+                50,
+                Some(40),
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            900
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::CostUsd, 60, t1),
+            90
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::Requests, 60, t1),
+            2
+        );
+
+        // 5. In-window resize replaces the live t1 bucket cleanly without double counting.
+        assert_eq!(
+            engine.resize_reservation_estimates_by_id(
+                &view,
+                &record,
+                "principal-resize-expiry",
+                baseline.id(),
+                "gpt-5",
+                Some(25),
+                25,
+                Some(20),
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            850
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::CostUsd, 60, t1),
+            70
+        );
+
+        // 6. Dropping `other` in-window removes its live 800 hold leaving only baseline's 50;
+        // then advancing past t1 and dropping `baseline` does not make the next window negative.
+        drop(other);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            50
+        );
+        clock.advance_secs(60);
+        let t2 = unix_secs(clock.now());
+        drop(baseline);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t2),
+            0
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::CostUsd, 60, t2),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_local_usage_after_handoff_preserves_bucket_starts_for_drop_and_skips_expired()
+    {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database_url = format!(
+            "sqlite://{}",
+            directory.path().join("handoff-buckets.sqlite").display()
+        );
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let storage_impl = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+            .await
+            .expect("open sqlite");
+        storage_impl.initialize().await.expect("migrate sqlite");
+        let storage: Arc<dyn Storage> = Arc::new(storage_impl);
+        let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
+        let handle = engine
+            .start_durable_usage_sync(storage.clone())
+            .await
+            .expect("start durable usage");
+        let state = engine
+            .inner
+            .durable_usage
+            .read()
+            .clone()
+            .expect("durable state");
+        handle.shutdown().await;
+
+        let view = PrincipalView::for_tests(
+            "principal-handoff",
+            true,
+            vec!["claude-3-opus".to_owned()],
+            vec![
+                Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 10,
+                },
+                Limit {
+                    kind: LimitKind::TotalTokens,
+                    window_secs: 60,
+                    cap_micros: 1_000,
+                },
+                Limit {
+                    kind: LimitKind::TotalTokens,
+                    window_secs: 3_600,
+                    cap_micros: 10_000,
+                },
+            ],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            key_hash_b64: "handoff-bucket-key".to_owned(),
+            ..StoredApiKeyRecord::default()
+        };
+
+        // 1. Reserve at t0 under 60s (1s buckets) and 3600s (60s buckets).
+        let res1 = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-handoff",
+                "claude-3-opus",
+                Some(100),
+                200,
+                None,
+            )
+            .await
+            .expect("res1 succeeds");
+
+        // Cross a 1s bucket boundary (t1 = t0 + 5), hand off writer, then drop res1:
+        // rebuilt charge must stay at original bucket_start and disappear completely on drop.
+        clock.advance_secs(5);
+        let t1 = unix_secs(clock.now());
+        rebuild_local_usage_after_handoff(&engine, &state, t1);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            300
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 3_600, t1),
+            300
+        );
+        drop(res1);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            0,
+            "dropping active reservation after 1s-bucket-crossing handoff must remove rebuilt 60s hold"
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 3_600, t1),
+            0,
+            "dropping active reservation after handoff must remove rebuilt 3600s hold"
+        );
+
+        // 2. Reserve at t1, advance 65s to t2 (expires 60s hold, crosses 60s bucket boundary inside
+        // still-live 3600s window), hand off writer, and verify expired 60s hold is skipped while
+        // live 3600s hold preserves its original bucket and drops cleanly.
+        let res2 = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-handoff",
+                "claude-3-opus",
+                Some(100),
+                200,
+                None,
+            )
+            .await
+            .expect("res2 succeeds");
+        clock.advance_secs(65);
+        let t2 = unix_secs(clock.now());
+        rebuild_local_usage_after_handoff(&engine, &state, t2);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t2),
+            0,
+            "expired 60s hold must not be resurrected into new window during handoff rebuild"
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 3_600, t2),
+            300
+        );
+        drop(res2);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t2),
+            0
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 3_600, t2),
+            0,
+            "dropping active 3600s hold after 60s-bucket-crossing handoff must leave 0"
+        );
+
+        // 3. Reserve 300 tokens at t2, advance 65s to t3 so the 60s hold expires while 3600s stays
+        // live, rebuild across handoff, then reconcile 100 actual tokens. Neither window may
+        // retain a -200 negative delta from the expired hold; both must settle at 100 tokens.
+        let res3 = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-handoff",
+                "claude-3-opus",
+                Some(100),
+                200,
+                None,
+            )
+            .await
+            .expect("res3 succeeds");
+        clock.advance_secs(65);
+        let t3 = unix_secs(clock.now());
+        rebuild_local_usage_after_handoff(&engine, &state, t3);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t3),
+            0
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::Requests, 60, t3),
+            0
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 3_600, t3),
+            300
+        );
+
+        engine.reconcile(res3, 40, 60, None);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t3),
+            100,
+            "settling after handoff skipped expired 60s hold must charge actual 100 tokens"
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::Requests, 60, t3),
+            1
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 3_600, t3),
+            100
+        );
+
+        let over_cap = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-handoff",
+                "claude-3-opus",
+                Some(450),
+                500,
+                None,
+            )
+            .await;
+        assert!(
+            matches!(
+                over_cap,
+                Err(RejectReason::TokenRateLimit {
+                    kind: LimitKind::TotalTokens
+                })
+            ),
+            "settled 100-token charge must leave 900 capacity, not grant phantom credit"
+        );
+        let at_cap = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-handoff",
+                "claude-3-opus",
+                Some(400),
+                500,
+                None,
+            )
+            .await
+            .expect("exact remaining 900-token capacity succeeds");
+        drop(at_cap);
+
+        // 4. Advance 65s so 60s window clears again, reserve 300 tokens (`res4`) and hand off
+        // response without usage (`handoff_after_response`), advance 65s so 60s expires while
+        // 3600s remains live, rebuild across handoff, then estimate-only commit via
+        // `commit_reserved_by_id`. Expired 60s window must charge the admitted 300 tokens once
+        // at t5 while live 3600s stays charged once (100 from phase 3 + 300 live = 400).
+        clock.advance_secs(65);
+        let res4 = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-handoff",
+                "claude-3-opus",
+                Some(100),
+                200,
+                None,
+            )
+            .await
+            .expect("res4 succeeds");
+        let res4_id = res4.id().to_owned();
+        res4.handoff_after_response();
+        clock.advance_secs(65);
+        let t5 = unix_secs(clock.now());
+        rebuild_local_usage_after_handoff(&engine, &state, t5);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t5),
+            0
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::Requests, 60, t5),
+            0
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 3_600, t5),
+            400
+        );
+
+        assert!(engine.commit_reserved_by_id(&res4_id));
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t5),
+            300,
+            "estimate-only commit after expired 60s hold skipped at handoff must charge 300 tokens locally"
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::Requests, 60, t5),
+            1
+        );
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 3_600, t5),
+            400,
+            "live 3600s hold must remain charged once without double-counting"
+        );
+
+        let over_commit_cap = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-handoff",
+                "claude-3-opus",
+                Some(350),
+                400,
+                None,
+            )
+            .await;
+        assert!(
+            matches!(
+                over_commit_cap,
+                Err(RejectReason::TokenRateLimit {
+                    kind: LimitKind::TotalTokens
+                })
+            ),
+            "committed 300-token charge must leave 700 capacity"
+        );
+        let at_commit_cap = engine
+            .reserve_async(
+                &view,
+                &record,
+                "principal-handoff",
+                "claude-3-opus",
+                Some(300),
+                400,
+                None,
+            )
+            .await
+            .expect("exact remaining 700-token capacity succeeds");
+        drop(at_commit_cap);
+    }
+
+    #[test]
+    fn reconcile_across_bucket_and_expiry_without_handoff_never_credits_window() {
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
+        let view = PrincipalView::for_tests(
+            "principal-reconcile",
+            true,
+            vec!["claude-3-opus".to_owned()],
+            vec![
+                Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 10,
+                },
+                Limit {
+                    kind: LimitKind::TotalTokens,
+                    window_secs: 60,
+                    cap_micros: 1_000,
+                },
+            ],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            key_hash_b64: "reconcile-nohandoff-key".to_owned(),
+            ..StoredApiKeyRecord::default()
+        };
+
+        // (a) Settling a 300-token live hold to 100 tokens after advancing 5s removes the
+        // original bucket instead of recording -200 in the newer bucket, so the settled 100
+        // tokens stay intact once the original bucket expires at t0 + 61.
+        let res_live = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-reconcile",
+                "claude-3-opus",
+                Some(100),
+                200,
+                None,
+            )
+            .expect("res_live succeeds");
+        clock.advance_secs(5);
+        let t1 = unix_secs(clock.now());
+        engine.reconcile(res_live, 40, 60, None);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t1),
+            100
+        );
+        clock.advance_secs(56);
+        let t_after_t0 = unix_secs(clock.now());
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t_after_t0),
+            100,
+            "settling across 1s bucket boundary must remain 100 after original bucket expires"
+        );
+
+        // (b) Settling an expired 300-token hold without handoff charges 100 without -200 credit.
+        clock.advance_secs(10);
+        let res_exp = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-reconcile",
+                "claude-3-opus",
+                Some(100),
+                200,
+                None,
+            )
+            .expect("res_exp succeeds");
+        clock.advance_secs(65);
+        let t_expired = unix_secs(clock.now());
+        engine.reconcile(res_exp, 40, 60, None);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::TotalTokens, 60, t_expired),
+            100
+        );
+        assert_eq!(
+            engine
+                .reserve(
+                    &view,
+                    &record,
+                    "principal-reconcile",
+                    "claude-3-opus",
+                    Some(450),
+                    500,
+                    None,
+                )
+                .err(),
+            Some(RejectReason::TokenRateLimit {
+                kind: LimitKind::TotalTokens
+            })
+        );
+        let ok = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-reconcile",
+                "claude-3-opus",
+                Some(400),
+                500,
+                None,
+            )
+            .expect("exact remaining 900 capacity succeeds");
+        drop(ok);
     }
 }

@@ -159,13 +159,14 @@ async fn connect_realtime_provider(
             "WebSocket connection budget is full",
         ));
     }
-    let mut config = state.websocket_bulkhead_config;
-    config.semaphore_permits = config.max_conns_per_upstream;
     let operation = async {
         let bulkhead_started = std::time::Instant::now();
         let guard = state
             .websocket_bulkheads
-            .bulkhead(session.candidate.upstream_name.clone(), config)
+            .semaphore_only_bulkhead(
+                websocket_breaker_key(session.candidate.upstream_id),
+                state.websocket_bulkhead_config,
+            )
             .acquire_owned()
             .await
             .map_err(|_| {
@@ -218,7 +219,7 @@ pub(super) async fn codex_backend_root_handler(
     State(state): State<ProxyState>,
     OriginalUri(uri): OriginalUri,
     method: axum::http::Method,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     provider_scope: Option<Extension<ProviderScope>>,
     codex_backend: Option<Extension<cc_lb_engine::CodexBackendSurface>>,
     websocket: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
@@ -253,9 +254,20 @@ pub(super) async fn codex_backend_root_handler(
         .await;
     }
 
-    let (observer, _) = state.lifecycle.websocket_observer(uri.path());
-    if let Some(observer) = observer.as_ref() {
-        observer.mark_authn_reached();
+    let Some(_guard) = state.drain_controller.try_track() else {
+        let mut response = Response::new(Body::from("draining"));
+        *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("60"),
+        );
+        return response;
+    };
+
+    cc_lb_engine::strip_hop_by_hop(&mut headers);
+    let observer = state.lifecycle.local_observer(uri.path());
+    if let Some(ctx) = observer.as_ref() {
+        ctx.mark_authn_reached();
     }
     let auth = match state.lifecycle.authenticate(&headers).await {
         Ok(auth) => auth,
@@ -269,9 +281,9 @@ pub(super) async fn codex_backend_root_handler(
             );
         }
     };
-    if let Some(observer) = observer.as_ref() {
-        state.lifecycle.record_local_auth_succeeded(&auth, observer);
-        observer.terminate_local(TerminalClassification::OPERATION_NOT_SUPPORTED);
+    if let Some(ctx) = observer.as_ref() {
+        state.lifecycle.record_local_auth_succeeded(&auth, ctx);
+        ctx.terminate_local(TerminalClassification::OPERATION_NOT_SUPPORTED);
     }
 
     provider_scope_error_response(
@@ -355,7 +367,7 @@ pub(super) async fn openai_live_call_websocket_handler(
 async fn openai_realtime_websocket_for_target(
     state: ProxyState,
     uri: axum::http::Uri,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     provider_scope: Option<Extension<ProviderScope>>,
     codex_backend: Option<Extension<cc_lb_engine::CodexBackendSurface>>,
     websocket: WebSocketUpgrade,
@@ -364,6 +376,7 @@ async fn openai_realtime_websocket_for_target(
     let Some(guard) = state.drain_controller.try_track() else {
         return websocket_http_error(&WebSocketError::new(503, "draining", "server is draining"));
     };
+    cc_lb_engine::strip_hop_by_hop(&mut headers);
     let auth_path = target_path.as_deref().unwrap_or("/v1/live");
     let auth = match state.lifecycle.authenticate(&headers).await {
         Ok(auth) => auth,
@@ -443,13 +456,14 @@ async fn openai_realtime_websocket_for_target(
 pub(super) async fn gemini_live_websocket_handler(
     State(state): State<ProxyState>,
     OriginalUri(uri): OriginalUri,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     provider_scope: Option<Extension<ProviderScope>>,
     websocket: WebSocketUpgrade,
 ) -> Response<Body> {
     let Some(guard) = state.drain_controller.try_track() else {
         return websocket_http_error(&WebSocketError::new(503, "draining", "server is draining"));
     };
+    cc_lb_engine::strip_hop_by_hop(&mut headers);
     let path = uri
         .path()
         .strip_prefix("/gemini")
@@ -766,10 +780,12 @@ async fn relay_realtime_websocket(
                                 if metrics.observe_frame_at(frame, now) {
                                     session.emit_request_activity();
                                 }
-                                metrics.observe_turn_boundary(kind, frame);
-                                metrics.observe_provider_metadata(kind, frame);
-                                if kind.may_report_usage(frame) {
-                                    let _ = usage_tx.send(frame.clone());
+                                if kind == RealtimeWebSocketKind::Gemini {
+                                    metrics.observe_turn_boundary(kind, frame);
+                                    metrics.observe_provider_metadata(kind, frame);
+                                    if kind.may_report_usage(frame) {
+                                        let _ = usage_tx.send(frame.clone());
+                                    }
                                 }
                             }
                             message

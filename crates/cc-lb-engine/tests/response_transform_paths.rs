@@ -1014,6 +1014,173 @@ async fn audio_json_response_preserves_the_ordinary_buffered_path() {
     }
 }
 
+async fn ordinary_buffered_response_enforces_max_buffered_response_bytes()
+-> Result<(), Box<dyn std::error::Error>> {
+    // At exact cap (128 bytes), ordinary buffered response succeeds and runs transform hook.
+    let ok_body = Bytes::from(format!(r#"{{"output":"{}"}}"#, "a".repeat(115)));
+    assert_eq!(ok_body.len(), 128);
+    let ok_transform = Arc::new(UnchangedBufferedTransform::default());
+    let ok_lifecycle = lifecycle_with_transforms_and_config(
+        Some(ok_transform.clone()),
+        None,
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers: json_headers(ok_body.len(), false),
+            body: ok_body.clone(),
+        }),
+        LifecycleConfig {
+            max_buffered_response_bytes: 128,
+            ..LifecycleConfig::default()
+        },
+    );
+    let ok_response = handle_authenticated(
+        &ok_lifecycle,
+        messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":false}"#,
+        )),
+    )
+    .await?;
+    let (ok_status, _ok_headers, ok_received) = collect_body(ok_response).await;
+    assert_eq!(ok_status, StatusCode::OK);
+    assert_eq!(ok_received, ok_body);
+    assert_eq!(ok_transform.seen_bodies(), vec![ok_body]);
+
+    // Above cap (129 bytes), fails closed with 502, skips transform hook, and records StreamError.
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "buffered-cap.sqlite").await?);
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let mut updates = test_bus.bus.subscribe();
+    let over_body = Bytes::from(format!(r#"{{"output":"{}"}}"#, "b".repeat(116)));
+    assert_eq!(over_body.len(), 129);
+    let over_transform = Arc::new(UnchangedBufferedTransform::default());
+    let over_lifecycle = lifecycle_with_transforms_and_config(
+        Some(over_transform.clone()),
+        None,
+        Arc::new(ChunkedDispatch {
+            status: StatusCode::OK,
+            headers: json_headers(over_body.len(), false),
+            chunks: vec![over_body.slice(..64), over_body.slice(64..)],
+        }),
+        LifecycleConfig {
+            max_buffered_response_bytes: 128,
+            ..LifecycleConfig::default()
+        },
+    )
+    .with_event_bus(test_bus.bus_arc());
+
+    let err_response = handle_authenticated(
+        &over_lifecycle,
+        messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":false}"#,
+        )),
+    )
+    .await?;
+    let (err_status, _err_headers, err_received) = collect_body(err_response).await;
+    assert_eq!(err_status, StatusCode::BAD_GATEWAY);
+    let err_text = std::str::from_utf8(&err_received)?;
+    assert!(err_text.contains("api_error"), "{err_text}");
+    assert!(
+        err_text.contains("upstream response body could not be read"),
+        "{err_text}"
+    );
+    assert!(over_transform.seen_bodies().is_empty());
+
+    test_bus.shutdown().await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while let Ok(update) = updates.recv().await {
+            if matches!(update, cc_lb_request_log::RequestEventUpdate::Final(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("final request event published");
+    let events = common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].error_code.as_deref(),
+        Some("upstream_stream_error")
+    );
+    Ok(())
+}
+
+async fn opaque_openai_file_content_download_streams_past_buffered_cap()
+-> Result<(), Box<dyn std::error::Error>> {
+    for uri in [
+        "/v1/files/file-abc123/content",
+        "/v1/videos/vid-abc123/content",
+    ] {
+        let payload = Bytes::from(vec![b'f'; 512]);
+        let transform = Arc::new(UnchangedBufferedTransform::default());
+        let record = upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/");
+        let lifecycle = lifecycle_with_record_and_config(
+            Some(transform.clone()),
+            None,
+            Arc::new(FixedDispatch {
+                status: StatusCode::OK,
+                headers: json_headers(payload.len(), false),
+                body: payload.clone(),
+            }),
+            LifecycleConfig {
+                max_buffered_response_bytes: 128,
+                ..LifecycleConfig::default()
+            },
+            record.clone(),
+        );
+
+        let mut request = http::Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("x-api-key", common::managed_api_key())
+            .body(Bytes::new())?;
+        request
+            .extensions_mut()
+            .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Openai));
+
+        let response = handle_authenticated(&lifecycle, request).await?;
+        let (status, _headers, received) = collect_body(response).await;
+        assert_eq!(status, StatusCode::OK, "uri={uri}");
+        assert_eq!(received, payload, "uri={uri}");
+        assert!(
+            transform.seen_bodies().is_empty(),
+            "opaque content download {uri} must stream without running JSON transform or hitting buffered cap"
+        );
+
+        // Non-2xx error responses on the same route must remain buffered and bounded.
+        let error_lifecycle = lifecycle_with_record_and_config(
+            Some(Arc::new(UnchangedBufferedTransform::default())),
+            None,
+            Arc::new(FixedDispatch {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                headers: json_headers(512, false),
+                body: Bytes::from(vec![b'e'; 512]),
+            }),
+            LifecycleConfig {
+                max_buffered_response_bytes: 128,
+                ..LifecycleConfig::default()
+            },
+            record,
+        );
+        let mut error_request = http::Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("x-api-key", common::managed_api_key())
+            .body(Bytes::new())?;
+        error_request
+            .extensions_mut()
+            .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Openai));
+
+        let err_response = handle_authenticated(&error_lifecycle, error_request).await?;
+        assert_eq!(
+            err_response.status(),
+            StatusCode::BAD_GATEWAY,
+            "error body above cap on {uri} must stay bounded"
+        );
+    }
+    Ok(())
+}
+
 async fn non_json_response_relays_first_chunk_before_upstream_eof() {
     let mut cases = Vec::new();
     for content_type in [
@@ -5873,4 +6040,10 @@ async fn response_transform_paths_suite_part_5() {
         .await
         .unwrap();
     gemini_cached_contents_create_stays_buffered_with_hook().await;
+    ordinary_buffered_response_enforces_max_buffered_response_bytes()
+        .await
+        .unwrap();
+    opaque_openai_file_content_download_streams_past_buffered_cap()
+        .await
+        .unwrap();
 }

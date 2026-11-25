@@ -17,6 +17,9 @@ use url::Url;
 
 pub const DEFAULT_MESSAGES_CAP_BYTES: u64 = 32 * 1024 * 1024;
 pub const DEFAULT_FILES_CAP_BYTES: u64 = 100 * 1024 * 1024;
+pub const DEFAULT_MAX_BUFFERED_RESPONSE_BYTES: u64 = 100 * 1024 * 1024;
+pub const DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
+pub const DEFAULT_UPSTREAM_CONNECT_SECS: u64 = 30;
 pub const DEFAULT_OAUTH_AEAD_KEY_ENV: &str = "CC_LB_MASTER_KEY";
 pub const DEFAULT_ADMIN_TOKEN_ENV: &str = "CC_LB_ADMIN_TOKEN";
 pub const ADMIN_AUTH_PROVIDERS_JSON_ENV: &str = "CC_LB_ADMIN_AUTH_PROVIDERS_JSON";
@@ -168,6 +171,9 @@ pub struct TlsConfig {
     pub key_path: Option<PathBuf>,
     #[serde(default = "default_true")]
     pub reload_on_sighup: bool,
+    #[serde(default = "default_tls_handshake_timeout_secs")]
+    #[schemars(range(min = 1))]
+    pub handshake_timeout_secs: u64,
 }
 
 impl Default for TlsConfig {
@@ -176,6 +182,7 @@ impl Default for TlsConfig {
             cert_path: None,
             key_path: None,
             reload_on_sighup: true,
+            handshake_timeout_secs: DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS,
         }
     }
 }
@@ -187,6 +194,9 @@ pub struct BodyConfig {
     pub messages_cap_bytes: u64,
     #[serde(default = "default_files_cap_bytes")]
     pub files_cap_bytes: u64,
+    #[serde(default = "default_max_buffered_response_bytes")]
+    #[schemars(range(min = 1))]
+    pub max_buffered_response_bytes: u64,
 }
 
 impl Default for BodyConfig {
@@ -194,16 +204,19 @@ impl Default for BodyConfig {
         Self {
             messages_cap_bytes: DEFAULT_MESSAGES_CAP_BYTES,
             files_cap_bytes: DEFAULT_FILES_CAP_BYTES,
+            max_buffered_response_bytes: DEFAULT_MAX_BUFFERED_RESPONSE_BYTES,
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TimeoutsConfig {
-    #[serde(default = "default_upstream_total_secs")]
+    #[schemars(default = "default_upstream_total_secs")]
     pub upstream_total_secs: u64,
-    #[serde(default = "default_drain_secs")]
+    #[schemars(range(min = 1), default = "default_upstream_connect_secs")]
+    pub upstream_connect_secs: u64,
+    #[schemars(default = "default_drain_secs")]
     pub drain_secs: u64,
 }
 
@@ -211,8 +224,43 @@ impl Default for TimeoutsConfig {
     fn default() -> Self {
         Self {
             upstream_total_secs: 600,
+            upstream_connect_secs: DEFAULT_UPSTREAM_CONNECT_SECS,
             drain_secs: 60,
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for TimeoutsConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawTimeoutsConfig {
+            upstream_total_secs: Option<u64>,
+            upstream_connect_secs: Option<u64>,
+            drain_secs: Option<u64>,
+        }
+
+        let defaults = Self::default();
+        let raw = RawTimeoutsConfig::deserialize(deserializer)?;
+        let upstream_total_secs = raw
+            .upstream_total_secs
+            .unwrap_or(defaults.upstream_total_secs);
+        // Existing configurations with `upstream_total_secs < 30` (including legacy `0`,
+        // which runs with a 1s effective total timeout) and an omitted connect timeout
+        // stay valid on upgrade, while explicit overrides remain subject to `validate_timeouts`.
+        let effective_total_secs = upstream_total_secs.max(1);
+        let upstream_connect_secs = raw
+            .upstream_connect_secs
+            .unwrap_or_else(|| DEFAULT_UPSTREAM_CONNECT_SECS.min(effective_total_secs));
+        let drain_secs = raw.drain_secs.unwrap_or(defaults.drain_secs);
+        Ok(Self {
+            upstream_total_secs,
+            upstream_connect_secs,
+            drain_secs,
+        })
     }
 }
 
@@ -911,6 +959,14 @@ fn default_files_cap_bytes() -> u64 {
     DEFAULT_FILES_CAP_BYTES
 }
 
+fn default_max_buffered_response_bytes() -> u64 {
+    DEFAULT_MAX_BUFFERED_RESPONSE_BYTES
+}
+
+fn default_tls_handshake_timeout_secs() -> u64 {
+    DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS
+}
+
 fn default_event_bus_broadcast_capacity() -> usize {
     DEFAULT_EVENT_BUS_BROADCAST_CAPACITY
 }
@@ -925,6 +981,10 @@ fn default_pg_notify_channel() -> String {
 
 fn default_upstream_total_secs() -> u64 {
     TimeoutsConfig::default().upstream_total_secs
+}
+
+fn default_upstream_connect_secs() -> u64 {
+    DEFAULT_UPSTREAM_CONNECT_SECS
 }
 
 fn default_drain_secs() -> u64 {

@@ -664,7 +664,6 @@ async fn subscription_websocket_state(
         aead: Arc::new(AeadService::from_master_key([0; 32])),
         storage,
         dynamic_view,
-        builtin_authn,
         clock,
         breaker_registry: Arc::new(BreakerRegistry::new()),
         breaker_config: BreakerRuntimeConfig::default(),
@@ -674,6 +673,11 @@ async fn subscription_websocket_state(
             semaphore_permits: 100,
             acquire_timeout: Duration::from_secs(1),
         },
+        dns_resolver: cc_lb_engine::MetricDnsResolver::new(
+            &cc_lb_engine::dns_cache::DnsResolverConfig::default(),
+        )
+        .expect("default DNS resolver builds"),
+        upstream_connect_timeout: Duration::from_secs(30),
     }
 }
 
@@ -1158,11 +1162,12 @@ async fn websocket_dispatch_deadline_bounds_bulkhead_wait_and_connection_prepare
     };
 
     // Hold the sole bulkhead permit so the next acquire stalls for up to 30s unless bounded by deadline.
-    let mut cfg = state.websocket_bulkhead_config;
-    cfg.semaphore_permits = cfg.max_conns_per_upstream;
     let held_guard = state
         .websocket_bulkheads
-        .bulkhead("stalled".to_owned(), cfg)
+        .semaphore_only_bulkhead(
+            responses_websocket::websocket_breaker_key(Uuid::from_u128(1)),
+            state.websocket_bulkhead_config,
+        )
         .acquire_owned()
         .await
         .expect("sole bulkhead permit acquired");

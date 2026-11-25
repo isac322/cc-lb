@@ -153,17 +153,14 @@ fn openai_response_done_complete(value: &Value) -> bool {
 }
 
 fn has_provider_metadata_marker(kind: RealtimeWebSocketKind, frame: &[u8]) -> bool {
+    if !is_json_object_frame(frame) {
+        return false;
+    }
     match kind {
-        RealtimeWebSocketKind::Openai => frame
-            .windows(b"session.created".len())
-            .any(|window| window == b"session.created"),
+        RealtimeWebSocketKind::Openai => contains_bytes(frame, b"session.created"),
         RealtimeWebSocketKind::Gemini => {
-            frame
-                .windows(b"setupComplete".len())
-                .any(|window| window == b"setupComplete")
-                || frame
-                    .windows(b"sessionResumptionUpdate".len())
-                    .any(|window| window == b"sessionResumptionUpdate")
+            contains_bytes(frame, b"setupComplete")
+                || contains_bytes(frame, b"sessionResumptionUpdate")
         }
     }
 }
@@ -253,22 +250,16 @@ impl RealtimeStreamMetrics {
     /// frame. Usage accounting is intentionally marker-filtered and therefore
     /// cannot observe OpenAI `response.created` frames reliably.
     pub fn observe_turn_boundary(&mut self, kind: RealtimeWebSocketKind, frame: &[u8]) {
+        if !is_json_object_frame(frame) {
+            return;
+        }
         let has_boundary_marker = match kind {
             RealtimeWebSocketKind::Openai => {
-                frame
-                    .windows(b"response.created".len())
-                    .any(|window| window == b"response.created")
-                    || frame
-                        .windows(b"response.done".len())
-                        .any(|window| window == b"response.done")
+                contains_bytes(frame, b"response.created")
+                    || contains_bytes(frame, b"response.done")
             }
             RealtimeWebSocketKind::Gemini => {
-                frame
-                    .windows(b"modelTurn".len())
-                    .any(|window| window == b"modelTurn")
-                    || frame
-                        .windows(b"turnComplete".len())
-                        .any(|window| window == b"turnComplete")
+                contains_bytes(frame, b"modelTurn") || contains_bytes(frame, b"turnComplete")
             }
         };
         if !has_boundary_marker {
@@ -411,17 +402,29 @@ impl RealtimeWebSocketKind {
 
     /// A cheap marker check avoids parsing audio and other ordinary relay frames.
     pub fn may_report_usage(self, frame: &[u8]) -> bool {
+        if !is_json_object_frame(frame) {
+            return false;
+        }
         match self {
-            Self::Openai => frame
-                .windows(b"response.done".len())
-                .any(|window| window == b"response.done"),
-            Self::Gemini => ["usageMetadata", "turnComplete"].iter().any(|marker| {
-                frame
-                    .windows(marker.len())
-                    .any(|window| window == marker.as_bytes())
-            }),
+            Self::Openai => contains_bytes(frame, b"response.done"),
+            Self::Gemini => ["usageMetadata", "turnComplete"]
+                .iter()
+                .any(|marker| contains_bytes(frame, marker.as_bytes())),
         }
     }
+}
+
+fn is_json_object_frame(frame: &[u8]) -> bool {
+    matches!(frame.iter().find(|b| !b.is_ascii_whitespace()), Some(b'{'))
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 #[must_use]
@@ -879,7 +882,7 @@ impl RealtimeWebSocketSession {
             observer.finish();
             if let Some(dispatch) = tracing::enabled!(
                 target: "cc_lb_engine::lifecycle",
-                tracing::Level::INFO
+                tracing::Level::DEBUG
             )
             .then(|| tracing::dispatcher::get_default(|dispatch| dispatch.clone()))
             {
@@ -2276,5 +2279,47 @@ mod tests {
         let latency = gemini.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
         assert_eq!(latency.provider_session_id.as_deref(), Some("gm-s2"));
         assert_eq!(latency.provider_connection_id.as_deref(), Some("gm-c1"));
+    }
+
+    #[test]
+    fn observe_provider_metadata_captures_and_updates_without_parsing_non_metadata_frames() {
+        let mut openai = RealtimeStreamMetrics::new();
+        // Raw PCM audio (non-`{`) and audio deltas must not set metadata.
+        openai.observe_provider_metadata(RealtimeWebSocketKind::Openai, &[0x00, 0xff, 0x01]);
+        openai.observe_provider_metadata(
+            RealtimeWebSocketKind::Openai,
+            br#"{"type":"response.audio.delta","delta":"AAAA"}"#,
+        );
+        assert_eq!(openai.provider_session_id, None);
+        assert_eq!(openai.provider_connection_id, None);
+
+        openai.observe_provider_metadata(
+            RealtimeWebSocketKind::Openai,
+            br#"  {"type":"session.created","session":{"id":"sess_oai","connection_id":"conn_oai"}}"#,
+        );
+        assert_eq!(openai.provider_session_id.as_deref(), Some("sess_oai"));
+        assert_eq!(openai.provider_connection_id.as_deref(), Some("conn_oai"));
+
+        let mut gemini = RealtimeStreamMetrics::new();
+        gemini.observe_provider_metadata(
+            RealtimeWebSocketKind::Gemini,
+            br#"{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"data":"AAAA"}}]}}}"#,
+        );
+        assert_eq!(gemini.provider_session_id, None);
+
+        gemini.observe_provider_metadata(
+            RealtimeWebSocketKind::Gemini,
+            br#"  {"setupComplete":{"sessionId":"gem_s1","connectionId":"gem_c1"}}"#,
+        );
+        assert_eq!(gemini.provider_session_id.as_deref(), Some("gem_s1"));
+        assert_eq!(gemini.provider_connection_id.as_deref(), Some("gem_c1"));
+
+        // Subsequent sessionResumptionUpdate must overwrite provider_session_id while preserving connection_id.
+        gemini.observe_provider_metadata(
+            RealtimeWebSocketKind::Gemini,
+            br#"{"sessionResumptionUpdate":{"newSessionId":"gem_s2"}}"#,
+        );
+        assert_eq!(gemini.provider_session_id.as_deref(), Some("gem_s2"));
+        assert_eq!(gemini.provider_connection_id.as_deref(), Some("gem_c1"));
     }
 }

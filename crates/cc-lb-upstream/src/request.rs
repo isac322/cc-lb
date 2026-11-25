@@ -16,6 +16,7 @@ pub struct ShapedRequest {
     method: Method,
     headers: HeaderMap,
     body: Bytes,
+    upstream_id: Option<uuid::Uuid>,
     gemini_envelope_hook: Option<Arc<dyn GeminiEnvelopeHook>>,
     _seal: crate::private::Seal,
 }
@@ -61,6 +62,16 @@ impl ShapedRequest {
         self.body = body;
     }
 
+    /// Attaches the stable upstream ID selected for this dispatch attempt.
+    pub fn set_upstream_id(&mut self, upstream_id: uuid::Uuid) {
+        self.upstream_id = Some(upstream_id);
+    }
+
+    /// Returns the optional upstream ID attached to this request.
+    pub fn upstream_id(&self) -> Option<uuid::Uuid> {
+        self.upstream_id
+    }
+
     /// Attaches a prebound final Code Assist envelope hook.
     ///
     /// Signers for other providers ignore this capability.
@@ -94,6 +105,7 @@ impl ShapedRequestBuilder {
             method,
             headers,
             body,
+            upstream_id: None,
             gemini_envelope_hook: None,
             _seal: crate::private::Seal,
         }
@@ -120,6 +132,7 @@ pub struct SignedRequest {
     method: Method,
     headers: HeaderMap,
     body: Bytes,
+    upstream_id: Option<uuid::Uuid>,
     _seal: crate::private::Seal,
 }
 
@@ -131,8 +144,14 @@ impl SignedRequest {
             method: shaped.method,
             headers: shaped.headers,
             body: shaped.body,
+            upstream_id: shaped.upstream_id,
             _seal: crate::private::Seal,
         }
+    }
+
+    /// Returns the optional stable upstream ID preserved from shaping.
+    pub fn upstream_id(&self) -> Option<uuid::Uuid> {
+        self.upstream_id
     }
 
     /// Returns the destination URL.
@@ -279,5 +298,28 @@ mod tests {
         assert_eq!(method, Method::POST);
         assert_eq!(headers["authorization"], "Bearer token");
         assert_eq!(body, Bytes::from_static(b"{}"));
+    }
+
+    #[test]
+    fn shaped_and_signed_request_preserve_optional_upstream_id() {
+        let mut builder = ShapedRequestBuilder {
+            _seal: crate::private::Seal,
+        };
+        let mut shaped = builder.shaped_request(
+            "https://api.example.test/v1/messages".parse().expect("url"),
+            Method::POST,
+            HeaderMap::new(),
+            Bytes::from_static(b"{}"),
+        );
+        assert_eq!(shaped.upstream_id(), None);
+        let id = uuid::Uuid::new_v4();
+        shaped.set_upstream_id(id);
+        assert_eq!(shaped.upstream_id(), Some(id));
+
+        let mut capability = SigningCapability {
+            _seal: crate::private::Seal,
+        };
+        let signed = SignedRequest::from_shaped(shaped, &mut capability);
+        assert_eq!(signed.upstream_id(), Some(id));
     }
 }

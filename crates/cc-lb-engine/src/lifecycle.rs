@@ -207,8 +207,8 @@ use crate::response_transform::{
     unwrap_gemini_code_assist_body,
 };
 use crate::responses_websocket::{
-    PreparedWebSocketTurn, WebSocketCandidate, WebSocketError, WebSocketIngress,
-    WebSocketPluginRequest, WsUnknownReasoningPlan,
+    DeferredWebSocketLimitContext, PreparedWebSocketTurn, WebSocketCandidate, WebSocketError,
+    WebSocketIngress, WebSocketPluginRequest, WsUnknownReasoningPlan,
 };
 use crate::sse_error_frame::{
     ResponsesSseErrorContext, make_provider_error_frame, make_responses_failed_frame,
@@ -279,6 +279,32 @@ pub struct Lifecycle {
     completion_observer: Arc<CompletionObserver>,
     clock: ClockHandle,
     rng: Mutex<StdRng>,
+}
+
+fn is_openai_opaque_content_download(method: &Method, path: &str) -> bool {
+    if method != Method::GET {
+        return false;
+    }
+    let path_without_query = path.split('?').next().unwrap_or(path);
+    let trimmed = path_without_query.trim_start_matches('/');
+    let trimmed = trimmed.strip_prefix("openai/").unwrap_or(trimmed);
+    let mut segments = trimmed.split('/');
+    matches!(
+        (
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+        ),
+        (
+            Some("v1"),
+            Some("files" | "videos"),
+            Some(resource_id),
+            Some("content"),
+            None
+        ) if !resource_id.is_empty()
+    )
 }
 
 impl Lifecycle {
@@ -593,6 +619,26 @@ impl Lifecycle {
         (observer, request_id)
     }
 
+    /// Allocate a standalone observation context for local non-middleware proxy handlers.
+    pub fn local_observer(&self, path: &str) -> Option<LifecycleContext> {
+        self.websocket_observer(path).0
+    }
+
+    /// Record request start and full authentication success metadata for locally
+    /// served endpoints that do not enter [`Self::handle`].
+    pub fn record_local_auth_succeeded(
+        &self,
+        auth: &crate::authn_rail::Authenticated,
+        observer: &LifecycleContext,
+    ) {
+        observer.emit_request_started(false);
+        self.record_authentication_completed(auth, observer);
+        observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
+            event_id: observer.event_id().to_owned(),
+            result: Ok(self.websocket_auth_info(auth)),
+        });
+    }
+
     /// Queue an already-received provider frame; this never reads a client body
     /// or dispatches upstream. Connection ownership is checked by the gateway.
     pub(crate) fn observe_websocket_quota_frame(
@@ -674,6 +720,36 @@ impl Lifecycle {
         request_id: &str,
         codex_backend: bool,
     ) -> Result<PreparedWebSocketTurn, WebSocketError> {
+        self.prepare_websocket_turn_with_surface_and_session(
+            auth,
+            ingress,
+            body,
+            owner,
+            observer,
+            request_id,
+            codex_backend,
+            false,
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// Route and reserve one logical Responses WebSocket turn with gateway
+    /// session pinning context so indeterminate encrypted-reasoning turns can
+    /// defer both normalization and limit estimation until candidate selection.
+    pub(crate) async fn prepare_websocket_turn_with_surface_and_session(
+        &self,
+        auth: &crate::Authenticated,
+        ingress: WebSocketIngress<'_>,
+        body: Arc<Value>,
+        owner: WebSocketTurnOwner,
+        observer: Option<LifecycleContext>,
+        request_id: &str,
+        codex_backend: bool,
+        session_unpinned: bool,
+        other_turns_active: bool,
+    ) -> Result<PreparedWebSocketTurn, WebSocketError> {
         let span = tracing::info_span!(
             "proxy.responses_websocket.turn",
             cc_lb.request.id = request_id,
@@ -726,7 +802,7 @@ impl Lifecycle {
             observer.emit_request_started(true);
         }
         let mut setup_timings = cc_lb_lifecycle::RequestSetupTimings::default();
-        let result = async {
+        let result: Result<PreparedWebSocketTurn, WebSocketError> = async {
             let view = self.dynamic_view.load();
             let cached = view
                 .principal_view
@@ -800,7 +876,13 @@ impl Lifecycle {
                 });
             }
             let route_started = Instant::now();
-            let (ctx, mut pipeline_result, unknown_reasoning_plan, fallback_candidates) = self
+            let (
+                ctx,
+                mut pipeline_result,
+                unknown_reasoning_plan,
+                fallback_candidates,
+                has_explicit_affinity,
+            ) = self
                 .websocket_routing(
                     &view,
                     auth,
@@ -810,6 +892,8 @@ impl Lifecycle {
                     request_id.to_owned(),
                     codex_backend,
                     false,
+                    session_unpinned,
+                    other_turns_active,
                 )
                 .await
                 .inspect_err(|error| {
@@ -901,72 +985,48 @@ impl Lifecycle {
                     routing_trace: route_info.routing_trace.clone(),
                 });
             }
-            let body_view = RequestBodyView {
-                parsed: Ok(effective_body.clone()),
-                json_parse_ms: 0.0,
-            };
-            let reserve_started = Instant::now();
-            let mut active_limit = match self
-                .reserve_limit(
-                    &view.principal_view,
-                    &ctx,
-                    &principal,
-                    record,
-                    auth.success(),
-                    || {
-                        body_view.limit_request(
-                            &ctx.canonical_model_id,
-                            Some(ProviderCapability::OpenaiResponses),
-                            &routed.cache_bundle.cache_breakpoints,
-                            true,
-                        )
-                    },
+            let (reservation, deferred_limit_context) = if matches!(
+                unknown_reasoning_plan,
+                WsUnknownReasoningPlan::DeferredUnestablished { .. }
+            ) {
+                let baseline_body = strip_openai_reasoning_encrypted_items(&body, None)
+                    .map(Arc::new)
+                    .unwrap_or_else(|| Arc::clone(&effective_body));
+                let reservation = self
+                    .reserve_websocket_limit_for_record(
+                        &view.principal_view,
+                        &ctx,
+                        &principal,
+                        record,
+                        auth.success(),
+                        &baseline_body,
+                        &routed.cache_bundle.cache_breakpoints,
+                        observer.as_ref(),
+                    )
+                    .await?;
+                (
+                    reservation,
+                    Some(DeferredWebSocketLimitContext {
+                        ctx,
+                        principal,
+                        cache_breakpoints: routed.cache_bundle.cache_breakpoints.clone(),
+                    }),
                 )
-                .await
-            {
-                Ok(limit) => limit,
-                Err(LimitRejectionErr { response, info }) => {
-                    if let Some(observer) = observer.as_ref() {
-                        observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
-                            event_id: observer.event_id().to_owned(),
-                            decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
-                                reason: info.reason_label.clone(),
-                                subject: info.subject,
-                                request_summary: info.request_summary,
-                                route_summary: info.route_summary,
-                                limit_violation: info.limit_violation,
-                            },
-                        });
-                    }
-                    return Err(WebSocketError::new(
-                        response.status().as_u16(),
-                        error_codes::LIMIT_REJECTED,
-                        info.reason_label,
-                    ));
-                }
+            } else {
+                let reservation = self
+                    .reserve_websocket_limit_for_record(
+                        &view.principal_view,
+                        &ctx,
+                        &principal,
+                        record,
+                        auth.success(),
+                        &effective_body,
+                        &routed.cache_bundle.cache_breakpoints,
+                        observer.as_ref(),
+                    )
+                    .await?;
+                (reservation, None)
             };
-            let reservation_id = active_limit
-                .as_ref()
-                .and_then(|limit| limit.reservation.as_ref())
-                .map(|reservation| reservation.id().to_owned())
-                .unwrap_or_default();
-            if let Some(observer) = observer.as_ref() {
-                if let Some(engine) = self.limit_engine.as_ref()
-                    && !reservation_id.is_empty()
-                {
-                    observer.attach_limit_reservation(Arc::clone(engine), reservation_id.clone());
-                }
-                observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
-                    event_id: observer.event_id().to_owned(),
-                    decision: cc_lb_lifecycle::LimitDecisionKind::Reserved {
-                        reservation_id,
-                        amount: active_limit.as_ref().map_or(0, |limit| {
-                            limit.request.max_tokens.unwrap_or(0).max(0) as u64
-                        }),
-                        limit_reserve_ms: Some(duration_to_ms(reserve_started.elapsed())),
-                    },
-                });
-            }
             let explicit_store = body.get("store").and_then(Value::as_bool);
             let mut candidates =
                 Vec::with_capacity(pipeline_result.candidates.len() + fallback_candidates.len());
@@ -995,9 +1055,8 @@ impl Lifecycle {
                 observer: observer.clone(),
                 completion_observer: Arc::clone(&self.completion_observer),
                 prompt_cache_observation_context,
-                reservation: active_limit
-                    .as_mut()
-                    .and_then(|limit| limit.reservation.take()),
+                reservation,
+                deferred_limit_context,
                 limit_engine: self.limit_engine.clone(),
                 oauth_compat: false,
                 oauth_transport: record.kind == StorageUpstreamKind::OpenaiOauth,
@@ -1010,6 +1069,7 @@ impl Lifecycle {
                 setup_timings,
                 request_id: request_id.to_owned(),
                 unknown_reasoning_plan,
+                has_explicit_affinity,
             })
         }
         .instrument(span.clone())
@@ -1098,6 +1158,32 @@ impl Lifecycle {
             .map(|record| record.kind == StorageUpstreamKind::OpenaiOauth)
     }
 
+    pub(crate) fn websocket_candidate_for_upstream(
+        &self,
+        upstream_id: Uuid,
+        codex_backend: bool,
+    ) -> Option<WebSocketCandidate> {
+        let view = self.dynamic_view.load();
+        let record = view.upstreams_snapshot().iter().find(|record| {
+            record.id == upstream_id && record.enabled && record.deleted_at_unix_secs.is_none()
+        })?;
+        if !matches!(
+            record.kind,
+            StorageUpstreamKind::OpenaiApiKey | StorageUpstreamKind::OpenaiOauth
+        ) {
+            return None;
+        }
+        if codex_backend && record.kind != StorageUpstreamKind::OpenaiOauth {
+            return None;
+        }
+        Some(WebSocketCandidate {
+            upstream_id: record.id,
+            upstream_name: record.name.clone(),
+            socket_per_lane: record.kind == StorageUpstreamKind::OpenaiOauth,
+            is_api_key: record.kind == StorageUpstreamKind::OpenaiApiKey,
+        })
+    }
+
     /// Recheck a retained connection against the current view without reserving again.
     #[cfg(test)]
     pub(crate) async fn validate_websocket_turn(
@@ -1139,9 +1225,171 @@ impl Lifecycle {
             next_request_id(),
             codex_backend,
             reject_exhausted_subscription,
+            false,
+            false,
         )
         .await
         .map(|_| ())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn reserve_websocket_limit_for_record(
+        &self,
+        principal_view: &PrincipalView,
+        ctx: &RequestContext,
+        principal: &Principal,
+        record: &UpstreamRecord,
+        authn_success: &AuthnSuccess,
+        effective_body: &Arc<Value>,
+        cache_breakpoints: &[CacheBreakpoint],
+        observer: Option<&LifecycleContext>,
+    ) -> Result<Option<LimitReservation>, WebSocketError> {
+        let body_view = RequestBodyView {
+            parsed: Ok(Arc::clone(effective_body)),
+            json_parse_ms: 0.0,
+        };
+        let reserve_started = Instant::now();
+        let mut active_limit = match self
+            .reserve_limit(
+                principal_view,
+                ctx,
+                principal,
+                record,
+                authn_success,
+                || {
+                    body_view.limit_request(
+                        &ctx.canonical_model_id,
+                        Some(ProviderCapability::OpenaiResponses),
+                        cache_breakpoints,
+                        true,
+                    )
+                },
+            )
+            .await
+        {
+            Ok(limit) => limit,
+            Err(err) => {
+                return Err(Self::limit_rejection_to_ws_error(observer, err));
+            }
+        };
+        let reservation = active_limit
+            .as_mut()
+            .and_then(|limit| limit.reservation.take());
+        let reservation_id = reservation
+            .as_ref()
+            .map(|reservation| reservation.id().to_owned())
+            .unwrap_or_default();
+        if let Some(observer) = observer {
+            if let Some(engine) = self.limit_engine.as_ref()
+                && !reservation_id.is_empty()
+            {
+                observer.attach_limit_reservation(Arc::clone(engine), reservation_id.clone());
+            }
+            observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
+                event_id: observer.event_id().to_owned(),
+                decision: cc_lb_lifecycle::LimitDecisionKind::Reserved {
+                    reservation_id,
+                    amount: active_limit.as_ref().map_or(0, |limit| {
+                        limit.request.max_tokens.unwrap_or(0).max(0) as u64
+                    }),
+                    limit_reserve_ms: Some(duration_to_ms(reserve_started.elapsed())),
+                },
+            });
+        }
+        Ok(reservation)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn resize_websocket_deferred_limit(
+        &self,
+        auth: &crate::Authenticated,
+        headers: &HeaderMap,
+        deferred: &DeferredWebSocketLimitContext,
+        upstream_id: Uuid,
+        effective_body: &Arc<Value>,
+        reservation_id: Option<&str>,
+        observer: Option<&LifecycleContext>,
+    ) -> Result<Option<PromptCacheObservationContext>, WebSocketError> {
+        let view = self.dynamic_view.load();
+        let record = view
+            .upstreams_snapshot()
+            .iter()
+            .find(|record| record.id == upstream_id)
+            .ok_or_else(|| {
+                WebSocketError::new(
+                    502,
+                    error_codes::ROUTE_NOT_CONFIGURED,
+                    "selected upstream is unavailable",
+                )
+            })?;
+        let cache_context = prompt_cache_observation_context(
+            &view,
+            upstream_id,
+            &deferred.ctx.canonical_model_id,
+            &[],
+            &HashSet::new(),
+            None,
+            provider_cache::analyze(
+                ProviderCapability::OpenaiResponses,
+                effective_body.as_ref(),
+                &deferred.ctx.canonical_model_id,
+                headers,
+            ),
+        );
+        let (Some(limit_engine), Some(subject_provider), Some(reservation_id)) = (
+            self.limit_engine.as_ref(),
+            self.limit_subject_provider.as_ref(),
+            reservation_id,
+        ) else {
+            return Ok(cache_context);
+        };
+        let Some(subject) = subject_provider
+            .limit_subject(&deferred.ctx, &deferred.principal, auth.success())
+            .await
+        else {
+            return Ok(cache_context);
+        };
+        let body_view = RequestBodyView {
+            parsed: Ok(Arc::clone(effective_body)),
+            json_parse_ms: 0.0,
+        };
+        let limit_request = body_view.limit_request(
+            &deferred.ctx.canonical_model_id,
+            Some(ProviderCapability::OpenaiResponses),
+            &deferred.cache_breakpoints,
+            true,
+        );
+        let (max_input_estimate, _sent_service_tier, _fanout_multiplier, cost_estimate) =
+            self.compute_limit_reservation_inputs(&deferred.ctx, record, &limit_request);
+        match limit_engine.resize_reservation_estimates_by_id(
+            &view.principal_view,
+            &subject.record,
+            &subject.principal_id,
+            reservation_id,
+            &limit_request.model,
+            limit_request.max_tokens,
+            max_input_estimate,
+            cost_estimate,
+        ) {
+            Ok(true) => Ok(cache_context),
+            Ok(false) => Err(WebSocketError::new(
+                503,
+                "reservation_expired",
+                "The queued response reservation is no longer active",
+            )),
+            Err(reason) => Err(Self::limit_rejection_to_ws_error(
+                observer,
+                Self::build_limit_rejection_err(
+                    &view.principal_view,
+                    limit_engine.as_ref(),
+                    &deferred.ctx,
+                    &subject,
+                    record,
+                    &limit_request,
+                    reason,
+                ),
+            )),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1155,12 +1403,15 @@ impl Lifecycle {
         request_id: String,
         codex_backend: bool,
         reject_exhausted_subscription: bool,
+        session_unpinned: bool,
+        other_turns_active: bool,
     ) -> Result<
         (
             RequestContext,
             FilterPipelineResult,
             WsUnknownReasoningPlan,
             Vec<UpstreamCandidate>,
+            bool,
         ),
         WebSocketError,
     > {
@@ -1638,8 +1889,27 @@ impl Lifecycle {
         let plan = match recovery {
             WsUnknownReasoningRecovery::None => WsUnknownReasoningPlan::None,
             WsUnknownReasoningRecovery::Unestablished => {
-                if dispatchable_candidates > 1 {
-                    if let Some(stripped) = strip_openai_reasoning_encrypted_items(body, None)
+                if dispatchable_candidates <= 1 {
+                    WsUnknownReasoningPlan::RetryStripAll { unknown_keys: keys }
+                } else {
+                    let has_oauth = result
+                        .candidates
+                        .iter()
+                        .chain(fallback_candidates.iter())
+                        .any(|candidate| candidate.kind == cc_lb_domain::UpstreamKind::OpenaiOauth);
+                    let has_api_key = result
+                        .candidates
+                        .iter()
+                        .chain(fallback_candidates.iter())
+                        .any(|candidate| {
+                            candidate.kind.credential_kind() == CredentialKind::ApiKey
+                        });
+                    let can_pin_before_send =
+                        session_unpinned && (other_turns_active || (has_oauth && has_api_key));
+                    if can_pin_before_send {
+                        WsUnknownReasoningPlan::DeferredUnestablished { unknown_keys: keys }
+                    } else if let Some(stripped) =
+                        strip_openai_reasoning_encrypted_items(body, None)
                         && let Ok(bytes) = serde_json::to_vec(&stripped)
                     {
                         let frame = Bytes::from(bytes);
@@ -1651,8 +1921,6 @@ impl Lifecycle {
                     } else {
                         WsUnknownReasoningPlan::None
                     }
-                } else {
-                    WsUnknownReasoningPlan::RetryStripAll { unknown_keys: keys }
                 }
             }
             WsUnknownReasoningRecovery::Pending {
@@ -1663,7 +1931,14 @@ impl Lifecycle {
                 pending_keys,
             },
         };
-        Ok((ctx, result, plan, fallback_candidates))
+        let has_explicit_affinity = affinity.is_some() || has_connection_owner;
+        Ok((
+            ctx,
+            result,
+            plan,
+            fallback_candidates,
+            has_explicit_affinity,
+        ))
     }
 
     /// Shape one WebSocket frame for its selected upstream.
@@ -2024,23 +2299,6 @@ impl Lifecycle {
         };
         let kind = principal_kind_lite(cached.principal_kind());
         observer.emit_authentication_completed(principal_id.to_owned(), kind);
-    }
-
-    /// Emit `RequestStarted` (if not already emitted), the durable
-    /// `LifecycleEvent::AuthCompleted` event carrying principal/key/timing
-    /// metadata, and the metrics-only `AuthenticationCompleted` event for an
-    /// authenticated request that terminates locally outside `Lifecycle::handle`.
-    pub fn record_local_auth_succeeded(
-        &self,
-        auth: &crate::authn_rail::Authenticated,
-        observer: &LifecycleContext,
-    ) {
-        observer.emit_request_started(false);
-        observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
-            event_id: observer.event_id().to_owned(),
-            result: Ok(self.websocket_auth_info(auth)),
-        });
-        self.record_authentication_completed(auth, observer);
     }
 
     /// Handle a request that has already been authenticated. `auth` is the
@@ -3281,6 +3539,7 @@ impl Lifecycle {
                             authenticated: auth,
                             reserved: reserved.as_ref(),
                             ctx: &ctx,
+                            parsed_body: body_view.value(),
                             principal: &principal,
                             routed: &routed,
                             signer: signer.clone(),
@@ -3329,6 +3588,7 @@ impl Lifecycle {
                         auth,
                         reserved.as_ref(),
                         &ctx,
+                        body_view.value(),
                         &principal,
                         &routed,
                         signer.clone(),
@@ -3425,6 +3685,7 @@ impl Lifecycle {
                                 authenticated: auth,
                                 reserved: reserved.as_ref(),
                                 ctx: &ctx,
+                                parsed_body: body_view.value(),
                                 principal: &principal,
                                 routed: &routed,
                                 signer: new_signer.clone(),
@@ -3473,6 +3734,7 @@ impl Lifecycle {
                             auth,
                             reserved.as_ref(),
                             &ctx,
+                            body_view.value(),
                             &principal,
                             &routed,
                             new_signer.clone(),
@@ -3633,6 +3895,7 @@ impl Lifecycle {
                         auth,
                         reserved.as_ref(),
                         &ctx,
+                        body_view.value(),
                         &principal,
                         &routed,
                         signer.clone(),
@@ -3724,6 +3987,7 @@ impl Lifecycle {
                                     auth,
                                     reserved.as_ref(),
                                     &ctx,
+                                    body_view.value(),
                                     &principal,
                                     &routed,
                                     signer.clone(),
@@ -3924,6 +4188,7 @@ impl Lifecycle {
                         auth,
                         reserved.as_ref(),
                         &retry_ctx,
+                        Some(&next),
                         &principal,
                         &routed,
                         signer.clone(),
@@ -4107,6 +4372,151 @@ impl Lifecycle {
         Ok(response)
     }
 
+    fn compute_limit_reservation_inputs(
+        &self,
+        ctx: &RequestContext,
+        upstream_record: &UpstreamRecord,
+        limit_request: &LimitRequest,
+    ) -> (i64, Option<String>, i64, Option<i64>) {
+        let capability = classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope);
+        let fanout_multiplier = admission_fanout_multiplier(
+            upstream_record.kind,
+            capability,
+            limit_request.fanout_multiplier,
+        );
+        let max_input_estimate = limit_request
+            .input_tokens_estimate
+            .saturating_mul(fanout_multiplier);
+        let local_cache_input = limit_request.local_cache_input.map(|mut input| {
+            input.uncached_input_tokens = input
+                .uncached_input_tokens
+                .saturating_mul(fanout_multiplier as u64);
+            input.cache_prefix_5m_tokens = input
+                .cache_prefix_5m_tokens
+                .saturating_mul(fanout_multiplier as u64);
+            input.cache_prefix_1h_tokens = input
+                .cache_prefix_1h_tokens
+                .saturating_mul(fanout_multiplier as u64);
+            input
+        });
+        let sent_service_tier = if ctx.codex_backend {
+            limit_request.service_tier.clone()
+        } else {
+            compat_service_tier_for_upstream(
+                capability.unwrap_or(ProviderCapability::OpenaiResponses),
+                upstream_record.kind,
+                limit_request.service_tier.as_deref(),
+                ctx.openai_oauth_compat.as_ref().is_some_and(|policy| {
+                    policy.service_tier == cc_lb_domain::CoerceOrReject::Coerce
+                }),
+            )
+        };
+        let cost_estimate = if limit_request.model.is_empty() {
+            Some(0)
+        } else {
+            self.limit_cost_estimator.as_ref().and_then(|estimator| {
+                if let Some(input) = local_cache_input {
+                    estimator.estimate_max_with_local_cache_and_images(
+                        &limit_request.model,
+                        input,
+                        limit_request.max_tokens.unwrap_or(0).max(0) as u64,
+                        limit_request.use_image_rates,
+                        sent_service_tier.as_deref(),
+                    )
+                } else {
+                    estimator.estimate_max_with_cache_and_images(
+                        &limit_request.model,
+                        max_input_estimate as u64,
+                        limit_request.max_tokens.unwrap_or(0).max(0) as u64,
+                        limit_request.estimated_cache_tokens,
+                        limit_request.can_cross_cache_cliff,
+                        limit_request.use_image_rates,
+                        sent_service_tier.as_deref(),
+                    )
+                }
+            })
+        };
+        (
+            max_input_estimate,
+            sent_service_tier,
+            fanout_multiplier,
+            cost_estimate,
+        )
+    }
+
+    fn build_limit_rejection_err(
+        view: &PrincipalView,
+        limit_engine: &LimitEngine,
+        ctx: &RequestContext,
+        subject: &AuthLimitSubject,
+        upstream_record: &UpstreamRecord,
+        limit_request: &LimitRequest,
+        reason: RejectReason,
+    ) -> LimitRejectionErr {
+        let limit_violation = limit_violation_name(&reason).map(str::to_owned);
+        let retry_after_seconds = limit_retry_after_secs(reason.clone());
+        let reason_label = "limit_rejected".to_owned();
+        let capability =
+            crate::provider_capability::classify(&ctx.method, &ctx.path, ctx.provider_scope)
+                .unwrap_or(ProviderCapability::AnthropicMessages);
+        let mut response = limit_rejection_response(
+            capability,
+            reason,
+            &limit_request.model,
+            &subject.principal_id,
+            retry_after_seconds,
+        );
+        attach_limit_headers_from_record(
+            response.headers_mut(),
+            limit_engine,
+            capability.provider(),
+            &subject.key_id,
+            &subject.record,
+            view.default_limits(&subject.principal_id),
+        );
+        let info = LimitRejectionInfo {
+            subject: cc_lb_lifecycle::LimitSubject {
+                principal_id: subject.principal_id.clone(),
+                key_id: subject.key_id.clone(),
+            },
+            request_summary: cc_lb_lifecycle::LimitRequestSummary {
+                model: limit_request.model.clone(),
+                path: ctx.path.clone(),
+                method: ctx.method.as_str().to_owned(),
+            },
+            route_summary: cc_lb_lifecycle::RouteSummary {
+                upstream_name: upstream_record.name.clone(),
+            },
+            limit_violation,
+            reason_label,
+        };
+        LimitRejectionErr { response, info }
+    }
+
+    fn limit_rejection_to_ws_error(
+        observer: Option<&LifecycleContext>,
+        err: LimitRejectionErr,
+    ) -> WebSocketError {
+        let LimitRejectionErr { response, info } = err;
+        if let Some(observer) = observer {
+            observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
+                event_id: observer.event_id().to_owned(),
+                decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
+                    reason: info.reason_label.clone(),
+                    subject: info.subject,
+                    request_summary: info.request_summary,
+                    route_summary: info.route_summary,
+                    limit_violation: info.limit_violation,
+                },
+            });
+        }
+        WebSocketError::new(
+            response.status().as_u16(),
+            error_codes::LIMIT_REJECTED,
+            info.reason_label,
+        )
+    }
+
     #[allow(clippy::result_large_err)]
     #[tracing::instrument(
         name = "proxy.reserve_limit",
@@ -4142,66 +4552,8 @@ impl Lifecycle {
             return Ok(None);
         };
         let limit_request = make_limit_request();
-        let fanout_multiplier = admission_fanout_multiplier(
-            upstream_record.kind,
-            classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope),
-            limit_request.fanout_multiplier,
-        );
-        let max_input_estimate = limit_request
-            .input_tokens_estimate
-            .saturating_mul(fanout_multiplier);
-        let local_cache_input = limit_request.local_cache_input.map(|mut input| {
-            input.uncached_input_tokens = input
-                .uncached_input_tokens
-                .saturating_mul(fanout_multiplier as u64);
-            input.cache_prefix_5m_tokens = input
-                .cache_prefix_5m_tokens
-                .saturating_mul(fanout_multiplier as u64);
-            input.cache_prefix_1h_tokens = input
-                .cache_prefix_1h_tokens
-                .saturating_mul(fanout_multiplier as u64);
-            input
-        });
-        let sent_service_tier = if ctx.codex_backend {
-            limit_request.service_tier.clone()
-        } else {
-            compat_service_tier_for_upstream(
-                classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope)
-                    .unwrap_or(ProviderCapability::OpenaiResponses),
-                upstream_record.kind,
-                limit_request.service_tier.as_deref(),
-                ctx.openai_oauth_compat.as_ref().is_some_and(|policy| {
-                    policy.service_tier == cc_lb_domain::CoerceOrReject::Coerce
-                }),
-            )
-        };
-        let cost_estimate = if limit_request.model.is_empty() {
-            Some(0)
-        } else {
-            self.limit_cost_estimator.as_ref().and_then(|estimator| {
-                if let Some(input) = local_cache_input {
-                    estimator.estimate_max_with_local_cache_and_images(
-                        &limit_request.model,
-                        input,
-                        limit_request.max_tokens.unwrap_or(0).max(0) as u64,
-                        limit_request.use_image_rates,
-                        sent_service_tier.as_deref(),
-                    )
-                } else {
-                    let estimated_cache_tokens = limit_request.estimated_cache_tokens;
-                    let can_cross_cache_cliff = limit_request.can_cross_cache_cliff;
-                    estimator.estimate_max_with_cache_and_images(
-                        &limit_request.model,
-                        max_input_estimate as u64,
-                        limit_request.max_tokens.unwrap_or(0).max(0) as u64,
-                        estimated_cache_tokens,
-                        can_cross_cache_cliff,
-                        limit_request.use_image_rates,
-                        sent_service_tier.as_deref(),
-                    )
-                }
-            })
-        };
+        let (max_input_estimate, sent_service_tier, fanout_multiplier, cost_estimate) =
+            self.compute_limit_reservation_inputs(ctx, upstream_record, &limit_request);
 
         match limit_engine
             .reserve_async(
@@ -4226,54 +4578,23 @@ impl Lifecycle {
                 }))
             }
             Err(reason) => {
-                let limit_violation = limit_violation_name(&reason).map(|v| v.to_owned());
+                let err = Self::build_limit_rejection_err(
+                    view,
+                    limit_engine.as_ref(),
+                    ctx,
+                    &subject,
+                    upstream_record,
+                    &limit_request,
+                    reason,
+                );
                 let span = tracing::Span::current();
                 span.record("cc_lb.limit.decision", "rejected");
                 span.record("otel.status_code", "ERROR");
                 span.record("error.type", error_codes::LIMIT_REJECTED);
-                if let Some(violation) = limit_violation.as_deref() {
+                if let Some(violation) = err.info.limit_violation.as_deref() {
                     span.record("cc_lb.limit.violation", violation);
                 }
-                let retry_after_seconds = limit_retry_after_secs(reason.clone());
-                let reason_label = "limit_rejected".to_owned();
-                let capability = crate::provider_capability::classify(
-                    &ctx.method,
-                    &ctx.path,
-                    ctx.provider_scope,
-                )
-                .unwrap_or(ProviderCapability::AnthropicMessages);
-                let mut response = limit_rejection_response(
-                    capability,
-                    reason,
-                    &limit_request.model,
-                    &subject.principal_id,
-                    retry_after_seconds,
-                );
-                attach_limit_headers_from_record(
-                    response.headers_mut(),
-                    limit_engine.as_ref(),
-                    capability.provider(),
-                    &subject.key_id,
-                    &subject.record,
-                    view.default_limits(&subject.principal_id),
-                );
-                let info = LimitRejectionInfo {
-                    subject: cc_lb_lifecycle::LimitSubject {
-                        principal_id: subject.principal_id.clone(),
-                        key_id: subject.key_id.clone(),
-                    },
-                    request_summary: cc_lb_lifecycle::LimitRequestSummary {
-                        model: limit_request.model.clone(),
-                        path: ctx.path.clone(),
-                        method: ctx.method.as_str().to_owned(),
-                    },
-                    route_summary: cc_lb_lifecycle::RouteSummary {
-                        upstream_name: upstream_record.name.clone(),
-                    },
-                    limit_violation,
-                    reason_label,
-                };
-                Err(LimitRejectionErr { response, info })
+                Err(err)
             }
         }
     }
@@ -4387,9 +4708,9 @@ impl Lifecycle {
         }
 
         let status = response.status();
-        // Audio endpoints also stream binary/text payloads without a JSON
-        // `stream` flag. Buffered transforms apply to semantic JSON media
-        // types and Gemini OAuth envelopes, not arbitrary streamed bytes.
+        // Audio endpoints and opaque file content downloads also stream binary/text
+        // payloads without a JSON `stream` flag. Buffered transforms apply to semantic
+        // JSON media types and Gemini OAuth envelopes, not arbitrary streamed bytes.
         let response_is_json = has_json_content_type(response.headers());
         let gemini_catalog = transform_ctx.gemini_oauth
             && response_affinity_context.capability == ProviderCapability::GeminiModels;
@@ -4403,7 +4724,13 @@ impl Lifecycle {
             response_affinity_context.capability,
             ProviderCapability::OpenaiAudio | ProviderCapability::OpenaiAudioTranscriptions
         ) && !response_is_json;
-        let stream_response = stream_requested || audio_stream;
+        let opaque_file_download = status.is_success()
+            && response_affinity_context.capability == ProviderCapability::OpenaiAccountOwned
+            && is_openai_opaque_content_download(
+                &transform_ctx.request_method,
+                &transform_ctx.request_path,
+            );
+        let stream_response = stream_requested || audio_stream || opaque_file_download;
         // A streamed public Responses request still gets a non-SSE error body
         // (Codex `{detail}`) buffered so it is rewritten to the public error shape.
         let compat_force_buffered = compat_response_plan.as_ref().is_some_and(|plan| {
@@ -4412,9 +4739,10 @@ impl Lifecycle {
                     && !response_is_sse)
                 || (matches!(&plan.kind, CompatResponseKind::Chat { .. }) && !status.is_success())
         });
-        let buffered_transform_required = compat_force_buffered
-            || transform_ctx.gemini_oauth
-            || (response_is_json && transform_ctx.dialect.response_transform_hook().is_some());
+        let buffered_transform_required = !opaque_file_download
+            && (compat_force_buffered
+                || transform_ctx.gemini_oauth
+                || (response_is_json && transform_ctx.dialect.response_transform_hook().is_some()));
         let restricted_codex_models = transform_ctx.codex_backend
             && response_affinity_context.capability == ProviderCapability::OpenaiModels
             && self
@@ -4462,13 +4790,13 @@ impl Lifecycle {
         }
         strip_hop_by_hop(&mut parts.headers);
         let mut body_buf: Vec<u8> = Vec::new();
-        // Ordinary buffered responses remain uncapped. Requested streams
-        // requiring JSON/OAuth transforms use the path's cap; non-SSE,
-        // non-JSON streaming responses instead relay incrementally above.
+        // Requested streams requiring JSON/OAuth transforms use the path's cap;
+        // ordinary buffered responses are bounded by `max_buffered_response_bytes`;
+        // non-SSE, non-JSON streaming responses relay incrementally above.
         let body_cap = if stream_response {
             body_cap_for_path(&self.config, &transform_ctx.request_path)
         } else {
-            usize::MAX
+            self.config.max_buffered_response_bytes
         };
         let mut body_collect_failed = false;
         let mut body_limit_terminal = false;
@@ -4489,6 +4817,14 @@ impl Lifecycle {
                                 &mut body_limit_terminal,
                             )
                         {
+                            tracing::warn!(
+                                request_id = %event_ctx.request_id,
+                                path = %transform_ctx.request_path,
+                                body_cap,
+                                buffered_bytes = body_buf.len(),
+                                chunk_bytes = data.len(),
+                                "buffered upstream response exceeded body cap"
+                            );
                             break;
                         }
                     }
@@ -4554,6 +4890,14 @@ impl Lifecycle {
                                 &mut body_collect_failed,
                                 &mut body_limit_terminal,
                             ) {
+                                tracing::warn!(
+                                    request_id = %event_ctx.request_id,
+                                    path = %transform_ctx.request_path,
+                                    body_cap,
+                                    buffered_bytes = body_buf.len(),
+                                    chunk_bytes = data.len(),
+                                    "buffered upstream response exceeded body cap"
+                                );
                                 break;
                             }
                         }
@@ -4578,7 +4922,7 @@ impl Lifecycle {
         let body_collect_ms = duration_to_ms(body_collect_started.elapsed());
         let first_body_chunk_ms = first_body_chunk_at
             .map(|t| duration_to_ms(t.saturating_duration_since(body_collect_started)));
-        tracing::info!(
+        tracing::debug!(
             request_id = %event_ctx.request_id,
             status = status.as_u16(),
             proxy_setup_ms = event_ctx.proxy_setup_ms,
@@ -5442,6 +5786,7 @@ impl Lifecycle {
             authenticated,
             reserved,
             ctx,
+            parsed_body,
             principal,
             routed,
             signer,
@@ -5464,6 +5809,7 @@ impl Lifecycle {
                 authenticated,
                 reserved,
                 ctx,
+                parsed_body,
                 principal,
                 routed,
                 signer.clone(),
@@ -5491,6 +5837,7 @@ impl Lifecycle {
         authenticated: &crate::authn_rail::Authenticated,
         reserved: Option<&Reserved>,
         ctx: &RequestContext,
+        parsed_body: Option<&Value>,
         principal: &Principal,
         routed: &RoutedUpstream<'_>,
         signer: Arc<dyn Signer>,
@@ -5512,6 +5859,7 @@ impl Lifecycle {
                 self.dispatcher.as_ref(),
                 attempt_scope,
                 ctx,
+                parsed_body,
                 principal,
                 &routed.route,
                 routed.record.kind,
@@ -5544,12 +5892,16 @@ impl Lifecycle {
                 capability,
                 ProviderCapability::OpenaiAudio | ProviderCapability::OpenaiAudioTranscriptions
             ) && !has_json_content_type(response.headers());
+            let opaque_file_download = response.status().is_success()
+                && capability == ProviderCapability::OpenaiAccountOwned
+                && is_openai_opaque_content_download(&ctx.method, &ctx.path);
             let protocol = if response_is_sse && !compat_forces_buffered {
                 cc_lb_request_log::RequestProtocol::HttpSse
             } else if !compat_forces_buffered
                 && response.status().is_success()
-                && !has_json_content_type(response.headers())
-                && (stream_requested || audio_stream)
+                && (opaque_file_download
+                    || (!has_json_content_type(response.headers())
+                        && (stream_requested || audio_stream)))
             {
                 cc_lb_request_log::RequestProtocol::HttpStream
             } else {
@@ -5764,6 +6116,7 @@ impl Lifecycle {
         dispatcher: &dyn UpstreamDispatch,
         attempt_scope: Scoped<'_>,
         ctx: &RequestContext,
+        parsed_body: Option<&Value>,
         principal: &Principal,
         route: &RouteDecision,
         upstream_kind: StorageUpstreamKind,
@@ -5798,6 +6151,7 @@ impl Lifecycle {
                 prepare_request(
                     authenticated,
                     ctx,
+                    parsed_body,
                     capability,
                     upstream_kind,
                     ctx.openai_oauth_compat
@@ -5868,7 +6222,7 @@ impl Lifecycle {
         let realtime_hangup = upstream_kind == StorageUpstreamKind::OpenaiOauth
             && classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope)
                 == Some(ProviderCapability::OpenaiRealtimeHangup);
-        let shaped = match tracing::info_span!("proxy.shape").in_scope(|| {
+        let mut shaped = match tracing::info_span!("proxy.shape").in_scope(|| {
             if realtime_hangup {
                 return shape_request(
                     &RawPassthroughDialect {
@@ -5893,6 +6247,7 @@ impl Lifecycle {
                 return Err(AttemptFailure::Shape(source));
             }
         };
+        shaped.set_upstream_id(route.upstream_id);
         timings.shape_ms = Some(duration_to_ms(shape_start.elapsed()));
         if let Some(shape_ms) = timings.shape_ms {
             tracing::Span::current().record(
@@ -5929,19 +6284,21 @@ impl Lifecycle {
             );
         }
 
-        let signed_header_names: Vec<String> = signed
-            .headers()
-            .keys()
-            .map(|k| k.as_str().to_owned())
-            .collect();
-        tracing::info!(
-            url = %cc_lb_observability::sanitize_url_for_log(signed.url().as_str()),
-            method = %signed.method(),
-            header_count = signed.headers().len(),
-            headers = ?signed_header_names,
-            body_bytes = signed.body_len(),
-            "about to dispatch signed request"
-        );
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let signed_header_names: Vec<String> = signed
+                .headers()
+                .keys()
+                .map(|k| k.as_str().to_owned())
+                .collect();
+            tracing::debug!(
+                url = %cc_lb_observability::sanitize_url_for_log(signed.url().as_str()),
+                method = %signed.method(),
+                header_count = signed.headers().len(),
+                headers = ?signed_header_names,
+                body_bytes = signed.body_len(),
+                "about to dispatch signed request"
+            );
+        }
 
         let _ = keepalive_request_started
             .get_or_init(|| async {
@@ -6212,7 +6569,7 @@ impl Lifecycle {
         }
         let stream_latency_log_dispatch = tracing::enabled!(
             target: "cc_lb_engine::lifecycle",
-            tracing::Level::INFO
+            tracing::Level::DEBUG
         )
         .then(|| tracing::dispatcher::get_default(|dispatch| dispatch.clone()));
         let response_body_timing = BodyIoTiming::default();

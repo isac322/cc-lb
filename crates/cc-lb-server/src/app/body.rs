@@ -333,10 +333,11 @@ pub(super) async fn lifecycle_handler(
         }
     };
     let request = Request::from_parts(parts, body);
-    let request = match responses_request_body::normalize(request, cap, &auth, observer.as_ref()) {
-        Ok(request) => request,
-        Err(error) => return error.into_response(),
-    };
+    let request =
+        match responses_request_body::normalize(request, cap, &auth, observer.as_ref()).await {
+            Ok(request) => request,
+            Err(error) => return error.into_response(),
+        };
     match state.lifecycle.handle(request, &auth).await {
         Ok(response) => response,
         Err(source) => {
@@ -460,26 +461,33 @@ pub(super) async fn oauth_usage_handler(
     State(state): State<ProxyState>,
     request: Request<Body>,
 ) -> Response<Body> {
-    let authn = &state.builtin_authn;
-    let dynamic_view = state.dynamic_view.load();
+    let observer = request
+        .extensions()
+        .get::<cc_lb_engine::LifecycleContext>()
+        .cloned();
+    let provider = request
+        .extensions()
+        .get::<ProviderScope>()
+        .map(|scope| scope.0);
     // The request reached the authentication attempt: replay buffered
     // pre-auth lifecycle events so the request-log row is complete.
-    if let Some(ctx) = request.extensions().get::<cc_lb_engine::LifecycleContext>() {
+    if let Some(ctx) = observer.as_ref() {
         ctx.mark_authn_reached();
     }
-    if let Err(error) =
-        cc_lb_engine::authenticate_first(authn, request.headers(), &dynamic_view.principal_view)
-            .await
-    {
-        let status = StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
-        let mut response = json_response(
-            status,
-            serde_json::json!({ "error": "authentication_error", "message": error.to_string() }),
-        );
-        response
-            .extensions_mut()
-            .insert(TerminalClassification::local(status));
-        return response;
+    let auth = match state.lifecycle.authenticate(request.headers()).await {
+        Ok(auth) => auth,
+        Err(error) => {
+            return cc_lb_engine::reject_unauthenticated_for_route(
+                &error,
+                request.method(),
+                request.uri().path(),
+                provider,
+                observer.as_ref(),
+            );
+        }
+    };
+    if let Some(ctx) = observer.as_ref() {
+        state.lifecycle.record_local_auth_succeeded(&auth, ctx);
     }
 
     let mut response = match cc_lb_control::subscription_quotas::build_cc_lb_oauth_usage_response(
@@ -498,6 +506,7 @@ pub(super) async fn oauth_usage_handler(
             )
         }
     };
+    let _ = &auth;
     let status = response.status();
     response
         .extensions_mut()
