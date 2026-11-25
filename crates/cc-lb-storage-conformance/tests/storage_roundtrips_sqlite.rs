@@ -238,6 +238,14 @@ fn meta_backend_kind_stamp_sqlite() {
 }
 
 #[test]
+fn meta_prefix_list_and_delete_sqlite() {
+    run_sqlite_scenario(
+        "meta_prefix_list_and_delete",
+        cc_lb_storage_conformance::scenarios::revisioning_meta::meta_prefix_list_and_delete,
+    );
+}
+
+#[test]
 fn managed_keys_empty_label_roundtrip_sqlite() {
     run_sqlite_scenario(
         "managed_keys_empty_label_roundtrip",

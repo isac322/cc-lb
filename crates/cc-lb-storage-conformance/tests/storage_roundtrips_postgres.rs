@@ -259,6 +259,14 @@ fn meta_backend_kind_stamp_postgres() {
 }
 
 #[test]
+fn meta_prefix_list_and_delete_postgres() {
+    run_postgres_scenario(
+        "meta_prefix_list_and_delete",
+        cc_lb_storage_conformance::scenarios::revisioning_meta::meta_prefix_list_and_delete,
+    );
+}
+
+#[test]
 fn pool_quota_history_fable_roundtrip_postgres() {
     run_postgres_scenario(
         "pool_quota_history_fable_roundtrip",

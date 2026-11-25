@@ -9,8 +9,8 @@ use cc_lb_clock::{ClockHandle, unix_secs};
 use cc_lb_control::{
     LimitResetUsageRefresh, LimitResetUsageRefreshPort, ManualWarmupBridgeResult,
     ManualWarmupJobResult, SPLIT_BRIDGE_DEFAULT_TIMEOUT, SPLIT_BRIDGE_POLL_INTERVAL,
-    oauth_refresh_bridge_idempotency_key, take_manual_warmup_result,
-    take_oauth_usage_refresh_result,
+    load_manual_warmup_result, load_oauth_usage_refresh_result, manual_warmup_result_meta_key,
+    oauth_refresh_bridge_idempotency_key, oauth_usage_refresh_result_meta_key,
 };
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsageRefreshJob;
@@ -513,10 +513,10 @@ impl LimitResetUsageRefreshPort for SplitSchedulerLimitResetUsageRefresh {
             return LimitResetUsageRefresh::Failed;
         }
 
-        match self
+        let result = match self
             .bridge
             .poll_until_settled(&key, Some(cancel), deadline, || async {
-                take_oauth_usage_refresh_result(self.bridge.storage.as_ref(), upstream_id, nonce)
+                load_oauth_usage_refresh_result(self.bridge.storage.as_ref(), upstream_id, nonce)
                     .await
                     .map_err(|error| error.to_string())
             })
@@ -529,13 +529,25 @@ impl LimitResetUsageRefreshPort for SplitSchedulerLimitResetUsageRefresh {
                     timeout_secs = self.bridge.timeout.as_secs(),
                     "split usage refresh was not completed by a proxy scheduler worker"
                 );
-                LimitResetUsageRefresh::Failed
+                return LimitResetUsageRefresh::Failed;
             }
             Err(error) => {
                 tracing::warn!(%upstream_id, %error, "split usage refresh bridge failed");
-                LimitResetUsageRefresh::Failed
+                return LimitResetUsageRefresh::Failed;
             }
-        }
+        };
+        let meta_key = oauth_usage_refresh_result_meta_key(upstream_id, nonce);
+        best_effort_delete_after_read(&self.bridge.storage, &meta_key, deadline).await;
+        result
+    }
+}
+
+async fn best_effort_delete_after_read(storage: &Arc<dyn Storage>, key: &str, deadline: Instant) {
+    let delete_budget = deadline
+        .saturating_duration_since(Instant::now())
+        .min(Duration::from_millis(50));
+    if !delete_budget.is_zero() {
+        let _ = tokio::time::timeout(delete_budget, storage.delete_meta_value(key)).await;
     }
 }
 
@@ -569,34 +581,50 @@ impl SplitManualWarmupPort for SplitSchedulerManualWarmup {
         candidate_cycle_key: i64,
     ) -> Result<SplitManualWarmupTicket, SplitManualWarmupError> {
         let deadline = self.bridge.deadline();
+        if Instant::now() >= deadline {
+            return Err(SplitManualWarmupError::Unavailable(
+                "manual warmup enqueue deadline elapsed before submission".to_owned(),
+            ));
+        }
+        let now_unix_secs = unix_secs(self.bridge.clock.now());
         let expires_at_unix_secs =
-            unix_secs(self.bridge.clock.now()).saturating_add(self.bridge.timeout.as_secs().max(1));
+            now_unix_secs.saturating_add(self.bridge.timeout.as_secs().max(1));
         let nonce = Uuid::new_v4();
         let job = ManualWarmupJob::new(upstream_id, lane, holder, candidate_cycle_key, nonce)
             .with_expires_at(expires_at_unix_secs);
         let key = job.idempotency_key();
-        self.bridge
-            .push_expedited(
-                AdaptiveJob::ManualWarmup(job),
-                key.clone(),
-                1,
-                None,
-                deadline,
-            )
-            .await
-            .map_err(|err| {
-                SplitManualWarmupError::Unavailable(
-                    err.into_reason("manual warmup was not completed by a proxy scheduler worker"),
-                )
-            })?;
-        Ok(SplitManualWarmupTicket {
-            upstream_id,
-            lane,
-            nonce,
-            idempotency_key: key,
-            expires_at_unix_secs,
+        match tokio::time::timeout_at(
             deadline,
-        })
+            self.bridge
+                .backend
+                .push_or_expedite_adaptive_task(SchedulerPushTask {
+                    args: AdaptiveJob::ManualWarmup(job),
+                    idempotency_key: Some(key.clone()),
+                    run_at_unix_secs: Some(now_unix_secs),
+                    max_attempts: Some(1),
+                }),
+        )
+        .await
+        {
+            Ok(Ok(())) => Ok(SplitManualWarmupTicket {
+                upstream_id,
+                lane,
+                nonce,
+                idempotency_key: key,
+                expires_at_unix_secs,
+                deadline,
+            }),
+            Ok(Err(error)) if error.is_confirmed_push_rejection() => {
+                Err(SplitManualWarmupError::Unavailable(error.to_string()))
+            }
+            Ok(Err(error)) => Err(SplitManualWarmupError::OutcomeUnknown(format!(
+                "manual warmup enqueue outcome unknown: {error}"
+            ))),
+            Err(_) => Err(SplitManualWarmupError::OutcomeUnknown(
+                "manual warmup enqueue timed out before acknowledgement and may have been accepted"
+                    .to_owned(),
+            )),
+        }
     }
 
     async fn wait_manual_warmup(
@@ -609,9 +637,10 @@ impl SplitManualWarmupPort for SplitSchedulerManualWarmup {
                     .to_owned(),
             )
         };
-        let take_result_bounded = || {
+        let meta_key = manual_warmup_result_meta_key(ticket.upstream_id, ticket.lane, ticket.nonce);
+        let load_result_bounded = || {
             SplitSchedulerBridge::await_bounded(ticket.deadline, None, async {
-                take_manual_warmup_result(
+                load_manual_warmup_result(
                     self.bridge.storage.as_ref(),
                     ticket.upstream_id,
                     ticket.lane,
@@ -621,24 +650,22 @@ impl SplitManualWarmupPort for SplitSchedulerManualWarmup {
                 .map_err(|error| error.to_string())
             })
         };
-        let map_bridge_result = |result: Option<ManualWarmupBridgeResult>| match result {
-            Some(ManualWarmupBridgeResult::Settled(settled)) => Ok(Some(settled)),
-            Some(ManualWarmupBridgeResult::ExpiredBeforeStart { detail, .. }) => {
-                Err(SplitManualWarmupError::ExpiredBeforeStart(detail))
-            }
-            None => Ok(None),
-        };
 
         loop {
             if Instant::now() >= ticket.deadline {
                 return Err(outcome_unknown());
             }
-            match take_result_bounded().await {
-                Ok(found) => {
-                    if let Some(settled) = map_bridge_result(found)? {
-                        return Ok(settled);
-                    }
+            match load_result_bounded().await {
+                Ok(Some(found)) => {
+                    return finish_manual_warmup_bridge_result(
+                        &self.bridge.storage,
+                        &meta_key,
+                        ticket.deadline,
+                        found,
+                    )
+                    .await;
                 }
+                Ok(None) => {}
                 Err(BridgeStepError::TimedOut) => return Err(outcome_unknown()),
                 Err(BridgeStepError::Failed(error)) => {
                     return Err(SplitManualWarmupError::OutcomeUnknown(error));
@@ -661,8 +688,17 @@ impl SplitManualWarmupPort for SplitSchedulerManualWarmup {
             };
             if let Some(row) = statuses.first() {
                 if task_status_is_terminal(row) {
-                    return match take_result_bounded().await {
-                        Ok(found) => map_bridge_result(found)?.ok_or_else(outcome_unknown),
+                    return match load_result_bounded().await {
+                        Ok(Some(found)) => {
+                            finish_manual_warmup_bridge_result(
+                                &self.bridge.storage,
+                                &meta_key,
+                                ticket.deadline,
+                                found,
+                            )
+                            .await
+                        }
+                        Ok(None) => Err(outcome_unknown()),
                         Err(BridgeStepError::TimedOut) => Err(outcome_unknown()),
                         Err(BridgeStepError::Failed(error)) => {
                             Err(SplitManualWarmupError::OutcomeUnknown(error))
@@ -690,12 +726,17 @@ impl SplitManualWarmupPort for SplitSchedulerManualWarmup {
                                     .to_owned(),
                             ));
                         }
-                        Ok(false) => match take_result_bounded().await {
-                            Ok(found) => {
-                                if let Some(settled) = map_bridge_result(found)? {
-                                    return Ok(settled);
-                                }
+                        Ok(false) => match load_result_bounded().await {
+                            Ok(Some(found)) => {
+                                return finish_manual_warmup_bridge_result(
+                                    &self.bridge.storage,
+                                    &meta_key,
+                                    ticket.deadline,
+                                    found,
+                                )
+                                .await;
                             }
+                            Ok(None) => {}
                             Err(BridgeStepError::TimedOut) => return Err(outcome_unknown()),
                             Err(BridgeStepError::Failed(error)) => {
                                 return Err(SplitManualWarmupError::OutcomeUnknown(error));
@@ -713,6 +754,21 @@ impl SplitManualWarmupPort for SplitSchedulerManualWarmup {
                 return Err(outcome_unknown());
             }
             tokio::time::sleep((ticket.deadline - now).min(self.bridge.poll_interval)).await;
+        }
+    }
+}
+
+async fn finish_manual_warmup_bridge_result(
+    storage: &Arc<dyn Storage>,
+    meta_key: &str,
+    deadline: Instant,
+    result: ManualWarmupBridgeResult,
+) -> Result<ManualWarmupJobResult, SplitManualWarmupError> {
+    best_effort_delete_after_read(storage, meta_key, deadline).await;
+    match result {
+        ManualWarmupBridgeResult::Settled(settled) => Ok(settled),
+        ManualWarmupBridgeResult::ExpiredBeforeStart { detail, .. } => {
+            Err(SplitManualWarmupError::ExpiredBeforeStart(detail))
         }
     }
 }

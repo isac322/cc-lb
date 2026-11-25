@@ -887,3 +887,99 @@ async fn dispatch_manual_warmup_preserves_result_and_cache_when_quota_sink_is_cl
     let matching_samples = run_manual_warmup_429_quota_exhausted_case(true).await;
     assert_eq!(matching_samples, 0);
 }
+
+#[tokio::test]
+async fn apalis_housekeeping_prunes_expired_split_bridge_results_when_request_retention_disabled() {
+    use cc_lb_storage_api::MetaStore as _;
+
+    let fixture = Fixture::new().await;
+    let cfg = cc_lb_config::Config {
+        request_event_retention_days: 0,
+        ..cc_lb_config::Config::default()
+    };
+    let pusher = Arc::new(FailingPusher);
+    let dispatch = fixture.dispatch_with_config(pusher, cfg);
+
+    let now = now_unix_secs();
+    let early_upstream = Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("uuid");
+    let late_upstream = Uuid::parse_str("ffffffff-ffff-4000-8000-000000000001").expect("uuid");
+
+    let mut live_keys = Vec::new();
+    for idx in 0..270_u128 {
+        let nonce = Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0001 + idx);
+        let key = cc_lb_control::manual_warmup_result_meta_key(
+            early_upstream,
+            WarmupLane::Primary,
+            nonce,
+        );
+        let payload = serde_json::to_string(&cc_lb_control::ManualWarmupBridgeResult::Settled(
+            cc_lb_control::ManualWarmupJobResult {
+                nonce,
+                outcome: WarmupAttemptOutcome::Success(
+                    cc_lb_storage_api::WarmupSuccessReason::CycleAdvanced,
+                ),
+                cycle_key: Some(1),
+                error_detail: None,
+                expires_at_unix_secs: now.saturating_add(600),
+            },
+        ))
+        .expect("serialize live");
+        fixture
+            .storage
+            .put_meta_value(&key, &payload)
+            .await
+            .expect("seed live");
+        live_keys.push(key);
+    }
+
+    let expired_nonce = Uuid::parse_str("ffffffff-ffff-4000-8000-000000000099").expect("uuid");
+    let expired_key = cc_lb_control::manual_warmup_result_meta_key(
+        late_upstream,
+        WarmupLane::Primary,
+        expired_nonce,
+    );
+    let expired_payload = serde_json::to_string(&cc_lb_control::ManualWarmupBridgeResult::Settled(
+        cc_lb_control::ManualWarmupJobResult {
+            nonce: expired_nonce,
+            outcome: WarmupAttemptOutcome::Success(
+                cc_lb_storage_api::WarmupSuccessReason::CycleAdvanced,
+            ),
+            cycle_key: Some(2),
+            error_detail: None,
+            expires_at_unix_secs: now.saturating_sub(60),
+        },
+    ))
+    .expect("serialize expired");
+    fixture
+        .storage
+        .put_meta_value(&expired_key, &expired_payload)
+        .await
+        .expect("seed expired");
+
+    let outcome = dispatch
+        .dispatch_singleton(cc_lb_scheduler::worker::CronJob::ApalisHousekeeping(
+            Default::default(),
+        ))
+        .await
+        .expect("dispatch apalis housekeeping");
+    assert_eq!(outcome, JobOutcome::Done);
+
+    assert_eq!(
+        fixture
+            .storage
+            .get_meta_value(&expired_key)
+            .await
+            .expect("get expired"),
+        None,
+        "expired bridge result past first page must be pruned even when request_event_retention_days = 0"
+    );
+    assert!(
+        fixture
+            .storage
+            .get_meta_value(&live_keys[0])
+            .await
+            .expect("get live")
+            .is_some(),
+        "live bridge result must remain"
+    );
+}

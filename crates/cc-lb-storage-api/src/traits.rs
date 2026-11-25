@@ -467,9 +467,10 @@ pub trait MetaStore: Send + Sync {
     async fn list_meta_values_by_prefix(
         &self,
         prefix: &str,
+        after_key: Option<&str>,
         limit: usize,
     ) -> StorageResult<Vec<(String, String)>> {
-        let _ = (prefix, limit);
+        let _ = (prefix, after_key, limit);
         Err(StorageError::Fatal {
             message: "list_meta_values_by_prefix is not implemented for this storage backend"
                 .to_owned(),

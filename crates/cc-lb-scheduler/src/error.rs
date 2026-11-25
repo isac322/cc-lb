@@ -112,6 +112,28 @@ fn truncate_chars(input: &str, max_chars: usize) -> String {
 }
 
 impl SchedulerError {
+    /// Returns `true` only when a task push error guarantees the database row
+    /// was never committed (for example pool timeout before SQL submission,
+    /// invalid payload encoding, or explicit database constraint/schema error).
+    ///
+    /// Connection drops, I/O errors, TLS/protocol errors, and caller-side
+    /// timeouts remain ambiguous (`false`) because an autocommit statement
+    /// may already have committed on the server before the failure arrived.
+    pub fn is_confirmed_push_rejection(&self) -> bool {
+        match self {
+            Self::Job(_) | Self::Conflict(_) | Self::InvalidRetryDelay => true,
+            Self::JobTimeout { .. } | Self::RetriesExhausted { .. } => false,
+            Self::Database(db_err) => matches!(
+                db_err,
+                sqlx::Error::PoolTimedOut
+                    | sqlx::Error::PoolClosed
+                    | sqlx::Error::Configuration(_)
+                    | sqlx::Error::Database(_)
+                    | sqlx::Error::Encode(_)
+            ),
+        }
+    }
+
     pub(crate) fn from_task_push_sqlx_error(error: sqlx::Error) -> Self {
         if is_unique_constraint_error(&error) {
             Self::Conflict(error.to_string())
@@ -137,3 +159,43 @@ fn is_unique_constraint_error(error: &sqlx::Error) -> bool {
 }
 
 pub type Result<T> = std::result::Result<T, SchedulerError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirmed_push_rejection_distinguishes_pre_commit_and_ambiguous_errors() {
+        assert!(SchedulerError::Job("encode error".to_owned()).is_confirmed_push_rejection());
+        assert!(SchedulerError::Conflict("duplicate".to_owned()).is_confirmed_push_rejection());
+        assert!(SchedulerError::InvalidRetryDelay.is_confirmed_push_rejection());
+        assert!(SchedulerError::Database(sqlx::Error::PoolTimedOut).is_confirmed_push_rejection());
+        assert!(SchedulerError::Database(sqlx::Error::PoolClosed).is_confirmed_push_rejection());
+        assert!(
+            SchedulerError::Database(sqlx::Error::Configuration("bad url".into()))
+                .is_confirmed_push_rejection()
+        );
+
+        assert!(
+            !SchedulerError::JobTimeout {
+                job_kind: "manual_warmup",
+                timeout: Duration::from_secs(1),
+            }
+            .is_confirmed_push_rejection()
+        );
+        assert!(
+            !SchedulerError::Database(sqlx::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "connection reset after commit",
+            )))
+            .is_confirmed_push_rejection()
+        );
+        assert!(
+            !SchedulerError::Database(sqlx::Error::Protocol("eof".into()))
+                .is_confirmed_push_rejection()
+        );
+        assert!(
+            !SchedulerError::Database(sqlx::Error::WorkerCrashed).is_confirmed_push_rejection()
+        );
+    }
+}

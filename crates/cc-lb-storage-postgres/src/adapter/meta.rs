@@ -224,17 +224,33 @@ impl MetaStore for PostgresStorage {
     async fn list_meta_values_by_prefix(
         &self,
         prefix: &str,
+        after_key: Option<&str>,
         limit: usize,
     ) -> StorageResult<Vec<(String, String)>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        sqlx::query_as(
-            "SELECT key, value FROM meta WHERE starts_with(key, $1) ORDER BY key ASC LIMIT $2",
-        )
-        .bind(prefix)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)
+        match after_key {
+            Some(after) => sqlx::query_as(
+                "SELECT key, value FROM meta \
+                 WHERE starts_with(key, $1) AND key COLLATE \"C\" > $2 \
+                 ORDER BY key COLLATE \"C\" ASC LIMIT $3",
+            )
+            .bind(prefix)
+            .bind(after)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_error),
+            None => sqlx::query_as(
+                "SELECT key, value FROM meta \
+                 WHERE starts_with(key, $1) \
+                 ORDER BY key COLLATE \"C\" ASC LIMIT $2",
+            )
+            .bind(prefix)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_error),
+        }
     }
 
     /// Read-only: never migrates, so an operator CLI pointed at an older or

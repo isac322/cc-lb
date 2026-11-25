@@ -106,28 +106,40 @@ impl SchedulerDispatch {
                     .await,
             ),
             CronJob::PriceCatalogRefresh(job) => self.dispatch_price_catalog(job).await,
-            CronJob::ApalisHousekeeping(job) => match &self.backend {
-                #[cfg(feature = "storage-sqlite")]
-                SchedulerBackend::Sqlite(sqlite) => {
-                    let config =
-                        ApalisHousekeepingConfig::new(self.config.scheduler.dlq_retention_days);
-                    apalis_housekeeping_outcome(
-                        ApalisHousekeepingJobHandler::new(sqlite.pool().clone(), config)
-                            .handle(job, unix_secs(self.clock.now()), self.storage.as_ref())
-                            .await,
-                    )
+            CronJob::ApalisHousekeeping(job) => {
+                let now_unix_secs = unix_secs(self.clock.now());
+                if let Err(error) = cc_lb_control::prune_expired_split_bridge_results(
+                    self.storage.as_ref(),
+                    now_unix_secs,
+                    256,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "split bridge expired result prune failed");
                 }
-                #[cfg(feature = "storage-postgres")]
-                SchedulerBackend::Postgres(postgres) => {
-                    let config =
-                        ApalisHousekeepingConfig::new(self.config.scheduler.dlq_retention_days);
-                    apalis_housekeeping_outcome(
-                        ApalisHousekeepingJobHandler::new(postgres.pool().clone(), config)
-                            .handle(job, unix_secs(self.clock.now()), self.storage.as_ref())
-                            .await,
-                    )
+                match &self.backend {
+                    #[cfg(feature = "storage-sqlite")]
+                    SchedulerBackend::Sqlite(sqlite) => {
+                        let config =
+                            ApalisHousekeepingConfig::new(self.config.scheduler.dlq_retention_days);
+                        apalis_housekeeping_outcome(
+                            ApalisHousekeepingJobHandler::new(sqlite.pool().clone(), config)
+                                .handle(job, now_unix_secs, self.storage.as_ref())
+                                .await,
+                        )
+                    }
+                    #[cfg(feature = "storage-postgres")]
+                    SchedulerBackend::Postgres(postgres) => {
+                        let config =
+                            ApalisHousekeepingConfig::new(self.config.scheduler.dlq_retention_days);
+                        apalis_housekeeping_outcome(
+                            ApalisHousekeepingJobHandler::new(postgres.pool().clone(), config)
+                                .handle(job, now_unix_secs, self.storage.as_ref())
+                                .await,
+                        )
+                    }
                 }
-            },
+            }
             CronJob::WarmupWatchdog(job) => self.handle_warmup_watchdog(job).await,
             CronJob::OAuthRefreshWatchdog(job) => self.handle_oauth_refresh_watchdog(job).await,
             CronJob::OAuthUsagePoll(job) => self.handle_oauth_usage_poll(job).await,

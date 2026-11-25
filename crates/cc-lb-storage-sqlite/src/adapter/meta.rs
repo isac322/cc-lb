@@ -238,11 +238,24 @@ impl MetaStore for SqliteStorage {
     async fn list_meta_values_by_prefix(
         &self,
         prefix: &str,
+        after_key: Option<&str>,
         limit: usize,
     ) -> StorageResult<Vec<(String, String)>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        if let Some(upper) = meta_prefix_upper_bound(prefix) {
-            sqlx::query_as(
+        match (meta_prefix_upper_bound(prefix), after_key) {
+            (Some(upper), Some(after)) => sqlx::query_as(
+                "SELECT key, value FROM meta_v1 \
+                 WHERE key >= ?1 AND key < ?2 AND key > ?3 \
+                 ORDER BY key ASC LIMIT ?4",
+            )
+            .bind(prefix)
+            .bind(upper)
+            .bind(after)
+            .bind(limit)
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_sqlx_error),
+            (Some(upper), None) => sqlx::query_as(
                 "SELECT key, value FROM meta_v1 \
                  WHERE key >= ?1 AND key < ?2 \
                  ORDER BY key ASC LIMIT ?3",
@@ -252,9 +265,19 @@ impl MetaStore for SqliteStorage {
             .bind(limit)
             .fetch_all(self.pool())
             .await
-            .map_err(map_sqlx_error)
-        } else {
-            sqlx::query_as(
+            .map_err(map_sqlx_error),
+            (None, Some(after)) => sqlx::query_as(
+                "SELECT key, value FROM meta_v1 \
+                 WHERE key >= ?1 AND key > ?2 \
+                 ORDER BY key ASC LIMIT ?3",
+            )
+            .bind(prefix)
+            .bind(after)
+            .bind(limit)
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_sqlx_error),
+            (None, None) => sqlx::query_as(
                 "SELECT key, value FROM meta_v1 \
                  WHERE key >= ?1 \
                  ORDER BY key ASC LIMIT ?2",
@@ -263,7 +286,7 @@ impl MetaStore for SqliteStorage {
             .bind(limit)
             .fetch_all(self.pool())
             .await
-            .map_err(map_sqlx_error)
+            .map_err(map_sqlx_error),
         }
     }
 

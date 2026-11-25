@@ -4597,6 +4597,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fire_now_split_ambiguous_enqueue_returns_504_with_audit_and_confirmed_unavailable_returns_503()
+     {
+        use crate::ports::{
+            SplitManualWarmupError, SplitManualWarmupPort, SplitManualWarmupTicket,
+        };
+
+        struct FixedEnqueuePort {
+            err: SplitManualWarmupError,
+        }
+
+        #[async_trait::async_trait]
+        impl SplitManualWarmupPort for FixedEnqueuePort {
+            async fn enqueue_manual_warmup(
+                &self,
+                _upstream_id: Uuid,
+                _lane: WarmupLane,
+                _holder: String,
+                _candidate_cycle_key: i64,
+            ) -> Result<SplitManualWarmupTicket, SplitManualWarmupError> {
+                Err(self.err.clone())
+            }
+
+            async fn wait_manual_warmup(
+                &self,
+                _ticket: SplitManualWarmupTicket,
+            ) -> Result<cc_lb_control::ManualWarmupJobResult, SplitManualWarmupError> {
+                unreachable!("wait_manual_warmup must not run when enqueue fails")
+            }
+        }
+
+        let mut context = test_context().await;
+        let upstream =
+            create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), true, None)
+                .await;
+
+        // Ambiguous enqueue -> 504 warmup_outcome_unknown WITH attributed audit row.
+        context.state.lifecycle = Some(crate::AdminPorts {
+            warmup: None,
+            subscription_quota_ingestion: None,
+            replica_identity: None,
+            split_manual_warmup: Some(Arc::new(FixedEnqueuePort {
+                err: SplitManualWarmupError::OutcomeUnknown(
+                    "enqueue timed out after commit".to_owned(),
+                ),
+            })),
+        });
+        let (status, body) = fire_now_response(context.state.clone(), upstream.id).await;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(body["fired"], false);
+        assert_eq!(body["error"], "warmup_outcome_unknown");
+        context.state.post_commit_tracker.wait_idle().await;
+        let audits = cc_lb_storage_api::AuditStore::query_recent_audit(
+            context.storage.as_ref(),
+            cc_lb_storage_api::AuditQueryScope::All,
+            0,
+            u64::MAX,
+            20,
+            true,
+        )
+        .await
+        .expect("query audit rows");
+        assert!(
+            audits.iter().any(|entry| {
+                entry.admin_action.as_deref() == Some("upstream_warmup_fire_now")
+                    && entry.status == 504
+            }),
+            "ambiguous enqueue must persist a 504 fire-now audit row: {audits:?}"
+        );
+
+        // Confirmed non-acceptance -> 503 warmup_unavailable and no new audit row.
+        let before_count = audits.len();
+        context.state.lifecycle = Some(crate::AdminPorts {
+            warmup: None,
+            subscription_quota_ingestion: None,
+            replica_identity: None,
+            split_manual_warmup: Some(Arc::new(FixedEnqueuePort {
+                err: SplitManualWarmupError::Unavailable("pool closed before submit".to_owned()),
+            })),
+        });
+        let (status_503, body_503) = fire_now_response(context.state.clone(), upstream.id).await;
+        assert_eq!(status_503, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body_503["error"], "warmup_unavailable");
+        context.state.post_commit_tracker.wait_idle().await;
+        let after_audits = cc_lb_storage_api::AuditStore::query_recent_audit(
+            context.storage.as_ref(),
+            cc_lb_storage_api::AuditQueryScope::All,
+            0,
+            u64::MAX,
+            20,
+            true,
+        )
+        .await
+        .expect("query audit rows after 503");
+        assert_eq!(after_audits.len(), before_count);
+    }
+
+    #[tokio::test]
     async fn fire_now_returns_200_on_success() {
         let context = test_context_with_dispatcher(StatusCode::OK).await;
         let upstream =
