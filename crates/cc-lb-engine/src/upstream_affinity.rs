@@ -647,12 +647,24 @@ fn tool_has_account_owned_reference(tool: &Value) -> bool {
     tool_has_account_owned_reference_depth(tool, 0)
 }
 
+fn is_openai_item_reference(object: &Map<String, Value>) -> bool {
+    match object.get("type") {
+        Some(Value::String(item_type)) => item_type == "item_reference",
+        None | Some(Value::Null) => {
+            reference_id(object.get("id")).is_some()
+                && !object.contains_key("role")
+                && !object.contains_key("content")
+        }
+        _ => false,
+    }
+}
+
 fn input_item_has_account_owned_reference(item: &Value) -> bool {
     let Some(object) = item.as_object() else {
         return false;
     };
     let item_type = object.get("type").and_then(Value::as_str);
-    if item_type == Some("item_reference")
+    if is_openai_item_reference(object)
         || object_has_direct_account_owned_reference(object)
         || object
             .get("environment")

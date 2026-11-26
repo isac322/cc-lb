@@ -4887,6 +4887,22 @@ async fn strip_and_failover_rejects_account_owned_references_409() {
             "prompt_cache_options": {"ttl": "30m", "comparison_response_id": "resp_cmp_1"},
             "input": [openai_reasoning_input(owned_reasoning), {"role": "user", "content": "compare"}]
         }),
+        // shorthand ItemReference without type field
+        json!({
+            "model": "gpt-5.4",
+            "input": [
+                openai_reasoning_input(owned_reasoning),
+                {"id": "item_shorthand_1"}
+            ]
+        }),
+        // shorthand ItemReference with explicit null type
+        json!({
+            "model": "gpt-5.4",
+            "input": [
+                openai_reasoning_input(owned_reasoning),
+                {"type": null, "id": "item_shorthand_null_1"}
+            ]
+        }),
     ];
 
     for (idx, body) in blocked_payloads.iter().enumerate() {
@@ -4904,7 +4920,8 @@ async fn strip_and_failover_rejects_account_owned_references_409() {
     // Controls: `code_interpreter` (`{"type": "auto"}`), `shell` (`{"type": "container_auto"}`),
     // `image_generation` (`input_image_mask.image_url`), `function` schema `examples`, replayed
     // `mcp_list_tools.input_schema`, `additional_tools` schemas, `prompt_cache_options.ttl`,
-    // and assistant `annotations` must remain failover-eligible on HTTP and WS.
+    // complete replay items carrying `id`, and assistant `annotations` must remain
+    // failover-eligible on HTTP and WS.
     let control_bodies = [
         json!({
             "model": "gpt-5.4",
@@ -4967,6 +4984,25 @@ async fn strip_and_failover_rejects_account_owned_references_409() {
                         }
                     }]
                 },
+                {
+                    "type": "message",
+                    "id": "msg_complete_1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "Prior turn"}]
+                },
+                {
+                    "id": "msg_easy_1",
+                    "role": "user",
+                    "content": "follow up"
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "read_doc",
+                    "arguments": "{}"
+                },
                 {"role": "user", "content": "continue"}
             ]
         }),
@@ -4990,7 +5026,7 @@ async fn strip_and_failover_rejects_account_owned_references_409() {
     );
     assert_eq!(captured[0].1["input"].as_array().unwrap().len(), 1);
     assert_eq!(captured[1].1["input"].as_array().unwrap().len(), 3);
-    assert_eq!(captured[2].1["input"].as_array().unwrap().len(), 2);
+    assert_eq!(captured[2].1["input"].as_array().unwrap().len(), 5);
 
     let mut gw = ws1296_gateway(lc).await;
     for (idx, body) in blocked_payloads.iter().enumerate() {
@@ -5230,6 +5266,139 @@ async fn strip_and_failover_public_ws_code_interpreter_auto_prefers_api_key_over
         "SessionHint(oauth_b) must not override API-key requirement on owner failover"
     );
     queued_gw.close();
+
+    // `additional_tools` declaring `code_interpreter` with a fresh auto container must receive
+    // the exact same API-key credential protection on HTTP and WS: route to API key when mixed,
+    // fail closed with 409 when only OAuth candidates exist, while `function` tools in
+    // `additional_tools` stay eligible to fail over to OAuth.
+    let additional_code_interp_http = json!({
+        "model": "gpt-5.4",
+        "store": false,
+        "input": [
+            openai_reasoning_input(owned_reasoning),
+            {
+                "type": "additional_tools",
+                "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}]
+            },
+            {"role": "user", "content": "calc"}
+        ]
+    });
+    let additional_code_interp_ws = Bytes::from(
+        json!({
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "store": false,
+            "input": [
+                ws1296_reasoning_item(owned_reasoning),
+                {
+                    "type": "additional_tools",
+                    "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}]
+                },
+                {"role": "user", "content": "calc"}
+            ]
+        })
+        .to_string(),
+    );
+
+    let mixed_dispatch = Arc::new(RecordingDispatch::default());
+    let mixed_lc = lifecycle(
+        vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", false),
+            openai_oauth_upstream_record(oauth_b, "oauth-b", true),
+            openai_upstream_record(api_key_c, "openai-api-key", true),
+        ],
+        mixed_dispatch.clone(),
+        Some(store.clone()),
+    );
+    let mixed_http_resp = handle_authenticated(
+        &mixed_lc,
+        responses_request(additional_code_interp_http.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(mixed_http_resp.status(), StatusCode::OK);
+    let mixed_captured = mixed_dispatch.captured_requests();
+    assert_eq!(mixed_captured.len(), 1);
+    assert!(mixed_captured[0].0.contains("openai-api-key.local"));
+
+    let mut mixed_ws_gw = ws1296_gateway(mixed_lc).await;
+    let mixed_ws_dispatch = ws1296_admit(&mut mixed_ws_gw, additional_code_interp_ws.clone())
+        .await
+        .expect("mixed pool additional_tools code_interpreter WS admits")
+        .expect("mixed pool additional_tools code_interpreter WS dispatches");
+    assert_eq!(mixed_ws_dispatch.candidates.len(), 1);
+    assert_eq!(mixed_ws_dispatch.candidates[0].upstream_id, api_key_c);
+    mixed_ws_gw.close();
+
+    let oauth_only_add_dispatch = Arc::new(RecordingDispatch::default());
+    let oauth_only_add_lc = lifecycle(
+        vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", false),
+            openai_oauth_upstream_record(oauth_b, "oauth-b", true),
+        ],
+        oauth_only_add_dispatch.clone(),
+        Some(store),
+    );
+    let oauth_add_http_resp = handle_authenticated(
+        &oauth_only_add_lc,
+        responses_request(additional_code_interp_http),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        oauth_add_http_resp.status(),
+        StatusCode::CONFLICT,
+        "HTTP additional_tools code_interpreter with only OAuth fallback must return 409"
+    );
+
+    // Control on OAuth-only pool: `additional_tools` with a `function` tool (no hosted tool)
+    // still fails over cleanly to `oauth_b` on both HTTP and WS.
+    let oauth_fn_ctrl_resp = handle_authenticated(
+        &oauth_only_add_lc,
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "input": [
+                openai_reasoning_input(owned_reasoning),
+                {"type": "additional_tools", "tools": [{"type": "function", "name": "lookup"}]},
+                {"role": "user", "content": "calc"}
+            ]
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(oauth_fn_ctrl_resp.status(), StatusCode::OK);
+    assert_eq!(oauth_only_add_dispatch.call_count(), 1);
+
+    let mut oauth_only_add_gw = ws1296_gateway(oauth_only_add_lc).await;
+    let add_ws_err = ws1296_admit(&mut oauth_only_add_gw, additional_code_interp_ws)
+        .await
+        .expect_err(
+            "WS additional_tools code_interpreter with only OAuth fallback must return 409",
+        );
+    assert_eq!(add_ws_err.status, 409);
+    assert_eq!(add_ws_err.code, "upstream_affinity_unavailable");
+    let fn_ctrl_ws_dispatch = ws1296_admit(
+        &mut oauth_only_add_gw,
+        Bytes::from(
+            json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "store": false,
+                "input": [
+                    ws1296_reasoning_item(owned_reasoning),
+                    {"type": "additional_tools", "tools": [{"type": "function", "name": "lookup"}]},
+                    {"role": "user", "content": "calc"}
+                ]
+            })
+            .to_string(),
+        ),
+    )
+    .await
+    .expect("WS additional_tools function control admits")
+    .expect("WS additional_tools function control dispatches");
+    assert_eq!(fn_ctrl_ws_dispatch.candidates[0].upstream_id, oauth_b);
+    oauth_only_add_gw.close();
 }
 
 #[tokio::test]

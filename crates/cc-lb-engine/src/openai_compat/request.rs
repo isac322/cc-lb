@@ -282,6 +282,49 @@ pub fn normalize_responses_request(
         truncation_emulate: trunc_emulate,
     })
 }
+fn strip_hosted_tools_from_array(tools: &mut Vec<Value>, depth: usize) {
+    if depth >= 8 {
+        return;
+    }
+    let mut kept = Vec::with_capacity(tools.len());
+    for mut tool in tools.drain(..) {
+        match tool.get("type").and_then(Value::as_str) {
+            Some("file_search" | "code_interpreter") => continue,
+            Some("namespace") => {
+                if let Some(obj) = tool.as_object_mut()
+                    && let Some(nested) = obj.get_mut("tools").and_then(Value::as_array_mut)
+                {
+                    strip_hosted_tools_from_array(nested, depth + 1);
+                    if nested.is_empty() {
+                        continue;
+                    }
+                }
+            }
+            _ => {}
+        }
+        kept.push(tool);
+    }
+    *tools = kept;
+}
+
+fn collect_api_key_only_tools(tools: &[Value], out: &mut Vec<ApiKeyOnlyFeature>, depth: usize) {
+    if depth >= 8 {
+        return;
+    }
+    for t in tools {
+        match t.get("type").and_then(Value::as_str) {
+            Some("file_search") => out.push(ApiKeyOnlyFeature::FileSearchTool),
+            Some("code_interpreter") => out.push(ApiKeyOnlyFeature::CodeInterpreterTool),
+            Some("namespace") => {
+                if let Some(nested) = t.get("tools").and_then(Value::as_array) {
+                    collect_api_key_only_tools(nested, out, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn degrade_without_api_key(
     body: &Value,
     features: &[ApiKeyOnlyFeature],
@@ -324,16 +367,25 @@ pub fn degrade_without_api_key(
     }
     if hosted {
         let tools_removed = if let Some(a) = b.get_mut("tools").and_then(Value::as_array_mut) {
-            a.retain(|t| {
-                !matches!(
-                    t.get("type").and_then(Value::as_str),
-                    Some("file_search") | Some("code_interpreter")
-                )
-            });
+            strip_hosted_tools_from_array(a, 0);
             a.is_empty()
         } else {
             false
         };
+        if let Some(input) = b.get_mut("input").and_then(Value::as_array_mut) {
+            for item in input {
+                let Some(obj) = item.as_object_mut() else {
+                    continue;
+                };
+                if matches!(
+                    obj.get("type").and_then(Value::as_str),
+                    Some("additional_tools" | "tool_search_output")
+                ) && let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut)
+                {
+                    strip_hosted_tools_from_array(tools, 0);
+                }
+            }
+        }
         let forced = match b.get("tool_choice") {
             Some(Value::String(s)) if s == "required" => false,
             Some(v) => matches!(
@@ -418,11 +470,16 @@ pub fn trim_oldest_input(body: &Value) -> Option<Value> {
 pub fn api_key_only_features(body: &Value) -> Vec<ApiKeyOnlyFeature> {
     let mut r = Vec::new();
     if let Some(a) = body.get("tools").and_then(Value::as_array) {
-        for t in a {
-            match t.get("type").and_then(Value::as_str) {
-                Some("file_search") => r.push(ApiKeyOnlyFeature::FileSearchTool),
-                Some("code_interpreter") => r.push(ApiKeyOnlyFeature::CodeInterpreterTool),
-                _ => {}
+        collect_api_key_only_tools(a, &mut r, 0);
+    }
+    if let Some(input) = body.get("input").and_then(Value::as_array) {
+        for item in input {
+            if matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("additional_tools" | "tool_search_output")
+            ) && let Some(tools) = item.get("tools").and_then(Value::as_array)
+            {
+                collect_api_key_only_tools(tools, &mut r, 0);
             }
         }
     }
@@ -593,5 +650,41 @@ mod tests {
             !(a.iter().any(|x| x["type"] == "function_call")
                 ^ a.iter().any(|x| x["type"] == "function_call_output"))
         );
+    }
+
+    #[test]
+    fn api_key_only_features_detects_nested_and_input_tool_lists() {
+        let additional = json!({
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}]
+            }]
+        });
+        assert_eq!(
+            api_key_only_features(&additional),
+            vec![ApiKeyOnlyFeature::CodeInterpreterTool]
+        );
+
+        let tool_search = json!({
+            "input": [{
+                "type": "tool_search_output",
+                "tools": [{"type": "namespace", "name": "files", "tools": [{"type": "file_search", "vector_store_ids": ["vs_1"]}]}]
+            }]
+        });
+        assert_eq!(
+            api_key_only_features(&tool_search),
+            vec![ApiKeyOnlyFeature::FileSearchTool]
+        );
+
+        let function_only = json!({
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{"type": "function", "name": "lookup"}]
+            }, {
+                "type": "mcp_list_tools",
+                "tools": [{"type": "code_interpreter"}]
+            }]
+        });
+        assert!(api_key_only_features(&function_only).is_empty());
     }
 }
