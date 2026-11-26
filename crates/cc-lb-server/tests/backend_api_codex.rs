@@ -455,7 +455,7 @@ async fn backend_api_unknown_paths_authenticate_then_return_local_404() {
         .send()
         .await
         .unwrap();
-    assert_eq!(unknown.status(), 503);
+    assert_eq!(unknown.status(), 409);
     let after = fake
         .state
         .0
@@ -1591,7 +1591,7 @@ async fn backend_codex_hangup_never_routes_to_api_key_owner() {
         .send()
         .await
         .unwrap();
-    assert_eq!(codex_hangup.status(), 503);
+    assert_eq!(codex_hangup.status(), 409);
     let body = codex_hangup.text().await.unwrap();
     assert!(body.contains("upstream_affinity_unavailable"), "{body}");
     assert!(
@@ -1602,4 +1602,318 @@ async fn backend_codex_hangup_never_routes_to_api_key_owner() {
             .iter()
             .all(|r| r.path != "/v1/realtime/calls/rtc_api_key_only/hangup")
     );
+}
+
+#[tokio::test]
+async fn backend_codex_disabled_reasoning_owner_strips_and_fails_over_within_oauth_pool() {
+    use axum::{
+        Json, Router,
+        body::{Body, to_bytes},
+        extract::{Request, State},
+        http::StatusCode,
+        response::IntoResponse,
+    };
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::net::TcpListener;
+
+    #[derive(Clone, Default)]
+    struct FailoverCapture {
+        seq: Arc<AtomicUsize>,
+        recorded: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+    }
+
+    async fn codex_handler(
+        State(state): State<FailoverCapture>,
+        req: Request<Body>,
+    ) -> impl IntoResponse {
+        let path = req.uri().path().to_owned();
+        let account_id = req
+            .headers()
+            .get("chatgpt-account-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("api-key")
+            .to_owned();
+        if path == "/codex/models" {
+            return Json(json!({
+                "models": [{"slug":"gpt-5.4","display_name":"GPT 5.4","description":"test","capabilities":{}}]
+            }))
+            .into_response();
+        }
+        if path != "/codex/responses" {
+            return (StatusCode::NOT_FOUND, Json(json!({"detail":"not found"}))).into_response();
+        }
+        let body_bytes = to_bytes(req.into_body(), 2_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let n = state.seq.fetch_add(1, Ordering::SeqCst);
+        state
+            .recorded
+            .lock()
+            .unwrap()
+            .push((account_id.clone(), body));
+        let cipher = format!("gAAAAAB_owned_{account_id}_{n}");
+        let resp_id = format!("resp_{account_id}_{n}");
+        let reasoning = json!({
+            "type": "reasoning",
+            "id": format!("rs_{n}"),
+            "summary": [],
+            "encrypted_content": cipher
+        });
+        let created = json!({
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {"id": resp_id, "object": "response", "status": "in_progress", "output": []}
+        });
+        let item_done = json!({
+            "type": "response.output_item.done",
+            "sequence_number": 1,
+            "output_index": 0,
+            "item": reasoning
+        });
+        let completed = json!({
+            "type": "response.completed",
+            "sequence_number": 2,
+            "response": {
+                "id": resp_id,
+                "object": "response",
+                "status": "completed",
+                "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+                "output": [reasoning]
+            }
+        });
+        let sse = format!(
+            "event: response.created\ndata: {created}\n\n\
+             event: response.output_item.done\ndata: {item_done}\n\n\
+             event: response.completed\ndata: {completed}\n\n"
+        );
+        ([("content-type", "text/event-stream")], Body::from(sse)).into_response()
+    }
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let capture = FailoverCapture::default();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router_state = capture.clone();
+    let _fake_task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .fallback(codex_handler)
+                .with_state(router_state),
+        )
+        .await
+    });
+    let base = format!("http://{addr}/codex");
+
+    let server = common::spawn_test_server_with_openai_budget("").await;
+    let client = Client::new();
+    disable_all_seeded_upstreams(&client, &server).await;
+
+    let set_enabled = |upstream_id: String, enabled: bool| {
+        let client = &client;
+        let server = &server;
+        async move {
+            let (_, _, etag) = openai_oauth_public_compat::admin(
+                client,
+                server,
+                reqwest::Method::GET,
+                &format!("/admin/v1/upstreams/{upstream_id}"),
+                None,
+                None,
+            )
+            .await;
+            let (status, body, _) = openai_oauth_public_compat::admin(
+                client,
+                server,
+                reqwest::Method::PATCH,
+                &format!("/admin/v1/upstreams/{upstream_id}"),
+                Some(json!({ "enabled": enabled })),
+                etag.as_deref(),
+            )
+            .await;
+            assert_eq!(status, 200, "{body}");
+        }
+    };
+
+    add_oauth_upstream(&client, &server, "oauth-owner-a", &base, "acct-a").await;
+    add_oauth_upstream(&client, &server, "oauth-fallback-b", &base, "acct-b").await;
+    let (api_st, api_body, _) = openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::POST,
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "api-key-c",
+            "kind": "openai_api_key",
+            "base_url": format!("http://{addr}/v1"),
+            "api_key_value": "test-api-key",
+            "skip_preflight": true
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(api_st, 201, "{api_body}");
+
+    let (_, ups, _) = openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::GET,
+        "/admin/v1/upstreams",
+        None,
+        None,
+    )
+    .await;
+    let find_id = |name: &str| {
+        ups["upstreams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|u| u["name"].as_str() == Some(name))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let id_a = find_id("oauth-owner-a");
+    let id_b = find_id("oauth-fallback-b");
+
+    // Start with B disabled so Turn 1 deterministically binds to A.
+    set_enabled(id_b.clone(), false).await;
+
+    let key = &server.managed_key.plaintext;
+    let turn1 = client
+        .post(format!(
+            "http://{}/openai/backend-api/codex/responses",
+            server.proxy_addr
+        ))
+        .bearer_auth(key)
+        .json(&json!({
+            "model": "gpt-5.4",
+            "stream": true,
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+            "input": [{"role": "user", "content": "turn 1"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(turn1.status(), 200);
+    let _ = turn1.bytes().await.unwrap();
+    {
+        let rec = capture.recorded.lock().unwrap();
+        assert_eq!(rec.len(), 1);
+        assert_eq!(rec[0].0, "acct-a");
+    }
+
+    // Enable B and disable A -> Turn 2 with A's encrypted reasoning strips & fails over to B.
+    set_enabled(id_b.clone(), true).await;
+    set_enabled(id_a.clone(), false).await;
+
+    let turn2 = client
+        .post(format!(
+            "http://{}/openai/backend-api/codex/responses",
+            server.proxy_addr
+        ))
+        .bearer_auth(key)
+        .json(&json!({
+            "model": "gpt-5.4",
+            "stream": true,
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_0",
+                    "summary": [],
+                    "encrypted_content": "gAAAAAB_owned_acct-a_0"
+                },
+                {"role": "user", "content": "turn 2"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(turn2.status(), 200);
+    let _ = turn2.bytes().await.unwrap();
+    {
+        let rec = capture.recorded.lock().unwrap();
+        assert_eq!(rec.len(), 2);
+        assert_eq!(rec[1].0, "acct-b");
+        let forwarded_input = rec[1].1["input"].as_array().unwrap();
+        assert_eq!(forwarded_input.len(), 1);
+        assert_eq!(forwarded_input[0]["content"], "turn 2");
+        assert_eq!(rec[1].1["include"], json!(["reasoning.encrypted_content"]));
+    }
+
+    // Adding a non-strippable `compaction` item stays fail-closed with 409.
+    let compaction_conflict = client
+        .post(format!(
+            "http://{}/openai/backend-api/codex/responses",
+            server.proxy_addr
+        ))
+        .bearer_auth(key)
+        .json(&json!({
+            "model": "gpt-5.4",
+            "stream": true,
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_0",
+                    "summary": [],
+                    "encrypted_content": "gAAAAAB_owned_acct-a_0"
+                },
+                {
+                    "type": "compaction",
+                    "id": "cmp_1",
+                    "encrypted_content": "gAAAAAB_cmp_unknown"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(compaction_conflict.status(), 409);
+    let compaction_body: serde_json::Value = compaction_conflict.json().await.unwrap();
+    assert_eq!(
+        compaction_body["error"]["code"],
+        "upstream_affinity_unavailable"
+    );
+
+    // Disabling B leaves only api-key-c enabled; codex_backend must fail closed with 409.
+    set_enabled(id_b, false).await;
+    let no_oauth_conflict = client
+        .post(format!(
+            "http://{}/openai/backend-api/codex/responses",
+            server.proxy_addr
+        ))
+        .bearer_auth(key)
+        .json(&json!({
+            "model": "gpt-5.4",
+            "stream": true,
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [],
+                    "encrypted_content": "gAAAAAB_owned_acct-b_1"
+                },
+                {"role": "user", "content": "turn 4"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_oauth_conflict.status(), 409);
+    let no_oauth_body: serde_json::Value = no_oauth_conflict.json().await.unwrap();
+    assert_eq!(
+        no_oauth_body["error"]["code"],
+        "upstream_affinity_unavailable"
+    );
+    assert_eq!(capture.recorded.lock().unwrap().len(), 2);
 }

@@ -2252,7 +2252,7 @@ impl ResponsesWebSocketGateway {
             && self.connections.get(&connection_id) != Some(&upstream_id)
         {
             return Err(WebSocketError::new(
-                503,
+                409,
                 "upstream_affinity_unavailable",
                 "The selected provider connection is no longer owned by this upstream",
             )
@@ -2262,7 +2262,7 @@ impl ResponsesWebSocketGateway {
             existing_connection_id.is_some_and(|conn| conn != connection) || upstream_id != upstream
         }) {
             return Err(WebSocketError::new(
-                503,
+                409,
                 "upstream_affinity_unavailable",
                 "A continuation cannot move to another provider connection",
             )
@@ -2299,7 +2299,7 @@ impl ResponsesWebSocketGateway {
                     .is_ok()
                 {
                     return Err(WebSocketError::new(
-                        503,
+                        409,
                         "upstream_affinity_unavailable",
                         "The session is pinned to another OAuth account",
                     )
@@ -2307,7 +2307,7 @@ impl ResponsesWebSocketGateway {
                 }
             } else {
                 return Err(WebSocketError::new(
-                    503,
+                    409,
                     "upstream_affinity_unavailable",
                     "The session is pinned to another OAuth account",
                 )
@@ -2442,7 +2442,7 @@ impl ResponsesWebSocketGateway {
         })?;
         let connection_id = turn.connection_id.ok_or_else(|| {
             WebSocketError::new(
-                503,
+                409,
                 "upstream_affinity_unavailable",
                 "The selected provider connection is no longer owned by this upstream",
             )

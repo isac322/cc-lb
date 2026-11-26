@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UnknownOpenaiReasoningPolicy {
-    /// Fail closed with `503 upstream_affinity_unavailable`.
+    /// Fail closed with `409 upstream_affinity_unavailable`.
     FailClosed,
     /// Preserve unknown `reasoning.encrypted_content` verbatim when a single
     /// eligible OpenAI upstream exists (or an owner is already resolved) and
@@ -19,4 +19,22 @@ pub enum UnknownOpenaiReasoningPolicy {
     /// unknown `reasoning` items before dispatch instead of guessing.
     #[default]
     Hybrid,
+}
+
+/// Handling for OpenAI Responses requests whose only referenced opaque
+/// affinity state is `reasoning.encrypted_content` owned by an upstream that
+/// is currently disabled or otherwise ineligible for routing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UnavailableOpenaiReasoningOwnerPolicy {
+    /// Reject with `409 upstream_affinity_unavailable` instead of stripping
+    /// encrypted reasoning items and rerouting to another OpenAI upstream.
+    FailClosed,
+    /// Strip `reasoning.encrypted_content` items from `input` and fail over to
+    /// another eligible OpenAI upstream when the recorded owner is ineligible
+    /// and no `previous_response_id`, `conversation`, `compaction`, or
+    /// `compaction_summary` is present; still fails closed with `409` if no
+    /// other eligible OpenAI upstream exists.
+    #[default]
+    StripAndFailover,
 }

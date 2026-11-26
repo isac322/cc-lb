@@ -25,8 +25,9 @@ pub use types::{
     ObservabilityConfig, OpenAiOAuthConfig, PluginWireBounds, PostgresPoolConfig,
     PriceCatalogConfig, PromptCacheShadowConfig, RecurringJobConfig, RuntimeConfig,
     SchedulerConfig, SchedulerPoolConfig, ShapeOriginPolicy, StorageConfig,
-    SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig, UnknownOpenaiReasoningPolicy,
-    UpstreamAffinityConfig, WarmupConfig, WasmtimeAllocationStrategy, WasmtimeConfig,
+    SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig, UnavailableOpenaiReasoningOwnerPolicy,
+    UnknownOpenaiReasoningPolicy, UpstreamAffinityConfig, WarmupConfig, WasmtimeAllocationStrategy,
+    WasmtimeConfig,
 };
 pub use validation::{ValidationError, validate_postgres_url};
 

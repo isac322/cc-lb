@@ -630,7 +630,7 @@ async fn legacy_null_binding_expires_at_retention_boundary_without_read_extensio
     )
     .await
     .expect("expired request handled");
-    assert_eq!(expired.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(expired.status(), StatusCode::CONFLICT);
     assert_eq!(dispatch.call_count(), 1);
 }
 
@@ -863,21 +863,58 @@ async fn stateless_openai_reasoning_replay_stays_with_owner_and_fails_closed_whe
         &["http://origin.local/v1/responses".to_owned()]
     );
 
-    let disabled_dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({})));
+    let disabled_dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "id": "resp-fallback-follow-up",
+        "object": "response",
+        "output": []
+    })));
     let disabled_owner = lifecycle(
         vec![
             openai_upstream_record(origin, "origin", false),
             openai_upstream_record(fallback, "fallback", true),
         ],
         disabled_dispatch.clone(),
+        Some(store.clone()),
+    );
+    let failover_response =
+        handle_authenticated(&disabled_owner, responses_request(reasoning_replay.clone()))
+            .await
+            .expect("disabled owner replay strips and fails over by default");
+    assert_eq!(failover_response.status(), StatusCode::OK);
+    assert_eq!(
+        disabled_dispatch
+            .urls
+            .lock()
+            .expect("dispatch URL lock")
+            .as_slice(),
+        &["http://fallback.local/v1/responses".to_owned()]
+    );
+    let captured_failover = disabled_dispatch.captured_requests();
+    assert_eq!(captured_failover.len(), 1);
+    let forwarded_payload = &captured_failover[0].1;
+    assert_eq!(forwarded_payload["input"].as_array().unwrap().len(), 1);
+    assert_eq!(forwarded_payload["input"][0]["role"], "user");
+
+    let fail_closed_dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({})));
+    let fail_closed_owner = lifecycle_with_config(
+        vec![
+            openai_upstream_record(origin, "origin", false),
+            openai_upstream_record(fallback, "fallback", true),
+        ],
+        fail_closed_dispatch.clone(),
         Some(store),
+        LifecycleConfig {
+            unavailable_openai_reasoning_owner:
+                cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::FailClosed,
+            ..LifecycleConfig::default()
+        },
     );
     let disabled_response =
-        handle_authenticated(&disabled_owner, responses_request(reasoning_replay))
+        handle_authenticated(&fail_closed_owner, responses_request(reasoning_replay))
             .await
-            .expect("disabled owner replay handled");
-    assert_eq!(disabled_response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(disabled_dispatch.call_count(), 0);
+            .expect("disabled owner replay handled under FailClosed");
+    assert_eq!(disabled_response.status(), StatusCode::CONFLICT);
+    assert_eq!(fail_closed_dispatch.call_count(), 0);
 }
 
 #[tokio::test]
@@ -948,7 +985,7 @@ async fn stale_owner_epoch_binding_is_treated_as_unbound() {
     .await
     .expect("stale affinity request handled");
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
     let (_, _, body) = collect_body(response).await;
     let body: Value = serde_json::from_slice(&body).expect("error JSON");
     assert!(
@@ -1019,7 +1056,7 @@ async fn opaque_requests_fail_closed_before_dispatch_when_affinity_is_not_usable
         .await
         .expect("unknown request handled")
         .status(),
-        StatusCode::SERVICE_UNAVAILABLE
+        StatusCode::CONFLICT
     );
     assert_eq!(unknown_dispatch.call_count(), 0);
 
@@ -1082,12 +1119,12 @@ async fn opaque_requests_fail_closed_before_dispatch_when_affinity_is_not_usable
     )
     .await
     .expect("target-unavailable request handled");
-    assert_eq!(target_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(target_response.status(), StatusCode::CONFLICT);
     assert_eq!(target_dispatch.call_count(), 0);
 }
 
 /// #851: an affinity target whose apply status is `ApplyStatus::Error` is no
-/// longer a routing candidate, so the pinned request fails closed with 503
+/// longer a routing candidate, so the pinned request fails closed with 409
 /// `upstream_affinity_unavailable` instead of dispatching to it. Mirrors the
 /// disabled-target arm above, which takes the same path through
 /// `build_candidates` → `candidates.retain(affinity target)`.
@@ -1129,7 +1166,7 @@ async fn affinity_pinned_to_apply_error_upstream_fails_closed() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(status, StatusCode::CONFLICT);
     let body: Value = serde_json::from_slice(&body).expect("error body json");
     // The owner is excluded before dispatch, so the request fails with an
     // explicit affinity error instead of a generic routing miss.
@@ -2344,7 +2381,7 @@ async fn gemini_sqlite_affinity_rejects_stale_dynamic_view_before_dispatch() {
         let response = handle_authenticated(&stale, request)
             .await
             .expect("stale view request handled");
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
     assert_eq!(stale_dispatch.call_count(), 0);
 
@@ -2666,7 +2703,7 @@ async fn ws1296_websocket_learned_reasoning_routes_new_websocket_and_http_to_own
 }
 
 #[tokio::test]
-async fn ws1296_legacy_reasoning_owner_disabled_fails_closed_for_websocket_and_http() {
+async fn ws1296_legacy_reasoning_owner_disabled_fails_closed_when_configured() {
     let owner = Uuid::from_u128(0x129601);
     let fallback = Uuid::from_u128(0x129602);
     let store = Arc::new(MemoryAffinityStore::default());
@@ -2676,26 +2713,32 @@ async fn ws1296_legacy_reasoning_owner_disabled_fails_closed_for_websocket_and_h
         openai_upstream_record(owner, "owner", false),
         openai_upstream_record(fallback, "fallback", true),
     ];
+    let config = LifecycleConfig {
+        unavailable_openai_reasoning_owner:
+            cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::FailClosed,
+        ..LifecycleConfig::default()
+    };
     let dispatch = Arc::new(RecordingDispatch::default());
-    let mut gateway = ws1296_gateway(lifecycle(
+    let mut gateway = ws1296_gateway(lifecycle_with_config(
         records.clone(),
         dispatch.clone(),
         Some(store.clone()),
+        config.clone(),
     ))
     .await;
     let error = ws1296_admit(&mut gateway, ws1296_create(None, Some(WS1296_REASONING)))
         .await
-        .expect_err("disabled reasoning owner must not fall back");
-    assert_eq!(error.status, 503);
+        .expect_err("disabled reasoning owner must not fall back under FailClosed");
+    assert_eq!(error.status, 409);
     assert_eq!(error.code, "upstream_affinity_unavailable");
     let mut body: Value =
         serde_json::from_slice(&ws1296_create(None, Some(WS1296_REASONING))).unwrap();
     body.as_object_mut().unwrap().remove("type");
-    let http = lifecycle(records, dispatch.clone(), Some(store));
+    let http = lifecycle_with_config(records, dispatch.clone(), Some(store), config);
     let response = handle_authenticated(&http, responses_request(body))
         .await
         .expect("disabled owner HTTP continuation is handled");
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
     assert_eq!(dispatch.call_count(), 0);
     gateway.close();
 }
@@ -3039,12 +3082,12 @@ async fn ws_codex_backend_reconnect_previous_response_returns_400_with_mixed_ope
 }
 
 #[tokio::test]
-async fn ws_previous_response_fallback_controls_preserve_503_boundaries() {
+async fn ws_previous_response_fallback_controls_preserve_409_boundaries() {
     let oauth_id = Uuid::from_u128(0x138221);
     let api_key_id = Uuid::from_u128(0x138222);
     let anthropic_id = Uuid::from_u128(0x138223);
 
-    // Control A: mixed OpenAI pool on public /v1/responses must keep 503.
+    // Control A: mixed OpenAI pool on public /v1/responses must keep 409.
     let store_a = Arc::new(MemoryAffinityStore::default());
     let mut mixed_public = ws1296_gateway(lifecycle(
         vec![
@@ -3061,11 +3104,11 @@ async fn ws_previous_response_fallback_controls_preserve_503_boundaries() {
     )
     .await
     .expect_err("mixed OpenAI public WS must not rewrite unknown previous_response_id");
-    assert_eq!(err_a.status, 503);
+    assert_eq!(err_a.status, 409);
     assert_eq!(err_a.code, "upstream_affinity_unavailable");
     mixed_public.close();
 
-    // Control B: live previous_response_id owner + unknown encrypted_content must return 503.
+    // Control B: live previous_response_id owner + unknown encrypted_content must return 409.
     let store_b = Arc::new(MemoryAffinityStore::default());
     let mut live_oauth = ws1296_gateway(lifecycle(
         vec![openai_oauth_upstream_record(oauth_id, "oauth-main", true)],
@@ -3096,12 +3139,12 @@ async fn ws_previous_response_fallback_controls_preserve_503_boundaries() {
     )
     .await
     .expect_err("live previous_response_id must not mask unknown encrypted_content");
-    assert_eq!(err_b.status, 503);
+    assert_eq!(err_b.status, 409);
     assert_eq!(err_b.code, "upstream_affinity_unavailable");
     live_oauth.close();
 
     // Control C: under FailClosed policy, unknown encrypted_content without
-    // previous_response_id or with empty previous_response_id must return 503
+    // previous_response_id or with empty previous_response_id must return 409
     // on an OAuth-only pool.
     let store_c = Arc::new(MemoryAffinityStore::default());
     let mut oauth_only = ws1296_gateway(lifecycle_with_config(
@@ -3120,8 +3163,8 @@ async fn ws_previous_response_fallback_controls_preserve_503_boundaries() {
             ws1296_create(previous, Some("unknown-foreign-reasoning")),
         )
         .await
-        .expect_err("unknown reasoning must fail closed with 503");
-        assert_eq!(err_c.status, 503);
+        .expect_err("unknown reasoning must fail closed with 409");
+        assert_eq!(err_c.status, 409);
         assert_eq!(err_c.code, "upstream_affinity_unavailable");
     }
     oauth_only.close();
@@ -3137,7 +3180,7 @@ async fn ws_previous_response_fallback_controls_preserve_503_boundaries() {
     let err_d = ws1296_admit(&mut no_openai, ws1296_create(Some("resp_closed_ws"), None))
         .await
         .expect_err("empty OpenAI pool must not return previous_response_not_found");
-    assert_eq!(err_d.status, 503);
+    assert_eq!(err_d.status, 409);
     assert_eq!(err_d.code, "upstream_affinity_unavailable");
     no_openai.close();
 }
@@ -3804,10 +3847,13 @@ async fn hybrid_negative_controls_keep_fail_closed_boundaries() {
             "previous_response_id": "resp_unknown_hybrid",
             "input": [openai_reasoning_input("gAAAAABunknown_rs")]
         })),
-        // Disabled known owner stays fail-closed (no cross-upstream failover).
+        // Disabled known owner + compaction item stays fail-closed (only pure reasoning strips & fails over).
         responses_request(json!({
             "model": "gpt-5-codex",
-            "input": [openai_reasoning_input(owned_reasoning)]
+            "input": [
+                openai_reasoning_input(owned_reasoning),
+                {"type": "compaction", "id": "cmp_disabled", "encrypted_content": "gAAAAABunknown_cmp"},
+            ]
         })),
         // Anthropic web-search encrypted_content stays fail-closed.
         messages_request(opaque_request(&["anthropic-ws-cipher"], false)),
@@ -3825,11 +3871,11 @@ async fn hybrid_negative_controls_keep_fail_closed_boundaries() {
     for (idx, req) in cases.into_iter().enumerate() {
         let resp = handle_authenticated(&lc, req)
             .await
-            .unwrap_or_else(|e| panic!("case {idx} should produce HTTP 503 response, got {e:?}"));
+            .unwrap_or_else(|e| panic!("case {idx} should produce HTTP 409 response, got {e:?}"));
         assert_eq!(
             resp.status(),
-            StatusCode::SERVICE_UNAVAILABLE,
-            "case {idx} must fail closed with 503"
+            StatusCode::CONFLICT,
+            "case {idx} must fail closed with 409"
         );
     }
     assert!(
@@ -3837,7 +3883,7 @@ async fn hybrid_negative_controls_keep_fail_closed_boundaries() {
         "fail-closed negative controls must never dispatch upstream"
     );
 
-    // Explicit FailClosed policy rejects unknown reasoning with 503 on both HTTP and WS.
+    // Explicit FailClosed policy rejects unknown reasoning with 409 on both HTTP and WS.
     let fail_closed_lc = lifecycle_with_config(
         vec![openai_oauth_upstream_record(openai_id, "oauth-main", true)],
         shared_dispatch.clone(),
@@ -3856,13 +3902,13 @@ async fn hybrid_negative_controls_keep_fail_closed_boundaries() {
     )
     .await
     .unwrap();
-    assert_eq!(http_fc.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(http_fc.status(), StatusCode::CONFLICT);
 
     let mut gw_fc = ws1296_gateway(fail_closed_lc).await;
     let ws_fc_err = ws1296_admit(&mut gw_fc, ws1296_create(None, Some("gAAAAABfc_ws")))
         .await
-        .expect_err("FailClosed WS rejects unknown reasoning with 503");
-    assert_eq!(ws_fc_err.status, 503);
+        .expect_err("FailClosed WS rejects unknown reasoning with 409");
+    assert_eq!(ws_fc_err.status, 409);
     assert_eq!(ws_fc_err.code, "upstream_affinity_unavailable");
     gw_fc.close();
 }
@@ -4181,4 +4227,441 @@ async fn hybrid_ws_pending_affinity_binds_clean_incomplete_and_skips_error_incom
     );
     assert!(!gateway.has_active_turns());
     gateway.close();
+}
+
+#[tokio::test]
+async fn strip_and_failover_disabled_reasoning_owner_http_and_ws_failover_upfront() {
+    let owner_a = Uuid::parse_str("10000000-0000-0000-0000-000000000101").unwrap();
+    let fallback_b = Uuid::parse_str("10000000-0000-0000-0000-000000000102").unwrap();
+
+    // 1. HTTP: disabled owner A strips encrypted reasoning upfront without a wasted round-trip,
+    // preserves `include`, dispatches to fallback B, and binds B's new reasoning item.
+    let owned_http_a = "gAAAAABhttp_owned_by_a";
+    let new_http_b = "gAAAAABhttp_owned_by_b";
+    let http_store = Arc::new(MemoryAffinityStore::default());
+    http_store.insert(ws1296_openai_key(owned_http_a), owner_a);
+    let http_dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "id": "resp_http_b",
+        "object": "response",
+        "status": "completed",
+        "output": [openai_reasoning_input(new_http_b)],
+        "usage": {"input_tokens": 5, "output_tokens": 3}
+    })));
+    let http_lc = lifecycle(
+        vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", false),
+            openai_oauth_upstream_record(fallback_b, "oauth-b", true),
+        ],
+        http_dispatch.clone(),
+        Some(http_store.clone()),
+    );
+    let http_resp = handle_authenticated(
+        &http_lc,
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+            "input": [
+                openai_reasoning_input(owned_http_a),
+                {"role": "user", "content": "http-failover"}
+            ]
+        })),
+    )
+    .await
+    .expect("HTTP failover succeeds");
+    assert_eq!(http_resp.status(), StatusCode::OK);
+    let captured = http_dispatch.captured_requests();
+    assert_eq!(captured.len(), 1);
+    assert!(captured[0].0.contains("oauth-b.local"), "{}", captured[0].0);
+    assert_eq!(
+        captured[0].1["include"],
+        json!(["reasoning.encrypted_content"])
+    );
+    let forwarded_input = captured[0].1["input"].as_array().unwrap();
+    assert_eq!(forwarded_input.len(), 1);
+    assert_eq!(forwarded_input[0]["content"], "http-failover");
+    assert_eq!(
+        http_store.upstream_for(&ws1296_openai_key(owned_http_a)),
+        Some(owner_a)
+    );
+    assert_eq!(
+        http_store.upstream_for(&ws1296_openai_key(new_http_b)),
+        Some(fallback_b)
+    );
+
+    // 2. Fresh WS (`WebSocketTurnOwner::None`): disabled owner A strips upfront and binds B.
+    let owned_ws_a = "gAAAAABws_owned_by_a";
+    let new_ws_b = "gAAAAABws_owned_by_b";
+    let ws_store = Arc::new(MemoryAffinityStore::default());
+    ws_store.insert(ws1296_openai_key(owned_ws_a), owner_a);
+    let mut fresh_gw = ws1296_gateway(lifecycle(
+        vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", false),
+            openai_oauth_upstream_record(fallback_b, "oauth-b", true),
+        ],
+        Arc::new(RecordingDispatch::default()),
+        Some(ws_store.clone()),
+    ))
+    .await;
+    let d_fresh = ws1296_admit(&mut fresh_gw, ws1296_create(None, Some(owned_ws_a)))
+        .await
+        .expect("fresh WS admits")
+        .expect("fresh WS dispatches");
+    assert_eq!(d_fresh.candidates.len(), 1);
+    assert_eq!(d_fresh.candidates[0].upstream_id, fallback_b);
+    let sent_fresh: Value = serde_json::from_slice(
+        &ws_hybrid_send(&mut fresh_gw, &d_fresh, 1, fallback_b, "oauth-b").await,
+    )
+    .unwrap();
+    assert_eq!(sent_fresh["input"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        sent_fresh["include"],
+        json!(["reasoning.encrypted_content"])
+    );
+    ws1296_assert_raw_forward(
+        &fresh_gw
+            .provider_message(1, &ws1296_created("resp_ws_fresh"))
+            .await
+            .unwrap(),
+    );
+    ws1296_assert_raw_forward(
+        &fresh_gw
+            .provider_message(
+                1,
+                &ws1296_completed("resp_ws_fresh", vec![ws1296_reasoning_item(new_ws_b)]),
+            )
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        ws_store.upstream_for(&ws1296_openai_key(new_ws_b)),
+        Some(fallback_b)
+    );
+    assert_eq!(
+        ws_store.upstream_for(&ws1296_openai_key(owned_ws_a)),
+        Some(owner_a)
+    );
+    fresh_gw.close();
+
+    // 3. Open WS `SessionHint(B)` (session pinned to healthy B carrying reasoning from disabled A):
+    // must strip A's reasoning and stay on B without session-pin 409.
+    let mut pinned_b_gw = ws1296_gateway(lifecycle(
+        vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", false),
+            openai_oauth_upstream_record(fallback_b, "oauth-b", true),
+        ],
+        Arc::new(RecordingDispatch::default()),
+        Some(ws_store.clone()),
+    ))
+    .await;
+    let turn_b1 = ws1296_admit(&mut pinned_b_gw, ws1296_create(None, None))
+        .await
+        .unwrap()
+        .unwrap();
+    ws_hybrid_send(&mut pinned_b_gw, &turn_b1, 2, fallback_b, "oauth-b").await;
+    ws1296_assert_raw_forward(
+        &pinned_b_gw
+            .provider_message(2, &ws1296_created("resp_pin_b1"))
+            .await
+            .unwrap(),
+    );
+    ws1296_assert_raw_forward(
+        &pinned_b_gw
+            .provider_message(2, &ws1296_completed("resp_pin_b1", vec![]))
+            .await
+            .unwrap(),
+    );
+    let turn_b2 = ws1296_admit(&mut pinned_b_gw, ws1296_create(None, Some(owned_ws_a)))
+        .await
+        .expect("SessionHint(B) + disabled A reasoning must admit cleanly")
+        .expect("Turn 2 dispatches to B");
+    assert_eq!(turn_b2.candidates[0].upstream_id, fallback_b);
+    let sent_b2: Value = serde_json::from_slice(
+        &ws_hybrid_send(&mut pinned_b_gw, &turn_b2, 2, fallback_b, "oauth-b").await,
+    )
+    .unwrap();
+    assert_eq!(sent_b2["input"].as_array().unwrap().len(), 1);
+    pinned_b_gw.close();
+
+    // 4. Open WS `SessionHint(A)` (session pinned on A, then A disabled + B enabled via dynamic view):
+    // must fail over to B with A's reasoning stripped and update `session_upstream` to B.
+    let authn = TestAuthn::new(TestState::default());
+    let initial_view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(fallback_b, "oauth-b", false),
+        ])
+        .build();
+    let holder = Arc::new(DynamicViewHolder::new(initial_view));
+    let dynamic_store = Arc::new(MemoryAffinityStore::default());
+    let dynamic_lc = Lifecycle::new_with_dynamic_view(
+        authn.authn.clone(),
+        holder.clone(),
+        Arc::new(RecordingDispatch::default()),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(dynamic_store.clone());
+    let mut open_a_gw = ws1296_gateway(dynamic_lc).await;
+    let turn_a1 = ws1296_admit(&mut open_a_gw, ws1296_create(None, None))
+        .await
+        .unwrap()
+        .unwrap();
+    ws_hybrid_send(&mut open_a_gw, &turn_a1, 10, owner_a, "oauth-a").await;
+    ws1296_assert_raw_forward(
+        &open_a_gw
+            .provider_message(10, &ws1296_created("resp_open_a1"))
+            .await
+            .unwrap(),
+    );
+    ws1296_assert_raw_forward(
+        &open_a_gw
+            .provider_message(
+                10,
+                &ws1296_completed("resp_open_a1", vec![ws1296_reasoning_item(owned_ws_a)]),
+            )
+            .await
+            .unwrap(),
+    );
+    assert_eq!(open_a_gw.session_upstream(), Some(owner_a));
+
+    let swapped_view = DynamicViewBuilder::new(1)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", false),
+            openai_oauth_upstream_record(fallback_b, "oauth-b", true),
+        ])
+        .build();
+    holder.store(swapped_view);
+
+    let turn_a2 = ws1296_admit(&mut open_a_gw, ws1296_create(None, Some(owned_ws_a)))
+        .await
+        .expect("open SessionHint(A) with disabled A must fail over to B")
+        .expect("Turn a2 dispatches to B");
+    assert_eq!(turn_a2.candidates.len(), 1);
+    assert_eq!(turn_a2.candidates[0].upstream_id, fallback_b);
+    let sent_a2: Value = serde_json::from_slice(
+        &ws_hybrid_send(&mut open_a_gw, &turn_a2, 11, fallback_b, "oauth-b").await,
+    )
+    .unwrap();
+    assert_eq!(sent_a2["input"].as_array().unwrap().len(), 1);
+    assert_eq!(open_a_gw.session_upstream(), Some(fallback_b));
+    ws1296_assert_raw_forward(
+        &open_a_gw
+            .provider_message(11, &ws1296_created("resp_open_b2"))
+            .await
+            .unwrap(),
+    );
+    ws1296_assert_raw_forward(
+        &open_a_gw
+            .provider_message(
+                11,
+                &ws1296_completed("resp_open_b2", vec![ws1296_reasoning_item(new_ws_b)]),
+            )
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        dynamic_store.upstream_for(&ws1296_openai_key(new_ws_b)),
+        Some(fallback_b)
+    );
+    open_a_gw.close();
+}
+
+#[tokio::test]
+async fn strip_and_failover_fail_closed_boundaries_and_gemini_epoch_status_split() {
+    let owner_a = Uuid::parse_str("10000000-0000-0000-0000-000000000201").unwrap();
+    let fallback_b = Uuid::parse_str("10000000-0000-0000-0000-000000000202").unwrap();
+    let api_key_b = Uuid::parse_str("10000000-0000-0000-0000-000000000203").unwrap();
+    let gemini_id = Uuid::parse_str("10000000-0000-0000-0000-000000000204").unwrap();
+
+    let owned_reasoning = "gAAAAABowned_disabled_rs";
+    let owned_resp = "resp_owned_disabled";
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(owned_reasoning), owner_a);
+    store.insert(ws1296_openai_key(owned_resp), owner_a);
+
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({})));
+    let lc = lifecycle(
+        vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", false),
+            openai_oauth_upstream_record(fallback_b, "oauth-b", true),
+        ],
+        dispatch.clone(),
+        Some(store.clone()),
+    );
+
+    // Non-strippable state alongside owned reasoning keeps 409 fail-closed on HTTP.
+    let non_strippable_http = [
+        json!({
+            "model": "gpt-5.4",
+            "input": [
+                openai_reasoning_input(owned_reasoning),
+                {"type": "compaction", "id": "cmp_1", "encrypted_content": "gAAAAABcmp_1"}
+            ]
+        }),
+        json!({
+            "model": "gpt-5.4",
+            "input": [
+                openai_reasoning_input(owned_reasoning),
+                {"type": "compaction_summary", "id": "cmp_2", "encrypted_content": "gAAAAABcmp_2"}
+            ]
+        }),
+        json!({
+            "model": "gpt-5.4",
+            "previous_response_id": owned_resp,
+            "input": [openai_reasoning_input(owned_reasoning)]
+        }),
+        json!({
+            "model": "gpt-5.4",
+            "conversation": "conv_unknown_fail_closed",
+            "input": [openai_reasoning_input(owned_reasoning)]
+        }),
+    ];
+    for body in non_strippable_http {
+        let resp = handle_authenticated(&lc, responses_request(body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    // Non-strippable WS frames keep 409 fail-closed.
+    let mut gw = ws1296_gateway(lc).await;
+    for frame in [
+        Bytes::from(
+            json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "input": [
+                    ws1296_reasoning_item(owned_reasoning),
+                    {"type": "compaction", "id": "cmp_ws", "encrypted_content": "gAAAAABcmp_ws"}
+                ]
+            })
+            .to_string(),
+        ),
+        ws1296_create(Some(owned_resp), Some(owned_reasoning)),
+    ] {
+        let err = ws1296_admit(&mut gw, frame)
+            .await
+            .expect_err("non-strippable WS payload must stay 409");
+        assert_eq!(err.status, 409);
+        assert_eq!(err.code, "upstream_affinity_unavailable");
+    }
+    gw.close();
+    assert_eq!(dispatch.call_count(), 0);
+
+    // Zero eligible OpenAI upstreams -> 409 on both HTTP and WS.
+    let no_fallback_lc = lifecycle(
+        vec![openai_oauth_upstream_record(owner_a, "oauth-a", false)],
+        dispatch.clone(),
+        Some(store.clone()),
+    );
+    let no_fallback_http = handle_authenticated(
+        &no_fallback_lc,
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "input": [openai_reasoning_input(owned_reasoning)]
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(no_fallback_http.status(), StatusCode::CONFLICT);
+    let mut no_fallback_gw = ws1296_gateway(no_fallback_lc).await;
+    let no_fallback_ws = ws1296_admit(
+        &mut no_fallback_gw,
+        ws1296_create(None, Some(owned_reasoning)),
+    )
+    .await
+    .expect_err("zero OpenAI fallback must return 409");
+    assert_eq!(no_fallback_ws.status, 409);
+    assert_eq!(no_fallback_ws.code, "upstream_affinity_unavailable");
+    no_fallback_gw.close();
+
+    // `codex_backend` with disabled OAuth owner and only `openai_api_key` enabled -> 409 (HTTP + WS).
+    let api_only_lc = lifecycle(
+        vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", false),
+            openai_upstream_record(api_key_b, "openai-api-key", true),
+        ],
+        dispatch.clone(),
+        Some(store.clone()),
+    );
+    let mut codex_http_req = responses_request(json!({
+        "model": "gpt-5.4",
+        "input": [openai_reasoning_input(owned_reasoning)]
+    }));
+    codex_http_req
+        .extensions_mut()
+        .insert(cc_lb_engine::CodexBackendSurface);
+    let codex_http_resp = handle_authenticated(&api_only_lc, codex_http_req)
+        .await
+        .unwrap();
+    assert_eq!(codex_http_resp.status(), StatusCode::CONFLICT);
+    let mut codex_gw = ws1296_gateway(api_only_lc).await.with_codex_backend(true);
+    let codex_ws_err = ws1296_admit(&mut codex_gw, ws1296_create(None, Some(owned_reasoning)))
+        .await
+        .expect_err("codex_backend must not fail over onto openai_api_key");
+    assert_eq!(codex_ws_err.status, 409);
+    assert_eq!(codex_ws_err.code, "upstream_affinity_unavailable");
+    codex_gw.close();
+    assert_eq!(dispatch.call_count(), 0);
+
+    // Gemini cachedContent owner_epoch mismatch -> 409, while affinity store error -> 503.
+    let gemini_store = Arc::new(MemoryAffinityStore::default());
+    let gemini_key = UpstreamAffinityKey {
+        principal_id: "principal-test".to_owned(),
+        provider: "gemini".to_owned(),
+        kind: UpstreamAffinityKind::GeminiCachedContent,
+        value_sha256: Sha256::digest(b"cachedContents/epoch-check").into(),
+    };
+    gemini_store.insert_binding(UpstreamAffinityBinding {
+        key: gemini_key,
+        upstream_id: gemini_id,
+        owner_epoch: 0,
+        observed_at_unix_secs: TEST_NOW_UNIX_SECS,
+        expires_at_unix_secs: None,
+    });
+    gemini_store.set_owner_epoch(gemini_id, 1);
+    let gemini_lc = lifecycle(
+        vec![gemini_upstream_record(gemini_id, "gemini-main", true)],
+        dispatch.clone(),
+        Some(gemini_store.clone()),
+    );
+    let epoch_resp = handle_authenticated(
+        &gemini_lc,
+        provider_request(
+            cc_lb_domain::Provider::Gemini,
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            json!({
+                "cachedContent": "cachedContents/epoch-check",
+                "contents": [{"parts": [{"text": "hi"}]}]
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(epoch_resp.status(), StatusCode::CONFLICT);
+
+    *gemini_store
+        .resolve_failure
+        .lock()
+        .expect("resolve failure lock") = Some("transient storage outage".to_owned());
+    let outage_resp = handle_authenticated(
+        &gemini_lc,
+        provider_request(
+            cc_lb_domain::Provider::Gemini,
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            json!({
+                "cachedContent": "cachedContents/epoch-check",
+                "contents": [{"parts": [{"text": "hi"}]}]
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outage_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(dispatch.call_count(), 0);
 }

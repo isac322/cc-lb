@@ -286,6 +286,7 @@ pub struct LifecycleConfig {
     pub replica_identity: Option<ReplicaIdentity>,
     pub upstream_affinity_ttl: Duration,
     pub unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy,
+    pub unavailable_openai_reasoning_owner: cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy,
     pub openai_oauth_compat: cc_lb_domain::OpenaiOauthCompatPolicy,
     pub openai_realtime_origin: url::Url,
 }
@@ -301,6 +302,8 @@ impl Default for LifecycleConfig {
                 UpstreamAffinityConfig::default().ttl_secs(),
             ),
             unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy::default(),
+            unavailable_openai_reasoning_owner:
+                cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::default(),
             openai_oauth_compat: cc_lb_domain::OpenaiOauthCompatPolicy::default(),
             openai_realtime_origin: url::Url::parse("https://api.openai.com/").expect("valid URL"),
         }

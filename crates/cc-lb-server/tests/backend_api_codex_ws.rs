@@ -2390,3 +2390,348 @@ async fn codex_backend_root_non_upgrade_persists_auth_failure_and_local_404_rows
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
+
+#[tokio::test]
+async fn backend_codex_ws_disabled_reasoning_owner_strips_and_fails_over_across_open_and_fresh_sockets()
+ {
+    use axum::http::HeaderMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone, Default)]
+    struct WsFailoverState {
+        seq: Arc<AtomicUsize>,
+        recorded: Arc<Mutex<Vec<(String, Value)>>>,
+    }
+
+    async fn ws_failover_handler(
+        State(state): State<WsFailoverState>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> impl IntoResponse {
+        let account_id = headers
+            .get("chatgpt-account-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("unknown")
+            .to_owned();
+        ws.on_upgrade(move |mut socket: AxumWebSocket| async move {
+            while let Some(Ok(AxumMessage::Text(text))) = socket.recv().await {
+                let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                    continue;
+                };
+                if value.get("type").and_then(Value::as_str) != Some("response.create") {
+                    continue;
+                }
+                let n = state.seq.fetch_add(1, Ordering::SeqCst);
+                state.recorded.lock().unwrap().push((account_id.clone(), value));
+                let cipher = format!("gAAAAAB_ws_owned_{account_id}_{n}");
+                let resp_id = format!("resp_ws_{account_id}_{n}");
+                let reasoning = json!({
+                    "type": "reasoning",
+                    "id": format!("rs_ws_{n}"),
+                    "summary": [],
+                    "encrypted_content": cipher
+                });
+                let created = json!({
+                    "type": "response.created",
+                    "sequence_number": 0,
+                    "response": {"id": resp_id, "object": "response", "status": "in_progress", "output": []}
+                });
+                let item_done = json!({
+                    "type": "response.output_item.done",
+                    "sequence_number": 1,
+                    "output_index": 0,
+                    "item": reasoning
+                });
+                let completed = json!({
+                    "type": "response.completed",
+                    "sequence_number": 2,
+                    "response": {
+                        "id": resp_id,
+                        "object": "response",
+                        "status": "completed",
+                        "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+                        "output": [reasoning]
+                    }
+                });
+                for frame in [created, item_done, completed] {
+                    if socket
+                        .send(AxumMessage::Text(frame.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        })
+    }
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let state = WsFailoverState::default();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router_state = state.clone();
+    let _upstream_task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route(
+                    "/backend-api/codex/responses",
+                    axum::routing::get(ws_failover_handler),
+                )
+                .with_state(router_state),
+        )
+        .await
+    });
+    let base = format!("http://{addr}/backend-api/codex");
+
+    let server = common::spawn_test_server_with_openai_budget("").await;
+    let client = Client::new();
+
+    // Disable seeded upstreams so only our two WS OAuth upstreams participate.
+    let (_, seeded, _) = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::GET,
+        "/admin/v1/upstreams",
+        None,
+        None,
+    )
+    .await;
+    for u in seeded["upstreams"].as_array().unwrap() {
+        let id = u["id"].as_str().unwrap();
+        let (_, _, etag) = crate::openai_oauth_public_compat::admin(
+            &client,
+            &server,
+            reqwest::Method::GET,
+            &format!("/admin/v1/upstreams/{id}"),
+            None,
+            None,
+        )
+        .await;
+        let (st, body, _) = crate::openai_oauth_public_compat::admin(
+            &client,
+            &server,
+            reqwest::Method::PATCH,
+            &format!("/admin/v1/upstreams/{id}"),
+            Some(json!({ "enabled": false })),
+            etag.as_deref(),
+        )
+        .await;
+        assert_eq!(st, 200, "{body}");
+    }
+
+    let set_enabled = |upstream_id: String, enabled: bool| {
+        let client = &client;
+        let server = &server;
+        async move {
+            let (_, _, etag) = crate::openai_oauth_public_compat::admin(
+                client,
+                server,
+                reqwest::Method::GET,
+                &format!("/admin/v1/upstreams/{upstream_id}"),
+                None,
+                None,
+            )
+            .await;
+            let (st, body, _) = crate::openai_oauth_public_compat::admin(
+                client,
+                server,
+                reqwest::Method::PATCH,
+                &format!("/admin/v1/upstreams/{upstream_id}"),
+                Some(json!({ "enabled": enabled })),
+                etag.as_deref(),
+            )
+            .await;
+            assert_eq!(st, 200, "{body}");
+        }
+    };
+
+    crate::backend_api_codex::add_oauth_upstream(
+        &client,
+        &server,
+        "oauth-ws-a",
+        &base,
+        "acct-ws-a",
+    )
+    .await;
+    crate::backend_api_codex::add_oauth_upstream(
+        &client,
+        &server,
+        "oauth-ws-b",
+        &base,
+        "acct-ws-b",
+    )
+    .await;
+    let (_, ups, _) = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::GET,
+        "/admin/v1/upstreams",
+        None,
+        None,
+    )
+    .await;
+    let find_id = |name: &str| {
+        ups["upstreams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|u| u["name"].as_str() == Some(name))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let id_a = find_id("oauth-ws-a");
+    let id_b = find_id("oauth-ws-b");
+
+    set_enabled(id_b.clone(), false).await;
+
+    let key = &server.managed_key.plaintext;
+    let connect_ws = || {
+        let mut req = format!(
+            "ws://{}/openai/backend-api/codex/responses",
+            server.proxy_addr
+        )
+        .into_client_request()
+        .unwrap();
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {key}").parse().unwrap());
+        tokio_tungstenite::connect_async(req)
+    };
+
+    // Open socket 1 pinned on A after Turn 1.
+    let (mut ws1, _) = connect_ws().await.unwrap();
+    ws1.send(Message::Text(
+        json!({
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+            "input": [{"role": "user", "content": "ws-turn-1"}]
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    for expected in [
+        "response.created",
+        "response.output_item.done",
+        "response.completed",
+    ] {
+        let frame: Value = serde_json::from_str(&recv_text(&mut ws1).await).unwrap();
+        assert_eq!(frame["type"], expected, "{frame}");
+    }
+
+    // Swap active upstream to B while ws1 stays open -> open-socket Turn 2 must fail over cleanly!
+    set_enabled(id_b.clone(), true).await;
+    set_enabled(id_a.clone(), false).await;
+
+    ws1.send(Message::Text(
+        json!({
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_ws_0",
+                    "summary": [],
+                    "encrypted_content": "gAAAAAB_ws_owned_acct-ws-a_0"
+                },
+                {"role": "user", "content": "ws-turn-2-open"}
+            ]
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    for expected in [
+        "response.created",
+        "response.output_item.done",
+        "response.completed",
+    ] {
+        let frame: Value = serde_json::from_str(&recv_text(&mut ws1).await).unwrap();
+        assert_eq!(frame["type"], expected, "{frame}");
+    }
+
+    // Fresh socket 2 carrying A's disabled reasoning also fails over upfront to B.
+    let (mut ws2, _) = connect_ws().await.unwrap();
+    ws2.send(Message::Text(
+        json!({
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_ws_0",
+                    "summary": [],
+                    "encrypted_content": "gAAAAAB_ws_owned_acct-ws-a_0"
+                },
+                {"role": "user", "content": "ws-turn-3-fresh"}
+            ]
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    for expected in [
+        "response.created",
+        "response.output_item.done",
+        "response.completed",
+    ] {
+        let frame: Value = serde_json::from_str(&recv_text(&mut ws2).await).unwrap();
+        assert_eq!(frame["type"], expected, "{frame}");
+    }
+
+    {
+        let rec = state.recorded.lock().unwrap();
+        assert_eq!(rec.len(), 3);
+        assert_eq!(rec[0].0, "acct-ws-a");
+        assert_eq!(rec[1].0, "acct-ws-b");
+        assert_eq!(rec[1].1["input"].as_array().unwrap().len(), 1);
+        assert_eq!(rec[1].1["input"][0]["content"], "ws-turn-2-open");
+        assert_eq!(rec[2].0, "acct-ws-b");
+        assert_eq!(rec[2].1["input"].as_array().unwrap().len(), 1);
+        assert_eq!(rec[2].1["input"][0]["content"], "ws-turn-3-fresh");
+    }
+
+    // Disabling B leaves 0 eligible OAuth upstreams -> must fail closed with 409.
+    set_enabled(id_b, false).await;
+    ws2.send(Message::Text(
+        json!({
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_ws_1",
+                    "summary": [],
+                    "encrypted_content": "gAAAAAB_ws_owned_acct-ws-b_1"
+                },
+                {"role": "user", "content": "ws-turn-4-conflict"}
+            ]
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let err_frame: Value = serde_json::from_str(&recv_text(&mut ws2).await).unwrap();
+    assert_eq!(err_frame["type"], "error", "{err_frame}");
+    assert_eq!(err_frame["status"], 409, "{err_frame}");
+    assert_eq!(
+        err_frame["error"]["code"], "upstream_affinity_unavailable",
+        "{err_frame}"
+    );
+    assert_eq!(state.recorded.lock().unwrap().len(), 3);
+}

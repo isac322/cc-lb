@@ -892,6 +892,18 @@ describe('config field guidance', () => {
     );
     expect(guidance.description).toContain('reasoning');
     expect(guidance.recommendation).toContain('hybrid');
+    expect(guidance.recommendation).toContain('409');
+  });
+
+  it('provides guidance for unavailable_openai_reasoning_owner affinity policy', () => {
+    const guidance = resolveConfigFieldGuidance(
+      'upstream_affinity.unavailable_openai_reasoning_owner',
+      undefined,
+      'enum',
+    );
+    expect(guidance.description).toContain('reasoning');
+    expect(guidance.recommendation).toContain('strip_and_failover');
+    expect(guidance.recommendation).toContain('409');
   });
 
   it('falls back to the schema description when the table omits one', () => {

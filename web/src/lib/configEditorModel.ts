@@ -2070,7 +2070,17 @@ const CONFIG_FIELD_GUIDANCE: readonly {
       description:
         'How OpenAI Responses requests handle unestablished encrypted reasoning items when no affinity owner is known.',
       recommendation:
-        'Use hybrid (default) for multi-provider thread portability without cross-upstream failover; use fail_closed only when strict 503 rejection on foreign reasoning items is required.',
+        'Use hybrid (default) for multi-provider thread portability without cross-upstream failover; use fail_closed only when strict 409 rejection on foreign reasoning items is required.',
+      impactDimensions: ['availability', 'latency'],
+    },
+  },
+  {
+    pattern: 'upstream_affinity.unavailable_openai_reasoning_owner',
+    guidance: {
+      description:
+        'How OpenAI Responses requests handle encrypted reasoning items when their recorded owner upstream is disabled or ineligible (without previous_response_id, conversation, or compaction items).',
+      recommendation:
+        'Use strip_and_failover (default) to drop foreign-account encrypted reasoning items and reroute to another eligible OpenAI upstream; use fail_closed to reject with 409 instead.',
       impactDimensions: ['availability', 'latency'],
     },
   },

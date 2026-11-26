@@ -1430,7 +1430,7 @@ async fn handle_connect_outcome(
                     .retain(|candidate| candidate.upstream_id == owner_id);
                 if deferred.remaining.is_empty() {
                     deferred.last_error = Some(WebSocketError::new(
-                        503,
+                        409,
                         "upstream_affinity_unavailable",
                         "The session is pinned to another OAuth account",
                     ));

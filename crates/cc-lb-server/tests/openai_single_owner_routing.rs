@@ -203,10 +203,10 @@ async fn account_owned_resources_route_only_to_a_single_owner() {
     add_api_key_upstream(&c, &s, &b).await;
     let before = (a.served().len(), b.served().len());
     let (status, body) = proxy(&c, &s, Method::GET, "/v1/files", None).await;
-    assert_eq!(status, 503, "{body}");
+    assert_eq!(status, 409, "{body}");
     assert_eq!(body["error"]["code"], "upstream_affinity_unavailable");
     let (status, body) = proxy(&c, &s, Method::GET, "/v1/responses/resp_unknown", None).await;
-    assert_eq!(status, 503, "{body}");
+    assert_eq!(status, 409, "{body}");
     assert_eq!(
         (a.served().len(), b.served().len()),
         before,

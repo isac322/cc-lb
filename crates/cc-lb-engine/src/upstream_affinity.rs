@@ -522,9 +522,10 @@ fn walk_openai_reasoning_items<'a, B>(
     ControlFlow::Continue(())
 }
 
-/// Returns whether the OpenAI Responses request's ONLY opaque affinity state
+/// Returns whether the OpenAI Responses request's ONLY OpenAI affinity state
 /// comes from `reasoning.encrypted_content` items in an `input` array (with no
 /// `previous_response_id`, `conversation`, `compaction`, or `compaction_summary`).
+/// Used both by unknown-reasoning hybrid recovery and by ineligible-owner failover.
 pub(crate) fn is_openai_unknown_reasoning_only(
     capability: ProviderCapability,
     value: &Value,

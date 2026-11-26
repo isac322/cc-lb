@@ -2,7 +2,8 @@ use cc_lb_config::{
     Config, DEFAULT_FILES_CAP_BYTES, DEFAULT_MAX_BUFFERED_RESPONSE_BYTES,
     DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV, DEFAULT_SQLITE_PATH,
     DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS, DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS,
-    DEFAULT_UPSTREAM_CONNECT_SECS, StorageConfig, TlsConfig, UnknownOpenaiReasoningPolicy,
+    DEFAULT_UPSTREAM_CONNECT_SECS, StorageConfig, TlsConfig, UnavailableOpenaiReasoningOwnerPolicy,
+    UnknownOpenaiReasoningPolicy,
 };
 
 #[test]
@@ -46,6 +47,10 @@ fn load_minimal_toml_applies_plan_defaults() {
     assert_eq!(
         config.upstream_affinity.unknown_openai_reasoning,
         UnknownOpenaiReasoningPolicy::Hybrid
+    );
+    assert_eq!(
+        config.upstream_affinity.unavailable_openai_reasoning_owner,
+        UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover
     );
     assert_eq!(config.circuit_breaker.failures_to_open, 5);
     assert_eq!(config.circuit_breaker.window_secs, 10);
@@ -101,6 +106,7 @@ fn upstream_affinity_ttl_loads_from_toml() {
 [upstream_affinity]
 ttl_days = 14
 unknown_openai_reasoning = "fail_closed"
+unavailable_openai_reasoning_owner = "fail_closed"
 "#,
     );
 
@@ -111,6 +117,10 @@ unknown_openai_reasoning = "fail_closed"
     assert_eq!(
         config.upstream_affinity.unknown_openai_reasoning,
         UnknownOpenaiReasoningPolicy::FailClosed
+    );
+    assert_eq!(
+        config.upstream_affinity.unavailable_openai_reasoning_owner,
+        UnavailableOpenaiReasoningOwnerPolicy::FailClosed
     );
 }
 

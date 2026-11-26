@@ -246,6 +246,7 @@
       "$ref": "#/$defs/UpstreamAffinityConfig",
       "default": {
         "ttl_days": 7,
+        "unavailable_openai_reasoning_owner": "strip_and_failover",
         "unknown_openai_reasoning": "hybrid"
       }
     },
@@ -1394,11 +1395,26 @@
         }
       }
     },
+    "UnavailableOpenaiReasoningOwnerPolicy": {
+      "description": "Handling for OpenAI Responses requests whose only referenced opaque\naffinity state is `reasoning.encrypted_content` owned by an upstream that\nis currently disabled or otherwise ineligible for routing.",
+      "oneOf": [
+        {
+          "description": "Reject with `409 upstream_affinity_unavailable` instead of stripping\nencrypted reasoning items and rerouting to another OpenAI upstream.",
+          "type": "string",
+          "const": "fail_closed"
+        },
+        {
+          "description": "Strip `reasoning.encrypted_content` items from `input` and fail over to\nanother eligible OpenAI upstream when the recorded owner is ineligible\nand no `previous_response_id`, `conversation`, `compaction`, or\n`compaction_summary` is present; still fails closed with `409` if no\nother eligible OpenAI upstream exists.",
+          "type": "string",
+          "const": "strip_and_failover"
+        }
+      ]
+    },
     "UnknownOpenaiReasoningPolicy": {
       "description": "Handling for OpenAI Responses requests whose only unestablished opaque\naffinity state is `reasoning.encrypted_content` (and for unmatched pending\n`reasoning.encrypted_content` on a resolved OpenAI owner).",
       "oneOf": [
         {
-          "description": "Fail closed with `503 upstream_affinity_unavailable`.",
+          "description": "Fail closed with `409 upstream_affinity_unavailable`.",
           "type": "string",
           "const": "fail_closed"
         },
@@ -1417,6 +1433,10 @@
           "format": "uint32",
           "default": 7,
           "minimum": 1
+        },
+        "unavailable_openai_reasoning_owner": {
+          "$ref": "#/$defs/UnavailableOpenaiReasoningOwnerPolicy",
+          "default": "strip_and_failover"
         },
         "unknown_openai_reasoning": {
           "$ref": "#/$defs/UnknownOpenaiReasoningPolicy",

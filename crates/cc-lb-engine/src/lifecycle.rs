@@ -46,9 +46,9 @@ use self::limits::{
 };
 pub(crate) use self::limits::{INPUT_ESTIMATE_MAX_BYTES, INPUT_ESTIMATE_MAX_NODES};
 use self::routing::{
-    FailoverReason, FailoverRouter, FilterPipelineResult, RoutedUpstream, announce_attempt,
-    emit_route_completed, execute_filter_pipeline, filter_codex_models_catalog, route_for_record,
-    route_info_for_routed, terminal_candidates, upstream_for_record,
+    FailoverReason, FailoverRouter, FilterPipelineFailure, FilterPipelineResult, RoutedUpstream,
+    announce_attempt, emit_route_completed, execute_filter_pipeline, filter_codex_models_catalog,
+    route_for_record, route_info_for_routed, terminal_candidates, upstream_for_record,
 };
 pub use self::routing::{native_route_dialect, observe_rate_limits};
 use self::streaming::{
@@ -476,6 +476,71 @@ impl Lifecycle {
         }
     }
 
+    fn filter_pipeline_failure_response(
+        &self,
+        request_capability: ProviderCapability,
+        terminal_strategy: TerminalStrategy,
+        pipeline_result: &mut FilterPipelineResult,
+        failure: FilterPipelineFailure,
+        route_span: &tracing::Span,
+        observer: Option<&LifecycleContext>,
+    ) -> Response<Body> {
+        if let Some(o) = observer {
+            for error in pipeline_result.internal_errors.drain(..) {
+                o.record_internal_error(error);
+            }
+        }
+        let terminal_decision =
+            self.select_terminal_upstream(terminal_strategy, &pipeline_result.candidates);
+        route_span.record(
+            "cc_lb.route.candidate_count",
+            numeric_attribute(Some(0)).as_value(),
+        );
+        route_span.record("cc_lb.route.outcome", "error");
+        route_span.record("otel.status_code", "ERROR");
+        route_span.record("error.type", error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER);
+        let (status, error_type, client_message, retry_after_secs) = if failure.is_pool_saturated()
+        {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "overloaded_error",
+                "plugin runtime saturated",
+                Some(1_u64),
+            )
+        } else {
+            (
+                StatusCode::BAD_GATEWAY,
+                "api_error",
+                "routing filter plugin failed",
+                None,
+            )
+        };
+        if let Some(o) = observer {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
+                event_id: o.event_id().to_owned(),
+                result: Err(cc_lb_lifecycle::RouteFailure::RouteNoUpstreamAfterFilter),
+                routing_trace: Some(pipeline_result.routing_trace(terminal_decision)),
+            });
+            o.terminate_failure(InternalFailure {
+                status,
+                error_code: error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER,
+                error: failure.internal_error(),
+            });
+        }
+        if let Some(retry_after_secs) = retry_after_secs {
+            provider_error_response_with_retry_after(
+                request_capability,
+                status,
+                error_type,
+                client_message,
+                None,
+                retry_after_secs,
+            )
+        } else {
+            provider_error_response(request_capability, status, error_type, client_message, None)
+        }
+    }
+
     async fn resolve_request_affinities(
         &self,
         keys: &[UpstreamAffinityKey],
@@ -527,7 +592,7 @@ impl Lifecycle {
                 && owner_epoch.is_some_and(|epoch| epoch != binding.owner_epoch)
             {
                 return Err(RequestAffinityFailure {
-                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    status: StatusCode::CONFLICT,
                     error_type: "api_error",
                     message: UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
                 });
@@ -536,7 +601,7 @@ impl Lifecycle {
         }
         let Some(target_upstream_id) = target_upstream_id else {
             return Err(RequestAffinityFailure {
-                status: StatusCode::SERVICE_UNAVAILABLE,
+                status: StatusCode::CONFLICT,
                 error_type: "api_error",
                 message: UPSTREAM_AFFINITY_NOT_ESTABLISHED_MESSAGE,
             });
@@ -1419,6 +1484,10 @@ impl Lifecycle {
         enum WsUnknownReasoningRecovery {
             None,
             Unestablished,
+            StrippedOwnerFailover {
+                body: Arc<Value>,
+                frame: Bytes,
+            },
             Pending {
                 pending_digests: HashSet<[u8; 32]>,
                 pending_keys: Vec<UpstreamAffinityKey>,
@@ -1478,7 +1547,7 @@ impl Lifecycle {
             .and_then(Value::as_str)
             .is_some_and(|id| !id.is_empty());
         let mut recovery = WsUnknownReasoningRecovery::None;
-        let affinity = match self.resolve_request_affinities(&keys).await {
+        let mut affinity = match self.resolve_request_affinities(&keys).await {
             Ok(affinity) => {
                 if let Some(ref resolved) = affinity
                     && self.config.unknown_openai_reasoning
@@ -1540,7 +1609,7 @@ impl Lifecycle {
                 }
             }
         };
-        let target = match (
+        let mut target = match (
             owner,
             affinity
                 .as_ref()
@@ -1662,6 +1731,23 @@ impl Lifecycle {
             candidates
                 .retain(|candidate| candidate.kind == cc_lb_domain::UpstreamKind::OpenaiOauth);
         }
+        let owner_failover_pool = if !has_connection_owner
+            && let Some(ref resolved_affinity) = affinity
+            && self.config.unavailable_openai_reasoning_owner
+                == cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover
+            && is_openai_unknown_reasoning_only(ProviderCapability::OpenaiResponses, body)
+        {
+            let mut pool = candidates.clone();
+            pool.retain(|candidate| candidate.upstream_id != resolved_affinity.target_upstream_id);
+            if let WebSocketTurnOwner::SessionHint(hint_id) = owner
+                && hint_id != resolved_affinity.target_upstream_id
+            {
+                pool.retain(|candidate| candidate.upstream_id == hint_id);
+            }
+            Some((resolved_affinity.target_upstream_id, pool))
+        } else {
+            None
+        };
         if let Some(target) = target {
             candidates.retain(|candidate| candidate.upstream_id == target);
         }
@@ -1707,7 +1793,7 @@ impl Lifecycle {
             None
         };
         let filters = pipeline.filters_for(cc_lb_domain::Provider::Openai);
-        let pre_filter_candidates = (target.is_none()
+        let mut pre_filter_candidates = (target.is_none()
             && candidates.len() > 1
             && filters
                 .iter()
@@ -1760,9 +1846,52 @@ impl Lifecycle {
                 .candidates
                 .retain(|candidate| candidate.upstream_id == target);
         }
+        if result.candidates.is_empty()
+            && let Some((owner_id, fallback_pool)) = owner_failover_pool
+            && !fallback_pool.is_empty()
+        {
+            if (matches!(owner, WebSocketTurnOwner::None)
+                || matches!(owner, WebSocketTurnOwner::SessionHint(hint_id) if hint_id == owner_id))
+                && fallback_pool.len() > 1
+                && filters
+                    .iter()
+                    .any(|filter| filter.plugin_id() == BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
+            {
+                pre_filter_candidates = Some(fallback_pool.clone());
+            }
+            let mut fallback_result =
+                execute_filter_pipeline(filters, &ctx, &principal, fallback_pool);
+            if let Some(ref failure) = fallback_result.failure {
+                return Err(websocket_filter_error(failure));
+            }
+            if !fallback_result.candidates.is_empty()
+                && let Some(stripped) = strip_openai_reasoning_encrypted_items(body, None)
+                && let Ok(bytes) = serde_json::to_vec(&stripped)
+            {
+                let frame = Bytes::from(bytes);
+                ctx.body_bytes = frame.clone();
+                if !result.internal_errors.is_empty() {
+                    let mut combined = std::mem::take(&mut result.internal_errors);
+                    combined.append(&mut fallback_result.internal_errors);
+                    fallback_result.internal_errors = combined;
+                }
+                result = fallback_result;
+                affinity = None;
+                target = None;
+                recovery = WsUnknownReasoningRecovery::StrippedOwnerFailover {
+                    body: Arc::new(stripped),
+                    frame,
+                };
+                tracing::warn!(
+                    owner_upstream_id = %owner_id,
+                    model = %ctx.canonical_model_id,
+                    "failing over WebSocket OpenAI encrypted reasoning turn after stripping unavailable owner items"
+                );
+            }
+        }
         if result.candidates.is_empty() {
             return Err(WebSocketError::new(
-                503,
+                if target.is_some() { 409 } else { 503 },
                 if target.is_some() {
                     error_codes::UPSTREAM_AFFINITY_UNAVAILABLE
                 } else {
@@ -1889,6 +2018,9 @@ impl Lifecycle {
         let dispatchable_candidates = result.candidates.len() + fallback_candidates.len();
         let plan = match recovery {
             WsUnknownReasoningRecovery::None => WsUnknownReasoningPlan::None,
+            WsUnknownReasoningRecovery::StrippedOwnerFailover { body, frame } => {
+                WsUnknownReasoningPlan::StrippedUpfront { body, frame }
+            }
             WsUnknownReasoningRecovery::Unestablished => {
                 if dispatchable_candidates <= 1 {
                     WsUnknownReasoningPlan::RetryStripAll { unknown_keys: keys }
@@ -2744,7 +2876,7 @@ impl Lifecycle {
             },
         }
         let mut unknown_reasoning_recovery = HttpUnknownReasoningRecovery::None;
-        let request_affinity = match self
+        let mut request_affinity = match self
             .resolve_request_affinities(&request_affinity_keys)
             .await
         {
@@ -2915,10 +3047,33 @@ impl Lifecycle {
             candidates
                 .retain(|candidate| candidate.kind == cc_lb_domain::UpstreamKind::OpenaiOauth);
         }
+        let ineligible_reasoning_fallback_pool = if let Some(affinity) = request_affinity.as_ref()
+            && self.config.unavailable_openai_reasoning_owner
+                == cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover
+            && body_view
+                .value()
+                .is_some_and(|value| is_openai_unknown_reasoning_only(request_capability, value))
+        {
+            let mut pool = candidates.clone();
+            pool.retain(|candidate| candidate.upstream_id != affinity.target_upstream_id);
+            if !ctx.codex_backend {
+                retain_api_key_candidates(&mut pool, &ctx.compat_api_key_only_features);
+                if request_kind == RequestKind::OpenaiAudioTranscriptions
+                    && ctx.openai_oauth_compat.is_some_and(|policy| {
+                        policy.transcription == cc_lb_domain::EnabledOrDisabled::Disabled
+                    })
+                {
+                    pool.retain(|candidate| {
+                        candidate.kind != cc_lb_domain::UpstreamKind::OpenaiOauth
+                    });
+                }
+            }
+            Some((affinity.target_upstream_id, pool))
+        } else {
+            None
+        };
         if let Some(affinity) = request_affinity.as_ref() {
             candidates.retain(|candidate| candidate.upstream_id == affinity.target_upstream_id);
-            selected_cache_matches
-                .retain(|upstream_id, _| *upstream_id == affinity.target_upstream_id);
         }
         // Account-owned OpenAI resources (files, batches, stored responses with no
         // recorded owner, …) live in one API account. Route them only when exactly
@@ -2949,7 +3104,7 @@ impl Lifecycle {
                     routing_trace: None,
                 });
                 o.terminate_failure(InternalFailure {
-                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    status: StatusCode::CONFLICT,
                     error_code: error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
                     error: InternalError {
                         stage: InternalErrorStage::RouterFilter,
@@ -2960,7 +3115,7 @@ impl Lifecycle {
             }
             return Ok(provider_error_response(
                 request_capability,
-                StatusCode::SERVICE_UNAVAILABLE,
+                StatusCode::CONFLICT,
                 error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
                 SINGLE_OWNER_AMBIGUOUS_MESSAGE,
                 None,
@@ -2973,78 +3128,78 @@ impl Lifecycle {
             candidates,
         );
         if let Some(failure) = pipeline_result.failure.take() {
-            if let Some(o) = observer.as_ref() {
-                for error in pipeline_result.internal_errors.drain(..) {
-                    o.record_internal_error(error);
-                }
-            }
-            let terminal_decision = self.select_terminal_upstream(
+            return Ok(self.filter_pipeline_failure_response(
+                request_capability,
                 router_pipeline.terminal.clone(),
-                &pipeline_result.candidates,
-            );
-            route_span.record(
-                "cc_lb.route.candidate_count",
-                numeric_attribute(Some(0)).as_value(),
-            );
-            route_span.record("cc_lb.route.outcome", "error");
-            route_span.record("otel.status_code", "ERROR");
-            route_span.record("error.type", error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER);
-            let (status, error_type, client_message, retry_after_secs) =
-                if failure.is_pool_saturated() {
-                    (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "overloaded_error",
-                        "plugin runtime saturated",
-                        Some(1_u64),
-                    )
-                } else {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        "api_error",
-                        "routing filter plugin failed",
-                        None,
-                    )
-                };
-            if let Some(o) = observer.as_ref() {
-                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
-                    event_id: o.event_id().to_owned(),
-                    result: Err(cc_lb_lifecycle::RouteFailure::RouteNoUpstreamAfterFilter),
-                    routing_trace: Some(pipeline_result.routing_trace(terminal_decision)),
-                });
-                o.terminate_failure(InternalFailure {
-                    status,
-                    error_code: error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER,
-                    error: failure.internal_error(),
-                });
-            }
-            return Ok(if let Some(retry_after_secs) = retry_after_secs {
-                provider_error_response_with_retry_after(
-                    request_capability,
-                    status,
-                    error_type,
-                    client_message,
-                    None,
-                    retry_after_secs,
-                )
-            } else {
-                provider_error_response(
-                    request_capability,
-                    status,
-                    error_type,
-                    client_message,
-                    None,
-                )
-            });
+                &mut pipeline_result,
+                failure,
+                &route_span,
+                observer.as_ref(),
+            ));
         }
         // Hard affinity: provider-owned state lives on exactly one upstream.
         // Filters may only narrow the candidate set; if they (or the eligible
         // candidate set itself) exclude the owner, the request cannot be
         // served anywhere else, so fail with an explicit affinity error rather
-        // than a generic routing miss.
+        // than a generic routing miss (unless ineligible-owner reasoning
+        // failover applies and another eligible OpenAI upstream exists).
         if let Some(affinity) = request_affinity.as_ref() {
             pipeline_result
                 .candidates
                 .retain(|candidate| candidate.upstream_id == affinity.target_upstream_id);
+        }
+        if request_affinity.is_some()
+            && pipeline_result.candidates.is_empty()
+            && let Some((owner_id, fallback_pool)) = ineligible_reasoning_fallback_pool
+            && !fallback_pool.is_empty()
+        {
+            let mut fallback_result = execute_filter_pipeline(
+                router_pipeline.filters_for(request_kind.provider()),
+                &ctx,
+                &principal,
+                fallback_pool,
+            );
+            if let Some(failure) = fallback_result.failure.take() {
+                if !pipeline_result.internal_errors.is_empty() {
+                    let mut combined = std::mem::take(&mut pipeline_result.internal_errors);
+                    combined.append(&mut fallback_result.internal_errors);
+                    fallback_result.internal_errors = combined;
+                }
+                return Ok(self.filter_pipeline_failure_response(
+                    request_capability,
+                    router_pipeline.terminal.clone(),
+                    &mut fallback_result,
+                    failure,
+                    &route_span,
+                    observer.as_ref(),
+                ));
+            }
+            if !fallback_result.candidates.is_empty()
+                && let Some(stripped) = body_view
+                    .value()
+                    .and_then(|value| strip_openai_reasoning_encrypted_items(value, None))
+                && let Ok(bytes) = serde_json::to_vec(&stripped)
+            {
+                ctx.body_bytes = Bytes::from(bytes);
+                rewrite_json_request_body_headers(
+                    &mut ctx.downstream_headers,
+                    ctx.body_bytes.len(),
+                );
+                body_view.parsed = Ok(Arc::new(stripped));
+                request_affinity = None;
+                unknown_reasoning_recovery = HttpUnknownReasoningRecovery::None;
+                if !pipeline_result.internal_errors.is_empty() {
+                    let mut combined = std::mem::take(&mut pipeline_result.internal_errors);
+                    combined.append(&mut fallback_result.internal_errors);
+                    fallback_result.internal_errors = combined;
+                }
+                pipeline_result = fallback_result;
+                tracing::warn!(
+                    owner_upstream_id = %owner_id,
+                    model = %ctx.canonical_model_id,
+                    "failing over HTTP OpenAI encrypted reasoning request after stripping unavailable owner items"
+                );
+            }
         }
         let mut pending_request_keys = request_affinity
             .as_ref()
@@ -3099,7 +3254,7 @@ impl Lifecycle {
                     routing_trace: Some(pipeline_result.routing_trace(terminal_decision.clone())),
                 });
                 o.terminate_failure(InternalFailure {
-                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    status: StatusCode::CONFLICT,
                     error_code: error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
                     error: InternalError {
                         stage: InternalErrorStage::RouterFilter,
@@ -3110,7 +3265,7 @@ impl Lifecycle {
             }
             return Ok(provider_error_response(
                 request_capability,
-                StatusCode::SERVICE_UNAVAILABLE,
+                StatusCode::CONFLICT,
                 error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
                 UPSTREAM_AFFINITY_TARGET_INELIGIBLE_MESSAGE,
                 None,
@@ -3306,40 +3461,54 @@ impl Lifecycle {
             }
 
             routed_owner_epoch = if affinity_owner_epoch_required {
-                let owner_epoch = match self.upstream_affinity_store.as_ref() {
-                    None => None,
-                    Some(store) => store
+                enum EpochLookupFailure {
+                    Storage,
+                    Conflict,
+                }
+                let lookup = match self.upstream_affinity_store.as_ref() {
+                    None => Err(EpochLookupFailure::Storage),
+                    Some(store) => match store
                         .read_upstream_owner_epoch(routed.route.upstream_id, routed.record.revision)
                         .await
-                        .ok()
-                        .flatten(),
+                    {
+                        Ok(Some(epoch))
+                            if request_affinity
+                                .as_ref()
+                                .is_none_or(|affinity| affinity.owner_epoch == epoch) =>
+                        {
+                            Ok(epoch)
+                        }
+                        Ok(_) => Err(EpochLookupFailure::Conflict),
+                        Err(_) => Err(EpochLookupFailure::Storage),
+                    },
                 };
-                let owner_epoch = owner_epoch.filter(|epoch| {
-                    request_affinity
-                        .as_ref()
-                        .is_none_or(|affinity| affinity.owner_epoch == *epoch)
-                });
-                if owner_epoch.is_none() {
-                    if let Some(o) = observer.as_ref() {
-                        o.terminate_failure(InternalFailure {
-                            status: StatusCode::SERVICE_UNAVAILABLE,
-                            error_code: error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
-                            error: InternalError {
-                                stage: InternalErrorStage::Storage,
-                                kind: InternalErrorKind::Unavailable,
-                                message: Some(UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE.to_owned()),
-                            },
-                        });
+                match lookup {
+                    Ok(epoch) => Some(epoch),
+                    Err(failure) => {
+                        let status = match failure {
+                            EpochLookupFailure::Storage => StatusCode::SERVICE_UNAVAILABLE,
+                            EpochLookupFailure::Conflict => StatusCode::CONFLICT,
+                        };
+                        if let Some(o) = observer.as_ref() {
+                            o.terminate_failure(InternalFailure {
+                                status,
+                                error_code: error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                                error: InternalError {
+                                    stage: InternalErrorStage::Storage,
+                                    kind: InternalErrorKind::Unavailable,
+                                    message: Some(UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE.to_owned()),
+                                },
+                            });
+                        }
+                        return Ok(provider_error_response(
+                            request_capability,
+                            status,
+                            error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                            UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                            None,
+                        ));
                     }
-                    return Ok(provider_error_response(
-                        request_capability,
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
-                        UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
-                        None,
-                    ));
                 }
-                owner_epoch
             } else {
                 Some(0)
             };
