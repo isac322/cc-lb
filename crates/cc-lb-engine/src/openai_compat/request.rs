@@ -403,6 +403,7 @@ pub fn degrade_without_api_key(
             Keep,
             Remove,
             Auto,
+            None,
         }
         let action = match object.get_mut("tool_choice") {
             Some(Value::String(s)) if s == "required" && !has_remaining_tools => {
@@ -427,7 +428,9 @@ pub fn degrade_without_api_key(
                     };
                     let required_mode =
                         choice.get("mode").and_then(Value::as_str) == Some("required");
-                    if empty_after_strip || (!has_remaining_tools && required_mode) {
+                    if empty_after_strip {
+                        ToolChoiceAction::None
+                    } else if !has_remaining_tools && required_mode {
                         ToolChoiceAction::Remove
                     } else {
                         ToolChoiceAction::Keep
@@ -444,6 +447,9 @@ pub fn degrade_without_api_key(
             }
             ToolChoiceAction::Auto => {
                 object.insert("tool_choice".into(), json!("auto"));
+            }
+            ToolChoiceAction::None => {
+                object.insert("tool_choice".into(), json!("none"));
             }
         }
     }
@@ -825,7 +831,7 @@ mod tests {
         assert_eq!(out_forced_auto["tool_choice"], "auto");
 
         // 5. allowed_tools with mode: "required" and only code_interpreter allowed, even with an
-        // outside surviving function tool -> empties subset and clears tool_choice
+        // outside surviving function tool -> sets tool_choice: "none" so outside tool is not called
         let allowed_only_hosted = json!({
             "tools": [{"type": "function", "name": "outside_fn"}],
             "input": [{
@@ -844,7 +850,7 @@ mod tests {
             &policy,
         )
         .unwrap();
-        assert!(out_allowed_cleared.get("tool_choice").is_none());
+        assert_eq!(out_allowed_cleared["tool_choice"], "none");
 
         // 6. allowed_tools with mode: "required" and surviving lookup function in additional_tools ->
         // strips code_interpreter selector and preserves subset + mode
@@ -874,8 +880,10 @@ mod tests {
             json!([{"type": "function", "name": "lookup"}])
         );
 
-        // 7. allowed_tools with mode: "auto": clears when emptied, preserves subset + mode when lookup survives
+        // 7. allowed_tools with mode: "auto": sets "none" when emptied (preserving subset ban over
+        // outside functions), preserves subset + mode when lookup survives
         let allowed_auto_only = json!({
+            "tools": [{"type": "function", "name": "outside_fn"}],
             "input": [{
                 "type": "additional_tools",
                 "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}]
@@ -892,7 +900,7 @@ mod tests {
             &policy,
         )
         .unwrap();
-        assert!(out_allowed_auto_cleared.get("tool_choice").is_none());
+        assert_eq!(out_allowed_auto_cleared["tool_choice"], "none");
 
         let allowed_auto_mixed = json!({
             "input": [{
