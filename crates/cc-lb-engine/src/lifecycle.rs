@@ -1488,6 +1488,7 @@ impl Lifecycle {
             StrippedOwnerFailover {
                 body: Arc<Value>,
                 frame: Bytes,
+                requires_api_key: bool,
             },
             Pending {
                 pending_digests: HashSet<[u8; 32]>,
@@ -1745,21 +1746,20 @@ impl Lifecycle {
             ) {
             let mut pool = candidates.clone();
             pool.retain(|candidate| candidate.upstream_id != resolved_affinity.target_upstream_id);
-            if let WebSocketTurnOwner::SessionHint(hint_id) = owner
-                && hint_id != resolved_affinity.target_upstream_id
-            {
-                pool.retain(|candidate| candidate.upstream_id == hint_id);
-            }
-            if !codex_backend
+            let requires_api_key = !codex_backend
                 && !compat_request::api_key_only_features(
                     Some(body),
                     ProviderCapability::OpenaiResponses,
                 )
-                .is_empty()
-            {
+                .is_empty();
+            if requires_api_key {
                 pool.retain(|candidate| candidate.kind == cc_lb_domain::UpstreamKind::OpenaiApiKey);
+            } else if let WebSocketTurnOwner::SessionHint(hint_id) = owner
+                && hint_id != resolved_affinity.target_upstream_id
+            {
+                pool.retain(|candidate| candidate.upstream_id == hint_id);
             }
-            Some((resolved_affinity.target_upstream_id, pool))
+            Some((resolved_affinity.target_upstream_id, pool, requires_api_key))
         } else {
             None
         };
@@ -1862,7 +1862,7 @@ impl Lifecycle {
                 .retain(|candidate| candidate.upstream_id == target);
         }
         if result.candidates.is_empty()
-            && let Some((owner_id, mut fallback_pool)) = owner_failover_pool
+            && let Some((owner_id, mut fallback_pool, requires_api_key)) = owner_failover_pool
         {
             let has_sub_pref = filters
                 .iter()
@@ -1883,7 +1883,8 @@ impl Lifecycle {
                 let frame = Bytes::from(bytes);
                 let mut fallback_ctx = ctx.clone();
                 fallback_ctx.body_bytes = frame.clone();
-                let pre_filter_fallback = ((matches!(owner, WebSocketTurnOwner::None)
+                let pre_filter_fallback = ((requires_api_key
+                    || matches!(owner, WebSocketTurnOwner::None)
                     || matches!(owner, WebSocketTurnOwner::SessionHint(hint_id) if hint_id == owner_id))
                     && fallback_pool.len() > 1
                     && has_sub_pref)
@@ -1909,6 +1910,7 @@ impl Lifecycle {
                     recovery = WsUnknownReasoningRecovery::StrippedOwnerFailover {
                         body: Arc::new(stripped),
                         frame,
+                        requires_api_key,
                     };
                     tracing::warn!(
                         owner_upstream_id = %owner_id,
@@ -2047,13 +2049,16 @@ impl Lifecycle {
         let dispatchable_candidates = result.candidates.len() + fallback_candidates.len();
         let plan = match recovery {
             WsUnknownReasoningRecovery::None => WsUnknownReasoningPlan::None,
-            WsUnknownReasoningRecovery::StrippedOwnerFailover { body, frame } => {
-                WsUnknownReasoningPlan::StrippedUpfront {
-                    body,
-                    frame,
-                    owner_failover: true,
-                }
-            }
+            WsUnknownReasoningRecovery::StrippedOwnerFailover {
+                body,
+                frame,
+                requires_api_key,
+            } => WsUnknownReasoningPlan::StrippedUpfront {
+                body,
+                frame,
+                owner_failover: true,
+                requires_api_key,
+            },
             WsUnknownReasoningRecovery::Unestablished => {
                 if dispatchable_candidates <= 1 {
                     WsUnknownReasoningPlan::RetryStripAll { unknown_keys: keys }
@@ -2084,6 +2089,7 @@ impl Lifecycle {
                             body: Arc::new(stripped),
                             frame,
                             owner_failover: false,
+                            requires_api_key: false,
                         }
                     } else {
                         WsUnknownReasoningPlan::None
@@ -3093,7 +3099,11 @@ impl Lifecycle {
             let mut pool = candidates.clone();
             pool.retain(|candidate| candidate.upstream_id != affinity.target_upstream_id);
             if !ctx.codex_backend {
-                retain_api_key_candidates(&mut pool, &ctx.compat_api_key_only_features);
+                if !ctx.compat_api_key_only_features.is_empty() {
+                    pool.retain(|candidate| {
+                        candidate.kind == cc_lb_domain::UpstreamKind::OpenaiApiKey
+                    });
+                }
                 if request_kind == RequestKind::OpenaiAudioTranscriptions
                     && ctx.openai_oauth_compat.is_some_and(|policy| {
                         policy.transcription == cc_lb_domain::EnabledOrDisabled::Disabled

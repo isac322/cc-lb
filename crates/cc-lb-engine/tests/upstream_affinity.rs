@@ -4829,6 +4829,64 @@ async fn strip_and_failover_rejects_account_owned_references_409() {
                 }
             ]
         }),
+        // additional_tools carrying image_generation.input_image_mask.file_id
+        json!({
+            "model": "gpt-5.4",
+            "input": [
+                openai_reasoning_input(owned_reasoning),
+                {
+                    "type": "additional_tools",
+                    "tools": [{"type": "image_generation", "input_image_mask": {"file_id": "file_add_mask_1"}}]
+                },
+                {"role": "user", "content": "edit"}
+            ]
+        }),
+        // additional_tools carrying shell.environment container_reference
+        json!({
+            "model": "gpt-5.4",
+            "input": [
+                openai_reasoning_input(owned_reasoning),
+                {
+                    "type": "additional_tools",
+                    "tools": [{"type": "shell", "environment": {"type": "container_reference", "container_id": "cntr_add_1"}}]
+                },
+                {"role": "user", "content": "run"}
+            ]
+        }),
+        // tool_search_output carrying image_generation.input_image_mask.file_id
+        json!({
+            "model": "gpt-5.4",
+            "input": [
+                openai_reasoning_input(owned_reasoning),
+                {
+                    "type": "tool_search_output",
+                    "tools": [{"type": "image_generation", "input_image_mask": {"file_id": "file_search_mask_1"}}]
+                },
+                {"role": "user", "content": "edit"}
+            ]
+        }),
+        // top-level mcp tool with tunnel_id
+        json!({
+            "model": "gpt-5.4",
+            "tools": [{"type": "mcp", "server_label": "priv", "tunnel_id": "tun_1"}],
+            "input": [openai_reasoning_input(owned_reasoning), {"role": "user", "content": "call"}]
+        }),
+        // namespace tool wrapping nested mcp tool with tunnel_id
+        json!({
+            "model": "gpt-5.4",
+            "tools": [{
+                "type": "namespace",
+                "name": "priv_ns",
+                "tools": [{"type": "mcp", "server_label": "priv", "tunnel_id": "tun_nested_1"}]
+            }],
+            "input": [openai_reasoning_input(owned_reasoning), {"role": "user", "content": "call"}]
+        }),
+        // org-scoped prompt_cache_options.comparison_response_id
+        json!({
+            "model": "gpt-5.4",
+            "prompt_cache_options": {"ttl": "30m", "comparison_response_id": "resp_cmp_1"},
+            "input": [openai_reasoning_input(owned_reasoning), {"role": "user", "content": "compare"}]
+        }),
     ];
 
     for (idx, body) in blocked_payloads.iter().enumerate() {
@@ -4845,8 +4903,8 @@ async fn strip_and_failover_rejects_account_owned_references_409() {
 
     // Controls: `code_interpreter` (`{"type": "auto"}`), `shell` (`{"type": "container_auto"}`),
     // `image_generation` (`input_image_mask.image_url`), `function` schema `examples`, replayed
-    // `mcp_list_tools.input_schema`, and assistant `annotations` must remain failover-eligible
-    // on HTTP and WS!
+    // `mcp_list_tools.input_schema`, `additional_tools` schemas, `prompt_cache_options.ttl`,
+    // and assistant `annotations` must remain failover-eligible on HTTP and WS.
     let control_bodies = [
         json!({
             "model": "gpt-5.4",
@@ -4893,6 +4951,25 @@ async fn strip_and_failover_rejects_account_owned_references_409() {
                 {"role": "user", "content": "continue"}
             ]
         }),
+        json!({
+            "model": "gpt-5.4",
+            "prompt_cache_options": {"ttl": "30m", "mode": "implicit"},
+            "input": [
+                openai_reasoning_input(owned_reasoning),
+                {
+                    "type": "additional_tools",
+                    "tools": [{
+                        "type": "function",
+                        "name": "schema_only",
+                        "parameters": {
+                            "type": "object",
+                            "examples": [{"file_id": "file_add_ex", "tunnel_id": "tun_ex"}]
+                        }
+                    }]
+                },
+                {"role": "user", "content": "continue"}
+            ]
+        }),
     ];
     for (idx, body) in control_bodies.iter().enumerate() {
         let control_resp = handle_authenticated(&lc, responses_request(body.clone()))
@@ -4905,7 +4982,7 @@ async fn strip_and_failover_rejects_account_owned_references_409() {
         );
     }
     let captured = dispatch.captured_requests();
-    assert_eq!(captured.len(), 2);
+    assert_eq!(captured.len(), 3);
     assert!(
         captured[0].0.contains("openai-api-key.local"),
         "{}",
@@ -4913,6 +4990,7 @@ async fn strip_and_failover_rejects_account_owned_references_409() {
     );
     assert_eq!(captured[0].1["input"].as_array().unwrap().len(), 1);
     assert_eq!(captured[1].1["input"].as_array().unwrap().len(), 3);
+    assert_eq!(captured[2].1["input"].as_array().unwrap().len(), 2);
 
     let mut gw = ws1296_gateway(lc).await;
     for (idx, body) in blocked_payloads.iter().enumerate() {
@@ -4946,7 +5024,7 @@ async fn strip_and_failover_rejects_account_owned_references_409() {
         );
         ctrl_gw.close();
     }
-    assert_eq!(dispatch.call_count(), 2);
+    assert_eq!(dispatch.call_count(), 3);
 }
 
 #[tokio::test]
@@ -4959,16 +5037,19 @@ async fn strip_and_failover_public_ws_code_interpreter_auto_prefers_api_key_over
     let store = Arc::new(MemoryAffinityStore::default());
     store.insert(ws1296_openai_key(owned_reasoning), owner_a);
 
-    let lc = lifecycle(
-        vec![
-            openai_oauth_upstream_record(owner_a, "oauth-a", false),
-            openai_oauth_upstream_record(oauth_b, "oauth-b", true),
-            openai_upstream_record(api_key_c, "openai-api-key", true),
-        ],
-        Arc::new(RecordingDispatch::default()),
-        Some(store),
-    );
-    let mut public_gw = ws1296_gateway(lc).await;
+    let make_mixed_lc = || {
+        lifecycle(
+            vec![
+                openai_oauth_upstream_record(owner_a, "oauth-a", false),
+                openai_oauth_upstream_record(oauth_b, "oauth-b", true),
+                openai_upstream_record(api_key_c, "openai-api-key", true),
+            ],
+            Arc::new(RecordingDispatch::default()),
+            Some(store.clone()),
+        )
+    };
+
+    let mut public_gw = ws1296_gateway(make_mixed_lc()).await;
     let frame = Bytes::from(
         json!({
             "type": "response.create",
@@ -4992,18 +5073,37 @@ async fn strip_and_failover_public_ws_code_interpreter_auto_prefers_api_key_over
     assert_eq!(parsed_frame["input"].as_array().unwrap().len(), 1);
     public_gw.close();
 
-    // OAuth-only subcase (no API key enabled): public WS code_interpreter request must fail closed
-    // with 409 rather than forwarding the hosted tool to OAuth.
+    // OAuth-only subcase (no API key enabled): both HTTP and public WS code_interpreter owner
+    // failover must fail closed with 409 rather than reaching OAuth request shaping.
     let oauth_only_store = Arc::new(MemoryAffinityStore::default());
     oauth_only_store.insert(ws1296_openai_key(owned_reasoning), owner_a);
+    let oauth_only_dispatch = Arc::new(RecordingDispatch::default());
     let oauth_only_lc = lifecycle(
         vec![
             openai_oauth_upstream_record(owner_a, "oauth-a", false),
             openai_oauth_upstream_record(oauth_b, "oauth-b", true),
         ],
-        Arc::new(RecordingDispatch::default()),
+        oauth_only_dispatch.clone(),
         Some(oauth_only_store),
     );
+    let http_err_resp = handle_authenticated(
+        &oauth_only_lc,
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}],
+            "input": [openai_reasoning_input(owned_reasoning), {"role": "user", "content": "calc"}]
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        http_err_resp.status(),
+        StatusCode::CONFLICT,
+        "HTTP public code_interpreter with only OAuth fallback must return 409"
+    );
+    assert_eq!(oauth_only_dispatch.call_count(), 0);
+
     let mut oauth_only_gw = ws1296_gateway(oauth_only_lc).await;
     let err = ws1296_admit(&mut oauth_only_gw, frame)
         .await
@@ -5011,6 +5111,125 @@ async fn strip_and_failover_public_ws_code_interpreter_auto_prefers_api_key_over
     assert_eq!(err.status, 409);
     assert_eq!(err.code, "upstream_affinity_unavailable");
     oauth_only_gw.close();
+
+    // Queued race subcase: Turn 2 (public code_interpreter failover requiring API key) queues on
+    // a busy lane while Turn 1 is connecting to OAuth B. Even after Turn 1 pins `session_upstream`
+    // to OAuth B, Turn 2 must keep its admitted API-key candidate and reject OAuth B with 409;
+    // subsequent Turn 3 admitted under `SessionHint(oauth_b)` must likewise route to API key C.
+    let mut queued_gw = ws1296_gateway(make_mixed_lc()).await;
+    let turn1_frame = Bytes::from(
+        json!({
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "stream_id": "lane-1",
+            "store": false,
+            "input": [{"role": "user", "content": "warm oauth session"}]
+        })
+        .to_string(),
+    );
+    let d1 = ws1296_admit(&mut queued_gw, turn1_frame)
+        .await
+        .expect("Turn 1 admits cleanly")
+        .expect("Turn 1 dispatches immediately");
+
+    let turn2_frame = Bytes::from(
+        json!({
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "stream_id": "lane-1",
+            "store": false,
+            "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}],
+            "input": [ws1296_reasoning_item(owned_reasoning), {"role": "user", "content": "queued calc"}]
+        })
+        .to_string(),
+    );
+    assert!(
+        ws1296_admit(&mut queued_gw, turn2_frame)
+            .await
+            .expect("queued Turn 2 admits cleanly")
+            .is_none(),
+        "Turn 2 must queue behind active Turn 1 on lane-1"
+    );
+
+    queued_gw.assign_connection(d1.turn_id, 1, oauth_b, "oauth-b");
+    queued_gw.commit_send_attempt(d1.turn_id);
+    let _ = queued_gw.sent(d1.turn_id);
+    let _ = queued_gw
+        .provider_message(
+            1,
+            &Bytes::from(
+                json!({
+                    "type": "response.created",
+                    "stream_id": "lane-1",
+                    "response": {"id": "resp_warm_oauth", "status": "in_progress", "store": false}
+                })
+                .to_string(),
+            ),
+        )
+        .await
+        .unwrap();
+    let popped = queued_gw
+        .provider_message(
+            1,
+            &Bytes::from(
+                json!({
+                    "type": "response.completed",
+                    "stream_id": "lane-1",
+                    "response": {
+                        "id": "resp_warm_oauth",
+                        "status": "completed",
+                        "store": false,
+                        "usage": {"input_tokens": 10, "output_tokens": 2}
+                    }
+                })
+                .to_string(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(queued_gw.session_upstream(), Some(oauth_b));
+    let d2 = popped
+        .dispatches
+        .into_iter()
+        .find(|d| d.turn_id != d1.turn_id && !d.control)
+        .expect("completing Turn 1 dispatches queued Turn 2");
+    assert_eq!(d2.candidates.len(), 1);
+    assert_eq!(
+        d2.candidates[0].upstream_id, api_key_c,
+        "queued API-key-only owner failover must not be overwritten by OAuth session pin"
+    );
+    let oauth_err = queued_gw
+        .validate_candidate_for_send(d2.turn_id, oauth_b, None, false)
+        .await
+        .expect_err("OAuth candidate must be rejected for queued API-key-only owner failover");
+    assert_eq!(oauth_err.status, 409);
+    assert_eq!(oauth_err.code, "upstream_affinity_unavailable");
+    queued_gw
+        .validate_candidate_for_send(d2.turn_id, api_key_c, None, false)
+        .await
+        .expect("API-key candidate validates cleanly for queued Turn 2");
+
+    let turn3_frame = Bytes::from(
+        json!({
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "stream_id": "lane-2",
+            "store": false,
+            "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}],
+            "input": [ws1296_reasoning_item(owned_reasoning), {"role": "user", "content": "later calc"}]
+        })
+        .to_string(),
+    );
+    let d3 = ws1296_admit(&mut queued_gw, turn3_frame)
+        .await
+        .expect("Turn 3 under SessionHint(oauth_b) admits cleanly")
+        .expect("Turn 3 dispatches immediately");
+    assert_eq!(d3.candidates.len(), 1);
+    assert_eq!(
+        d3.candidates[0].upstream_id, api_key_c,
+        "SessionHint(oauth_b) must not override API-key requirement on owner failover"
+    );
+    queued_gw.close();
 }
 
 #[tokio::test]

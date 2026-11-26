@@ -31,7 +31,7 @@ fn is_prewarm_body(body: &serde_json::Value) -> bool {
 use crate::response_transform::ResponseTransformContext;
 use crate::terminal_observer::{
     InternalFailure, LifecycleContext, StreamTerminationCause, StreamTerminationOutcome,
-    UpstreamErrorCode, record_websocket_terminal_span,
+    UpstreamErrorCode, error_codes, record_websocket_terminal_span,
 };
 use crate::upstream_affinity::{
     is_openai_invalid_encrypted_content_error_value, strip_openai_reasoning_encrypted_items,
@@ -221,6 +221,7 @@ pub(crate) enum WsUnknownReasoningPlan {
         body: Arc<Value>,
         frame: Bytes,
         owner_failover: bool,
+        requires_api_key: bool,
     },
     /// Resolved or single dispatchable upstream: send verbatim first and retry once
     /// stripping all encrypted reasoning items on HTTP-400 `invalid_encrypted_content`.
@@ -693,6 +694,21 @@ struct Turn {
     all_candidates_oauth: bool,
     admitted_session_upstream: Option<Uuid>,
     owner_failover_replacement: bool,
+    owner_failover_requires_api_key: bool,
+}
+
+impl Turn {
+    fn ensure_credential_eligible(&self, is_api_key: bool) -> Result<(), WebSocketError> {
+        if self.owner_failover_requires_api_key && !is_api_key {
+            return Err(WebSocketError::new(
+                409,
+                error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                "This turn requires an OpenAI API-key upstream",
+            )
+            .with_stream(self.lane.clone()));
+        }
+        Ok(())
+    }
 }
 
 /// Signed WebSocket connection metadata produced off the relay loop.
@@ -1149,15 +1165,17 @@ impl ResponsesWebSocketGateway {
             pending_affinity_keys,
             deferred_unestablished,
             owner_failover_replacement,
+            owner_failover_requires_api_key,
         ) = match std::mem::replace(
             &mut prepared.unknown_reasoning_plan,
             WsUnknownReasoningPlan::None,
         ) {
-            WsUnknownReasoningPlan::None => (body, frame, None, Vec::new(), None, false),
+            WsUnknownReasoningPlan::None => (body, frame, None, Vec::new(), None, false, false),
             WsUnknownReasoningPlan::StrippedUpfront {
                 body: stripped_body,
                 frame: stripped_frame,
                 owner_failover,
+                requires_api_key,
             } => (
                 stripped_body,
                 stripped_frame,
@@ -1165,6 +1183,7 @@ impl ResponsesWebSocketGateway {
                 Vec::new(),
                 None,
                 owner_failover,
+                requires_api_key,
             ),
             WsUnknownReasoningPlan::RetryStripAll { unknown_keys } => (
                 body,
@@ -1172,6 +1191,7 @@ impl ResponsesWebSocketGateway {
                 Some(WsUnknownReasoningRetry::All),
                 unknown_keys,
                 None,
+                false,
                 false,
             ),
             WsUnknownReasoningPlan::DeferredUnestablished { unknown_keys } => {
@@ -1190,6 +1210,7 @@ impl ResponsesWebSocketGateway {
                         currently_stripped: false,
                     }),
                     false,
+                    false,
                 )
             }
             WsUnknownReasoningPlan::RetryStripPending {
@@ -1201,6 +1222,7 @@ impl ResponsesWebSocketGateway {
                 Some(WsUnknownReasoningRetry::Pending(pending_digests)),
                 pending_keys,
                 None,
+                false,
                 false,
             ),
         };
@@ -1293,6 +1315,7 @@ impl ResponsesWebSocketGateway {
                 all_candidates_oauth,
                 admitted_session_upstream: self.session_upstream,
                 owner_failover_replacement,
+                owner_failover_requires_api_key,
             },
         );
         if !self.lanes.contains_key(&lane) {
@@ -1514,6 +1537,7 @@ impl ResponsesWebSocketGateway {
                 all_candidates_oauth,
                 admitted_session_upstream: self.session_upstream,
                 owner_failover_replacement: false,
+                owner_failover_requires_api_key: false,
             },
         );
         let lane_state = self.lanes.entry(lane).or_default();
@@ -1736,7 +1760,8 @@ impl ResponsesWebSocketGateway {
                     self.session_oauth
                         && turn.pinned.is_none()
                         && !turn.prepared.has_explicit_affinity
-                        && turn.admitted_session_upstream.is_none(),
+                        && turn.admitted_session_upstream.is_none()
+                        && !turn.owner_failover_requires_api_key,
                     turn.lane.clone(),
                     turn.prepared.has_explicit_affinity,
                 )
@@ -1843,6 +1868,7 @@ impl ResponsesWebSocketGateway {
                     "The admitted response is no longer available",
                 )
             })?;
+            turn.ensure_credential_eligible(candidate.is_api_key)?;
             let reject_exhausted = Self::reject_exhausted_fallback(turn, candidate.upstream_id);
             if !reject_exhausted {
                 return Ok(());
@@ -1926,6 +1952,7 @@ impl ResponsesWebSocketGateway {
                     "The admitted response is no longer available",
                 )
             })?;
+            turn.ensure_credential_eligible(candidate.is_api_key)?;
             if turn
                 .prepared
                 .reservation
@@ -2297,6 +2324,7 @@ impl ResponsesWebSocketGateway {
             .copied()
             .or_else(|| self.lifecycle.is_openai_oauth_upstream(upstream_id))
             .unwrap_or(false);
+        turn.ensure_credential_eligible(!is_candidate_oauth)?;
         if self.session_oauth
             && is_candidate_oauth
             && !turn.prepared.has_explicit_affinity
@@ -5103,6 +5131,7 @@ pub(crate) mod tests {
                 all_candidates_oauth: false,
                 admitted_session_upstream: None,
                 owner_failover_replacement: false,
+                owner_failover_requires_api_key: false,
             },
         );
         gateway.lanes.insert(
@@ -5754,6 +5783,7 @@ pub(crate) mod tests {
                     all_candidates_oauth: false,
                     admitted_session_upstream: None,
                     owner_failover_replacement: false,
+                    owner_failover_requires_api_key: false,
                 },
             );
             gateway.finish_turn(1, None);
@@ -6757,6 +6787,7 @@ pub(crate) mod tests {
             all_candidates_oauth: false,
             admitted_session_upstream: None,
             owner_failover_replacement: false,
+            owner_failover_requires_api_key: false,
         }
     }
 

@@ -606,6 +606,7 @@ fn object_has_direct_account_owned_reference(object: &Map<String, Value>) -> boo
     reference_id(object.get("file_id")).is_some()
         || reference_id(object.get("container_id")).is_some()
         || reference_id(object.get("vector_store_id")).is_some()
+        || reference_id(object.get("tunnel_id")).is_some()
         || has_non_empty_array(object, "file_ids")
         || has_non_empty_array(object, "vector_store_ids")
         || object
@@ -613,11 +614,14 @@ fn object_has_direct_account_owned_reference(object: &Map<String, Value>) -> boo
             .is_some_and(has_owned_container_reference)
 }
 
-fn tool_has_account_owned_reference(tool: &Value) -> bool {
+fn tool_has_account_owned_reference_depth(tool: &Value, depth: usize) -> bool {
+    if depth >= 8 {
+        return true;
+    }
     let Some(object) = tool.as_object() else {
         return false;
     };
-    object_has_direct_account_owned_reference(object)
+    if object_has_direct_account_owned_reference(object)
         || object
             .get("input_image_mask")
             .and_then(Value::as_object)
@@ -625,17 +629,42 @@ fn tool_has_account_owned_reference(tool: &Value) -> bool {
         || object
             .get("environment")
             .is_some_and(has_owned_shell_environment_reference)
+    {
+        return true;
+    }
+    object.get("type").and_then(Value::as_str) == Some("namespace")
+        && object
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(|nested| {
+                nested
+                    .iter()
+                    .any(|inner| tool_has_account_owned_reference_depth(inner, depth + 1))
+            })
+}
+
+fn tool_has_account_owned_reference(tool: &Value) -> bool {
+    tool_has_account_owned_reference_depth(tool, 0)
 }
 
 fn input_item_has_account_owned_reference(item: &Value) -> bool {
     let Some(object) = item.as_object() else {
         return false;
     };
-    if object.get("type").and_then(Value::as_str) == Some("item_reference")
+    let item_type = object.get("type").and_then(Value::as_str);
+    if item_type == Some("item_reference")
         || object_has_direct_account_owned_reference(object)
         || object
             .get("environment")
             .is_some_and(has_owned_shell_environment_reference)
+    {
+        return true;
+    }
+    if matches!(item_type, Some("additional_tools" | "tool_search_output"))
+        && object
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(|tools| tools.iter().any(tool_has_account_owned_reference))
     {
         return true;
     }
@@ -652,7 +681,7 @@ fn input_item_has_account_owned_reference(item: &Value) -> bool {
         return true;
     }
     matches!(
-        object.get("type").and_then(Value::as_str),
+        item_type,
         Some("function_call_output" | "custom_tool_call_output" | "computer_call_output")
     ) && object.get("output").is_some_and(|output| {
         output
@@ -670,11 +699,13 @@ fn input_item_has_account_owned_reference(item: &Value) -> bool {
 /// Returns whether a known-owner OpenAI Responses request with an unavailable
 /// owner may strip `reasoning.encrypted_content` items and fail over.
 /// Requires `is_openai_unknown_reasoning_only` and rejects requests that also
-/// carry account-owned references in typed provider positions (`prompt`,
-/// `item_reference`, `file_id`, `file_ids`, `container_id`, explicit `container`
-/// ids or `container.file_ids`, `vector_store_id`, `vector_store_ids`,
+/// carry account- or org-owned references in typed provider positions (`prompt`,
+/// `prompt_cache_options.comparison_response_id`, `item_reference`, `file_id`,
+/// `file_ids`, `container_id`, explicit `container` ids or `container.file_ids`,
+/// `vector_store_id`, `vector_store_ids`, MCP `tunnel_id`,
 /// `image_generation.input_image_mask.file_id`, `computer_call_output.output`,
-/// or shell `environment` container / skill references), while leaving schemas,
+/// shell `environment` container/skill references, and `additional_tools` /
+/// `tool_search_output` / `namespace` tool lists), while leaving schemas,
 /// annotations, and fresh auto containers (`{"type": "auto"}` /
 /// `{"type": "container_auto"}` without `file_ids`) eligible for failover.
 pub(crate) fn is_openai_reasoning_owner_failover_eligible(
@@ -688,6 +719,14 @@ pub(crate) fn is_openai_reasoning_owner_failover_eligible(
         return false;
     };
     if object.get("prompt").is_some_and(|v| !v.is_null()) {
+        return false;
+    }
+    if object
+        .get("prompt_cache_options")
+        .and_then(Value::as_object)
+        .is_some_and(|opts| reference_id(opts.get("comparison_response_id")).is_some())
+        || reference_id(object.get("comparison_response_id")).is_some()
+    {
         return false;
     }
     if object
