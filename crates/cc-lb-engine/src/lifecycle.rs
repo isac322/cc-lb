@@ -1736,6 +1736,9 @@ impl Lifecycle {
             && let Some(ref resolved_affinity) = affinity
             && self.config.unavailable_openai_reasoning_owner
                 == cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover
+            && (self.config.unknown_openai_reasoning
+                != cc_lb_domain::UnknownOpenaiReasoningPolicy::FailClosed
+                || resolved_affinity.pending_keys.is_empty())
             && is_openai_reasoning_owner_failover_eligible(
                 ProviderCapability::OpenaiResponses,
                 body,
@@ -1747,12 +1750,14 @@ impl Lifecycle {
             {
                 pool.retain(|candidate| candidate.upstream_id == hint_id);
             }
-            if !codex_backend {
-                let api_key_only = compat_request::api_key_only_features(
+            if !codex_backend
+                && !compat_request::api_key_only_features(
                     Some(body),
                     ProviderCapability::OpenaiResponses,
-                );
-                retain_api_key_candidates(&mut pool, &api_key_only);
+                )
+                .is_empty()
+            {
+                pool.retain(|candidate| candidate.kind == cc_lb_domain::UpstreamKind::OpenaiApiKey);
             }
             Some((resolved_affinity.target_upstream_id, pool))
         } else {
@@ -2043,7 +2048,11 @@ impl Lifecycle {
         let plan = match recovery {
             WsUnknownReasoningRecovery::None => WsUnknownReasoningPlan::None,
             WsUnknownReasoningRecovery::StrippedOwnerFailover { body, frame } => {
-                WsUnknownReasoningPlan::StrippedUpfront { body, frame }
+                WsUnknownReasoningPlan::StrippedUpfront {
+                    body,
+                    frame,
+                    owner_failover: true,
+                }
             }
             WsUnknownReasoningRecovery::Unestablished => {
                 if dispatchable_candidates <= 1 {
@@ -2074,6 +2083,7 @@ impl Lifecycle {
                         WsUnknownReasoningPlan::StrippedUpfront {
                             body: Arc::new(stripped),
                             frame,
+                            owner_failover: false,
                         }
                     } else {
                         WsUnknownReasoningPlan::None
@@ -3074,6 +3084,9 @@ impl Lifecycle {
         let ineligible_reasoning_fallback_pool = if let Some(affinity) = request_affinity.as_ref()
             && self.config.unavailable_openai_reasoning_owner
                 == cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover
+            && (self.config.unknown_openai_reasoning
+                != cc_lb_domain::UnknownOpenaiReasoningPolicy::FailClosed
+                || affinity.pending_keys.is_empty())
             && body_view.value().is_some_and(|value| {
                 is_openai_reasoning_owner_failover_eligible(request_capability, value)
             }) {

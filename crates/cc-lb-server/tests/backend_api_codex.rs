@@ -2035,31 +2035,42 @@ async fn backend_codex_disabled_reasoning_owner_strips_and_fails_over_within_oau
         .await
         .expect("query request_events_v1");
         if rows.len() == 4 {
-            assert_eq!(rows[0].get::<Option<i64>, _>("list_status"), Some(200));
+            let ok_a: Vec<_> = rows
+                .iter()
+                .filter(|r| {
+                    r.get::<Option<String>, _>("upstream_name").as_deref() == Some("oauth-owner-a")
+                })
+                .collect();
+            assert_eq!(ok_a.len(), 1, "expected 1 row for oauth-owner-a");
+            assert_eq!(ok_a[0].get::<Option<i64>, _>("list_status"), Some(200));
             assert_eq!(
-                rows[0].get::<Option<String>, _>("upstream_name").as_deref(),
-                Some("oauth-owner-a")
-            );
-            assert_eq!(
-                rows[0].get::<Option<i64>, _>("cache_read_input_tokens"),
+                ok_a[0].get::<Option<i64>, _>("cache_read_input_tokens"),
                 Some(64)
             );
-            assert_eq!(rows[1].get::<Option<i64>, _>("list_status"), Some(200));
+
+            let ok_b: Vec<_> = rows
+                .iter()
+                .filter(|r| {
+                    r.get::<Option<String>, _>("upstream_name").as_deref()
+                        == Some("oauth-fallback-b")
+                })
+                .collect();
+            assert_eq!(ok_b.len(), 1, "expected 1 row for oauth-fallback-b");
+            assert_eq!(ok_b[0].get::<Option<i64>, _>("list_status"), Some(200));
             assert_eq!(
-                rows[1].get::<Option<String>, _>("upstream_name").as_deref(),
-                Some("oauth-fallback-b")
-            );
-            assert_eq!(
-                rows[1].get::<Option<i64>, _>("cache_read_input_tokens"),
+                ok_b[0].get::<Option<i64>, _>("cache_read_input_tokens"),
                 Some(0)
             );
-            for row in &rows[2..4] {
-                assert_eq!(row.get::<Option<i64>, _>("list_status"), Some(409));
-                assert_eq!(
-                    row.get::<Option<String>, _>("error_code").as_deref(),
-                    Some("upstream_affinity_unavailable")
-                );
-            }
+
+            let conflicts = rows
+                .iter()
+                .filter(|r| {
+                    r.get::<Option<i64>, _>("list_status") == Some(409)
+                        && r.get::<Option<String>, _>("error_code").as_deref()
+                            == Some("upstream_affinity_unavailable")
+                })
+                .count();
+            assert_eq!(conflicts, 2, "expected 2 affinity 409 conflict rows");
             break;
         }
         assert!(

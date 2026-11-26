@@ -220,6 +220,7 @@ pub(crate) enum WsUnknownReasoningPlan {
     StrippedUpfront {
         body: Arc<Value>,
         frame: Bytes,
+        owner_failover: bool,
     },
     /// Resolved or single dispatchable upstream: send verbatim first and retry once
     /// stripping all encrypted reasoning items on HTTP-400 `invalid_encrypted_content`.
@@ -691,6 +692,7 @@ struct Turn {
     has_any_oauth_candidate: bool,
     all_candidates_oauth: bool,
     admitted_session_upstream: Option<Uuid>,
+    owner_failover_replacement: bool,
 }
 
 /// Signed WebSocket connection metadata produced off the relay loop.
@@ -1140,51 +1142,68 @@ impl ResponsesWebSocketGateway {
             )
             .await
             .map_err(|error| error.with_stream(lane.clone()))?;
-        let (body, frame, unknown_reasoning_retry, pending_affinity_keys, deferred_unestablished) =
-            match std::mem::replace(
-                &mut prepared.unknown_reasoning_plan,
-                WsUnknownReasoningPlan::None,
-            ) {
-                WsUnknownReasoningPlan::None => (body, frame, None, Vec::new(), None),
-                WsUnknownReasoningPlan::StrippedUpfront {
-                    body: stripped_body,
-                    frame: stripped_frame,
-                } => (stripped_body, stripped_frame, None, Vec::new(), None),
-                WsUnknownReasoningPlan::RetryStripAll { unknown_keys } => (
-                    body,
-                    frame,
-                    Some(WsUnknownReasoningRetry::All),
-                    unknown_keys,
+        let (
+            body,
+            frame,
+            unknown_reasoning_retry,
+            pending_affinity_keys,
+            deferred_unestablished,
+            owner_failover_replacement,
+        ) = match std::mem::replace(
+            &mut prepared.unknown_reasoning_plan,
+            WsUnknownReasoningPlan::None,
+        ) {
+            WsUnknownReasoningPlan::None => (body, frame, None, Vec::new(), None, false),
+            WsUnknownReasoningPlan::StrippedUpfront {
+                body: stripped_body,
+                frame: stripped_frame,
+                owner_failover,
+            } => (
+                stripped_body,
+                stripped_frame,
+                None,
+                Vec::new(),
+                None,
+                owner_failover,
+            ),
+            WsUnknownReasoningPlan::RetryStripAll { unknown_keys } => (
+                body,
+                frame,
+                Some(WsUnknownReasoningRetry::All),
+                unknown_keys,
+                None,
+                false,
+            ),
+            WsUnknownReasoningPlan::DeferredUnestablished { unknown_keys } => {
+                let original_bytes = frame.len().saturating_add(json_owned_bytes(&body));
+                (
+                    body.clone(),
+                    frame.clone(),
                     None,
-                ),
-                WsUnknownReasoningPlan::DeferredUnestablished { unknown_keys } => {
-                    let original_bytes = frame.len().saturating_add(json_owned_bytes(&body));
-                    (
-                        body.clone(),
-                        frame.clone(),
-                        None,
-                        Vec::new(),
-                        Some(DeferredUnestablishedReasoning {
-                            original_body: body,
-                            original_frame: frame,
-                            original_bytes,
-                            stripped_extra_bytes: 0,
-                            unknown_keys,
-                            currently_stripped: false,
-                        }),
-                    )
-                }
-                WsUnknownReasoningPlan::RetryStripPending {
-                    pending_digests,
-                    pending_keys,
-                } => (
-                    body,
-                    frame,
-                    Some(WsUnknownReasoningRetry::Pending(pending_digests)),
-                    pending_keys,
-                    None,
-                ),
-            };
+                    Vec::new(),
+                    Some(DeferredUnestablishedReasoning {
+                        original_body: body,
+                        original_frame: frame,
+                        original_bytes,
+                        stripped_extra_bytes: 0,
+                        unknown_keys,
+                        currently_stripped: false,
+                    }),
+                    false,
+                )
+            }
+            WsUnknownReasoningPlan::RetryStripPending {
+                pending_digests,
+                pending_keys,
+            } => (
+                body,
+                frame,
+                Some(WsUnknownReasoningRetry::Pending(pending_digests)),
+                pending_keys,
+                None,
+                false,
+            ),
+        };
         let actual_charge = frame
             .len()
             .saturating_add(json_owned_bytes(&body))
@@ -1273,6 +1292,7 @@ impl ResponsesWebSocketGateway {
                 has_any_oauth_candidate: false,
                 all_candidates_oauth,
                 admitted_session_upstream: self.session_upstream,
+                owner_failover_replacement,
             },
         );
         if !self.lanes.contains_key(&lane) {
@@ -1493,6 +1513,7 @@ impl ResponsesWebSocketGateway {
                 has_any_oauth_candidate: false,
                 all_candidates_oauth,
                 admitted_session_upstream: self.session_upstream,
+                owner_failover_replacement: false,
             },
         );
         let lane_state = self.lanes.entry(lane).or_default();
@@ -1802,7 +1823,9 @@ impl ResponsesWebSocketGateway {
     }
 
     fn reject_exhausted_fallback(turn: &Turn, upstream_id: Uuid) -> bool {
-        turn.pinned.is_none() && Some(upstream_id) != turn.initial_selected_upstream_id
+        turn.pinned.is_none()
+            && (turn.owner_failover_replacement
+                || Some(upstream_id) != turn.initial_selected_upstream_id)
     }
 
     /// Revalidate an unpinned fallback candidate's fresh quota and routing
@@ -5079,6 +5102,7 @@ pub(crate) mod tests {
                 has_any_oauth_candidate: false,
                 all_candidates_oauth: false,
                 admitted_session_upstream: None,
+                owner_failover_replacement: false,
             },
         );
         gateway.lanes.insert(
@@ -5729,6 +5753,7 @@ pub(crate) mod tests {
                     has_any_oauth_candidate: false,
                     all_candidates_oauth: false,
                     admitted_session_upstream: None,
+                    owner_failover_replacement: false,
                 },
             );
             gateway.finish_turn(1, None);
@@ -6731,6 +6756,7 @@ pub(crate) mod tests {
             has_any_oauth_candidate: false,
             all_candidates_oauth: false,
             admitted_session_upstream: None,
+            owner_failover_replacement: false,
         }
     }
 

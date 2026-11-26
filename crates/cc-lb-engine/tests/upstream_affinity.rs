@@ -4715,15 +4715,18 @@ async fn strip_and_failover_rejects_account_owned_references_409() {
         "status": "completed",
         "output": []
     })));
-    let lc = lifecycle(
-        vec![
-            openai_oauth_upstream_record(owner_a, "oauth-a", false),
-            openai_oauth_upstream_record(fallback_b, "oauth-b", true),
-            openai_upstream_record(api_key_c, "openai-api-key", true),
-        ],
-        dispatch.clone(),
-        Some(store),
-    );
+    let make_lc = || {
+        lifecycle(
+            vec![
+                openai_oauth_upstream_record(owner_a, "oauth-a", false),
+                openai_oauth_upstream_record(fallback_b, "oauth-b", true),
+                openai_upstream_record(api_key_c, "openai-api-key", true),
+            ],
+            dispatch.clone(),
+            Some(store.clone()),
+        )
+    };
+    let lc = make_lc();
 
     // Every request carrying an account-owned file/container/vector-store/prompt/item reference
     // alongside disabled-owner reasoning must stay fail-closed with 409 on HTTP and WS.
@@ -4784,6 +4787,48 @@ async fn strip_and_failover_rejects_account_owned_references_409() {
                 {"type": "code_interpreter_call", "id": "ci_1", "container_id": "cntr_call_1"}
             ]
         }),
+        // image_generation.input_image_mask.file_id
+        json!({
+            "model": "gpt-5.4",
+            "tools": [{"type": "image_generation", "input_image_mask": {"file_id": "file_mask_1"}}],
+            "input": [openai_reasoning_input(owned_reasoning), {"role": "user", "content": "edit"}]
+        }),
+        // shell.environment container_reference
+        json!({
+            "model": "gpt-5.4",
+            "tools": [{"type": "shell", "environment": {"type": "container_reference", "container_id": "cntr_shell_1"}}],
+            "input": [openai_reasoning_input(owned_reasoning), {"role": "user", "content": "run"}]
+        }),
+        // shell.environment container_auto with uploaded file_ids
+        json!({
+            "model": "gpt-5.4",
+            "tools": [{"type": "shell", "environment": {"type": "container_auto", "file_ids": ["file_shell_1"]}}],
+            "input": [openai_reasoning_input(owned_reasoning), {"role": "user", "content": "run"}]
+        }),
+        // function_call_output with array output carrying input_file.file_id
+        json!({
+            "model": "gpt-5.4",
+            "input": [
+                openai_reasoning_input(owned_reasoning),
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": [{"type": "input_file", "file_id": "file_out_1"}]
+                }
+            ]
+        }),
+        // computer_call_output with object output carrying file_id
+        json!({
+            "model": "gpt-5.4",
+            "input": [
+                openai_reasoning_input(owned_reasoning),
+                {
+                    "type": "computer_call_output",
+                    "call_id": "call_comp_1",
+                    "output": {"type": "computer_screenshot", "file_id": "file_screenshot_1"}
+                }
+            ]
+        }),
     ];
 
     for (idx, body) in blocked_payloads.iter().enumerate() {
@@ -4798,36 +4843,76 @@ async fn strip_and_failover_rejects_account_owned_references_409() {
     }
     assert_eq!(dispatch.call_count(), 0);
 
-    // Controls: `code_interpreter` with `container: {"type": "auto"}` (no file_ids) AND a
-    // `function` tool whose JSON `parameters` schema declares a property named `"file_id"` must
-    // still qualify for failover onto API-key / OAuth fallback!
-    let control_body = json!({
-        "model": "gpt-5.4",
-        "tools": [
-            {"type": "code_interpreter", "container": {"type": "auto"}},
-            {
-                "type": "function",
-                "name": "read_doc",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"file_id": {"type": "string"}}
+    // Controls: `code_interpreter` (`{"type": "auto"}`), `shell` (`{"type": "container_auto"}`),
+    // `image_generation` (`input_image_mask.image_url`), `function` schema `examples`, replayed
+    // `mcp_list_tools.input_schema`, and assistant `annotations` must remain failover-eligible
+    // on HTTP and WS!
+    let control_bodies = [
+        json!({
+            "model": "gpt-5.4",
+            "tools": [
+                {"type": "code_interpreter", "container": {"type": "auto"}},
+                {"type": "shell", "environment": {"type": "container_auto"}},
+                {"type": "image_generation", "input_image_mask": {"image_url": "data:image/png;base64,AA=="}},
+                {
+                    "type": "function",
+                    "name": "read_doc",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"file_id": {"type": "string"}},
+                        "examples": [{"file_id": "file_ex"}]
+                    }
                 }
-            }
-        ],
-        "input": [openai_reasoning_input(owned_reasoning), {"role": "user", "content": "run"}]
-    });
-    let control_resp = handle_authenticated(&lc, responses_request(control_body))
-        .await
-        .unwrap();
-    assert_eq!(control_resp.status(), StatusCode::OK);
+            ],
+            "input": [openai_reasoning_input(owned_reasoning), {"role": "user", "content": "run"}]
+        }),
+        json!({
+            "model": "gpt-5.4",
+            "input": [
+                openai_reasoning_input(owned_reasoning),
+                {
+                    "type": "mcp_list_tools",
+                    "server_label": "docs",
+                    "tools": [{
+                        "name": "inspect",
+                        "input_schema": {
+                            "type": "object",
+                            "examples": [{"file_id": "file_schema_example"}]
+                        }
+                    }]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "See source.",
+                        "annotations": [{"type": "file_citation", "file_id": "file_ann_1"}]
+                    }]
+                },
+                {"role": "user", "content": "continue"}
+            ]
+        }),
+    ];
+    for (idx, body) in control_bodies.iter().enumerate() {
+        let control_resp = handle_authenticated(&lc, responses_request(body.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            control_resp.status(),
+            StatusCode::OK,
+            "HTTP control {idx} should fail over"
+        );
+    }
     let captured = dispatch.captured_requests();
-    assert_eq!(captured.len(), 1);
+    assert_eq!(captured.len(), 2);
     assert!(
         captured[0].0.contains("openai-api-key.local"),
         "{}",
         captured[0].0
     );
     assert_eq!(captured[0].1["input"].as_array().unwrap().len(), 1);
+    assert_eq!(captured[1].1["input"].as_array().unwrap().len(), 3);
 
     let mut gw = ws1296_gateway(lc).await;
     for (idx, body) in blocked_payloads.iter().enumerate() {
@@ -4843,7 +4928,25 @@ async fn strip_and_failover_rejects_account_owned_references_409() {
         assert_eq!(err.code, "upstream_affinity_unavailable");
     }
     gw.close();
-    assert_eq!(dispatch.call_count(), 1);
+    for (idx, body) in control_bodies.iter().enumerate() {
+        let mut ctrl_gw = ws1296_gateway(make_lc()).await;
+        let mut ws_body = body.clone();
+        ws_body
+            .as_object_mut()
+            .unwrap()
+            .insert("type".to_owned(), json!("response.create"));
+        let admitted = ws1296_admit(&mut ctrl_gw, Bytes::from(ws_body.to_string()))
+            .await
+            .unwrap_or_else(|err| panic!("WS control {idx} should admit: {err:?}"))
+            .unwrap_or_else(|| panic!("WS control {idx} should dispatch"));
+        let parsed: Value = serde_json::from_slice(&admitted.frame).unwrap();
+        assert_eq!(
+            parsed["input"].as_array().unwrap().len(),
+            captured[idx].1["input"].as_array().unwrap().len()
+        );
+        ctrl_gw.close();
+    }
+    assert_eq!(dispatch.call_count(), 2);
 }
 
 #[tokio::test]
@@ -4876,7 +4979,7 @@ async fn strip_and_failover_public_ws_code_interpreter_auto_prefers_api_key_over
         })
         .to_string(),
     );
-    let dispatch = ws1296_admit(&mut public_gw, frame)
+    let dispatch = ws1296_admit(&mut public_gw, frame.clone())
         .await
         .expect("public WS failover admits")
         .expect("public WS failover dispatches");
@@ -4888,6 +4991,26 @@ async fn strip_and_failover_public_ws_code_interpreter_auto_prefers_api_key_over
     let parsed_frame: Value = serde_json::from_slice(&dispatch.frame).unwrap();
     assert_eq!(parsed_frame["input"].as_array().unwrap().len(), 1);
     public_gw.close();
+
+    // OAuth-only subcase (no API key enabled): public WS code_interpreter request must fail closed
+    // with 409 rather than forwarding the hosted tool to OAuth.
+    let oauth_only_store = Arc::new(MemoryAffinityStore::default());
+    oauth_only_store.insert(ws1296_openai_key(owned_reasoning), owner_a);
+    let oauth_only_lc = lifecycle(
+        vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", false),
+            openai_oauth_upstream_record(oauth_b, "oauth-b", true),
+        ],
+        Arc::new(RecordingDispatch::default()),
+        Some(oauth_only_store),
+    );
+    let mut oauth_only_gw = ws1296_gateway(oauth_only_lc).await;
+    let err = ws1296_admit(&mut oauth_only_gw, frame)
+        .await
+        .expect_err("public WS code_interpreter with only OAuth fallback must return 409");
+    assert_eq!(err.status, 409);
+    assert_eq!(err.code, "upstream_affinity_unavailable");
+    oauth_only_gw.close();
 }
 
 #[tokio::test]
@@ -5262,4 +5385,250 @@ async fn gemini_stale_snapshot_returns_503_while_confirmed_epoch_mismatch_return
     let epoch_conflict_resp = handle_authenticated(&lc, req()).await.unwrap();
     assert_eq!(epoch_conflict_resp.status(), StatusCode::CONFLICT);
     assert_eq!(dispatch.call_count(), 0);
+}
+
+#[tokio::test]
+async fn strip_and_failover_respects_unknown_openai_reasoning_fail_closed_on_mixed_replay_http_and_ws()
+ {
+    let owner_a = Uuid::parse_str("10000000-0000-0000-0000-000000000351").unwrap();
+    let fallback_b = Uuid::parse_str("10000000-0000-0000-0000-000000000352").unwrap();
+    let known_cipher = "gAAAAABowned_known_mixed";
+    let unknown_cipher = "gAAAAABunknown_unestablished_mixed";
+
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(known_cipher), owner_a);
+
+    let mixed_body = || {
+        json!({
+            "model": "gpt-5.4",
+            "input": [
+                openai_reasoning_input(known_cipher),
+                openai_reasoning_input(unknown_cipher),
+                {"role": "user", "content": "continue"}
+            ]
+        })
+    };
+    let mut mixed_ws = mixed_body();
+    mixed_ws
+        .as_object_mut()
+        .unwrap()
+        .insert("type".to_owned(), json!("response.create"));
+    let mixed_ws_frame = Bytes::from(mixed_ws.to_string());
+
+    // 1. `unknown_openai_reasoning = FailClosed` with `StripAndFailover`: mixed bound + unbound
+    // replay must fail closed with 409 and 0 dispatches on HTTP and WS.
+    let dispatch_fc = RecordingDispatch::with_response(ResponseSpec::Json(json!({})));
+    let strict_lc = lifecycle_with_config(
+        vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", false),
+            openai_oauth_upstream_record(fallback_b, "oauth-b", true),
+        ],
+        dispatch_fc.clone(),
+        Some(store.clone()),
+        LifecycleConfig {
+            unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy::FailClosed,
+            unavailable_openai_reasoning_owner:
+                cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover,
+            ..LifecycleConfig::default()
+        },
+    );
+    let http_err = handle_authenticated(&strict_lc, responses_request(mixed_body()))
+        .await
+        .unwrap();
+    assert_eq!(http_err.status(), StatusCode::CONFLICT);
+    let mut strict_gw = ws1296_gateway(strict_lc).await;
+    let ws_err = ws1296_admit(&mut strict_gw, mixed_ws_frame.clone())
+        .await
+        .expect_err("mixed replay under unknown_openai_reasoning=fail_closed must stay 409");
+    assert_eq!(ws_err.status, 409);
+    assert_eq!(ws_err.code, "upstream_affinity_unavailable");
+    strict_gw.close();
+    assert_eq!(dispatch_fc.call_count(), 0);
+
+    // 2. Under `unknown_openai_reasoning = Hybrid`, the same mixed replay strips and fails over.
+    let dispatch_hybrid = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "id": "resp_ok",
+        "object": "response",
+        "status": "completed",
+        "output": []
+    })));
+    let hybrid_lc = lifecycle_with_config(
+        vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", false),
+            openai_oauth_upstream_record(fallback_b, "oauth-b", true),
+        ],
+        dispatch_hybrid.clone(),
+        Some(store),
+        LifecycleConfig {
+            unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy::Hybrid,
+            unavailable_openai_reasoning_owner:
+                cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover,
+            ..LifecycleConfig::default()
+        },
+    );
+    let http_ok = handle_authenticated(&hybrid_lc, responses_request(mixed_body()))
+        .await
+        .unwrap();
+    assert_eq!(http_ok.status(), StatusCode::OK);
+    let captured = dispatch_hybrid.captured_requests();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].1["input"].as_array().unwrap().len(), 1);
+
+    let mut hybrid_gw = ws1296_gateway(hybrid_lc).await;
+    let d = ws1296_admit(&mut hybrid_gw, mixed_ws_frame)
+        .await
+        .expect("mixed replay under Hybrid admits failover")
+        .expect("dispatches");
+    assert_eq!(d.candidates[0].upstream_id, fallback_b);
+    let parsed: Value = serde_json::from_slice(&d.frame).unwrap();
+    assert_eq!(parsed["input"].as_array().unwrap().len(), 1);
+    hybrid_gw.close();
+}
+
+#[tokio::test]
+async fn strip_and_failover_ws_rechecks_sole_replacement_quota_before_dispatch() {
+    use cc_lb_control::SubscriptionQuotaCacheLike;
+    use cc_lb_control::api_keys::principal_view::{
+        DialectCache, PrincipalView, RouterPipelineCache,
+    };
+    use cc_lb_domain::{
+        SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, TerminalStrategy,
+    };
+    use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
+    use cc_lb_routing::FilterPlugin;
+
+    #[derive(Default)]
+    struct MutableQuotaCache {
+        snapshots: Mutex<HashMap<Uuid, Vec<SubscriptionQuotaCandidateSnapshot>>>,
+    }
+
+    impl SubscriptionQuotaCacheLike for MutableQuotaCache {
+        fn upsert_observation(&self, _record: &cc_lb_storage_api::SubscriptionQuotaSample) {}
+
+        fn snapshot_for_upstream(
+            &self,
+            upstream_id: Uuid,
+            _now_unix_millis: u64,
+            _max_staleness_secs: u64,
+        ) -> Vec<SubscriptionQuotaCandidateSnapshot> {
+            self.snapshots
+                .lock()
+                .unwrap()
+                .get(&upstream_id)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    let owner_a = Uuid::parse_str("10000000-0000-0000-0000-000000000361").unwrap();
+    let fallback_b = Uuid::parse_str("10000000-0000-0000-0000-000000000362").unwrap();
+    let owned_cipher = "gAAAAABowned_ws_sole_recheck";
+
+    let quota_cache = Arc::new(MutableQuotaCache::default());
+    let filter: Arc<dyn FilterPlugin> = Arc::new(SubscriptionPreferenceFilter::with_clock(
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    ));
+    let pipeline = Arc::new(RouterPipelineCache {
+        user_filters: vec![filter],
+        terminal: TerminalStrategy::FirstPick,
+        instantiation_error: None,
+        provider_filters: None,
+    });
+    let chains = HashMap::from([(
+        "principal-test".to_owned(),
+        (Some(pipeline), DialectCache::Inherit),
+    )]);
+    let principal_view = Arc::new(PrincipalView::for_tests(
+        "principal-test",
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
+        chains,
+    ));
+
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(owned_cipher), owner_a);
+
+    let authn = TestAuthn::with_principal_view(TestState::default(), principal_view);
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .subscription_quota_cache(quota_cache.clone())
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", false),
+            openai_oauth_upstream_record(fallback_b, "oauth-fallback-b", true),
+        ])
+        .build();
+    let lc = Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
+        RecordingDispatch::with_response(ResponseSpec::Json(json!({}))),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store);
+
+    let mut gw = ws1296_gateway(lc).await;
+    let dispatch = ws1296_admit(&mut gw, ws1296_create(None, Some(owned_cipher)))
+        .await
+        .expect("sole healthy fallback B admits")
+        .expect("dispatches");
+    assert_eq!(dispatch.candidates.len(), 1);
+    assert_eq!(dispatch.candidates[0].upstream_id, fallback_b);
+
+    // Exhaust sole replacement B between admission and upstream connection/send.
+    {
+        let exhausted = |window: &str, reset_delta: u64| SubscriptionQuotaCandidateSnapshot {
+            window: window.to_owned(),
+            state: SubscriptionQuotaDataState::Fresh,
+            source: Some("test".to_owned()),
+            utilization: Some(1.0),
+            status: Some("rejected".to_owned()),
+            resets_at_unix_secs: Some(TEST_NOW_UNIX_SECS + reset_delta),
+            surpassed_threshold: None,
+            representative_claim: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            credits: None,
+            observed_at_unix_millis: Some(TEST_NOW_UNIX_SECS * 1000),
+            max_staleness_secs: 60,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+        };
+        quota_cache.snapshots.lock().unwrap().insert(
+            fallback_b,
+            vec![exhausted("5h", 1800), exhausted("7d", 86400)],
+        );
+    }
+
+    let validate_err = gw
+        .validate_fallback_candidate(&dispatch, &dispatch.candidates[0])
+        .await
+        .expect_err("validate_fallback_candidate must recheck exhausted replacement");
+    assert_eq!(validate_err.status, 503);
+    assert_eq!(validate_err.code, "route_no_upstream_after_filter");
+
+    let connect_job = gw
+        .begin_connection_prepare(&dispatch, &dispatch.candidates[0])
+        .expect("prepare job builds");
+    let connect_err = connect_job
+        .run()
+        .await
+        .err()
+        .expect("PreparedWsConnectJob::run must recheck exhausted replacement");
+    assert_eq!(connect_err.status, 503);
+    assert_eq!(connect_err.code, "route_no_upstream_after_filter");
+
+    let send_err = gw
+        .validate_candidate_for_send(dispatch.turn_id, fallback_b, None, false)
+        .await
+        .expect_err("validate_candidate_for_send must recheck exhausted replacement");
+    assert_eq!(send_err.status, 503);
+    assert_eq!(send_err.code, "route_no_upstream_after_filter");
+    gw.close();
 }

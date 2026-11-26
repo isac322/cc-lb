@@ -94,9 +94,9 @@ const KNOWN: Record<string, Omit<ErrorCodeExplanation, 'known'>> = {
   },
   upstream_affinity_unavailable: {
     summary:
-      'The upstream owning this session state is disabled, ineligible, or unknown (409), or affinity storage failed (503).',
+      'The upstream owning this session state is disabled, ineligible, or unknown (409), or affinity storage failed or routing state was stale (503).',
     nextStep:
-      'For 409 conflicts, re-enable the owning upstream or start a fresh thread; for 503, retry or check proxy storage.',
+      'For 409 conflicts, re-enable the owning upstream or start a fresh thread; for 503, retry once routing state refreshes or check proxy storage.',
     target: 'upstream',
   },
   limit_rejected: {
