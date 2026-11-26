@@ -282,6 +282,49 @@ pub fn normalize_responses_request(
         truncation_emulate: trunc_emulate,
     })
 }
+fn strip_hosted_tools_from_array(tools: &mut Vec<Value>, depth: usize) {
+    if depth >= 8 {
+        return;
+    }
+    let mut kept = Vec::with_capacity(tools.len());
+    for mut tool in tools.drain(..) {
+        match tool.get("type").and_then(Value::as_str) {
+            Some("file_search" | "code_interpreter") => continue,
+            Some("namespace") => {
+                if let Some(obj) = tool.as_object_mut()
+                    && let Some(nested) = obj.get_mut("tools").and_then(Value::as_array_mut)
+                {
+                    strip_hosted_tools_from_array(nested, depth + 1);
+                    if nested.is_empty() {
+                        continue;
+                    }
+                }
+            }
+            _ => {}
+        }
+        kept.push(tool);
+    }
+    *tools = kept;
+}
+
+fn collect_api_key_only_tools(tools: &[Value], out: &mut Vec<ApiKeyOnlyFeature>, depth: usize) {
+    if depth >= 8 {
+        return;
+    }
+    for t in tools {
+        match t.get("type").and_then(Value::as_str) {
+            Some("file_search") => out.push(ApiKeyOnlyFeature::FileSearchTool),
+            Some("code_interpreter") => out.push(ApiKeyOnlyFeature::CodeInterpreterTool),
+            Some("namespace") => {
+                if let Some(nested) = t.get("tools").and_then(Value::as_array) {
+                    collect_api_key_only_tools(nested, out, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn degrade_without_api_key(
     body: &Value,
     features: &[ApiKeyOnlyFeature],
@@ -323,37 +366,91 @@ pub fn degrade_without_api_key(
         return Err(reject("tools"));
     }
     if hosted {
-        let tools_removed = if let Some(a) = b.get_mut("tools").and_then(Value::as_array_mut) {
-            a.retain(|t| {
-                !matches!(
-                    t.get("type").and_then(Value::as_str),
-                    Some("file_search") | Some("code_interpreter")
-                )
-            });
-            a.is_empty()
+        let mut has_remaining_tools = false;
+        let top_tools_removed = if let Some(a) = b.get_mut("tools").and_then(Value::as_array_mut) {
+            strip_hosted_tools_from_array(a, 0);
+            if a.is_empty() {
+                true
+            } else {
+                has_remaining_tools = true;
+                false
+            }
         } else {
             false
         };
-        let forced = match b.get("tool_choice") {
-            Some(Value::String(s)) if s == "required" => false,
-            Some(v) => matches!(
-                v.get("type").and_then(Value::as_str),
-                Some("file_search") | Some("code_interpreter")
-            ),
-            None => false,
-        };
-        if tools_removed {
-            let object = b.as_object_mut().expect("request body is an object");
+        if let Some(input) = b.get_mut("input").and_then(Value::as_array_mut) {
+            for item in input {
+                let Some(obj) = item.as_object_mut() else {
+                    continue;
+                };
+                if matches!(
+                    obj.get("type").and_then(Value::as_str),
+                    Some("additional_tools" | "tool_search_output")
+                ) && let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut)
+                {
+                    strip_hosted_tools_from_array(tools, 0);
+                    if !tools.is_empty() {
+                        has_remaining_tools = true;
+                    }
+                }
+            }
+        }
+        let object = b.as_object_mut().expect("request body is an object");
+        if top_tools_removed {
             object.remove("tools");
-            if forced
-                || matches!(object.get("tool_choice"), Some(Value::String(s)) if s == "required")
-            {
+        }
+        enum ToolChoiceAction {
+            Keep,
+            Remove,
+            Auto,
+            None,
+        }
+        let action = match object.get_mut("tool_choice") {
+            Some(Value::String(s)) if s == "required" && !has_remaining_tools => {
+                ToolChoiceAction::Remove
+            }
+            Some(Value::Object(choice)) => match choice.get("type").and_then(Value::as_str) {
+                Some("file_search" | "code_interpreter") => {
+                    if has_remaining_tools {
+                        ToolChoiceAction::Auto
+                    } else {
+                        ToolChoiceAction::Remove
+                    }
+                }
+                Some("allowed_tools") => {
+                    let empty_after_strip = if let Some(allowed) =
+                        choice.get_mut("tools").and_then(Value::as_array_mut)
+                    {
+                        strip_hosted_tools_from_array(allowed, 0);
+                        allowed.is_empty()
+                    } else {
+                        false
+                    };
+                    let required_mode =
+                        choice.get("mode").and_then(Value::as_str) == Some("required");
+                    if empty_after_strip {
+                        ToolChoiceAction::None
+                    } else if !has_remaining_tools && required_mode {
+                        ToolChoiceAction::Remove
+                    } else {
+                        ToolChoiceAction::Keep
+                    }
+                }
+                _ => ToolChoiceAction::Keep,
+            },
+            _ => ToolChoiceAction::Keep,
+        };
+        match action {
+            ToolChoiceAction::Keep => {}
+            ToolChoiceAction::Remove => {
                 object.remove("tool_choice");
             }
-        } else if forced {
-            b.as_object_mut()
-                .expect("request body is an object")
-                .insert("tool_choice".into(), json!("auto"));
+            ToolChoiceAction::Auto => {
+                object.insert("tool_choice".into(), json!("auto"));
+            }
+            ToolChoiceAction::None => {
+                object.insert("tool_choice".into(), json!("none"));
+            }
         }
     }
     if features
@@ -418,11 +515,16 @@ pub fn trim_oldest_input(body: &Value) -> Option<Value> {
 pub fn api_key_only_features(body: &Value) -> Vec<ApiKeyOnlyFeature> {
     let mut r = Vec::new();
     if let Some(a) = body.get("tools").and_then(Value::as_array) {
-        for t in a {
-            match t.get("type").and_then(Value::as_str) {
-                Some("file_search") => r.push(ApiKeyOnlyFeature::FileSearchTool),
-                Some("code_interpreter") => r.push(ApiKeyOnlyFeature::CodeInterpreterTool),
-                _ => {}
+        collect_api_key_only_tools(a, &mut r, 0);
+    }
+    if let Some(input) = body.get("input").and_then(Value::as_array) {
+        for item in input {
+            if matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("additional_tools" | "tool_search_output")
+            ) && let Some(tools) = item.get("tools").and_then(Value::as_array)
+            {
+                collect_api_key_only_tools(tools, &mut r, 0);
             }
         }
     }
@@ -592,6 +694,238 @@ mod tests {
         assert!(
             !(a.iter().any(|x| x["type"] == "function_call")
                 ^ a.iter().any(|x| x["type"] == "function_call_output"))
+        );
+    }
+
+    #[test]
+    fn api_key_only_features_detects_nested_and_input_tool_lists() {
+        let additional = json!({
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}]
+            }]
+        });
+        assert_eq!(
+            api_key_only_features(&additional),
+            vec![ApiKeyOnlyFeature::CodeInterpreterTool]
+        );
+
+        let tool_search = json!({
+            "input": [{
+                "type": "tool_search_output",
+                "tools": [{"type": "namespace", "name": "files", "tools": [{"type": "file_search", "vector_store_ids": ["vs_1"]}]}]
+            }]
+        });
+        assert_eq!(
+            api_key_only_features(&tool_search),
+            vec![ApiKeyOnlyFeature::FileSearchTool]
+        );
+
+        let function_only = json!({
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{"type": "function", "name": "lookup"}]
+            }, {
+                "type": "mcp_list_tools",
+                "tools": [{"type": "code_interpreter"}]
+            }]
+        });
+        assert!(api_key_only_features(&function_only).is_empty());
+    }
+
+    #[test]
+    fn hosted_degradation_releases_required_across_input_tool_lists() {
+        let policy = OpenaiOauthCompatPolicy::default();
+
+        // 1. additional_tools with only code_interpreter (no top-level tools) + tool_choice: "required" -> clears tool_choice
+        let only_additional = json!({
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}]
+            }],
+            "tool_choice": "required"
+        });
+        let out_only = degrade_without_api_key(
+            &only_additional,
+            &[ApiKeyOnlyFeature::CodeInterpreterTool],
+            &policy,
+        )
+        .unwrap();
+        assert!(out_only.get("tool_choice").is_none());
+
+        // 2. additional_tools with code_interpreter + surviving function tool -> preserves tool_choice: "required"
+        let mixed_additional = json!({
+            "input": [{
+                "type": "additional_tools",
+                "tools": [
+                    {"type": "code_interpreter", "container": {"type": "auto"}},
+                    {"type": "function", "name": "lookup"}
+                ]
+            }],
+            "tool_choice": "required"
+        });
+        let out_mixed = degrade_without_api_key(
+            &mixed_additional,
+            &[ApiKeyOnlyFeature::CodeInterpreterTool],
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(out_mixed["tool_choice"], "required");
+        assert_eq!(
+            out_mixed["input"][0]["tools"]
+                .as_array()
+                .map(|tools| tools.len()),
+            Some(1)
+        );
+
+        // 3. Top-level tools with only code_interpreter + additional_tools with surviving function -> removes top-level tools, preserves "required"
+        let top_removed_input_survives = json!({
+            "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}],
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{"type": "function", "name": "lookup"}]
+            }],
+            "tool_choice": "required"
+        });
+        let out_top_removed = degrade_without_api_key(
+            &top_removed_input_survives,
+            &[ApiKeyOnlyFeature::CodeInterpreterTool],
+            &policy,
+        )
+        .unwrap();
+        assert!(out_top_removed.get("tools").is_none());
+        assert_eq!(out_top_removed["tool_choice"], "required");
+
+        // 4. Forced hosted tool_choice with additional_tools: clears when no tools remain, downgrades to "auto" when function survives
+        let forced_only_additional = json!({
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}]
+            }],
+            "tool_choice": {"type": "code_interpreter"}
+        });
+        let out_forced_cleared = degrade_without_api_key(
+            &forced_only_additional,
+            &[ApiKeyOnlyFeature::CodeInterpreterTool],
+            &policy,
+        )
+        .unwrap();
+        assert!(out_forced_cleared.get("tool_choice").is_none());
+
+        let forced_mixed_additional = json!({
+            "input": [{
+                "type": "additional_tools",
+                "tools": [
+                    {"type": "code_interpreter", "container": {"type": "auto"}},
+                    {"type": "function", "name": "lookup"}
+                ]
+            }],
+            "tool_choice": {"type": "code_interpreter"}
+        });
+        let out_forced_auto = degrade_without_api_key(
+            &forced_mixed_additional,
+            &[ApiKeyOnlyFeature::CodeInterpreterTool],
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(out_forced_auto["tool_choice"], "auto");
+
+        // 5. allowed_tools with mode: "required" and only code_interpreter allowed, even with an
+        // outside surviving function tool -> sets tool_choice: "none" so outside tool is not called
+        let allowed_only_hosted = json!({
+            "tools": [{"type": "function", "name": "outside_fn"}],
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}]
+            }],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [{"type": "code_interpreter"}]
+            }
+        });
+        let out_allowed_cleared = degrade_without_api_key(
+            &allowed_only_hosted,
+            &[ApiKeyOnlyFeature::CodeInterpreterTool],
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(out_allowed_cleared["tool_choice"], "none");
+
+        // 6. allowed_tools with mode: "required" and surviving lookup function in additional_tools ->
+        // strips code_interpreter selector and preserves subset + mode
+        let allowed_mixed = json!({
+            "input": [{
+                "type": "additional_tools",
+                "tools": [
+                    {"type": "code_interpreter", "container": {"type": "auto"}},
+                    {"type": "function", "name": "lookup"}
+                ]
+            }],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [{"type": "code_interpreter"}, {"type": "function", "name": "lookup"}]
+            }
+        });
+        let out_allowed_mixed = degrade_without_api_key(
+            &allowed_mixed,
+            &[ApiKeyOnlyFeature::CodeInterpreterTool],
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(out_allowed_mixed["tool_choice"]["mode"], "required");
+        assert_eq!(
+            out_allowed_mixed["tool_choice"]["tools"],
+            json!([{"type": "function", "name": "lookup"}])
+        );
+
+        // 7. allowed_tools with mode: "auto": sets "none" when emptied (preserving subset ban over
+        // outside functions), preserves subset + mode when lookup survives
+        let allowed_auto_only = json!({
+            "tools": [{"type": "function", "name": "outside_fn"}],
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}]
+            }],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "auto",
+                "tools": [{"type": "code_interpreter"}]
+            }
+        });
+        let out_allowed_auto_cleared = degrade_without_api_key(
+            &allowed_auto_only,
+            &[ApiKeyOnlyFeature::CodeInterpreterTool],
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(out_allowed_auto_cleared["tool_choice"], "none");
+
+        let allowed_auto_mixed = json!({
+            "input": [{
+                "type": "additional_tools",
+                "tools": [
+                    {"type": "code_interpreter", "container": {"type": "auto"}},
+                    {"type": "function", "name": "lookup"}
+                ]
+            }],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "auto",
+                "tools": [{"type": "code_interpreter"}, {"type": "function", "name": "lookup"}]
+            }
+        });
+        let out_allowed_auto_mixed = degrade_without_api_key(
+            &allowed_auto_mixed,
+            &[ApiKeyOnlyFeature::CodeInterpreterTool],
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(out_allowed_auto_mixed["tool_choice"]["mode"], "auto");
+        assert_eq!(
+            out_allowed_auto_mixed["tool_choice"]["tools"],
+            json!([{"type": "function", "name": "lookup"}])
         );
     }
 }

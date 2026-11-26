@@ -94,9 +94,10 @@ const KNOWN: Record<string, Omit<ErrorCodeExplanation, 'known'>> = {
   },
   upstream_affinity_unavailable: {
     summary:
-      'Session affinity storage failed, so the proxy could not pick the sticky upstream.',
-    nextStep: 'Retry; if it repeats, check the proxy’s storage.',
-    target: null,
+      'The upstream owning this session state is disabled, ineligible, or unknown (409), or affinity storage failed or routing state was stale (503).',
+    nextStep:
+      'For 409 conflicts, re-enable the owning upstream or start a fresh thread; for 503, retry once routing state refreshes or check proxy storage.',
+    target: 'upstream',
   },
   limit_rejected: {
     summary: 'A rate limit on this principal or key rejected the request.',

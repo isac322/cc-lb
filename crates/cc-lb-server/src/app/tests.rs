@@ -1432,6 +1432,8 @@ fn lifecycle_config_uses_startup_upstream_affinity_ttl() {
     config.upstream_affinity.ttl_days = 14;
     config.upstream_affinity.unknown_openai_reasoning =
         cc_lb_config::UnknownOpenaiReasoningPolicy::FailClosed;
+    config.upstream_affinity.unavailable_openai_reasoning_owner =
+        cc_lb_config::UnavailableOpenaiReasoningOwnerPolicy::FailClosed;
 
     let lifecycle_config = super::lifecycle_config_from_config(
         &config,
@@ -1449,6 +1451,10 @@ fn lifecycle_config_uses_startup_upstream_affinity_ttl() {
     assert_eq!(
         lifecycle_config.unknown_openai_reasoning,
         cc_lb_config::UnknownOpenaiReasoningPolicy::FailClosed
+    );
+    assert_eq!(
+        lifecycle_config.unavailable_openai_reasoning_owner,
+        cc_lb_config::UnavailableOpenaiReasoningOwnerPolicy::FailClosed
     );
 }
 

@@ -217,7 +217,7 @@ async fn codex_compaction_encrypted_content_binds_owner_across_http_continuation
     )
     .await
     .expect("disabled owner continuation handled");
-    assert_eq!(disabled_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(disabled_response.status(), StatusCode::CONFLICT);
     let body = disabled_response.into_body().collect().await?.to_bytes();
     let value: Value = serde_json::from_slice(&body)?;
     assert_eq!(value["error"]["type"], "upstream_affinity_unavailable");

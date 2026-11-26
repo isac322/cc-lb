@@ -1620,6 +1620,11 @@ mod tests {
             "staggered Happy Eyeballs must attempt both families inside the 1s budget"
         );
 
+        // Resume wall-clock time before exercising real loopback TCP connect I/O;
+        // under `start_paused = true`, Tokio auto-advances directly to the 500ms
+        // connect deadline whenever non-blocking `connect(2)` yields `Pending`.
+        tokio::time::resume();
+
         // Also confirm CachingDnsConnector receives progressive delayed AAAA when A is refused.
         struct ProgressiveStub;
         impl DnsResolver for ProgressiveStub {

@@ -111,7 +111,7 @@ impl Default for OpenaiPublicApiConfig {
     }
 }
 
-pub use cc_lb_domain::UnknownOpenaiReasoningPolicy;
+pub use cc_lb_domain::{UnavailableOpenaiReasoningOwnerPolicy, UnknownOpenaiReasoningPolicy};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -121,6 +121,8 @@ pub struct UpstreamAffinityConfig {
     pub ttl_days: u32,
     #[serde(default)]
     pub unknown_openai_reasoning: UnknownOpenaiReasoningPolicy,
+    #[serde(default)]
+    pub unavailable_openai_reasoning_owner: UnavailableOpenaiReasoningOwnerPolicy,
 }
 
 impl UpstreamAffinityConfig {
@@ -134,6 +136,7 @@ impl Default for UpstreamAffinityConfig {
         Self {
             ttl_days: DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS,
             unknown_openai_reasoning: UnknownOpenaiReasoningPolicy::default(),
+            unavailable_openai_reasoning_owner: UnavailableOpenaiReasoningOwnerPolicy::default(),
         }
     }
 }

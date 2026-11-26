@@ -522,9 +522,10 @@ fn walk_openai_reasoning_items<'a, B>(
     ControlFlow::Continue(())
 }
 
-/// Returns whether the OpenAI Responses request's ONLY opaque affinity state
+/// Returns whether the OpenAI Responses request's ONLY OpenAI affinity state
 /// comes from `reasoning.encrypted_content` items in an `input` array (with no
 /// `previous_response_id`, `conversation`, `compaction`, or `compaction_summary`).
+/// Used both by unknown-reasoning hybrid recovery and by ineligible-owner failover.
 pub(crate) fn is_openai_unknown_reasoning_only(
     capability: ProviderCapability,
     value: &Value,
@@ -554,6 +555,203 @@ pub(crate) fn is_openai_unknown_reasoning_only(
         ControlFlow::Continue(())
     });
     flow.is_continue() && found_reasoning
+}
+
+fn has_non_empty_array(object: &Map<String, Value>, key: &str) -> bool {
+    object
+        .get(key)
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+}
+
+fn has_owned_container_reference(value: &Value) -> bool {
+    if reference_id(Some(value)).is_some() {
+        return true;
+    }
+    value.as_object().is_some_and(|container| {
+        reference_id(container.get("container_id")).is_some()
+            || reference_id(container.get("file_id")).is_some()
+            || has_non_empty_array(container, "file_ids")
+    })
+}
+
+fn has_owned_shell_environment_reference(value: &Value) -> bool {
+    if reference_id(Some(value)).is_some() {
+        return true;
+    }
+    value.as_object().is_some_and(|env| {
+        env.get("type").and_then(Value::as_str) == Some("container_reference")
+            || reference_id(env.get("container_id")).is_some()
+            || reference_id(env.get("file_id")).is_some()
+            || has_non_empty_array(env, "file_ids")
+            || env
+                .get("container")
+                .is_some_and(has_owned_container_reference)
+            || env
+                .get("skills")
+                .and_then(Value::as_array)
+                .is_some_and(|skills| {
+                    skills.iter().any(|skill| {
+                        skill.as_object().is_some_and(|obj| {
+                            obj.get("type").and_then(Value::as_str) == Some("skill_reference")
+                                || reference_id(obj.get("skill_id")).is_some()
+                                || reference_id(obj.get("file_id")).is_some()
+                        })
+                    })
+                })
+    })
+}
+
+fn object_has_direct_account_owned_reference(object: &Map<String, Value>) -> bool {
+    reference_id(object.get("file_id")).is_some()
+        || reference_id(object.get("container_id")).is_some()
+        || reference_id(object.get("vector_store_id")).is_some()
+        || reference_id(object.get("tunnel_id")).is_some()
+        || has_non_empty_array(object, "file_ids")
+        || has_non_empty_array(object, "vector_store_ids")
+        || object
+            .get("container")
+            .is_some_and(has_owned_container_reference)
+}
+
+fn tool_has_account_owned_reference_depth(tool: &Value, depth: usize) -> bool {
+    if depth >= 8 {
+        return true;
+    }
+    let Some(object) = tool.as_object() else {
+        return false;
+    };
+    if object_has_direct_account_owned_reference(object)
+        || object
+            .get("input_image_mask")
+            .and_then(Value::as_object)
+            .is_some_and(|mask| reference_id(mask.get("file_id")).is_some())
+        || object
+            .get("environment")
+            .is_some_and(has_owned_shell_environment_reference)
+    {
+        return true;
+    }
+    object.get("type").and_then(Value::as_str) == Some("namespace")
+        && object
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(|nested| {
+                nested
+                    .iter()
+                    .any(|inner| tool_has_account_owned_reference_depth(inner, depth + 1))
+            })
+}
+
+fn tool_has_account_owned_reference(tool: &Value) -> bool {
+    tool_has_account_owned_reference_depth(tool, 0)
+}
+
+fn is_openai_item_reference(object: &Map<String, Value>) -> bool {
+    match object.get("type") {
+        Some(Value::String(item_type)) => item_type == "item_reference",
+        None | Some(Value::Null) => {
+            reference_id(object.get("id")).is_some()
+                && !object.contains_key("role")
+                && !object.contains_key("content")
+        }
+        _ => false,
+    }
+}
+
+fn input_item_has_account_owned_reference(item: &Value) -> bool {
+    let Some(object) = item.as_object() else {
+        return false;
+    };
+    let item_type = object.get("type").and_then(Value::as_str);
+    if is_openai_item_reference(object)
+        || object_has_direct_account_owned_reference(object)
+        || object
+            .get("environment")
+            .is_some_and(has_owned_shell_environment_reference)
+    {
+        return true;
+    }
+    if matches!(item_type, Some("additional_tools" | "tool_search_output"))
+        && object
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(|tools| tools.iter().any(tool_has_account_owned_reference))
+    {
+        return true;
+    }
+    if object
+        .get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|parts| {
+            parts.iter().any(|part| {
+                part.as_object()
+                    .is_some_and(object_has_direct_account_owned_reference)
+            })
+        })
+    {
+        return true;
+    }
+    matches!(
+        item_type,
+        Some("function_call_output" | "custom_tool_call_output" | "computer_call_output")
+    ) && object.get("output").is_some_and(|output| {
+        output
+            .as_object()
+            .is_some_and(object_has_direct_account_owned_reference)
+            || output.as_array().is_some_and(|parts| {
+                parts.iter().any(|part| {
+                    part.as_object()
+                        .is_some_and(object_has_direct_account_owned_reference)
+                })
+            })
+    })
+}
+
+/// Returns whether a known-owner OpenAI Responses request with an unavailable
+/// owner may strip `reasoning.encrypted_content` items and fail over.
+/// Requires `is_openai_unknown_reasoning_only` and rejects requests that also
+/// carry account- or org-owned references in typed provider positions (`prompt`,
+/// `prompt_cache_options.comparison_response_id`, `item_reference`, `file_id`,
+/// `file_ids`, `container_id`, explicit `container` ids or `container.file_ids`,
+/// `vector_store_id`, `vector_store_ids`, MCP `tunnel_id`,
+/// `image_generation.input_image_mask.file_id`, `computer_call_output.output`,
+/// shell `environment` container/skill references, and `additional_tools` /
+/// `tool_search_output` / `namespace` tool lists), while leaving schemas,
+/// annotations, and fresh auto containers (`{"type": "auto"}` /
+/// `{"type": "container_auto"}` without `file_ids`) eligible for failover.
+pub(crate) fn is_openai_reasoning_owner_failover_eligible(
+    capability: ProviderCapability,
+    value: &Value,
+) -> bool {
+    if !is_openai_unknown_reasoning_only(capability, value) {
+        return false;
+    }
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object.get("prompt").is_some_and(|v| !v.is_null()) {
+        return false;
+    }
+    if object
+        .get("prompt_cache_options")
+        .and_then(Value::as_object)
+        .is_some_and(|opts| reference_id(opts.get("comparison_response_id")).is_some())
+        || reference_id(object.get("comparison_response_id")).is_some()
+    {
+        return false;
+    }
+    if object
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| tools.iter().any(tool_has_account_owned_reference))
+    {
+        return false;
+    }
+    !object
+        .get("input")
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.iter().any(input_item_has_account_owned_reference))
 }
 
 /// Returns SHA-256 digests for `reasoning.encrypted_content` items present in

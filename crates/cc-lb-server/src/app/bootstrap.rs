@@ -1706,6 +1706,9 @@ pub(super) fn lifecycle_config_from_config(
         replica_identity,
         upstream_affinity_ttl: std::time::Duration::from_secs(config.upstream_affinity.ttl_secs()),
         unknown_openai_reasoning: config.upstream_affinity.unknown_openai_reasoning,
+        unavailable_openai_reasoning_owner: config
+            .upstream_affinity
+            .unavailable_openai_reasoning_owner,
         openai_oauth_compat: config.openai_oauth_compat,
         openai_realtime_origin: config.openai_public_api.realtime_origin.clone(),
     }

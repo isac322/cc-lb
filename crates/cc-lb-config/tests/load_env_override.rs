@@ -24,6 +24,10 @@ fn double_underscore_env_names_map_to_nested_config_fields() {
             "CC_LB_UPSTREAM_AFFINITY__UNKNOWN_OPENAI_REASONING",
             "fail_closed",
         )
+        .env(
+            "CC_LB_UPSTREAM_AFFINITY__UNAVAILABLE_OPENAI_REASONING_OWNER",
+            "fail_closed",
+        )
         .output()
         .unwrap();
 
@@ -136,6 +140,10 @@ proxy_addr = "[::]:7777"
     assert_eq!(
         config.upstream_affinity.unknown_openai_reasoning,
         cc_lb_config::UnknownOpenaiReasoningPolicy::FailClosed
+    );
+    assert_eq!(
+        config.upstream_affinity.unavailable_openai_reasoning_owner,
+        cc_lb_config::UnavailableOpenaiReasoningOwnerPolicy::FailClosed
     );
 }
 
