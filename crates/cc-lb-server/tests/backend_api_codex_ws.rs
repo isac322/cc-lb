@@ -2431,29 +2431,81 @@ async fn backend_codex_ws_disabled_reasoning_owner_strips_and_fails_over_across_
                     "summary": [],
                     "encrypted_content": cipher
                 });
-                let created = json!({
-                    "type": "response.created",
-                    "sequence_number": 0,
-                    "response": {"id": resp_id, "object": "response", "status": "in_progress", "output": []}
+                let function_call = json!({
+                    "type": "function_call",
+                    "id": "fc_ws_0",
+                    "call_id": "call_ws_0",
+                    "name": "lookup_status",
+                    "arguments": "{\"target\":\"repo\"}"
                 });
-                let item_done = json!({
-                    "type": "response.output_item.done",
-                    "sequence_number": 1,
-                    "output_index": 0,
-                    "item": reasoning
-                });
-                let completed = json!({
-                    "type": "response.completed",
-                    "sequence_number": 2,
-                    "response": {
-                        "id": resp_id,
-                        "object": "response",
-                        "status": "completed",
-                        "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
-                        "output": [reasoning]
-                    }
-                });
-                for frame in [created, item_done, completed] {
+                let frames: Vec<Value> = if n == 0 {
+                    vec![
+                        json!({
+                            "type": "response.created",
+                            "sequence_number": 0,
+                            "response": {"id": resp_id, "object": "response", "status": "in_progress", "output": []}
+                        }),
+                        json!({
+                            "type": "response.output_item.done",
+                            "sequence_number": 1,
+                            "output_index": 0,
+                            "item": reasoning
+                        }),
+                        json!({
+                            "type": "response.output_item.done",
+                            "sequence_number": 2,
+                            "output_index": 1,
+                            "item": function_call
+                        }),
+                        json!({
+                            "type": "response.completed",
+                            "sequence_number": 3,
+                            "response": {
+                                "id": resp_id,
+                                "object": "response",
+                                "status": "completed",
+                                "usage": {
+                                    "input_tokens": 120,
+                                    "input_tokens_details": {"cached_tokens": 64},
+                                    "output_tokens": 24,
+                                    "total_tokens": 144
+                                },
+                                "output": [reasoning, function_call]
+                            }
+                        }),
+                    ]
+                } else {
+                    vec![
+                        json!({
+                            "type": "response.created",
+                            "sequence_number": 0,
+                            "response": {"id": resp_id, "object": "response", "status": "in_progress", "output": []}
+                        }),
+                        json!({
+                            "type": "response.output_item.done",
+                            "sequence_number": 1,
+                            "output_index": 0,
+                            "item": reasoning
+                        }),
+                        json!({
+                            "type": "response.completed",
+                            "sequence_number": 2,
+                            "response": {
+                                "id": resp_id,
+                                "object": "response",
+                                "status": "completed",
+                                "usage": {
+                                    "input_tokens": 200,
+                                    "input_tokens_details": {"cached_tokens": 0},
+                                    "output_tokens": 24,
+                                    "total_tokens": 224
+                                },
+                                "output": [reasoning]
+                            }
+                        }),
+                    ]
+                };
+                for frame in frames {
                     if socket
                         .send(AxumMessage::Text(frame.to_string().into()))
                         .await
@@ -2601,12 +2653,22 @@ async fn backend_codex_ws_disabled_reasoning_owner_strips_and_fails_over_across_
         tokio_tungstenite::connect_async(req)
     };
 
+    let tools = json!([{
+        "type": "function",
+        "name": "lookup_status",
+        "description": "Inspect status",
+        "parameters": {"type": "object", "properties": {"target": {"type": "string"}}}
+    }]);
+
     // Open socket 1 pinned on A after Turn 1.
     let (mut ws1, _) = connect_ws().await.unwrap();
     ws1.send(Message::Text(
         json!({
             "type": "response.create",
             "model": "gpt-5.4",
+            "instructions": "Be concise",
+            "tools": tools,
+            "prompt_cache_key": "codex-ws-tool-thread",
             "store": false,
             "include": ["reasoning.encrypted_content"],
             "input": [{"role": "user", "content": "ws-turn-1"}]
@@ -2619,13 +2681,21 @@ async fn backend_codex_ws_disabled_reasoning_owner_strips_and_fails_over_across_
     for expected in [
         "response.created",
         "response.output_item.done",
+        "response.output_item.done",
         "response.completed",
     ] {
         let frame: Value = serde_json::from_str(&recv_text(&mut ws1).await).unwrap();
         assert_eq!(frame["type"], expected, "{frame}");
+        if expected == "response.completed" {
+            assert_eq!(
+                frame["response"]["usage"]["input_tokens_details"]["cached_tokens"], 64,
+                "{frame}"
+            );
+        }
     }
 
-    // Swap active upstream to B while ws1 stays open -> open-socket Turn 2 must fail over cleanly!
+    // Swap active upstream to B while ws1 stays open -> open-socket Turn 2 must fail over cleanly
+    // with Codex tool continuation items and session metadata preserved!
     set_enabled(id_b.clone(), true).await;
     set_enabled(id_a.clone(), false).await;
 
@@ -2633,6 +2703,9 @@ async fn backend_codex_ws_disabled_reasoning_owner_strips_and_fails_over_across_
         json!({
             "type": "response.create",
             "model": "gpt-5.4",
+            "instructions": "Be concise",
+            "tools": tools,
+            "prompt_cache_key": "codex-ws-tool-thread",
             "store": false,
             "include": ["reasoning.encrypted_content"],
             "input": [
@@ -2641,6 +2714,18 @@ async fn backend_codex_ws_disabled_reasoning_owner_strips_and_fails_over_across_
                     "id": "rs_ws_0",
                     "summary": [],
                     "encrypted_content": "gAAAAAB_ws_owned_acct-ws-a_0"
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_ws_0",
+                    "call_id": "call_ws_0",
+                    "name": "lookup_status",
+                    "arguments": "{\"target\":\"repo\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_ws_0",
+                    "output": "{\"ok\":true}"
                 },
                 {"role": "user", "content": "ws-turn-2-open"}
             ]
@@ -2657,14 +2742,23 @@ async fn backend_codex_ws_disabled_reasoning_owner_strips_and_fails_over_across_
     ] {
         let frame: Value = serde_json::from_str(&recv_text(&mut ws1).await).unwrap();
         assert_eq!(frame["type"], expected, "{frame}");
+        if expected == "response.completed" {
+            assert_eq!(
+                frame["response"]["usage"]["input_tokens_details"]["cached_tokens"], 0,
+                "{frame}"
+            );
+        }
     }
 
-    // Fresh socket 2 carrying A's disabled reasoning also fails over upfront to B.
+    // Fresh socket 2 carrying A's disabled reasoning + tool output also fails over upfront to B.
     let (mut ws2, _) = connect_ws().await.unwrap();
     ws2.send(Message::Text(
         json!({
             "type": "response.create",
             "model": "gpt-5.4",
+            "instructions": "Be concise",
+            "tools": tools,
+            "prompt_cache_key": "codex-ws-tool-thread",
             "store": false,
             "include": ["reasoning.encrypted_content"],
             "input": [
@@ -2673,6 +2767,18 @@ async fn backend_codex_ws_disabled_reasoning_owner_strips_and_fails_over_across_
                     "id": "rs_ws_0",
                     "summary": [],
                     "encrypted_content": "gAAAAAB_ws_owned_acct-ws-a_0"
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_ws_0",
+                    "call_id": "call_ws_0",
+                    "name": "lookup_status",
+                    "arguments": "{\"target\":\"repo\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_ws_0",
+                    "output": "{\"ok\":true}"
                 },
                 {"role": "user", "content": "ws-turn-3-fresh"}
             ]
@@ -2696,11 +2802,20 @@ async fn backend_codex_ws_disabled_reasoning_owner_strips_and_fails_over_across_
         assert_eq!(rec.len(), 3);
         assert_eq!(rec[0].0, "acct-ws-a");
         assert_eq!(rec[1].0, "acct-ws-b");
-        assert_eq!(rec[1].1["input"].as_array().unwrap().len(), 1);
-        assert_eq!(rec[1].1["input"][0]["content"], "ws-turn-2-open");
+        assert_eq!(rec[1].1["instructions"], "Be concise");
+        assert_eq!(rec[1].1["prompt_cache_key"], "codex-ws-tool-thread");
+        assert_eq!(rec[1].1["tools"], tools);
+        let in_1 = rec[1].1["input"].as_array().unwrap();
+        assert_eq!(in_1.len(), 3);
+        assert_eq!(in_1[0]["type"], "function_call");
+        assert_eq!(in_1[1]["type"], "function_call_output");
+        assert_eq!(in_1[2]["content"], "ws-turn-2-open");
         assert_eq!(rec[2].0, "acct-ws-b");
-        assert_eq!(rec[2].1["input"].as_array().unwrap().len(), 1);
-        assert_eq!(rec[2].1["input"][0]["content"], "ws-turn-3-fresh");
+        let in_2 = rec[2].1["input"].as_array().unwrap();
+        assert_eq!(in_2.len(), 3);
+        assert_eq!(in_2[0]["type"], "function_call");
+        assert_eq!(in_2[1]["type"], "function_call_output");
+        assert_eq!(in_2[2]["content"], "ws-turn-3-fresh");
     }
 
     // Disabling B leaves 0 eligible OAuth upstreams -> must fail closed with 409.

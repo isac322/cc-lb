@@ -1661,34 +1661,101 @@ async fn backend_codex_disabled_reasoning_owner_strips_and_fails_over_within_oau
             "summary": [],
             "encrypted_content": cipher
         });
-        let created = json!({
-            "type": "response.created",
-            "sequence_number": 0,
-            "response": {"id": resp_id, "object": "response", "status": "in_progress", "output": []}
+        let function_call = json!({
+            "type": "function_call",
+            "id": "fc_0",
+            "call_id": "call_0",
+            "name": "lookup_status",
+            "arguments": "{\"target\":\"repo\"}"
         });
-        let item_done = json!({
-            "type": "response.output_item.done",
-            "sequence_number": 1,
-            "output_index": 0,
-            "item": reasoning
-        });
-        let completed = json!({
-            "type": "response.completed",
-            "sequence_number": 2,
-            "response": {
-                "id": resp_id,
-                "object": "response",
-                "status": "completed",
-                "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
-                "output": [reasoning]
-            }
-        });
-        let sse = format!(
-            "event: response.created\ndata: {created}\n\n\
-             event: response.output_item.done\ndata: {item_done}\n\n\
-             event: response.completed\ndata: {completed}\n\n"
-        );
-        ([("content-type", "text/event-stream")], Body::from(sse)).into_response()
+        let (usage, output, frames) = if n == 0 {
+            let created = json!({
+                "type": "response.created",
+                "sequence_number": 0,
+                "response": {"id": resp_id, "object": "response", "status": "in_progress", "output": []}
+            });
+            let item_done_0 = json!({
+                "type": "response.output_item.done",
+                "sequence_number": 1,
+                "output_index": 0,
+                "item": reasoning
+            });
+            let item_done_1 = json!({
+                "type": "response.output_item.done",
+                "sequence_number": 2,
+                "output_index": 1,
+                "item": function_call
+            });
+            let usage = json!({
+                "input_tokens": 120,
+                "input_tokens_details": {"cached_tokens": 64},
+                "output_tokens": 24,
+                "total_tokens": 144
+            });
+            let output = json!([reasoning, function_call]);
+            let completed = json!({
+                "type": "response.completed",
+                "sequence_number": 3,
+                "response": {
+                    "id": resp_id,
+                    "object": "response",
+                    "status": "completed",
+                    "usage": usage,
+                    "output": output
+                }
+            });
+            (
+                usage,
+                output,
+                format!(
+                    "event: response.created\ndata: {created}\n\n\
+                     event: response.output_item.done\ndata: {item_done_0}\n\n\
+                     event: response.output_item.done\ndata: {item_done_1}\n\n\
+                     event: response.completed\ndata: {completed}\n\n"
+                ),
+            )
+        } else {
+            let created = json!({
+                "type": "response.created",
+                "sequence_number": 0,
+                "response": {"id": resp_id, "object": "response", "status": "in_progress", "output": []}
+            });
+            let item_done = json!({
+                "type": "response.output_item.done",
+                "sequence_number": 1,
+                "output_index": 0,
+                "item": reasoning
+            });
+            let usage = json!({
+                "input_tokens": 200,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 24,
+                "total_tokens": 224
+            });
+            let output = json!([reasoning]);
+            let completed = json!({
+                "type": "response.completed",
+                "sequence_number": 2,
+                "response": {
+                    "id": resp_id,
+                    "object": "response",
+                    "status": "completed",
+                    "usage": usage,
+                    "output": output
+                }
+            });
+            (
+                usage,
+                output,
+                format!(
+                    "event: response.created\ndata: {created}\n\n\
+                     event: response.output_item.done\ndata: {item_done}\n\n\
+                     event: response.completed\ndata: {completed}\n\n"
+                ),
+            )
+        };
+        let _ = (usage, output);
+        ([("content-type", "text/event-stream")], Body::from(frames)).into_response()
     }
 
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -1782,6 +1849,12 @@ async fn backend_codex_disabled_reasoning_owner_strips_and_fails_over_within_oau
     // Start with B disabled so Turn 1 deterministically binds to A.
     set_enabled(id_b.clone(), false).await;
 
+    let tools = json!([{
+        "type": "function",
+        "name": "lookup_status",
+        "description": "Inspect status",
+        "parameters": {"type": "object", "properties": {"target": {"type": "string"}}}
+    }]);
     let key = &server.managed_key.plaintext;
     let turn1 = client
         .post(format!(
@@ -1791,6 +1864,9 @@ async fn backend_codex_disabled_reasoning_owner_strips_and_fails_over_within_oau
         .bearer_auth(key)
         .json(&json!({
             "model": "gpt-5.4",
+            "instructions": "Be concise",
+            "tools": tools,
+            "prompt_cache_key": "codex-tool-thread",
             "stream": true,
             "store": false,
             "include": ["reasoning.encrypted_content"],
@@ -1807,7 +1883,8 @@ async fn backend_codex_disabled_reasoning_owner_strips_and_fails_over_within_oau
         assert_eq!(rec[0].0, "acct-a");
     }
 
-    // Enable B and disable A -> Turn 2 with A's encrypted reasoning strips & fails over to B.
+    // Enable B and disable A -> Turn 2 with A's encrypted reasoning + tool call/output
+    // strips only `reasoning` upfront, preserves Codex tool continuation fields, and fails over to B.
     set_enabled(id_b.clone(), true).await;
     set_enabled(id_a.clone(), false).await;
 
@@ -1819,6 +1896,9 @@ async fn backend_codex_disabled_reasoning_owner_strips_and_fails_over_within_oau
         .bearer_auth(key)
         .json(&json!({
             "model": "gpt-5.4",
+            "instructions": "Be concise",
+            "tools": tools,
+            "prompt_cache_key": "codex-tool-thread",
             "stream": true,
             "store": false,
             "include": ["reasoning.encrypted_content"],
@@ -1829,6 +1909,18 @@ async fn backend_codex_disabled_reasoning_owner_strips_and_fails_over_within_oau
                     "summary": [],
                     "encrypted_content": "gAAAAAB_owned_acct-a_0"
                 },
+                {
+                    "type": "function_call",
+                    "id": "fc_0",
+                    "call_id": "call_0",
+                    "name": "lookup_status",
+                    "arguments": "{\"target\":\"repo\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_0",
+                    "output": "{\"ok\":true}"
+                },
                 {"role": "user", "content": "turn 2"}
             ]
         }))
@@ -1836,14 +1928,20 @@ async fn backend_codex_disabled_reasoning_owner_strips_and_fails_over_within_oau
         .await
         .unwrap();
     assert_eq!(turn2.status(), 200);
-    let _ = turn2.bytes().await.unwrap();
+    let turn2_sse = String::from_utf8(turn2.bytes().await.unwrap().to_vec()).unwrap();
+    assert!(turn2_sse.contains("gAAAAAB_owned_acct-b_1"), "{turn2_sse}");
     {
         let rec = capture.recorded.lock().unwrap();
         assert_eq!(rec.len(), 2);
         assert_eq!(rec[1].0, "acct-b");
+        assert_eq!(rec[1].1["instructions"], "Be concise");
+        assert_eq!(rec[1].1["prompt_cache_key"], "codex-tool-thread");
+        assert_eq!(rec[1].1["tools"], tools);
         let forwarded_input = rec[1].1["input"].as_array().unwrap();
-        assert_eq!(forwarded_input.len(), 1);
-        assert_eq!(forwarded_input[0]["content"], "turn 2");
+        assert_eq!(forwarded_input.len(), 3);
+        assert_eq!(forwarded_input[0]["type"], "function_call");
+        assert_eq!(forwarded_input[1]["type"], "function_call_output");
+        assert_eq!(forwarded_input[2]["content"], "turn 2");
         assert_eq!(rec[1].1["include"], json!(["reasoning.encrypted_content"]));
     }
 
@@ -1916,4 +2014,59 @@ async fn backend_codex_disabled_reasoning_owner_strips_and_fails_over_within_oau
         "upstream_affinity_unavailable"
     );
     assert_eq!(capture.recorded.lock().unwrap().len(), 2);
+
+    // Confirm durable request_events_v1 captures the upstream switch (A -> B),
+    // cache_read_input_tokens drop on failover (64 -> 0), and fail-closed 409 outcomes.
+    use sqlx::{Row, sqlite::SqlitePoolOptions};
+    use std::time::Duration;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(&format!("sqlite://{}", server.sqlite_path.display()))
+        .await
+        .expect("open sqlite db");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let rows = sqlx::query(
+            "SELECT list_status, upstream_name, cache_read_input_tokens, error_code \
+             FROM request_events_v1 ORDER BY id ASC",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query request_events_v1");
+        if rows.len() == 4 {
+            assert_eq!(rows[0].get::<Option<i64>, _>("list_status"), Some(200));
+            assert_eq!(
+                rows[0].get::<Option<String>, _>("upstream_name").as_deref(),
+                Some("oauth-owner-a")
+            );
+            assert_eq!(
+                rows[0].get::<Option<i64>, _>("cache_read_input_tokens"),
+                Some(64)
+            );
+            assert_eq!(rows[1].get::<Option<i64>, _>("list_status"), Some(200));
+            assert_eq!(
+                rows[1].get::<Option<String>, _>("upstream_name").as_deref(),
+                Some("oauth-fallback-b")
+            );
+            assert_eq!(
+                rows[1].get::<Option<i64>, _>("cache_read_input_tokens"),
+                Some(0)
+            );
+            for row in &rows[2..4] {
+                assert_eq!(row.get::<Option<i64>, _>("list_status"), Some(409));
+                assert_eq!(
+                    row.get::<Option<String>, _>("error_code").as_deref(),
+                    Some("upstream_affinity_unavailable")
+                );
+            }
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for 4 codex request_events_v1 rows; saw {}",
+            rows.len()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }

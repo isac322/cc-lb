@@ -225,8 +225,9 @@ use crate::upstream_affinity::{
     extract_request_affinity_keys_with_scope, extract_response_affinity_keys,
     extract_response_affinity_keys_from_sse_event, extract_websocket_response_affinity_keys,
     gemini_cached_content_expiry, is_openai_invalid_encrypted_content_http_error,
-    is_openai_unknown_reasoning_only, path_affinity_key, realtime_call_affinity_key,
-    request_observes_response_affinity, strip_openai_reasoning_encrypted_items,
+    is_openai_reasoning_owner_failover_eligible, is_openai_unknown_reasoning_only,
+    path_affinity_key, realtime_call_affinity_key, request_observes_response_affinity,
+    strip_openai_reasoning_encrypted_items,
 };
 use crate::usage_decoder::{UsageDecoder, decode_full_body};
 #[cfg(test)]
@@ -1735,14 +1736,23 @@ impl Lifecycle {
             && let Some(ref resolved_affinity) = affinity
             && self.config.unavailable_openai_reasoning_owner
                 == cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover
-            && is_openai_unknown_reasoning_only(ProviderCapability::OpenaiResponses, body)
-        {
+            && is_openai_reasoning_owner_failover_eligible(
+                ProviderCapability::OpenaiResponses,
+                body,
+            ) {
             let mut pool = candidates.clone();
             pool.retain(|candidate| candidate.upstream_id != resolved_affinity.target_upstream_id);
             if let WebSocketTurnOwner::SessionHint(hint_id) = owner
                 && hint_id != resolved_affinity.target_upstream_id
             {
                 pool.retain(|candidate| candidate.upstream_id == hint_id);
+            }
+            if !codex_backend {
+                let api_key_only = compat_request::api_key_only_features(
+                    Some(body),
+                    ProviderCapability::OpenaiResponses,
+                );
+                retain_api_key_candidates(&mut pool, &api_key_only);
             }
             Some((resolved_affinity.target_upstream_id, pool))
         } else {
@@ -1847,46 +1857,60 @@ impl Lifecycle {
                 .retain(|candidate| candidate.upstream_id == target);
         }
         if result.candidates.is_empty()
-            && let Some((owner_id, fallback_pool)) = owner_failover_pool
-            && !fallback_pool.is_empty()
+            && let Some((owner_id, mut fallback_pool)) = owner_failover_pool
         {
-            if (matches!(owner, WebSocketTurnOwner::None)
-                || matches!(owner, WebSocketTurnOwner::SessionHint(hint_id) if hint_id == owner_id))
-                && fallback_pool.len() > 1
-                && filters
-                    .iter()
-                    .any(|filter| filter.plugin_id() == BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
-            {
-                pre_filter_candidates = Some(fallback_pool.clone());
+            let has_sub_pref = filters
+                .iter()
+                .any(|filter| filter.plugin_id() == BUILTIN_SUBSCRIPTION_PREFERENCE_ID);
+            if has_sub_pref {
+                fallback_pool.retain(|candidate| {
+                    !subscription_hard_blocked(
+                        ctx.canonical_model_id.as_str(),
+                        candidate,
+                        now_unix_millis,
+                    )
+                });
             }
-            let mut fallback_result =
-                execute_filter_pipeline(filters, &ctx, &principal, fallback_pool);
-            if let Some(ref failure) = fallback_result.failure {
-                return Err(websocket_filter_error(failure));
-            }
-            if !fallback_result.candidates.is_empty()
+            if !fallback_pool.is_empty()
                 && let Some(stripped) = strip_openai_reasoning_encrypted_items(body, None)
                 && let Ok(bytes) = serde_json::to_vec(&stripped)
             {
                 let frame = Bytes::from(bytes);
-                ctx.body_bytes = frame.clone();
-                if !result.internal_errors.is_empty() {
-                    let mut combined = std::mem::take(&mut result.internal_errors);
-                    combined.append(&mut fallback_result.internal_errors);
-                    fallback_result.internal_errors = combined;
+                let mut fallback_ctx = ctx.clone();
+                fallback_ctx.body_bytes = frame.clone();
+                let pre_filter_fallback = ((matches!(owner, WebSocketTurnOwner::None)
+                    || matches!(owner, WebSocketTurnOwner::SessionHint(hint_id) if hint_id == owner_id))
+                    && fallback_pool.len() > 1
+                    && has_sub_pref)
+                    .then(|| fallback_pool.clone());
+                let mut fallback_result =
+                    execute_filter_pipeline(filters, &fallback_ctx, &principal, fallback_pool);
+                if let Some(ref failure) = fallback_result.failure {
+                    return Err(websocket_filter_error(failure));
                 }
-                result = fallback_result;
-                affinity = None;
-                target = None;
-                recovery = WsUnknownReasoningRecovery::StrippedOwnerFailover {
-                    body: Arc::new(stripped),
-                    frame,
-                };
-                tracing::warn!(
-                    owner_upstream_id = %owner_id,
-                    model = %ctx.canonical_model_id,
-                    "failing over WebSocket OpenAI encrypted reasoning turn after stripping unavailable owner items"
-                );
+                if !fallback_result.candidates.is_empty() {
+                    if let Some(pool) = pre_filter_fallback {
+                        pre_filter_candidates = Some(pool);
+                    }
+                    ctx = fallback_ctx;
+                    if !result.internal_errors.is_empty() {
+                        let mut combined = std::mem::take(&mut result.internal_errors);
+                        combined.append(&mut fallback_result.internal_errors);
+                        fallback_result.internal_errors = combined;
+                    }
+                    result = fallback_result;
+                    affinity = None;
+                    target = None;
+                    recovery = WsUnknownReasoningRecovery::StrippedOwnerFailover {
+                        body: Arc::new(stripped),
+                        frame,
+                    };
+                    tracing::warn!(
+                        owner_upstream_id = %owner_id,
+                        model = %ctx.canonical_model_id,
+                        "failing over WebSocket OpenAI encrypted reasoning turn after stripping unavailable owner items"
+                    );
+                }
             }
         }
         if result.candidates.is_empty() {
@@ -3050,10 +3074,9 @@ impl Lifecycle {
         let ineligible_reasoning_fallback_pool = if let Some(affinity) = request_affinity.as_ref()
             && self.config.unavailable_openai_reasoning_owner
                 == cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover
-            && body_view
-                .value()
-                .is_some_and(|value| is_openai_unknown_reasoning_only(request_capability, value))
-        {
+            && body_view.value().is_some_and(|value| {
+                is_openai_reasoning_owner_failover_eligible(request_capability, value)
+            }) {
             let mut pool = candidates.clone();
             pool.retain(|candidate| candidate.upstream_id != affinity.target_upstream_id);
             if !ctx.codex_backend {
@@ -3150,55 +3173,69 @@ impl Lifecycle {
         }
         if request_affinity.is_some()
             && pipeline_result.candidates.is_empty()
-            && let Some((owner_id, fallback_pool)) = ineligible_reasoning_fallback_pool
-            && !fallback_pool.is_empty()
+            && let Some((owner_id, mut fallback_pool)) = ineligible_reasoning_fallback_pool
         {
-            let mut fallback_result = execute_filter_pipeline(
-                router_pipeline.filters_for(request_kind.provider()),
-                &ctx,
-                &principal,
-                fallback_pool,
-            );
-            if let Some(failure) = fallback_result.failure.take() {
-                if !pipeline_result.internal_errors.is_empty() {
-                    let mut combined = std::mem::take(&mut pipeline_result.internal_errors);
-                    combined.append(&mut fallback_result.internal_errors);
-                    fallback_result.internal_errors = combined;
-                }
-                return Ok(self.filter_pipeline_failure_response(
-                    request_capability,
-                    router_pipeline.terminal.clone(),
-                    &mut fallback_result,
-                    failure,
-                    &route_span,
-                    observer.as_ref(),
-                ));
+            let filters = router_pipeline.filters_for(request_kind.provider());
+            let has_sub_pref = filters
+                .iter()
+                .any(|filter| filter.plugin_id() == BUILTIN_SUBSCRIPTION_PREFERENCE_ID);
+            if has_sub_pref {
+                let now_unix_millis =
+                    u64::try_from(cc_lb_clock::unix_millis(self.clock.now())).unwrap_or(u64::MAX);
+                fallback_pool.retain(|candidate| {
+                    !subscription_hard_blocked(
+                        ctx.canonical_model_id.as_str(),
+                        candidate,
+                        now_unix_millis,
+                    )
+                });
             }
-            if !fallback_result.candidates.is_empty()
+            if !fallback_pool.is_empty()
                 && let Some(stripped) = body_view
                     .value()
                     .and_then(|value| strip_openai_reasoning_encrypted_items(value, None))
                 && let Ok(bytes) = serde_json::to_vec(&stripped)
             {
-                ctx.body_bytes = Bytes::from(bytes);
+                let mut fallback_ctx = ctx.clone();
+                fallback_ctx.body_bytes = Bytes::from(bytes);
                 rewrite_json_request_body_headers(
-                    &mut ctx.downstream_headers,
-                    ctx.body_bytes.len(),
+                    &mut fallback_ctx.downstream_headers,
+                    fallback_ctx.body_bytes.len(),
                 );
-                body_view.parsed = Ok(Arc::new(stripped));
-                request_affinity = None;
-                unknown_reasoning_recovery = HttpUnknownReasoningRecovery::None;
-                if !pipeline_result.internal_errors.is_empty() {
-                    let mut combined = std::mem::take(&mut pipeline_result.internal_errors);
-                    combined.append(&mut fallback_result.internal_errors);
-                    fallback_result.internal_errors = combined;
+                let mut fallback_result =
+                    execute_filter_pipeline(filters, &fallback_ctx, &principal, fallback_pool);
+                if let Some(failure) = fallback_result.failure.take() {
+                    if !pipeline_result.internal_errors.is_empty() {
+                        let mut combined = std::mem::take(&mut pipeline_result.internal_errors);
+                        combined.append(&mut fallback_result.internal_errors);
+                        fallback_result.internal_errors = combined;
+                    }
+                    return Ok(self.filter_pipeline_failure_response(
+                        request_capability,
+                        router_pipeline.terminal.clone(),
+                        &mut fallback_result,
+                        failure,
+                        &route_span,
+                        observer.as_ref(),
+                    ));
                 }
-                pipeline_result = fallback_result;
-                tracing::warn!(
-                    owner_upstream_id = %owner_id,
-                    model = %ctx.canonical_model_id,
-                    "failing over HTTP OpenAI encrypted reasoning request after stripping unavailable owner items"
-                );
+                if !fallback_result.candidates.is_empty() {
+                    ctx = fallback_ctx;
+                    body_view.parsed = Ok(Arc::new(stripped));
+                    request_affinity = None;
+                    unknown_reasoning_recovery = HttpUnknownReasoningRecovery::None;
+                    if !pipeline_result.internal_errors.is_empty() {
+                        let mut combined = std::mem::take(&mut pipeline_result.internal_errors);
+                        combined.append(&mut fallback_result.internal_errors);
+                        fallback_result.internal_errors = combined;
+                    }
+                    pipeline_result = fallback_result;
+                    tracing::warn!(
+                        owner_upstream_id = %owner_id,
+                        model = %ctx.canonical_model_id,
+                        "failing over HTTP OpenAI encrypted reasoning request after stripping unavailable owner items"
+                    );
+                }
             }
         }
         let mut pending_request_keys = request_affinity
@@ -3463,6 +3500,7 @@ impl Lifecycle {
             routed_owner_epoch = if affinity_owner_epoch_required {
                 enum EpochLookupFailure {
                     Storage,
+                    StaleSnapshot,
                     Conflict,
                 }
                 let lookup = match self.upstream_affinity_store.as_ref() {
@@ -3478,7 +3516,8 @@ impl Lifecycle {
                         {
                             Ok(epoch)
                         }
-                        Ok(_) => Err(EpochLookupFailure::Conflict),
+                        Ok(Some(_)) => Err(EpochLookupFailure::Conflict),
+                        Ok(None) => Err(EpochLookupFailure::StaleSnapshot),
                         Err(_) => Err(EpochLookupFailure::Storage),
                     },
                 };
@@ -3486,7 +3525,9 @@ impl Lifecycle {
                     Ok(epoch) => Some(epoch),
                     Err(failure) => {
                         let status = match failure {
-                            EpochLookupFailure::Storage => StatusCode::SERVICE_UNAVAILABLE,
+                            EpochLookupFailure::Storage | EpochLookupFailure::StaleSnapshot => {
+                                StatusCode::SERVICE_UNAVAILABLE
+                            }
                             EpochLookupFailure::Conflict => StatusCode::CONFLICT,
                         };
                         if let Some(o) = observer.as_ref() {

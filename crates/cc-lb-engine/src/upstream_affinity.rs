@@ -557,6 +557,94 @@ pub(crate) fn is_openai_unknown_reasoning_only(
     flow.is_continue() && found_reasoning
 }
 
+fn has_non_empty_array(object: &Map<String, Value>, key: &str) -> bool {
+    object
+        .get(key)
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+}
+
+fn has_owned_container_reference(value: &Value) -> bool {
+    if reference_id(Some(value)).is_some() {
+        return true;
+    }
+    value.as_object().is_some_and(|container| {
+        reference_id(container.get("container_id")).is_some()
+            || reference_id(container.get("file_id")).is_some()
+            || has_non_empty_array(container, "file_ids")
+    })
+}
+
+fn tool_has_account_owned_reference(tool: &Value) -> bool {
+    let Some(object) = tool.as_object() else {
+        return false;
+    };
+    reference_id(object.get("file_id")).is_some()
+        || reference_id(object.get("container_id")).is_some()
+        || reference_id(object.get("vector_store_id")).is_some()
+        || has_non_empty_array(object, "file_ids")
+        || has_non_empty_array(object, "vector_store_ids")
+        || object
+            .get("container")
+            .is_some_and(has_owned_container_reference)
+}
+
+fn input_has_account_owned_reference(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(input_has_account_owned_reference),
+        Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) == Some("item_reference") {
+                return true;
+            }
+            if reference_id(object.get("file_id")).is_some()
+                || reference_id(object.get("container_id")).is_some()
+                || reference_id(object.get("vector_store_id")).is_some()
+                || has_non_empty_array(object, "file_ids")
+                || has_non_empty_array(object, "vector_store_ids")
+                || object
+                    .get("container")
+                    .is_some_and(has_owned_container_reference)
+            {
+                return true;
+            }
+            object.values().any(input_has_account_owned_reference)
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+    }
+}
+
+/// Returns whether a known-owner OpenAI Responses request with an unavailable
+/// owner may strip `reasoning.encrypted_content` items and fail over.
+/// Requires `is_openai_unknown_reasoning_only` and rejects requests that also
+/// carry account-owned references (`prompt`, `item_reference`, `file_id`,
+/// `file_ids`, `container_id`, explicit `container` ids or `container.file_ids`,
+/// `vector_store_id`, or `vector_store_ids`), while still allowing `code_interpreter`
+/// with a fresh auto container (`{"type": "auto"}`) and without `file_ids`.
+pub(crate) fn is_openai_reasoning_owner_failover_eligible(
+    capability: ProviderCapability,
+    value: &Value,
+) -> bool {
+    if !is_openai_unknown_reasoning_only(capability, value) {
+        return false;
+    }
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object.get("prompt").is_some_and(|v| !v.is_null()) {
+        return false;
+    }
+    if object
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| tools.iter().any(tool_has_account_owned_reference))
+    {
+        return false;
+    }
+    !object
+        .get("input")
+        .is_some_and(input_has_account_owned_reference)
+}
+
 /// Returns SHA-256 digests for `reasoning.encrypted_content` items present in
 /// `value` whose OpenAI affinity key remained unresolved (`pending_keys`).
 pub(crate) fn collect_openai_pending_reasoning_digests(

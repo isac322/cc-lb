@@ -54,14 +54,14 @@ The initial performance improvement deferred deletion because an arbitrary TTL w
 ttl_days = 7
 ```
 
-- The default is 7 days. Specify a positive number of days; 0 is not allowed. Ordinary replay reads do not refresh `observed_at_unix_secs`, so bindings older than 7 days fail closed with a local `409 Conflict` (`upstream_affinity_unavailable`) immediately after upgrade unless `ttl_days` is explicitly configured higher.
+- The default is 7 days. Specify a positive number of days; 0 is not allowed. Ordinary replay reads do not refresh `observed_at_unix_secs`, so bindings older than 7 days become unavailable on lookup immediately after upgrade unless `ttl_days` is explicitly configured higher (returning `409 Conflict` / `upstream_affinity_unavailable`, except where `unknown_openai_reasoning = "hybrid"` handles pure reasoning-only requests or the single-account rule handles unrecorded stored-response lookups).
 - The environment variable is `CC_LB_UPSTREAM_AFFINITY__TTL_DAYS`.
 - Changes apply after a server restart. The engine's lookup policy and the background scheduler's cleanup policy use the same startup configuration.
 - The TTL basis is the last successful binding's `observed_at_unix_secs`. It is not a sliding TTL that adds a write on every lookup.
 - Expired when `now >= observed_at + TTL`. If a separate `expires_at_unix_secs` exists, that expiry condition also applies.
 - Existing `expires_at = NULL` rows are looked up and cleaned up under the same TTL. Do not block the hot path with a bulk backfill UPDATE.
 - Raising or lowering the setting applies the new basis to all still-stored rows after restart. Rows already physically deleted are not restored.
-- If the issuing upstream of expired history is unknown, return the existing unknown-affinity `409 Conflict` (`upstream_affinity_unavailable`). Do not guess and route to another account.
+- Once an expired row is skipped as unavailable for lookup, do not guess and route affinity-pinned requests to another account (`409 Conflict`, except `unknown_openai_reasoning = "hybrid"` or single-account stored-response placement).
 - Even if purge has not run yet, expired rows are not used for routing. When relearning from a new successful response, an expired conflicting row may be atomically replaced.
 - Physical cleanup runs in an out-of-request singleton cron at a default 600-second interval with up to 30 seconds of jitter. One batch is at most 1,000 rows; one job is at most 1,024 batches. Policy expiry applies immediately and does not wait for the physical purge to run.
 - Row deletion in SQLite enables page reuse but does not immediately shrink the DB file. Do not run VACUUM or capacity aggregation on the request path.
