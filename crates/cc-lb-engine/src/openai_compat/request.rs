@@ -395,26 +395,56 @@ pub fn degrade_without_api_key(
                 }
             }
         }
-        let forced = match b.get("tool_choice") {
-            Some(Value::String(s)) if s == "required" => false,
-            Some(v) => matches!(
-                v.get("type").and_then(Value::as_str),
-                Some("file_search") | Some("code_interpreter")
-            ),
-            None => false,
-        };
         let object = b.as_object_mut().expect("request body is an object");
         if top_tools_removed {
             object.remove("tools");
         }
-        if !has_remaining_tools {
-            if forced
-                || matches!(object.get("tool_choice"), Some(Value::String(s)) if s == "required")
-            {
+        enum ToolChoiceAction {
+            Keep,
+            Remove,
+            Auto,
+        }
+        let action = match object.get_mut("tool_choice") {
+            Some(Value::String(s)) if s == "required" && !has_remaining_tools => {
+                ToolChoiceAction::Remove
+            }
+            Some(Value::Object(choice)) => match choice.get("type").and_then(Value::as_str) {
+                Some("file_search" | "code_interpreter") => {
+                    if has_remaining_tools {
+                        ToolChoiceAction::Auto
+                    } else {
+                        ToolChoiceAction::Remove
+                    }
+                }
+                Some("allowed_tools") => {
+                    let empty_after_strip = if let Some(allowed) =
+                        choice.get_mut("tools").and_then(Value::as_array_mut)
+                    {
+                        strip_hosted_tools_from_array(allowed, 0);
+                        allowed.is_empty()
+                    } else {
+                        false
+                    };
+                    let required_mode =
+                        choice.get("mode").and_then(Value::as_str) == Some("required");
+                    if empty_after_strip || (!has_remaining_tools && required_mode) {
+                        ToolChoiceAction::Remove
+                    } else {
+                        ToolChoiceAction::Keep
+                    }
+                }
+                _ => ToolChoiceAction::Keep,
+            },
+            _ => ToolChoiceAction::Keep,
+        };
+        match action {
+            ToolChoiceAction::Keep => {}
+            ToolChoiceAction::Remove => {
                 object.remove("tool_choice");
             }
-        } else if forced {
-            object.insert("tool_choice".into(), json!("auto"));
+            ToolChoiceAction::Auto => {
+                object.insert("tool_choice".into(), json!("auto"));
+            }
         }
     }
     if features
@@ -793,5 +823,101 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out_forced_auto["tool_choice"], "auto");
+
+        // 5. allowed_tools with mode: "required" and only code_interpreter allowed, even with an
+        // outside surviving function tool -> empties subset and clears tool_choice
+        let allowed_only_hosted = json!({
+            "tools": [{"type": "function", "name": "outside_fn"}],
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}]
+            }],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [{"type": "code_interpreter"}]
+            }
+        });
+        let out_allowed_cleared = degrade_without_api_key(
+            &allowed_only_hosted,
+            &[ApiKeyOnlyFeature::CodeInterpreterTool],
+            &policy,
+        )
+        .unwrap();
+        assert!(out_allowed_cleared.get("tool_choice").is_none());
+
+        // 6. allowed_tools with mode: "required" and surviving lookup function in additional_tools ->
+        // strips code_interpreter selector and preserves subset + mode
+        let allowed_mixed = json!({
+            "input": [{
+                "type": "additional_tools",
+                "tools": [
+                    {"type": "code_interpreter", "container": {"type": "auto"}},
+                    {"type": "function", "name": "lookup"}
+                ]
+            }],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [{"type": "code_interpreter"}, {"type": "function", "name": "lookup"}]
+            }
+        });
+        let out_allowed_mixed = degrade_without_api_key(
+            &allowed_mixed,
+            &[ApiKeyOnlyFeature::CodeInterpreterTool],
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(out_allowed_mixed["tool_choice"]["mode"], "required");
+        assert_eq!(
+            out_allowed_mixed["tool_choice"]["tools"],
+            json!([{"type": "function", "name": "lookup"}])
+        );
+
+        // 7. allowed_tools with mode: "auto": clears when emptied, preserves subset + mode when lookup survives
+        let allowed_auto_only = json!({
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}]
+            }],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "auto",
+                "tools": [{"type": "code_interpreter"}]
+            }
+        });
+        let out_allowed_auto_cleared = degrade_without_api_key(
+            &allowed_auto_only,
+            &[ApiKeyOnlyFeature::CodeInterpreterTool],
+            &policy,
+        )
+        .unwrap();
+        assert!(out_allowed_auto_cleared.get("tool_choice").is_none());
+
+        let allowed_auto_mixed = json!({
+            "input": [{
+                "type": "additional_tools",
+                "tools": [
+                    {"type": "code_interpreter", "container": {"type": "auto"}},
+                    {"type": "function", "name": "lookup"}
+                ]
+            }],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "auto",
+                "tools": [{"type": "code_interpreter"}, {"type": "function", "name": "lookup"}]
+            }
+        });
+        let out_allowed_auto_mixed = degrade_without_api_key(
+            &allowed_auto_mixed,
+            &[ApiKeyOnlyFeature::CodeInterpreterTool],
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(out_allowed_auto_mixed["tool_choice"]["mode"], "auto");
+        assert_eq!(
+            out_allowed_auto_mixed["tool_choice"]["tools"],
+            json!([{"type": "function", "name": "lookup"}])
+        );
     }
 }
