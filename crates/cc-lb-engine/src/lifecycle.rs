@@ -1906,9 +1906,16 @@ impl Lifecycle {
         )
         .0;
         pool.retain(|candidate| allowed_ids.contains(&candidate.upstream_id));
+        let compat_requires_api_key = !codex_backend
+            && !compat_request::api_key_only_features(
+                Some(body),
+                ProviderCapability::OpenaiResponses,
+            )
+            .is_empty();
+        let effective_requires_api_key = requires_api_key || compat_requires_api_key;
         if codex_backend {
             pool.retain(|candidate| candidate.kind == cc_lb_domain::UpstreamKind::OpenaiOauth);
-        } else if requires_api_key {
+        } else if effective_requires_api_key {
             pool.retain(|candidate| candidate.kind == cc_lb_domain::UpstreamKind::OpenaiApiKey);
         }
         let filters = pipeline.filters_for(cc_lb_domain::Provider::Openai);
@@ -1940,7 +1947,7 @@ impl Lifecycle {
             has_sub_pref,
             now_unix_millis,
             codex_backend,
-            !codex_backend && !requires_api_key,
+            !codex_backend && !effective_requires_api_key,
         ) else {
             return Vec::new();
         };
@@ -2545,7 +2552,10 @@ impl Lifecycle {
                 break;
             }
 
-            if precomputed_ws_result.is_none() {
+            let allow_all_stripped_fallback = self.config.unknown_openai_reasoning
+                != cc_lb_domain::UnknownOpenaiReasoningPolicy::FailClosed
+                || plan.pending_keys.is_empty();
+            if precomputed_ws_result.is_none() && allow_all_stripped_fallback {
                 let healthy_matched_ids: HashSet<Uuid> =
                     plan.healthy_owners.iter().map(|(id, _)| *id).collect();
                 let replacement_pool: Vec<UpstreamCandidate> = owner_check_pool
@@ -2553,6 +2563,11 @@ impl Lifecycle {
                     .filter(|candidate| {
                         !is_candidate_blocked(candidate)
                             && !healthy_matched_ids.contains(&candidate.upstream_id)
+                            && !matches!(
+                                owner,
+                                WebSocketTurnOwner::PrewarmResponse(prewarm_owner)
+                                    if candidate.upstream_id == prewarm_owner
+                            )
                     })
                     .cloned()
                     .collect();
@@ -2614,108 +2629,166 @@ impl Lifecycle {
             }
 
             if precomputed_ws_result.is_none() {
-                let mut blocked_order = Vec::with_capacity(plan.blocked_owners.len());
-                if let WebSocketTurnOwner::PrewarmResponse(prewarm_owner) = owner
-                    && let Some(pos) = plan
-                        .blocked_owners
+                if let WebSocketTurnOwner::PrewarmResponse(prewarm_owner) = owner {
+                    if let Some(prewarm_candidate) = owner_check_pool
                         .iter()
-                        .position(|(id, _)| *id == prewarm_owner)
-                {
-                    blocked_order.push(plan.blocked_owners[pos]);
-                    for (idx, entry) in plan.blocked_owners.iter().enumerate() {
-                        if idx != pos {
-                            blocked_order.push(*entry);
+                        .find(|candidate| candidate.upstream_id == prewarm_owner)
+                    {
+                        let stale = stale_digests_for_owner(&plan.matched, prewarm_owner);
+                        if let Some(stripped) =
+                            strip_openai_reasoning_encrypted_items(body, Some(&stale))
+                            && let Ok(bytes) = serde_json::to_vec(&stripped)
+                        {
+                            let stripped_frame = Bytes::from(bytes);
+                            let mut probe_ctx = ctx.clone();
+                            probe_ctx.body_bytes = stripped_frame.clone();
+                            let mut probe_result = execute_filter_pipeline(
+                                filters,
+                                &probe_ctx,
+                                &principal,
+                                vec![prewarm_candidate.clone()],
+                            );
+                            if let Some(failure) = probe_result.failure.take() {
+                                probe_errors.append(&mut probe_result.internal_errors);
+                                last_probe_failure.get_or_insert(failure);
+                            } else {
+                                probe_result
+                                    .candidates
+                                    .retain(|candidate| candidate.upstream_id == prewarm_owner);
+                                if probe_result.candidates.is_empty() {
+                                    probe_errors.append(&mut probe_result.internal_errors);
+                                } else {
+                                    let stripped_count = stale.len();
+                                    let matched_epoch = plan
+                                        .blocked_owners
+                                        .iter()
+                                        .chain(plan.healthy_owners.iter())
+                                        .find(|(id, _)| *id == prewarm_owner)
+                                        .map(|(_, epoch)| *epoch);
+                                    let resolved = matched_epoch.map(|owner_epoch| {
+                                        RequestAffinityResolution {
+                                            target_upstream_id: prewarm_owner,
+                                            owner_epoch,
+                                            pending_keys: plan.pending_keys.clone(),
+                                        }
+                                    });
+                                    ctx = probe_ctx;
+                                    if self.config.unknown_openai_reasoning
+                                        == cc_lb_domain::UnknownOpenaiReasoningPolicy::Hybrid
+                                        && !has_previous
+                                        && !plan.pending_keys.is_empty()
+                                    {
+                                        let pending_digests =
+                                            collect_openai_pending_reasoning_digests(
+                                                ProviderCapability::OpenaiResponses,
+                                                &stripped,
+                                                &plan.pending_keys,
+                                            );
+                                        if !pending_digests.is_empty() {
+                                            recovery = WsUnknownReasoningRecovery::Pending {
+                                                pending_digests,
+                                                pending_keys: plan.pending_keys.clone(),
+                                            };
+                                        }
+                                    }
+                                    tracing::warn!(
+                                        chosen_upstream_id = %prewarm_owner,
+                                        stripped_item_count = stripped_count,
+                                        model = %ctx.canonical_model_id,
+                                        "reconciled multi-owner WebSocket prewarm turn onto prewarm owner"
+                                    );
+                                    target = Some(prewarm_owner);
+                                    affinity = resolved;
+                                    reconciled_body = Some((Arc::new(stripped), stripped_frame));
+                                    if !probe_errors.is_empty() {
+                                        let mut combined = std::mem::take(&mut probe_errors);
+                                        combined.append(&mut probe_result.internal_errors);
+                                        probe_result.internal_errors = combined;
+                                    }
+                                    precomputed_ws_result = Some(probe_result);
+                                }
+                            }
                         }
                     }
                 } else {
-                    blocked_order = plan.blocked_owners.clone();
-                }
-
-                for (owner_id, owner_epoch) in blocked_order {
-                    let Some(owner_candidate) = owner_check_pool
-                        .iter()
-                        .find(|candidate| candidate.upstream_id == owner_id)
-                    else {
-                        continue;
-                    };
-                    let stale = stale_digests_for_owner(&plan.matched, owner_id);
-                    let Some(stripped) = strip_openai_reasoning_encrypted_items(body, Some(&stale))
-                    else {
-                        continue;
-                    };
-                    let Ok(bytes) = serde_json::to_vec(&stripped) else {
-                        continue;
-                    };
-                    let stripped_frame = Bytes::from(bytes);
-                    let mut probe_ctx = ctx.clone();
-                    probe_ctx.body_bytes = stripped_frame.clone();
-                    let mut probe_result = execute_filter_pipeline(
-                        filters,
-                        &probe_ctx,
-                        &principal,
-                        vec![owner_candidate.clone()],
-                    );
-                    if let Some(failure) = probe_result.failure.take() {
-                        probe_errors.append(&mut probe_result.internal_errors);
-                        last_probe_failure.get_or_insert(failure);
-                        continue;
-                    }
-                    probe_result
-                        .candidates
-                        .retain(|candidate| candidate.upstream_id == owner_id);
-                    if probe_result.candidates.is_empty() {
-                        probe_errors.append(&mut probe_result.internal_errors);
-                        continue;
-                    }
-                    if let WebSocketTurnOwner::PrewarmResponse(prewarm_owner) = owner
-                        && owner_id != prewarm_owner
-                    {
-                        return Err(WebSocketError::new(
-                            400,
-                            "previous_response_not_found",
-                            "The previous response is not available on this connection",
-                        ));
-                    }
-                    let stripped_count = stale.len();
-                    let resolved = RequestAffinityResolution {
-                        target_upstream_id: owner_id,
-                        owner_epoch,
-                        pending_keys: plan.pending_keys.clone(),
-                    };
-                    ctx = probe_ctx;
-                    if self.config.unknown_openai_reasoning
-                        == cc_lb_domain::UnknownOpenaiReasoningPolicy::Hybrid
-                        && !has_previous
-                        && !resolved.pending_keys.is_empty()
-                    {
-                        let pending_digests = collect_openai_pending_reasoning_digests(
-                            ProviderCapability::OpenaiResponses,
-                            &stripped,
-                            &resolved.pending_keys,
+                    for &(owner_id, owner_epoch) in &plan.blocked_owners {
+                        let Some(owner_candidate) = owner_check_pool
+                            .iter()
+                            .find(|candidate| candidate.upstream_id == owner_id)
+                        else {
+                            continue;
+                        };
+                        let stale = stale_digests_for_owner(&plan.matched, owner_id);
+                        let Some(stripped) =
+                            strip_openai_reasoning_encrypted_items(body, Some(&stale))
+                        else {
+                            continue;
+                        };
+                        let Ok(bytes) = serde_json::to_vec(&stripped) else {
+                            continue;
+                        };
+                        let stripped_frame = Bytes::from(bytes);
+                        let mut probe_ctx = ctx.clone();
+                        probe_ctx.body_bytes = stripped_frame.clone();
+                        let mut probe_result = execute_filter_pipeline(
+                            filters,
+                            &probe_ctx,
+                            &principal,
+                            vec![owner_candidate.clone()],
                         );
-                        if !pending_digests.is_empty() {
-                            recovery = WsUnknownReasoningRecovery::Pending {
-                                pending_digests,
-                                pending_keys: resolved.pending_keys.clone(),
-                            };
+                        if let Some(failure) = probe_result.failure.take() {
+                            probe_errors.append(&mut probe_result.internal_errors);
+                            last_probe_failure.get_or_insert(failure);
+                            continue;
                         }
+                        probe_result
+                            .candidates
+                            .retain(|candidate| candidate.upstream_id == owner_id);
+                        if probe_result.candidates.is_empty() {
+                            probe_errors.append(&mut probe_result.internal_errors);
+                            continue;
+                        }
+                        let stripped_count = stale.len();
+                        let resolved = RequestAffinityResolution {
+                            target_upstream_id: owner_id,
+                            owner_epoch,
+                            pending_keys: plan.pending_keys.clone(),
+                        };
+                        ctx = probe_ctx;
+                        if self.config.unknown_openai_reasoning
+                            == cc_lb_domain::UnknownOpenaiReasoningPolicy::Hybrid
+                            && !has_previous
+                            && !resolved.pending_keys.is_empty()
+                        {
+                            let pending_digests = collect_openai_pending_reasoning_digests(
+                                ProviderCapability::OpenaiResponses,
+                                &stripped,
+                                &resolved.pending_keys,
+                            );
+                            if !pending_digests.is_empty() {
+                                recovery = WsUnknownReasoningRecovery::Pending {
+                                    pending_digests,
+                                    pending_keys: resolved.pending_keys.clone(),
+                                };
+                            }
+                        }
+                        tracing::warn!(
+                            chosen_upstream_id = %resolved.target_upstream_id,
+                            stripped_item_count = stripped_count,
+                            model = %ctx.canonical_model_id,
+                            "reconciled multi-owner WebSocket OpenAI encrypted reasoning turn by keeping surviving owner items"
+                        );
+                        target = Some(owner_id);
+                        affinity = Some(resolved);
+                        reconciled_body = Some((Arc::new(stripped), stripped_frame));
+                        if !probe_errors.is_empty() {
+                            let mut combined = std::mem::take(&mut probe_errors);
+                            combined.append(&mut probe_result.internal_errors);
+                            probe_result.internal_errors = combined;
+                        }
+                        precomputed_ws_result = Some(probe_result);
+                        break;
                     }
-                    tracing::warn!(
-                        chosen_upstream_id = %resolved.target_upstream_id,
-                        stripped_item_count = stripped_count,
-                        model = %ctx.canonical_model_id,
-                        "reconciled multi-owner WebSocket OpenAI encrypted reasoning turn by keeping surviving owner items"
-                    );
-                    target = Some(owner_id);
-                    affinity = Some(resolved);
-                    reconciled_body = Some((Arc::new(stripped), stripped_frame));
-                    if !probe_errors.is_empty() {
-                        let mut combined = std::mem::take(&mut probe_errors);
-                        combined.append(&mut probe_result.internal_errors);
-                        probe_result.internal_errors = combined;
-                    }
-                    precomputed_ws_result = Some(probe_result);
-                    break;
                 }
             }
 
@@ -2723,19 +2796,27 @@ impl Lifecycle {
                 if let Some(failure) = last_probe_failure {
                     return Err(websocket_filter_error(&failure));
                 }
-                if matches!(owner, WebSocketTurnOwner::PrewarmResponse(_)) {
-                    return Err(WebSocketError::new(
-                        400,
-                        "previous_response_not_found",
-                        "The previous response is not available on this connection",
-                    ));
+                if let WebSocketTurnOwner::PrewarmResponse(prewarm_owner) = owner {
+                    target = Some(prewarm_owner);
+                    let matched_epoch = plan
+                        .blocked_owners
+                        .iter()
+                        .chain(plan.healthy_owners.iter())
+                        .find(|(id, _)| *id == prewarm_owner)
+                        .map(|(_, epoch)| *epoch);
+                    affinity = matched_epoch.map(|owner_epoch| RequestAffinityResolution {
+                        target_upstream_id: prewarm_owner,
+                        owner_epoch,
+                        pending_keys: plan.pending_keys.clone(),
+                    });
+                } else {
+                    target = Some(plan.latest_owner.0);
+                    affinity = Some(RequestAffinityResolution {
+                        target_upstream_id: plan.latest_owner.0,
+                        owner_epoch: plan.latest_owner.1,
+                        pending_keys: plan.pending_keys,
+                    });
                 }
-                target = Some(plan.latest_owner.0);
-                affinity = Some(RequestAffinityResolution {
-                    target_upstream_id: plan.latest_owner.0,
-                    owner_epoch: plan.latest_owner.1,
-                    pending_keys: plan.pending_keys,
-                });
                 precomputed_ws_result = Some(FilterPipelineResult {
                     candidates: Vec::new(),
                     internal_errors: probe_errors,
@@ -4299,7 +4380,10 @@ impl Lifecycle {
                 break;
             }
 
-            if precomputed_pipeline_result.is_none() {
+            let allow_all_stripped_fallback = self.config.unknown_openai_reasoning
+                != cc_lb_domain::UnknownOpenaiReasoningPolicy::FailClosed
+                || plan.pending_keys.is_empty();
+            if precomputed_pipeline_result.is_none() && allow_all_stripped_fallback {
                 let healthy_matched_ids: HashSet<Uuid> =
                     plan.healthy_owners.iter().map(|(id, _)| *id).collect();
                 let replacement_pool: Vec<UpstreamCandidate> = owner_check_pool

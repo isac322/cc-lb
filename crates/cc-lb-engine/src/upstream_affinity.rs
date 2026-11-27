@@ -758,7 +758,7 @@ pub(crate) fn is_openai_reasoning_owner_failover_eligible(
     !openai_responses_has_account_owned_reference(value)
 }
 
-fn input_has_compaction_item(value: &Value) -> bool {
+pub(crate) fn input_has_compaction_item(value: &Value) -> bool {
     match value {
         Value::Array(items) => items.iter().any(input_has_compaction_item),
         Value::Object(object) => matches!(

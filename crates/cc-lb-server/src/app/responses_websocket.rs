@@ -468,11 +468,13 @@ async fn commit_and_send_responses_dispatch(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_responses_dispatch(
     gateway: &mut ResponsesWebSocketGateway,
     mut dispatch: WebSocketDispatch,
     connection_id: u64,
     connections: &mut HashMap<u64, WsProviderConnection>,
+    pending_connects: &HashMap<u64, PendingConnect>,
     dispatch_timings: cc_lb_engine::responses_websocket::ResponsesDispatchTimings,
     deadline: tokio::time::Instant,
     drain_controller: &DrainController,
@@ -566,8 +568,14 @@ async fn send_responses_dispatch(
     match validation {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
+            let pool = ws_relay_pool_snapshot(pending_connects);
             let (ready, emitted_error) = gateway
-                .fail_dispatch_with_recovery(dispatch.turn_id, Some(upstream_id), &error)
+                .fail_dispatch_with_recovery_and_pool(
+                    dispatch.turn_id,
+                    Some(upstream_id),
+                    &error,
+                    &pool,
+                )
                 .await;
             return (ready, emitted_error.into_iter().collect());
         }
@@ -578,8 +586,14 @@ async fn send_responses_dispatch(
                 "provider WebSocket connection timed out",
             )
             .with_stream(dispatch.stream_id.clone());
+            let pool = ws_relay_pool_snapshot(pending_connects);
             let (ready, emitted_error) = gateway
-                .fail_dispatch_with_recovery(dispatch.turn_id, Some(upstream_id), &error)
+                .fail_dispatch_with_recovery_and_pool(
+                    dispatch.turn_id,
+                    Some(upstream_id),
+                    &error,
+                    &pool,
+                )
                 .await;
             return (ready, emitted_error.into_iter().collect());
         }
@@ -716,9 +730,25 @@ fn next_ws_candidate(
     }
 }
 
+fn ws_relay_pool_snapshot(
+    pending_connects: &HashMap<u64, PendingConnect>,
+) -> cc_lb_engine::responses_websocket::WsRelayPoolSnapshot {
+    let mut coalescable_upstreams = std::collections::HashSet::new();
+    for entry in pending_connects.values() {
+        if !entry.active_socket_per_lane {
+            coalescable_upstreams.insert(entry.active_upstream_id);
+        }
+    }
+    cc_lb_engine::responses_websocket::WsRelayPoolSnapshot {
+        pending_connects: pending_connects.len(),
+        coalescable_upstreams,
+    }
+}
+
 async fn finish_failed_dispatch(
     gateway: &mut ResponsesWebSocketGateway,
     pending: PendingDispatchState,
+    pending_connects: &HashMap<u64, PendingConnect>,
 ) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
     let error = pending
         .last_error
@@ -730,11 +760,13 @@ async fn finish_failed_dispatch(
             )
         })
         .with_stream(pending.dispatch.stream_id);
+    let pool = ws_relay_pool_snapshot(pending_connects);
     let (ready, emitted_error) = gateway
-        .fail_dispatch_with_recovery(
+        .fail_dispatch_with_recovery_and_pool(
             pending.dispatch.turn_id,
             pending.last_attempted_upstream_id,
             &error,
+            &pool,
         )
         .await;
     (ready, emitted_error.into_iter().collect())
@@ -773,6 +805,7 @@ async fn advance_one_dispatch(
             pending.dispatch,
             connection_id,
             connections,
+            pending_connects,
             cc_lb_engine::responses_websocket::ResponsesDispatchTimings::reused(),
             pending.deadline,
             &state.drain_controller,
@@ -821,7 +854,7 @@ async fn advance_one_dispatch(
                 gateway.finalize_dispatch_reasoning(&mut pending.dispatch, pinned_to_single_owner)
             {
                 pending.last_error = Some(error.with_stream(pending.dispatch.stream_id.clone()));
-                return finish_failed_dispatch(gateway, pending).await;
+                return finish_failed_dispatch(gateway, pending, pending_connects).await;
             }
             let validation = tokio::select! {
                 biased;
@@ -893,7 +926,7 @@ async fn advance_one_dispatch(
             gateway.finalize_dispatch_reasoning(&mut pending.dispatch, pinned_to_single_owner)
         {
             pending.last_error = Some(error.with_stream(pending.dispatch.stream_id.clone()));
-            return finish_failed_dispatch(gateway, pending).await;
+            return finish_failed_dispatch(gateway, pending, pending_connects).await;
         }
 
         // Coalesce concurrent shareable API-key lanes onto an in-flight dial instead of
@@ -908,9 +941,11 @@ async fn advance_one_dispatch(
         }
 
         while connections.len() + pending_connects.len() >= connection_capacity {
-            let Some(retired_id) =
-                gateway.reclaim_idle_connection_for_failover(candidate.upstream_id)
-            else {
+            let Some(retired_id) = gateway.reclaim_idle_connection_for_failover(
+                candidate.upstream_id,
+                candidate.socket_per_lane,
+                &pending.dispatch.stream_id,
+            ) else {
                 break;
             };
             connections.remove(&retired_id);
@@ -921,7 +956,7 @@ async fn advance_one_dispatch(
                 "overloaded_error",
                 "WebSocket provider connection budget is full",
             ));
-            break;
+            continue;
         }
         // Skip open circuit breakers without burning a retry slot or bulkhead/signing work.
         let permit = match acquire_websocket_breaker_permit(state, candidate.upstream_id) {
@@ -1173,7 +1208,7 @@ async fn advance_one_dispatch(
         return (Vec::new(), Vec::new());
     }
 
-    finish_failed_dispatch(gateway, pending).await
+    finish_failed_dispatch(gateway, pending, pending_connects).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1227,7 +1262,8 @@ async fn handle_connect_outcome(
                         "upstream_unavailable",
                         "provider WebSocket connection timed out",
                     ));
-                    let (ready, errs) = finish_failed_dispatch(gateway, entry).await;
+                    let (ready, errs) =
+                        finish_failed_dispatch(gateway, entry, pending_connects).await;
                     dispatches.extend(ready);
                     errors.extend(errs);
                     continue;
@@ -1257,7 +1293,8 @@ async fn handle_connect_outcome(
                     gateway.finalize_dispatch_reasoning(&mut entry.dispatch, pinned_to_single_owner)
                 {
                     entry.last_error = Some(error.with_stream(entry.dispatch.stream_id.clone()));
-                    let (ready, errs) = finish_failed_dispatch(gateway, entry).await;
+                    let (ready, errs) =
+                        finish_failed_dispatch(gateway, entry, pending_connects).await;
                     dispatches.extend(ready);
                     errors.extend(errs);
                     continue;
@@ -1346,7 +1383,8 @@ async fn handle_connect_outcome(
                         let fatal = is_fatal_ws_connect_error(&error);
                         entry.last_error = Some(error);
                         if fatal {
-                            let (ready, errs) = finish_failed_dispatch(gateway, entry).await;
+                            let (ready, errs) =
+                                finish_failed_dispatch(gateway, entry, pending_connects).await;
                             dispatches.extend(ready);
                             errors.extend(errs);
                         } else {
@@ -1359,7 +1397,8 @@ async fn handle_connect_outcome(
                             "upstream_unavailable",
                             "provider WebSocket connection timed out",
                         ));
-                        let (ready, errs) = finish_failed_dispatch(gateway, entry).await;
+                        let (ready, errs) =
+                            finish_failed_dispatch(gateway, entry, pending_connects).await;
                         dispatches.extend(ready);
                         errors.extend(errs);
                     }
@@ -1380,7 +1419,8 @@ async fn handle_connect_outcome(
             primary.last_error = Some(error.clone());
             primary.last_attempted_upstream_id = Some(pending.active_upstream_id);
             if is_fatal_ws_connect_error(&error) || now >= primary.deadline {
-                let (ready, errs) = finish_failed_dispatch(gateway, primary).await;
+                let (ready, errs) =
+                    finish_failed_dispatch(gateway, primary, pending_connects).await;
                 dispatches.extend(ready);
                 errors.extend(errs);
             } else {
@@ -1397,7 +1437,8 @@ async fn handle_connect_outcome(
                             "provider WebSocket connection timed out",
                         )
                     });
-                    let (ready, errs) = finish_failed_dispatch(gateway, entry).await;
+                    let (ready, errs) =
+                        finish_failed_dispatch(gateway, entry, pending_connects).await;
                     dispatches.extend(ready);
                     errors.extend(errs);
                 } else {
@@ -1439,7 +1480,8 @@ async fn handle_connect_outcome(
                 entry.last_error = Some(error.clone());
                 entry.last_attempted_upstream_id = Some(pending.active_upstream_id);
                 if is_fatal_ws_connect_error(&error) || now >= entry.deadline {
-                    let (ready, errs) = finish_failed_dispatch(gateway, entry).await;
+                    let (ready, errs) =
+                        finish_failed_dispatch(gateway, entry, pending_connects).await;
                     dispatches.extend(ready);
                     errors.extend(errs);
                 } else {
@@ -1459,7 +1501,8 @@ async fn handle_connect_outcome(
                         "provider WebSocket connection timed out",
                     )
                 });
-                let (ready, errs) = finish_failed_dispatch(gateway, deferred).await;
+                let (ready, errs) =
+                    finish_failed_dispatch(gateway, deferred, pending_connects).await;
                 dispatches.extend(ready);
                 errors.extend(errs);
                 continue;
@@ -1474,7 +1517,8 @@ async fn handle_connect_outcome(
                         "upstream_affinity_unavailable",
                         "The session is pinned to another OAuth account",
                     ));
-                    let (ready, errs) = finish_failed_dispatch(gateway, deferred).await;
+                    let (ready, errs) =
+                        finish_failed_dispatch(gateway, deferred, pending_connects).await;
                     dispatches.extend(ready);
                     errors.extend(errs);
                     continue;
@@ -1516,6 +1560,7 @@ async fn handle_connect_outcome(
 async fn expire_deferred_for_session_owner(
     gateway: &mut ResponsesWebSocketGateway,
     deferred_for_session_owner: &mut VecDeque<PendingDispatchState>,
+    pending_connects: &HashMap<u64, PendingConnect>,
     dispatches: &mut VecDeque<WebSocketDispatch>,
 ) -> Vec<WebSocketError> {
     let mut errors = Vec::new();
@@ -1530,7 +1575,7 @@ async fn expire_deferred_for_session_owner(
                     "provider WebSocket connection timed out",
                 )
             });
-            let (ready, errs) = finish_failed_dispatch(gateway, entry).await;
+            let (ready, errs) = finish_failed_dispatch(gateway, entry, pending_connects).await;
             dispatches.extend(ready);
             errors.extend(errs);
         } else {
@@ -1616,6 +1661,7 @@ pub(super) async fn dispatch_responses_websocket_with_limits(
                 let errs = expire_deferred_for_session_owner(
                     gateway,
                     &mut deferred_for_session_owner,
+                    &pending_connects,
                     &mut ready_dispatches,
                 )
                 .await;
@@ -1626,10 +1672,12 @@ pub(super) async fn dispatch_responses_websocket_with_limits(
     (ready_dispatches.into_iter().collect(), errors)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_ws_provider_event(
     provider: WsProviderEvent,
     gateway: &mut ResponsesWebSocketGateway,
     connections: &mut HashMap<u64, WsProviderConnection>,
+    pending_connects: &HashMap<u64, PendingConnect>,
     dispatches: &mut VecDeque<WebSocketDispatch>,
     downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
 ) -> bool {
@@ -1642,7 +1690,11 @@ async fn handle_ws_provider_event(
             if !connections.contains_key(&connection_id) {
                 return true;
             }
-            match gateway.provider_message(connection_id, &bytes).await {
+            let pool = ws_relay_pool_snapshot(pending_connects);
+            match gateway
+                .provider_message_with_pool(connection_id, &bytes, &pool)
+                .await
+            {
                 Ok(result) => {
                     let sending_downstream =
                         result.frames.is_some() || result.forward || !result.errors.is_empty();
@@ -1858,10 +1910,12 @@ async fn flush_pending_ws_dispatches(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drain_buffered_ws_events_snapshot(
     event_rx: &mut tokio::sync::mpsc::Receiver<WsProviderEvent>,
     gateway: &mut ResponsesWebSocketGateway,
     connections: &mut HashMap<u64, WsProviderConnection>,
+    pending_connects: &HashMap<u64, PendingConnect>,
     dispatches: &mut VecDeque<WebSocketDispatch>,
     downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     max_events: usize,
@@ -1874,8 +1928,15 @@ async fn drain_buffered_ws_events_snapshot(
         }
     }
     for provider in buffered {
-        if !handle_ws_provider_event(provider, gateway, connections, dispatches, downstream_sink)
-            .await
+        if !handle_ws_provider_event(
+            provider,
+            gateway,
+            connections,
+            pending_connects,
+            dispatches,
+            downstream_sink,
+        )
+        .await
         {
             return false;
         }
@@ -1883,10 +1944,12 @@ async fn drain_buffered_ws_events_snapshot(
     true
 }
 
-pub(super) async fn drain_buffered_ws_events_before_expiry(
+#[allow(clippy::too_many_arguments)]
+async fn drain_buffered_ws_events_before_expiry_with_pool(
     event_rx: &mut tokio::sync::mpsc::Receiver<WsProviderEvent>,
     gateway: &mut ResponsesWebSocketGateway,
     connections: &mut HashMap<u64, WsProviderConnection>,
+    pending_connects: &HashMap<u64, PendingConnect>,
     dispatches: &mut VecDeque<WebSocketDispatch>,
     downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     now: std::time::Instant,
@@ -1897,6 +1960,7 @@ pub(super) async fn drain_buffered_ws_events_before_expiry(
             event_rx,
             gateway,
             connections,
+            pending_connects,
             dispatches,
             downstream_sink,
             snapshot_limit,
@@ -1915,6 +1979,28 @@ pub(super) async fn drain_buffered_ws_events_before_expiry(
         }
     }
     true
+}
+
+#[cfg(test)]
+pub(super) async fn drain_buffered_ws_events_before_expiry(
+    event_rx: &mut tokio::sync::mpsc::Receiver<WsProviderEvent>,
+    gateway: &mut ResponsesWebSocketGateway,
+    connections: &mut HashMap<u64, WsProviderConnection>,
+    dispatches: &mut VecDeque<WebSocketDispatch>,
+    downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    now: std::time::Instant,
+) -> bool {
+    let pending_connects = HashMap::new();
+    drain_buffered_ws_events_before_expiry_with_pool(
+        event_rx,
+        gateway,
+        connections,
+        &pending_connects,
+        dispatches,
+        downstream_sink,
+        now,
+    )
+    .await
 }
 
 pub(super) struct WsDownstreamReader {
@@ -2072,6 +2158,7 @@ async fn relay_responses_websocket(
                         &mut event_rx,
                         &mut gateway,
                         &mut connections,
+                        &pending_connects,
                         &mut dispatches,
                         &mut downstream_sink,
                         snapshot_limit,
@@ -2166,10 +2253,11 @@ async fn relay_responses_websocket(
                         tokio::time::sleep_until(deadline).await;
                     }
                 }, if pending_deadline.is_some() => {
-                    if !drain_buffered_ws_events_before_expiry(
+                    if !drain_buffered_ws_events_before_expiry_with_pool(
                         &mut event_rx,
                         &mut gateway,
                         &mut connections,
+                        &pending_connects,
                         &mut dispatches,
                         &mut downstream_sink,
                         std::time::Instant::now(),
@@ -2187,6 +2275,7 @@ async fn relay_responses_websocket(
                     let errors = expire_deferred_for_session_owner(
                         &mut gateway,
                         &mut deferred_for_session_owner,
+                        &pending_connects,
                         &mut dispatches,
                     )
                     .await;
@@ -2313,6 +2402,7 @@ async fn relay_responses_websocket(
                         provider,
                         &mut gateway,
                         &mut connections,
+                        &pending_connects,
                         &mut dispatches,
                         &mut downstream_sink,
                     )
@@ -2920,6 +3010,7 @@ mod tests {
             entered.notified().await;
             drain_for_trigger.trigger();
         });
+        let empty_pending_connects = HashMap::new();
         let (ready, errs) = tokio::time::timeout(
             Duration::from_secs(2),
             send_responses_dispatch(
@@ -2927,6 +3018,7 @@ mod tests {
                 dispatch,
                 1,
                 &mut connections,
+                &empty_pending_connects,
                 cc_lb_engine::responses_websocket::ResponsesDispatchTimings::reused(),
                 tokio::time::Instant::now() + Duration::from_secs(30),
                 &drain,

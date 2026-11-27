@@ -7025,14 +7025,12 @@ async fn chat_fanout_n_breaker_error_does_not_fail_over_to_b() {
 async fn multi_owner_openai_reasoning_picks_last_occurrence_http() {
     let owner_a = Uuid::parse_str("10000000-0000-0000-0000-000000000621").unwrap();
     let owner_b = Uuid::parse_str("10000000-0000-0000-0000-000000000622").unwrap();
-    let cipher_a1 = "gAAAAAB_last_occ_http_a1";
+    let cipher_a = "gAAAAAB_last_occ_http_a_repeat";
     let cipher_b = "gAAAAAB_last_occ_http_b";
-    let cipher_a2 = "gAAAAAB_last_occ_http_a2";
 
     let store = Arc::new(MemoryAffinityStore::default());
-    store.insert(ws1296_openai_key(cipher_a1), owner_a);
+    store.insert(ws1296_openai_key(cipher_a), owner_a);
     store.insert(ws1296_openai_key(cipher_b), owner_b);
-    store.insert(ws1296_openai_key(cipher_a2), owner_a);
 
     let quota = Arc::new(QaSubscriptionQuotaCache::default());
     quota.set_healthy(owner_a);
@@ -7070,11 +7068,11 @@ async fn multi_owner_openai_reasoning_picks_last_occurrence_http() {
             "model": "gpt-5.4",
             "store": false,
             "input": [
-                openai_reasoning_input(cipher_a1),
+                openai_reasoning_input(cipher_a),
                 {"role": "user", "content": "turn 1"},
                 openai_reasoning_input(cipher_b),
                 {"role": "user", "content": "turn 2"},
-                openai_reasoning_input(cipher_a2),
+                openai_reasoning_input(cipher_a),
                 {"role": "user", "content": "turn 3"}
             ]
         })),
@@ -7087,8 +7085,8 @@ async fn multi_owner_openai_reasoning_picks_last_occurrence_http() {
     assert!(captured[0].0.contains("oauth-a.local"), "{}", captured[0].0);
     let input = captured[0].1["input"].as_array().unwrap();
     assert_eq!(input.len(), 5, "{input:?}");
-    assert_eq!(input[0]["encrypted_content"], cipher_a1);
-    assert_eq!(input[3]["encrypted_content"], cipher_a2);
+    assert_eq!(input[0]["encrypted_content"], cipher_a);
+    assert_eq!(input[3]["encrypted_content"], cipher_a);
 }
 
 #[tokio::test]
@@ -7412,4 +7410,120 @@ async fn hybrid_unknown_reasoning_400_retry_falls_through_to_429_failover_http()
     assert_eq!(retry_in[0]["encrypted_content"], cipher_a);
     assert!(captured[2].0.contains("oauth-b.local"));
     assert_eq!(captured[2].1["input"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn multi_owner_fail_closed_unknown_reasoning_preserves_unbound_item_http() {
+    let owner_a = Uuid::parse_str("10000000-0000-0000-0000-000000000661").unwrap();
+    let owner_b = Uuid::parse_str("10000000-0000-0000-0000-000000000662").unwrap();
+    let owner_c = Uuid::parse_str("10000000-0000-0000-0000-000000000663").unwrap();
+    let cipher_a = "gAAAAAB_fc_multi_http_a";
+    let cipher_b = "gAAAAAB_fc_multi_http_b";
+    let cipher_unbound = "gAAAAAB_fc_multi_http_unbound";
+
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(cipher_a), owner_a);
+    store.insert(ws1296_openai_key(cipher_b), owner_b);
+
+    let quota = Arc::new(QaSubscriptionQuotaCache::default());
+    quota.set_exhausted(owner_a);
+    quota.set_exhausted(owner_b);
+    quota.set_healthy(owner_c);
+
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "id": "resp_fc_stays_b",
+        "object": "response",
+        "status": "completed",
+        "output": []
+    })));
+    let authn = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .subscription_quota_cache(quota.clone())
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(owner_b, "oauth-b", true),
+            openai_oauth_upstream_record(owner_c, "oauth-c", true),
+        ])
+        .build();
+    let lc = Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
+        dispatch.clone(),
+        LifecycleConfig {
+            unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy::FailClosed,
+            unavailable_openai_reasoning_owner:
+                cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover,
+            ..LifecycleConfig::default()
+        },
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store.clone());
+
+    let make_req = || {
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "input": [
+                openai_reasoning_input(cipher_a),
+                {"role": "user", "content": "t1"},
+                openai_reasoning_input(cipher_b),
+                openai_reasoning_input(cipher_unbound),
+                {"role": "user", "content": "t2"}
+            ]
+        }))
+    };
+
+    let resp = handle_authenticated(&lc, make_req()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let captured = dispatch.captured_requests();
+    assert_eq!(captured.len(), 1);
+    assert!(captured[0].0.contains("oauth-b.local"), "{}", captured[0].0);
+    let input = captured[0].1["input"].as_array().unwrap();
+    assert_eq!(input.len(), 4, "{input:?}");
+    assert_eq!(input[1]["encrypted_content"], cipher_b);
+    assert_eq!(input[2]["encrypted_content"], cipher_unbound);
+
+    // When both bound owners A and B are disabled and C is healthy, FailClosed + unbound item
+    // must return 409 rather than stripping everything onto C.
+    let store_2 = Arc::new(MemoryAffinityStore::default());
+    store_2.insert(ws1296_openai_key(cipher_a), owner_a);
+    store_2.insert(ws1296_openai_key(cipher_b), owner_b);
+    let dispatch_2 = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "id": "resp_unused",
+        "object": "response",
+        "status": "completed",
+        "output": []
+    })));
+    let authn_2 = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view_2 = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn_2.clone()))
+        .principal_view(authn_2.principal_view.clone())
+        .subscription_quota_cache(quota)
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", false),
+            openai_oauth_upstream_record(owner_b, "oauth-b", false),
+            openai_oauth_upstream_record(owner_c, "oauth-c", true),
+        ])
+        .build();
+    let lc_2 = Lifecycle::new_with_dynamic_view(
+        authn_2.authn,
+        Arc::new(DynamicViewHolder::new(view_2)),
+        dispatch_2.clone(),
+        LifecycleConfig {
+            unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy::FailClosed,
+            unavailable_openai_reasoning_owner:
+                cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover,
+            ..LifecycleConfig::default()
+        },
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store_2);
+
+    let resp_2 = handle_authenticated(&lc_2, make_req()).await.unwrap();
+    assert_eq!(resp_2.status(), StatusCode::CONFLICT);
+    assert!(dispatch_2.captured_requests().is_empty());
 }
