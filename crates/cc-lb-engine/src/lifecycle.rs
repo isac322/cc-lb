@@ -2247,7 +2247,8 @@ impl Lifecycle {
                         body,
                         &multi.matched,
                     ))
-                    || (matches!(owner, WebSocketTurnOwner::PrewarmResponse(_))
+                    || (codex_backend
+                        && matches!(owner, WebSocketTurnOwner::PrewarmResponse(_))
                         && self.is_multi_owner_openai_prewarm_reasoning_reconcilable(
                             ProviderCapability::OpenaiResponses,
                             body,

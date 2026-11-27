@@ -469,12 +469,49 @@ async fn commit_and_send_responses_dispatch(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn fail_dispatch_with_recovery_budget(
+    gateway: &mut ResponsesWebSocketGateway,
+    turn_id: u64,
+    failed_upstream_id: Option<uuid::Uuid>,
+    error: &WebSocketError,
+    connections: &HashMap<u64, WsProviderConnection>,
+    pending_connects: &HashMap<u64, PendingConnect>,
+    queued_dispatches: &VecDeque<WebSocketDispatch>,
+    deferred_for_session_owner: &VecDeque<PendingDispatchState>,
+    carried_budgets: &mut HashMap<u64, CarriedConnectBudget>,
+    budget: CarriedConnectBudget,
+) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
+    let mut pool = ws_relay_pool_snapshot(
+        connections,
+        pending_connects,
+        queued_dispatches,
+        deferred_for_session_owner,
+    );
+    pool.excluded_upstreams = budget.attempted_upstreams.clone();
+    pool.dial_attempts_exhausted = budget.attempts >= budget.max_attempts;
+    pool.connect_budget_expired = tokio::time::Instant::now() >= budget.deadline;
+    let (ready, emitted_error) = gateway
+        .fail_dispatch_with_recovery_and_pool(turn_id, failed_upstream_id, error, &pool)
+        .await;
+    if emitted_error.is_none() && ready.iter().any(|next| next.turn_id == turn_id) {
+        carried_budgets.insert(turn_id, budget);
+    }
+    (ready, emitted_error.into_iter().collect())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn send_responses_dispatch(
     gateway: &mut ResponsesWebSocketGateway,
     mut dispatch: WebSocketDispatch,
     connection_id: u64,
     connections: &mut HashMap<u64, WsProviderConnection>,
     pending_connects: &HashMap<u64, PendingConnect>,
+    queued_dispatches: &VecDeque<WebSocketDispatch>,
+    deferred_for_session_owner: &VecDeque<PendingDispatchState>,
+    carried_budgets: &mut HashMap<u64, CarriedConnectBudget>,
+    attempts: usize,
+    max_attempts: usize,
+    attempted_upstreams: &std::collections::HashSet<uuid::Uuid>,
     dispatch_timings: cc_lb_engine::responses_websocket::ResponsesDispatchTimings,
     deadline: tokio::time::Instant,
     drain_controller: &DrainController,
@@ -565,38 +602,39 @@ async fn send_responses_dispatch(
             ),
         ) => result,
     };
-    match validation {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            let pool = ws_relay_pool_snapshot(pending_connects);
-            let (ready, emitted_error) = gateway
-                .fail_dispatch_with_recovery_and_pool(
-                    dispatch.turn_id,
-                    Some(upstream_id),
-                    &error,
-                    &pool,
-                )
-                .await;
-            return (ready, emitted_error.into_iter().collect());
-        }
-        Err(_) => {
-            let error = WebSocketError::new(
+    let validation_error = match validation {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error),
+        Err(_) => Some(
+            WebSocketError::new(
                 504,
                 "upstream_unavailable",
                 "provider WebSocket connection timed out",
             )
-            .with_stream(dispatch.stream_id.clone());
-            let pool = ws_relay_pool_snapshot(pending_connects);
-            let (ready, emitted_error) = gateway
-                .fail_dispatch_with_recovery_and_pool(
-                    dispatch.turn_id,
-                    Some(upstream_id),
-                    &error,
-                    &pool,
-                )
-                .await;
-            return (ready, emitted_error.into_iter().collect());
-        }
+            .with_stream(dispatch.stream_id.clone()),
+        ),
+    };
+    if let Some(error) = validation_error {
+        let mut attempted = attempted_upstreams.clone();
+        attempted.insert(upstream_id);
+        return fail_dispatch_with_recovery_budget(
+            gateway,
+            dispatch.turn_id,
+            Some(upstream_id),
+            &error,
+            connections,
+            pending_connects,
+            queued_dispatches,
+            deferred_for_session_owner,
+            carried_budgets,
+            CarriedConnectBudget {
+                attempts,
+                max_attempts,
+                deadline,
+                attempted_upstreams: attempted,
+            },
+        )
+        .await;
     }
     if drain_controller.is_draining() {
         return finish_draining_dispatch(gateway, dispatch).await;
@@ -636,6 +674,13 @@ fn bounded_deadline(now: tokio::time::Instant, duration: Duration) -> tokio::tim
         .unwrap_or(now)
 }
 
+struct CarriedConnectBudget {
+    attempts: usize,
+    max_attempts: usize,
+    deadline: tokio::time::Instant,
+    attempted_upstreams: std::collections::HashSet<uuid::Uuid>,
+}
+
 struct PendingDispatchState {
     dispatch: WebSocketDispatch,
     remaining: VecDeque<cc_lb_engine::responses_websocket::WebSocketCandidate>,
@@ -645,27 +690,60 @@ struct PendingDispatchState {
     per_attempt_timeout: Duration,
     last_error: Option<WebSocketError>,
     last_attempted_upstream_id: Option<uuid::Uuid>,
+    attempted_upstreams: std::collections::HashSet<uuid::Uuid>,
     pinned_to_single_owner: bool,
 }
 
 impl PendingDispatchState {
+    #[cfg(test)]
     fn new(
         dispatch: WebSocketDispatch,
         per_attempt_timeout: Duration,
         connect_budget: Duration,
         max_attempts: usize,
     ) -> Self {
+        Self::with_carried_budget(
+            dispatch,
+            per_attempt_timeout,
+            connect_budget,
+            max_attempts,
+            None,
+        )
+    }
+
+    fn with_carried_budget(
+        dispatch: WebSocketDispatch,
+        per_attempt_timeout: Duration,
+        connect_budget: Duration,
+        max_attempts: usize,
+        carried: Option<CarriedConnectBudget>,
+    ) -> Self {
         let remaining = dispatch.candidates.iter().cloned().collect();
         let pinned_to_single_owner = dispatch.candidates.len() <= 1;
+        let (attempts, max_attempts, deadline, attempted_upstreams) = match carried {
+            Some(carried) => (
+                carried.attempts,
+                carried.max_attempts,
+                carried.deadline,
+                carried.attempted_upstreams,
+            ),
+            None => (
+                0,
+                max_attempts,
+                bounded_deadline(tokio::time::Instant::now(), connect_budget),
+                std::collections::HashSet::new(),
+            ),
+        };
         Self {
             dispatch,
             remaining,
-            attempts: 0,
+            attempts,
             max_attempts,
-            deadline: bounded_deadline(tokio::time::Instant::now(), connect_budget),
+            deadline,
             per_attempt_timeout,
             last_error: None,
             last_attempted_upstream_id: None,
+            attempted_upstreams,
             pinned_to_single_owner,
         }
     }
@@ -731,7 +809,10 @@ fn next_ws_candidate(
 }
 
 fn ws_relay_pool_snapshot(
+    connections: &HashMap<u64, WsProviderConnection>,
     pending_connects: &HashMap<u64, PendingConnect>,
+    queued_dispatches: &VecDeque<WebSocketDispatch>,
+    deferred_for_session_owner: &VecDeque<PendingDispatchState>,
 ) -> cc_lb_engine::responses_websocket::WsRelayPoolSnapshot {
     let mut coalescable_upstreams = std::collections::HashSet::new();
     for entry in pending_connects.values() {
@@ -739,17 +820,66 @@ fn ws_relay_pool_snapshot(
             coalescable_upstreams.insert(entry.active_upstream_id);
         }
     }
+    let has_existing_or_coalescable =
+        |candidate: &cc_lb_engine::responses_websocket::WebSocketCandidate,
+         stream_id: &Option<String>| {
+            connections.values().any(|conn| {
+                conn.upstream_id == candidate.upstream_id
+                    && (!candidate.socket_per_lane || &conn.lane == stream_id)
+            }) || (!candidate.socket_per_lane
+                && coalescable_upstreams.contains(&candidate.upstream_id))
+        };
+    let mut planned_dials = 0_usize;
+    for dispatch in queued_dispatches {
+        if dispatch.control || dispatch.connection_id.is_some() {
+            continue;
+        }
+        let Some(candidate) = dispatch.candidates.first() else {
+            continue;
+        };
+        if !has_existing_or_coalescable(candidate, &dispatch.stream_id) {
+            planned_dials = planned_dials.saturating_add(1);
+        }
+    }
+    for deferred in deferred_for_session_owner {
+        if deferred.dispatch.control
+            || deferred.dispatch.connection_id.is_some()
+            || deferred.attempts >= deferred.max_attempts
+        {
+            continue;
+        }
+        let Some(candidate) = deferred.remaining.front() else {
+            continue;
+        };
+        if !has_existing_or_coalescable(candidate, &deferred.dispatch.stream_id) {
+            planned_dials = planned_dials.saturating_add(1);
+        }
+    }
     cc_lb_engine::responses_websocket::WsRelayPoolSnapshot {
-        pending_connects: pending_connects.len(),
+        pending_connects: pending_connects.len().saturating_add(planned_dials),
         coalescable_upstreams,
+        ..Default::default()
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finish_failed_dispatch(
     gateway: &mut ResponsesWebSocketGateway,
     pending: PendingDispatchState,
+    connections: &HashMap<u64, WsProviderConnection>,
     pending_connects: &HashMap<u64, PendingConnect>,
+    queued_dispatches: &VecDeque<WebSocketDispatch>,
+    deferred_for_session_owner: &VecDeque<PendingDispatchState>,
+    carried_budgets: &mut HashMap<u64, CarriedConnectBudget>,
 ) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
+    let turn_id = pending.dispatch.turn_id;
+    let last_attempted_upstream_id = pending.last_attempted_upstream_id;
+    let budget = CarriedConnectBudget {
+        attempts: pending.attempts,
+        max_attempts: pending.max_attempts,
+        deadline: pending.deadline,
+        attempted_upstreams: pending.attempted_upstreams,
+    };
     let error = pending
         .last_error
         .unwrap_or_else(|| {
@@ -760,16 +890,19 @@ async fn finish_failed_dispatch(
             )
         })
         .with_stream(pending.dispatch.stream_id);
-    let pool = ws_relay_pool_snapshot(pending_connects);
-    let (ready, emitted_error) = gateway
-        .fail_dispatch_with_recovery_and_pool(
-            pending.dispatch.turn_id,
-            pending.last_attempted_upstream_id,
-            &error,
-            &pool,
-        )
-        .await;
-    (ready, emitted_error.into_iter().collect())
+    fail_dispatch_with_recovery_budget(
+        gateway,
+        turn_id,
+        last_attempted_upstream_id,
+        &error,
+        connections,
+        pending_connects,
+        queued_dispatches,
+        deferred_for_session_owner,
+        carried_budgets,
+        budget,
+    )
+    .await
 }
 
 async fn finish_draining_dispatch(
@@ -794,6 +927,8 @@ async fn advance_one_dispatch(
     pending_connects: &mut HashMap<u64, PendingConnect>,
     connect_tasks: &mut tokio::task::JoinSet<ConnectAttemptOutcome>,
     deferred_for_session_owner: &mut VecDeque<PendingDispatchState>,
+    queued_dispatches: &VecDeque<WebSocketDispatch>,
+    carried_budgets: &mut HashMap<u64, CarriedConnectBudget>,
 ) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
     if state.drain_controller.is_draining() && !pending.dispatch.control {
         return finish_draining_dispatch(gateway, pending.dispatch).await;
@@ -806,6 +941,12 @@ async fn advance_one_dispatch(
             connection_id,
             connections,
             pending_connects,
+            queued_dispatches,
+            deferred_for_session_owner,
+            carried_budgets,
+            pending.attempts,
+            pending.max_attempts,
+            &pending.attempted_upstreams,
             cc_lb_engine::responses_websocket::ResponsesDispatchTimings::reused(),
             pending.deadline,
             &state.drain_controller,
@@ -819,13 +960,13 @@ async fn advance_one_dispatch(
         pending.max_attempts,
         pending.dispatch.prefer_api_key_on_final_attempt,
     ) {
-        pending.last_attempted_upstream_id = Some(candidate.upstream_id);
         let existing = connections.iter().find_map(|(id, connection)| {
             (connection.upstream_id == candidate.upstream_id
                 && (!candidate.socket_per_lane || connection.lane == pending.dispatch.stream_id))
                 .then_some(*id)
         });
         if let Some(connection_id) = existing {
+            pending.last_attempted_upstream_id = Some(candidate.upstream_id);
             if pending
                 .deadline
                 .saturating_duration_since(tokio::time::Instant::now())
@@ -853,8 +994,18 @@ async fn advance_one_dispatch(
             if let Err(error) =
                 gateway.finalize_dispatch_reasoning(&mut pending.dispatch, pinned_to_single_owner)
             {
+                pending.attempted_upstreams.insert(candidate.upstream_id);
                 pending.last_error = Some(error.with_stream(pending.dispatch.stream_id.clone()));
-                return finish_failed_dispatch(gateway, pending, pending_connects).await;
+                return finish_failed_dispatch(
+                    gateway,
+                    pending,
+                    connections,
+                    pending_connects,
+                    queued_dispatches,
+                    deferred_for_session_owner,
+                    carried_budgets,
+                )
+                .await;
             }
             let validation = tokio::select! {
                 biased;
@@ -890,6 +1041,7 @@ async fn advance_one_dispatch(
                         return finish_draining_dispatch(gateway, pending.dispatch).await;
                     }
                     let fatal = is_fatal_ws_connect_error(&error);
+                    pending.attempted_upstreams.insert(candidate.upstream_id);
                     pending.last_error = Some(error);
                     if fatal {
                         break;
@@ -897,6 +1049,7 @@ async fn advance_one_dispatch(
                     continue;
                 }
                 Err(_) => {
+                    pending.attempted_upstreams.insert(candidate.upstream_id);
                     pending.last_error = Some(WebSocketError::new(
                         504,
                         "upstream_unavailable",
@@ -925,8 +1078,19 @@ async fn advance_one_dispatch(
         if let Err(error) =
             gateway.finalize_dispatch_reasoning(&mut pending.dispatch, pinned_to_single_owner)
         {
+            pending.last_attempted_upstream_id = Some(candidate.upstream_id);
+            pending.attempted_upstreams.insert(candidate.upstream_id);
             pending.last_error = Some(error.with_stream(pending.dispatch.stream_id.clone()));
-            return finish_failed_dispatch(gateway, pending, pending_connects).await;
+            return finish_failed_dispatch(
+                gateway,
+                pending,
+                connections,
+                pending_connects,
+                queued_dispatches,
+                deferred_for_session_owner,
+                carried_budgets,
+            )
+            .await;
         }
 
         // Coalesce concurrent shareable API-key lanes onto an in-flight dial instead of
@@ -939,6 +1103,25 @@ async fn advance_one_dispatch(
             in_flight.waiters.push(pending);
             return (Vec::new(), Vec::new());
         }
+
+        if pending.attempts >= pending.max_attempts {
+            continue;
+        }
+        if pending
+            .deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .is_zero()
+        {
+            pending.last_error.get_or_insert_with(|| {
+                WebSocketError::new(
+                    504,
+                    "upstream_unavailable",
+                    "provider WebSocket connection timed out",
+                )
+            });
+            break;
+        }
+        pending.last_attempted_upstream_id = Some(candidate.upstream_id);
 
         while connections.len() + pending_connects.len() >= connection_capacity {
             let Some(retired_id) = gateway.reclaim_idle_connection_for_failover(
@@ -962,29 +1145,11 @@ async fn advance_one_dispatch(
         let permit = match acquire_websocket_breaker_permit(state, candidate.upstream_id) {
             Ok(permit) => permit,
             Err(error) => {
+                pending.attempted_upstreams.insert(candidate.upstream_id);
                 pending.last_error = Some(error);
                 continue;
             }
         };
-        if pending.attempts >= pending.max_attempts {
-            drop(permit);
-            break;
-        }
-        if pending
-            .deadline
-            .saturating_duration_since(tokio::time::Instant::now())
-            .is_zero()
-        {
-            drop(permit);
-            pending.last_error.get_or_insert_with(|| {
-                WebSocketError::new(
-                    504,
-                    "upstream_unavailable",
-                    "provider WebSocket connection timed out",
-                )
-            });
-            break;
-        }
         // Recheck fresh quota and routing eligibility before burning an attempt
         // slot or acquiring the bulkhead so an unpinned fallback whose quota just
         // exhausted skips cleanly to the next eligible upstream.
@@ -1004,6 +1169,7 @@ async fn advance_one_dispatch(
             Ok(Err(error)) => {
                 drop(permit);
                 let fatal = is_fatal_ws_connect_error(&error);
+                pending.attempted_upstreams.insert(candidate.upstream_id);
                 pending.last_error = Some(error);
                 if fatal {
                     break;
@@ -1012,6 +1178,7 @@ async fn advance_one_dispatch(
             }
             Err(_) => {
                 drop(permit);
+                pending.attempted_upstreams.insert(candidate.upstream_id);
                 pending.last_error = Some(WebSocketError::new(
                     504,
                     "upstream_unavailable",
@@ -1021,6 +1188,7 @@ async fn advance_one_dispatch(
             }
         }
         pending.attempts += 1;
+        pending.attempted_upstreams.insert(candidate.upstream_id);
         let attempt_deadline =
             bounded_deadline(tokio::time::Instant::now(), pending.per_attempt_timeout)
                 .min(pending.deadline);
@@ -1208,7 +1376,16 @@ async fn advance_one_dispatch(
         return (Vec::new(), Vec::new());
     }
 
-    finish_failed_dispatch(gateway, pending, pending_connects).await
+    finish_failed_dispatch(
+        gateway,
+        pending,
+        connections,
+        pending_connects,
+        queued_dispatches,
+        deferred_for_session_owner,
+        carried_budgets,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1224,6 +1401,7 @@ async fn handle_connect_outcome(
     connect_tasks: &mut tokio::task::JoinSet<ConnectAttemptOutcome>,
     deferred_for_session_owner: &mut VecDeque<PendingDispatchState>,
     dispatches: &mut VecDeque<WebSocketDispatch>,
+    carried_budgets: &mut HashMap<u64, CarriedConnectBudget>,
 ) -> Vec<WebSocketError> {
     let Some(pending) = pending_connects.remove(&outcome.connection_id) else {
         return Vec::new();
@@ -1262,8 +1440,16 @@ async fn handle_connect_outcome(
                         "upstream_unavailable",
                         "provider WebSocket connection timed out",
                     ));
-                    let (ready, errs) =
-                        finish_failed_dispatch(gateway, entry, pending_connects).await;
+                    let (ready, errs) = finish_failed_dispatch(
+                        gateway,
+                        entry,
+                        connections,
+                        pending_connects,
+                        dispatches,
+                        deferred_for_session_owner,
+                        carried_budgets,
+                    )
+                    .await;
                     dispatches.extend(ready);
                     errors.extend(errs);
                     continue;
@@ -1292,9 +1478,19 @@ async fn handle_connect_outcome(
                 if let Err(error) =
                     gateway.finalize_dispatch_reasoning(&mut entry.dispatch, pinned_to_single_owner)
                 {
+                    entry.last_attempted_upstream_id = Some(upstream_id);
+                    entry.attempted_upstreams.insert(upstream_id);
                     entry.last_error = Some(error.with_stream(entry.dispatch.stream_id.clone()));
-                    let (ready, errs) =
-                        finish_failed_dispatch(gateway, entry, pending_connects).await;
+                    let (ready, errs) = finish_failed_dispatch(
+                        gateway,
+                        entry,
+                        connections,
+                        pending_connects,
+                        dispatches,
+                        deferred_for_session_owner,
+                        carried_budgets,
+                    )
+                    .await;
                     dispatches.extend(ready);
                     errors.extend(errs);
                     continue;
@@ -1381,10 +1577,20 @@ async fn handle_connect_outcome(
                             continue;
                         }
                         let fatal = is_fatal_ws_connect_error(&error);
+                        entry.last_attempted_upstream_id = Some(upstream_id);
+                        entry.attempted_upstreams.insert(upstream_id);
                         entry.last_error = Some(error);
                         if fatal {
-                            let (ready, errs) =
-                                finish_failed_dispatch(gateway, entry, pending_connects).await;
+                            let (ready, errs) = finish_failed_dispatch(
+                                gateway,
+                                entry,
+                                connections,
+                                pending_connects,
+                                dispatches,
+                                deferred_for_session_owner,
+                                carried_budgets,
+                            )
+                            .await;
                             dispatches.extend(ready);
                             errors.extend(errs);
                         } else {
@@ -1392,13 +1598,23 @@ async fn handle_connect_outcome(
                         }
                     }
                     Err(_) => {
+                        entry.last_attempted_upstream_id = Some(upstream_id);
+                        entry.attempted_upstreams.insert(upstream_id);
                         entry.last_error = Some(WebSocketError::new(
                             504,
                             "upstream_unavailable",
                             "provider WebSocket connection timed out",
                         ));
-                        let (ready, errs) =
-                            finish_failed_dispatch(gateway, entry, pending_connects).await;
+                        let (ready, errs) = finish_failed_dispatch(
+                            gateway,
+                            entry,
+                            connections,
+                            pending_connects,
+                            dispatches,
+                            deferred_for_session_owner,
+                            carried_budgets,
+                        )
+                        .await;
                         dispatches.extend(ready);
                         errors.extend(errs);
                     }
@@ -1418,9 +1634,20 @@ async fn handle_connect_outcome(
             let mut primary = pending.primary;
             primary.last_error = Some(error.clone());
             primary.last_attempted_upstream_id = Some(pending.active_upstream_id);
+            primary
+                .attempted_upstreams
+                .insert(pending.active_upstream_id);
             if is_fatal_ws_connect_error(&error) || now >= primary.deadline {
-                let (ready, errs) =
-                    finish_failed_dispatch(gateway, primary, pending_connects).await;
+                let (ready, errs) = finish_failed_dispatch(
+                    gateway,
+                    primary,
+                    connections,
+                    pending_connects,
+                    dispatches,
+                    deferred_for_session_owner,
+                    carried_budgets,
+                )
+                .await;
                 dispatches.extend(ready);
                 errors.extend(errs);
             } else {
@@ -1437,8 +1664,16 @@ async fn handle_connect_outcome(
                             "provider WebSocket connection timed out",
                         )
                     });
-                    let (ready, errs) =
-                        finish_failed_dispatch(gateway, entry, pending_connects).await;
+                    let (ready, errs) = finish_failed_dispatch(
+                        gateway,
+                        entry,
+                        connections,
+                        pending_connects,
+                        dispatches,
+                        deferred_for_session_owner,
+                        carried_budgets,
+                    )
+                    .await;
                     dispatches.extend(ready);
                     errors.extend(errs);
                 } else {
@@ -1479,9 +1714,18 @@ async fn handle_connect_outcome(
             for mut entry in std::iter::once(pending.primary).chain(pending.waiters) {
                 entry.last_error = Some(error.clone());
                 entry.last_attempted_upstream_id = Some(pending.active_upstream_id);
+                entry.attempted_upstreams.insert(pending.active_upstream_id);
                 if is_fatal_ws_connect_error(&error) || now >= entry.deadline {
-                    let (ready, errs) =
-                        finish_failed_dispatch(gateway, entry, pending_connects).await;
+                    let (ready, errs) = finish_failed_dispatch(
+                        gateway,
+                        entry,
+                        connections,
+                        pending_connects,
+                        dispatches,
+                        deferred_for_session_owner,
+                        carried_budgets,
+                    )
+                    .await;
                     dispatches.extend(ready);
                     errors.extend(errs);
                 } else {
@@ -1501,8 +1745,16 @@ async fn handle_connect_outcome(
                         "provider WebSocket connection timed out",
                     )
                 });
-                let (ready, errs) =
-                    finish_failed_dispatch(gateway, deferred, pending_connects).await;
+                let (ready, errs) = finish_failed_dispatch(
+                    gateway,
+                    deferred,
+                    connections,
+                    pending_connects,
+                    dispatches,
+                    deferred_for_session_owner,
+                    carried_budgets,
+                )
+                .await;
                 dispatches.extend(ready);
                 errors.extend(errs);
                 continue;
@@ -1517,8 +1769,16 @@ async fn handle_connect_outcome(
                         "upstream_affinity_unavailable",
                         "The session is pinned to another OAuth account",
                     ));
-                    let (ready, errs) =
-                        finish_failed_dispatch(gateway, deferred, pending_connects).await;
+                    let (ready, errs) = finish_failed_dispatch(
+                        gateway,
+                        deferred,
+                        connections,
+                        pending_connects,
+                        dispatches,
+                        deferred_for_session_owner,
+                        carried_budgets,
+                    )
+                    .await;
                     dispatches.extend(ready);
                     errors.extend(errs);
                     continue;
@@ -1548,6 +1808,8 @@ async fn handle_connect_outcome(
             pending_connects,
             connect_tasks,
             deferred_for_session_owner,
+            dispatches,
+            carried_budgets,
         )
         .await;
         dispatches.extend(ready);
@@ -1557,11 +1819,14 @@ async fn handle_connect_outcome(
     errors
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn expire_deferred_for_session_owner(
     gateway: &mut ResponsesWebSocketGateway,
     deferred_for_session_owner: &mut VecDeque<PendingDispatchState>,
+    connections: &HashMap<u64, WsProviderConnection>,
     pending_connects: &HashMap<u64, PendingConnect>,
     dispatches: &mut VecDeque<WebSocketDispatch>,
+    carried_budgets: &mut HashMap<u64, CarriedConnectBudget>,
 ) -> Vec<WebSocketError> {
     let mut errors = Vec::new();
     let now = tokio::time::Instant::now();
@@ -1575,7 +1840,16 @@ async fn expire_deferred_for_session_owner(
                     "provider WebSocket connection timed out",
                 )
             });
-            let (ready, errs) = finish_failed_dispatch(gateway, entry, pending_connects).await;
+            let (ready, errs) = finish_failed_dispatch(
+                gateway,
+                entry,
+                connections,
+                pending_connects,
+                dispatches,
+                deferred_for_session_owner,
+                carried_budgets,
+            )
+            .await;
             dispatches.extend(ready);
             errors.extend(errs);
         } else {
@@ -1605,6 +1879,8 @@ pub(super) async fn dispatch_responses_websocket_with_limits(
         tokio::task::JoinSet::new();
     let mut deferred_for_session_owner: VecDeque<PendingDispatchState> = VecDeque::new();
     let mut ready_dispatches = VecDeque::new();
+    let empty_dispatches = VecDeque::new();
+    let mut carried_budgets = HashMap::new();
     let (ready, mut errors) = advance_one_dispatch(
         gateway,
         PendingDispatchState::new(dispatch, per_attempt_timeout, connect_budget, max_attempts),
@@ -1616,6 +1892,8 @@ pub(super) async fn dispatch_responses_websocket_with_limits(
         &mut pending_connects,
         &mut connect_tasks,
         &mut deferred_for_session_owner,
+        &empty_dispatches,
+        &mut carried_budgets,
     )
     .await;
     ready_dispatches.extend(ready);
@@ -1643,6 +1921,7 @@ pub(super) async fn dispatch_responses_websocket_with_limits(
                             &mut connect_tasks,
                             &mut deferred_for_session_owner,
                             &mut ready_dispatches,
+                            &mut carried_budgets,
                         )
                         .await;
                         errors.extend(errs);
@@ -1661,8 +1940,10 @@ pub(super) async fn dispatch_responses_websocket_with_limits(
                 let errs = expire_deferred_for_session_owner(
                     gateway,
                     &mut deferred_for_session_owner,
+                    connections,
                     &pending_connects,
                     &mut ready_dispatches,
+                    &mut carried_budgets,
                 )
                 .await;
                 errors.extend(errs);
@@ -1678,6 +1959,7 @@ async fn handle_ws_provider_event(
     gateway: &mut ResponsesWebSocketGateway,
     connections: &mut HashMap<u64, WsProviderConnection>,
     pending_connects: &HashMap<u64, PendingConnect>,
+    deferred_for_session_owner: &VecDeque<PendingDispatchState>,
     dispatches: &mut VecDeque<WebSocketDispatch>,
     downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
 ) -> bool {
@@ -1690,7 +1972,12 @@ async fn handle_ws_provider_event(
             if !connections.contains_key(&connection_id) {
                 return true;
             }
-            let pool = ws_relay_pool_snapshot(pending_connects);
+            let pool = ws_relay_pool_snapshot(
+                connections,
+                pending_connects,
+                dispatches,
+                deferred_for_session_owner,
+            );
             match gateway
                 .provider_message_with_pool(connection_id, &bytes, &pool)
                 .await
@@ -1875,16 +2162,19 @@ async fn flush_pending_ws_dispatches(
     connect_tasks: &mut tokio::task::JoinSet<ConnectAttemptOutcome>,
     deferred_for_session_owner: &mut VecDeque<PendingDispatchState>,
     dispatches: &mut VecDeque<WebSocketDispatch>,
+    carried_budgets: &mut HashMap<u64, CarriedConnectBudget>,
     downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
 ) -> bool {
     while let Some(dispatch) = dispatches.pop_front() {
+        let carried = carried_budgets.remove(&dispatch.turn_id);
         let (ready, errors) = advance_one_dispatch(
             gateway,
-            PendingDispatchState::new(
+            PendingDispatchState::with_carried_budget(
                 dispatch,
                 WS_PROVIDER_CONNECT_TIMEOUT,
                 WS_DISPATCH_CONNECT_BUDGET,
                 WS_MAX_UPSTREAM_ATTEMPTS,
+                carried,
             ),
             state,
             connections,
@@ -1894,6 +2184,8 @@ async fn flush_pending_ws_dispatches(
             pending_connects,
             connect_tasks,
             deferred_for_session_owner,
+            dispatches,
+            carried_budgets,
         )
         .await;
         dispatches.extend(ready);
@@ -1916,6 +2208,7 @@ async fn drain_buffered_ws_events_snapshot(
     gateway: &mut ResponsesWebSocketGateway,
     connections: &mut HashMap<u64, WsProviderConnection>,
     pending_connects: &HashMap<u64, PendingConnect>,
+    deferred_for_session_owner: &VecDeque<PendingDispatchState>,
     dispatches: &mut VecDeque<WebSocketDispatch>,
     downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     max_events: usize,
@@ -1933,6 +2226,7 @@ async fn drain_buffered_ws_events_snapshot(
             gateway,
             connections,
             pending_connects,
+            deferred_for_session_owner,
             dispatches,
             downstream_sink,
         )
@@ -1950,6 +2244,7 @@ async fn drain_buffered_ws_events_before_expiry_with_pool(
     gateway: &mut ResponsesWebSocketGateway,
     connections: &mut HashMap<u64, WsProviderConnection>,
     pending_connects: &HashMap<u64, PendingConnect>,
+    deferred_for_session_owner: &VecDeque<PendingDispatchState>,
     dispatches: &mut VecDeque<WebSocketDispatch>,
     downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     now: std::time::Instant,
@@ -1961,6 +2256,7 @@ async fn drain_buffered_ws_events_before_expiry_with_pool(
             gateway,
             connections,
             pending_connects,
+            deferred_for_session_owner,
             dispatches,
             downstream_sink,
             snapshot_limit,
@@ -1991,11 +2287,13 @@ pub(super) async fn drain_buffered_ws_events_before_expiry(
     now: std::time::Instant,
 ) -> bool {
     let pending_connects = HashMap::new();
+    let deferred_for_session_owner = VecDeque::new();
     drain_buffered_ws_events_before_expiry_with_pool(
         event_rx,
         gateway,
         connections,
         &pending_connects,
+        &deferred_for_session_owner,
         dispatches,
         downstream_sink,
         now,
@@ -2119,6 +2417,7 @@ async fn relay_responses_websocket(
         tokio::task::JoinSet::new();
     let mut deferred_for_session_owner: VecDeque<PendingDispatchState> = VecDeque::new();
     let mut dispatches = VecDeque::new();
+    let mut carried_budgets: HashMap<u64, CarriedConnectBudget> = HashMap::new();
     let mut next_connection_id = 1_u64;
     let heartbeat_period = cc_lb_lifecycle::DEFAULT_STREAM_ACTIVITY_HEARTBEAT_INTERVAL;
     let mut activity_heartbeat = tokio::time::interval_at(
@@ -2142,6 +2441,7 @@ async fn relay_responses_websocket(
                 &mut connect_tasks,
                 &mut deferred_for_session_owner,
                 &mut dispatches,
+                &mut carried_budgets,
                 &mut downstream_sink,
             )
             .await
@@ -2159,6 +2459,7 @@ async fn relay_responses_websocket(
                         &mut gateway,
                         &mut connections,
                         &pending_connects,
+                        &deferred_for_session_owner,
                         &mut dispatches,
                         &mut downstream_sink,
                         snapshot_limit,
@@ -2178,6 +2479,7 @@ async fn relay_responses_websocket(
                     &mut connect_tasks,
                     &mut deferred_for_session_owner,
                     &mut dispatches,
+                    &mut carried_budgets,
                     &mut downstream_sink,
                 )
                 .await
@@ -2258,6 +2560,7 @@ async fn relay_responses_websocket(
                         &mut gateway,
                         &mut connections,
                         &pending_connects,
+                        &deferred_for_session_owner,
                         &mut dispatches,
                         &mut downstream_sink,
                         std::time::Instant::now(),
@@ -2275,8 +2578,10 @@ async fn relay_responses_websocket(
                     let errors = expire_deferred_for_session_owner(
                         &mut gateway,
                         &mut deferred_for_session_owner,
+                        &connections,
                         &pending_connects,
                         &mut dispatches,
+                        &mut carried_budgets,
                     )
                     .await;
                     for error in errors {
@@ -2304,6 +2609,7 @@ async fn relay_responses_websocket(
                                 &mut connect_tasks,
                                 &mut deferred_for_session_owner,
                                 &mut dispatches,
+                                &mut carried_budgets,
                             )
                             .await;
                             for error in errors {
@@ -2403,6 +2709,7 @@ async fn relay_responses_websocket(
                         &mut gateway,
                         &mut connections,
                         &pending_connects,
+                        &deferred_for_session_owner,
                         &mut dispatches,
                         &mut downstream_sink,
                     )
@@ -2626,6 +2933,8 @@ mod tests {
         let mut pending_connects = HashMap::new();
         let mut connect_tasks = tokio::task::JoinSet::new();
         let mut deferred = VecDeque::new();
+        let mut ready = VecDeque::new();
+        let mut carried_budgets = HashMap::new();
 
         // Start Lane 1 with a tight 80ms prepare timeout so prepare_job.run() times out.
         let (r1, e1) = advance_one_dispatch(
@@ -2639,6 +2948,8 @@ mod tests {
             &mut pending_connects,
             &mut connect_tasks,
             &mut deferred,
+            &ready,
+            &mut carried_budgets,
         )
         .await;
         assert!(r1.is_empty() && e1.is_empty());
@@ -2658,6 +2969,8 @@ mod tests {
             &mut pending_connects,
             &mut connect_tasks,
             &mut deferred,
+            &ready,
+            &mut carried_budgets,
         )
         .await;
         assert!(r2.is_empty() && e2.is_empty());
@@ -2665,7 +2978,6 @@ mod tests {
 
         // Wait for Lane 1's prepare_job.run() timeout outcome; verify ConnectAttemptError::Prepare
         // fails only Lane 1 (504) while restoring candidate to Lane 2 and re-dispatching it cleanly.
-        let mut ready = VecDeque::new();
         let mut errs = Vec::new();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while tokio::time::Instant::now() < deadline
@@ -2688,6 +3000,7 @@ mod tests {
                 &mut connect_tasks,
                 &mut deferred,
                 &mut ready,
+                &mut carried_budgets,
             )
             .await;
             errs.extend(new_errs);
@@ -2881,6 +3194,8 @@ mod tests {
         let mut pending_connects = HashMap::new();
         let mut connect_tasks = tokio::task::JoinSet::new();
         let mut deferred = VecDeque::new();
+        let empty_dispatches = VecDeque::new();
+        let mut carried_budgets = HashMap::new();
 
         armed.store(true, AtomicOrdering::SeqCst);
         let drain_for_trigger = drain.clone();
@@ -2901,6 +3216,8 @@ mod tests {
                 &mut pending_connects,
                 &mut connect_tasks,
                 &mut deferred,
+                &empty_dispatches,
+                &mut carried_budgets,
             ),
         )
         .await
@@ -3011,6 +3328,10 @@ mod tests {
             drain_for_trigger.trigger();
         });
         let empty_pending_connects = HashMap::new();
+        let empty_dispatches = VecDeque::new();
+        let empty_deferred = VecDeque::new();
+        let mut carried_budgets = HashMap::new();
+        let empty_attempted = std::collections::HashSet::new();
         let (ready, errs) = tokio::time::timeout(
             Duration::from_secs(2),
             send_responses_dispatch(
@@ -3019,6 +3340,12 @@ mod tests {
                 1,
                 &mut connections,
                 &empty_pending_connects,
+                &empty_dispatches,
+                &empty_deferred,
+                &mut carried_budgets,
+                0,
+                WS_MAX_UPSTREAM_ATTEMPTS,
+                &empty_attempted,
                 cc_lb_engine::responses_websocket::ResponsesDispatchTimings::reused(),
                 tokio::time::Instant::now() + Duration::from_secs(30),
                 &drain,
@@ -3033,5 +3360,853 @@ mod tests {
         assert_eq!(errs[0].status, 503);
         assert_eq!(errs[0].code, "draining");
         server_task.abort();
+    }
+
+    async fn spawn_test_downstream_sink() -> (
+        futures_util::stream::SplitSink<WebSocket, Message>,
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        JoinHandle<()>,
+    ) {
+        use futures_util::StreamExt as _;
+
+        let (sink_tx, sink_rx) = tokio::sync::oneshot::channel();
+        let sink_tx = Arc::new(std::sync::Mutex::new(Some(sink_tx)));
+        let app = axum::Router::new().route(
+            "/ws",
+            axum::routing::get(move |ws: axum::extract::ws::WebSocketUpgrade| {
+                let sink_tx = Arc::clone(&sink_tx);
+                async move {
+                    ws.on_upgrade(move |socket| async move {
+                        let (sink, _stream) = socket.split();
+                        if let Some(tx) = sink_tx.lock().unwrap().take() {
+                            let _ = tx.send(sink);
+                        }
+                        std::future::pending::<()>().await;
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test downstream sink");
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (client_ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+            .await
+            .expect("connect test downstream client");
+        let downstream_sink = sink_rx.await.expect("capture downstream sink");
+        (downstream_sink, client_ws, server_task)
+    }
+
+    async fn spawn_502_handshake_listener() -> (
+        std::net::SocketAddr,
+        Arc<std::sync::atomic::AtomicUsize>,
+        JoinHandle<()>,
+    ) {
+        use tokio::io::AsyncWriteExt as _;
+
+        let accepts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepts_task = Arc::clone(&accepts);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind 502 handshake listener");
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            while let Ok((mut tcp, _)) = listener.accept().await {
+                accepts_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = tcp
+                    .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+                let _ = tcp.shutdown().await;
+            }
+        });
+        (addr, accepts, task)
+    }
+
+    async fn ws_affinity_test_state(
+        records: Vec<UpstreamRecord>,
+        principal_id: &str,
+        cipher_owners: &[(&str, uuid::Uuid)],
+    ) -> ProxyState {
+        use sha2::Digest as _;
+
+        struct UnusedWsHttpDispatcher;
+        #[async_trait::async_trait]
+        impl cc_lb_engine::UpstreamDispatch for UnusedWsHttpDispatcher {
+            async fn dispatch(
+                &self,
+                _request: cc_lb_upstream::SignedRequest,
+            ) -> Result<http::Response<cc_lb_engine::Body>, cc_lb_engine::DispatchError>
+            {
+                unreachable!("unused")
+            }
+        }
+
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+        let sqlite = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite("sqlite::memory:", clock.clone())
+                .await
+                .expect("sqlite memory opens"),
+        );
+        cc_lb_storage_api::MetaStore::initialize(&*sqlite)
+            .await
+            .expect("sqlite initializes");
+        for record in &records {
+            cc_lb_storage_api::UpstreamStore::create(
+                &*sqlite,
+                cc_lb_storage_api::UpstreamCreate {
+                    id: record.id,
+                    name: record.name.clone(),
+                    kind: record.kind,
+                    base_url: record.base_url.clone(),
+                    api_key_ciphertext: record.api_key_ciphertext.clone(),
+                    oauth_tokens: None,
+                    warmup_enabled: record.warmup_enabled,
+                    warmup_dialect_plugin: record.warmup_dialect_plugin.clone(),
+                    workspace_id: record.workspace_id.clone(),
+                    vertex: record.vertex.clone(),
+                    vertex_credential_type: record.vertex_credential_type,
+                    vertex_quota_project_id: record.vertex_quota_project_id.clone(),
+                    api_key_access: None,
+                },
+            )
+            .await
+            .expect("seed upstream record");
+        }
+        let now_secs = cc_lb_clock::unix_secs(clock.now());
+        let bindings: Vec<_> = cipher_owners
+            .iter()
+            .map(
+                |(cipher, owner)| cc_lb_storage_api::UpstreamAffinityBinding {
+                    key: cc_lb_storage_api::UpstreamAffinityKey {
+                        principal_id: principal_id.to_owned(),
+                        provider: "openai".to_owned(),
+                        kind: cc_lb_storage_api::UpstreamAffinityKind::OpenaiResponseId,
+                        value_sha256: sha2::Sha256::digest(cipher.as_bytes()).into(),
+                    },
+                    upstream_id: *owner,
+                    owner_epoch: 0,
+                    observed_at_unix_secs: now_secs,
+                    expires_at_unix_secs: None,
+                },
+            )
+            .collect();
+        cc_lb_storage_api::UpstreamAffinityStore::bind_upstream_affinities(
+            &*sqlite, &bindings, now_secs, 86_400,
+        )
+        .await
+        .expect("seed affinity bindings");
+
+        let mut state = crate::app::tests::websocket_test_state(
+            records,
+            cc_lb_domain::TerminalStrategy::FirstPick,
+            DrainController::new(),
+            Arc::new(crate::app::tests::WebSocketTestSignerFactory),
+            Arc::new(crate::app::tests::FixtureKeyStore),
+            vec!["*".to_owned()],
+        )
+        .await;
+        let keys = Arc::new(cc_lb_control::api_keys::key_store::KeyStore::new(Arc::new(
+            crate::app::tests::FixtureKeyStore,
+        )));
+        let builtin_authn = Arc::new(cc_lb_control::api_keys::builtin_authn::BuiltinAuthn::new(
+            keys,
+            clock.clone(),
+        ));
+        state.lifecycle = Arc::new(
+            cc_lb_engine::Lifecycle::new_with_dynamic_view(
+                builtin_authn,
+                Arc::clone(&state.dynamic_view),
+                Arc::new(UnusedWsHttpDispatcher),
+                cc_lb_engine::LifecycleConfig::default(),
+                clock,
+            )
+            .with_upstream_affinity_store(
+                Arc::clone(&sqlite) as Arc<dyn cc_lb_storage_api::UpstreamAffinityStore>
+            ),
+        );
+        state.storage = sqlite as Arc<dyn cc_lb_storage_api::Storage>;
+        state
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_pre_dispatch_owner_recovery_preserves_connect_budget() {
+        use futures_util::StreamExt as _;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        // Subcase A: 1 initial dial attempt on owner `up1` + pre-dispatch recovery onto `[up2, up3, up4]`
+        // hits the shared 3-attempt dial cap on `up3` so `up4` receives zero dials.
+        let (addr1, accepts1, task1) = spawn_502_handshake_listener().await;
+        let (addr2, accepts2, task2) = spawn_502_handshake_listener().await;
+        let (addr3, accepts3, task3) = spawn_502_handshake_listener().await;
+        let accepts4 = Arc::new(AtomicUsize::new(0));
+        let accepts4_task = Arc::clone(&accepts4);
+        let listener4 = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind healthy 4th upstream");
+        let addr4 = listener4.local_addr().unwrap();
+        let task4 = tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener4.accept().await {
+                accepts4_task.fetch_add(1, AtomicOrdering::SeqCst);
+                let _ = tokio_tungstenite::accept_async(tcp).await;
+            }
+        });
+
+        let up1 = crate::app::tests::websocket_upstream(
+            1,
+            "owner-up1",
+            url::Url::parse(&format!("http://{addr1}/")).unwrap(),
+        );
+        let up2 = crate::app::tests::websocket_upstream(
+            2,
+            "up2",
+            url::Url::parse(&format!("http://{addr2}/")).unwrap(),
+        );
+        let up3 = crate::app::tests::websocket_upstream(
+            3,
+            "up3",
+            url::Url::parse(&format!("http://{addr3}/")).unwrap(),
+        );
+        let up4 = crate::app::tests::websocket_upstream(
+            4,
+            "up4",
+            url::Url::parse(&format!("http://{addr4}/")).unwrap(),
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_str(crate::app::tests::TEST_KEY.plaintext.as_str()).unwrap(),
+        );
+        let cipher_up1 = "gAAAAAB_pre_dispatch_budget_up1";
+        let state_seed = crate::app::tests::websocket_test_state(
+            vec![up1.clone()],
+            cc_lb_domain::TerminalStrategy::FirstPick,
+            DrainController::new(),
+            Arc::new(crate::app::tests::WebSocketTestSignerFactory),
+            Arc::new(crate::app::tests::FixtureKeyStore),
+            vec!["*".to_owned()],
+        )
+        .await;
+        let auth = state_seed.lifecycle.authenticate(&headers).await.unwrap();
+        let state = ws_affinity_test_state(
+            vec![up1.clone(), up2.clone(), up3.clone(), up4.clone()],
+            auth.principal_id(),
+            &[(cipher_up1, up1.id)],
+        )
+        .await;
+
+        let mut gateway = ResponsesWebSocketGateway::new(
+            state.lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            state.body_caps.messages,
+            8,
+        );
+        let initial_dispatch = gateway
+            .client_message(
+                auth.clone(),
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "store": false,
+                        "input": [
+                            {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": cipher_up1},
+                            {"role": "user", "content": "budget check"}
+                        ]
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(initial_dispatch.candidates.len(), 1);
+        assert_eq!(initial_dispatch.candidates[0].upstream_id, up1.id);
+
+        let (mut downstream_sink, mut client_ws, sink_server) = spawn_test_downstream_sink().await;
+        let (events, _event_rx) = tokio::sync::mpsc::channel(16);
+        let mut connections = HashMap::new();
+        let mut next_connection_id = 1;
+        let mut pending_connects = HashMap::new();
+        let mut connect_tasks = tokio::task::JoinSet::new();
+        let mut deferred = VecDeque::new();
+        let mut dispatches = VecDeque::from([initial_dispatch]);
+        let mut carried_budgets = HashMap::new();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                assert!(
+                    flush_pending_ws_dispatches(
+                        &mut gateway,
+                        &state,
+                        &mut connections,
+                        &events,
+                        &mut next_connection_id,
+                        8,
+                        &mut pending_connects,
+                        &mut connect_tasks,
+                        &mut deferred,
+                        &mut dispatches,
+                        &mut carried_budgets,
+                        &mut downstream_sink,
+                    )
+                    .await
+                );
+                if pending_connects.is_empty() && connect_tasks.is_empty() && dispatches.is_empty()
+                {
+                    break;
+                }
+                let outcome = connect_tasks
+                    .join_next()
+                    .await
+                    .expect("connect task present")
+                    .expect("join ok");
+                let errs = handle_connect_outcome(
+                    &mut gateway,
+                    outcome,
+                    &state,
+                    &mut connections,
+                    &events,
+                    &mut next_connection_id,
+                    8,
+                    &mut pending_connects,
+                    &mut connect_tasks,
+                    &mut deferred,
+                    &mut dispatches,
+                    &mut carried_budgets,
+                )
+                .await;
+                for err in errs {
+                    downstream_sink
+                        .send(websocket_error_message(&err))
+                        .await
+                        .unwrap();
+                }
+            }
+        })
+        .await
+        .expect("pre-dispatch recovery loop completes within timeout");
+
+        let client_frame = tokio::time::timeout(Duration::from_secs(2), client_ws.next())
+            .await
+            .expect("client receives 502 error")
+            .unwrap()
+            .unwrap();
+        let client_json: serde_json::Value =
+            serde_json::from_str(client_frame.to_text().unwrap()).unwrap();
+        assert_eq!(client_json["type"], "error");
+        assert_eq!(client_json["status"], 502);
+        assert_eq!(accepts1.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(accepts2.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(accepts3.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            accepts4.load(AtomicOrdering::SeqCst),
+            0,
+            "shared 3-attempt dial cap must prevent dialing 4th upstream after owner recovery"
+        );
+        assert!(carried_budgets.is_empty());
+
+        sink_server.abort();
+        task1.abort();
+        task2.abort();
+        task3.abort();
+        task4.abort();
+
+        // Subcase B: an expired connect deadline must block pre-dispatch owner recovery instead of
+        // minting a fresh connect budget for the replacement upstream.
+        let (hold_tx, _hold_rx) = tokio::sync::mpsc::channel(4);
+        let stall_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stalling listener");
+        let stall_addr = stall_listener.local_addr().unwrap();
+        let stall_task = tokio::spawn(async move {
+            while let Ok((tcp, _)) = stall_listener.accept().await {
+                let _ = hold_tx.try_send(tcp);
+            }
+        });
+        let accepts_sub_b = Arc::new(AtomicUsize::new(0));
+        let accepts_sub_b_task = Arc::clone(&accepts_sub_b);
+        let healthy_b_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind subcase B replacement listener");
+        let healthy_b_addr = healthy_b_listener.local_addr().unwrap();
+        let healthy_b_task = tokio::spawn(async move {
+            while let Ok((tcp, _)) = healthy_b_listener.accept().await {
+                accepts_sub_b_task.fetch_add(1, AtomicOrdering::SeqCst);
+                let _ = tokio_tungstenite::accept_async(tcp).await;
+            }
+        });
+        let up_stall = crate::app::tests::websocket_upstream(
+            11,
+            "stall-up",
+            url::Url::parse(&format!("http://{stall_addr}/")).unwrap(),
+        );
+        let up_healthy_b = crate::app::tests::websocket_upstream(
+            12,
+            "healthy-b",
+            url::Url::parse(&format!("http://{healthy_b_addr}/")).unwrap(),
+        );
+        let cipher_b = "gAAAAAB_pre_dispatch_expired_b";
+        let state_b = ws_affinity_test_state(
+            vec![up_stall.clone(), up_healthy_b],
+            auth.principal_id(),
+            &[(cipher_b, up_stall.id)],
+        )
+        .await;
+        let auth_b = state_b.lifecycle.authenticate(&headers).await.unwrap();
+        let mut gateway_b = ResponsesWebSocketGateway::new(
+            state_b.lifecycle.clone(),
+            &auth_b,
+            headers,
+            state_b.body_caps.messages,
+            8,
+        );
+        let dispatch_b = gateway_b
+            .client_message(
+                auth_b,
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "store": false,
+                        "input": [
+                            {"type": "reasoning", "id": "rs_b", "summary": [], "encrypted_content": cipher_b},
+                            {"role": "user", "content": "expired budget check"}
+                        ]
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let (events_b, _event_rx_b) = tokio::sync::mpsc::channel(16);
+        let mut connections_b = HashMap::new();
+        let mut next_conn_id_b = 1;
+        let mut pending_b = HashMap::new();
+        let mut connect_tasks_b = tokio::task::JoinSet::new();
+        let mut deferred_b = VecDeque::new();
+        let mut ready_b = VecDeque::new();
+        let mut carried_b = HashMap::new();
+        let (r0, e0) = advance_one_dispatch(
+            &mut gateway_b,
+            PendingDispatchState::new(
+                dispatch_b,
+                Duration::from_millis(30),
+                Duration::from_millis(30),
+                3,
+            ),
+            &state_b,
+            &mut connections_b,
+            &events_b,
+            &mut next_conn_id_b,
+            8,
+            &mut pending_b,
+            &mut connect_tasks_b,
+            &mut deferred_b,
+            &ready_b,
+            &mut carried_b,
+        )
+        .await;
+        assert!(r0.is_empty() && e0.is_empty());
+        let outcome_b = tokio::time::timeout(Duration::from_secs(2), connect_tasks_b.join_next())
+            .await
+            .expect("stalled connect times out")
+            .expect("connect task joined")
+            .expect("join ok");
+        let errs_b = handle_connect_outcome(
+            &mut gateway_b,
+            outcome_b,
+            &state_b,
+            &mut connections_b,
+            &events_b,
+            &mut next_conn_id_b,
+            8,
+            &mut pending_b,
+            &mut connect_tasks_b,
+            &mut deferred_b,
+            &mut ready_b,
+            &mut carried_b,
+        )
+        .await;
+        assert!(
+            ready_b.is_empty(),
+            "expired connect budget must block recovery dispatch: {ready_b:?}"
+        );
+        assert_eq!(errs_b.len(), 1);
+        assert_eq!(errs_b[0].status, 504);
+        assert_eq!(errs_b[0].code, "upstream_unavailable");
+        assert!(carried_b.is_empty());
+        assert_eq!(accepts_sub_b.load(AtomicOrdering::SeqCst), 0);
+
+        stall_task.abort();
+        healthy_b_task.abort();
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_buffered_429_batch_does_not_double_promise_single_free_slot() {
+        use futures_util::StreamExt as _;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let spawn_ws_sink_server = || async {
+            let accepts = Arc::new(AtomicUsize::new(0));
+            let accepts_task = Arc::clone(&accepts);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind ws server");
+            let addr = listener.local_addr().unwrap();
+            let task = tokio::spawn(async move {
+                while let Ok((tcp, _)) = listener.accept().await {
+                    accepts_task.fetch_add(1, AtomicOrdering::SeqCst);
+                    tokio::spawn(async move {
+                        if let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await {
+                            while let Some(Ok(_)) = ws.next().await {}
+                        }
+                    });
+                }
+            });
+            (addr, accepts, task)
+        };
+
+        let (addr_a, _acc_a, task_a) = spawn_ws_sink_server().await;
+        let (addr_b, _acc_b, task_b) = spawn_ws_sink_server().await;
+        let (addr_c, acc_c, task_c) = spawn_ws_sink_server().await;
+        let (addr_d, acc_d, task_d) = spawn_ws_sink_server().await;
+
+        let mk_up = |id: u128, name: &str, addr: std::net::SocketAddr, enabled: bool| {
+            let mut rec = crate::app::tests::websocket_upstream(
+                id,
+                name,
+                url::Url::parse(&format!("http://{addr}/")).unwrap(),
+            );
+            rec.enabled = enabled;
+            rec
+        };
+        let up_a = mk_up(21, "api-a", addr_a, true);
+        let up_b = mk_up(22, "api-b", addr_b, true);
+        let up_c = mk_up(23, "api-c", addr_c, true);
+        let up_d = mk_up(24, "api-d", addr_d, true);
+
+        let state = crate::app::tests::websocket_test_state(
+            vec![up_a.clone(), up_b.clone(), up_c.clone(), up_d.clone()],
+            cc_lb_domain::TerminalStrategy::FirstPick,
+            DrainController::new(),
+            Arc::new(crate::app::tests::WebSocketTestSignerFactory),
+            Arc::new(crate::app::tests::FixtureKeyStore),
+            vec!["*".to_owned()],
+        )
+        .await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_str(crate::app::tests::TEST_KEY.plaintext.as_str()).unwrap(),
+        );
+        let auth = state.lifecycle.authenticate(&headers).await.unwrap();
+        let mut gateway = ResponsesWebSocketGateway::new(
+            state.lifecycle.clone(),
+            &auth,
+            headers,
+            state.body_caps.messages,
+            3,
+        );
+
+        async fn connect_existing(
+            state: &ProxyState,
+            upstream_id: uuid::Uuid,
+            upstream_name: &str,
+            addr: std::net::SocketAddr,
+        ) -> WsProviderConnection {
+            let (ws_client, _) =
+                tokio_tungstenite::connect_async(format!("ws://{addr}/v1/responses"))
+                    .await
+                    .expect("connect existing mock socket");
+            let (sink, _stream) = ws_client.split();
+            let bulkhead = state
+                .websocket_bulkheads
+                .semaphore_only_bulkhead(
+                    websocket_breaker_key(upstream_id),
+                    state.websocket_bulkhead_config,
+                )
+                .acquire_owned()
+                .await
+                .expect("bulkhead permit");
+            WsProviderConnection {
+                upstream_id,
+                upstream_name: upstream_name.to_owned(),
+                sink,
+                task: None,
+                lane: None,
+                _bulkhead_guard: bulkhead,
+            }
+        }
+        let mut connections = HashMap::new();
+        connections.insert(1, connect_existing(&state, up_a.id, "api-a", addr_a).await);
+        connections.insert(2, connect_existing(&state, up_b.id, "api-b", addr_b).await);
+
+        let swap_records = |records: Vec<UpstreamRecord>| {
+            let view = state.dynamic_view.load();
+            state.dynamic_view.store(
+                cc_lb_control::DynamicViewBuilder::from_view(&view)
+                    .upstream_records(records)
+                    .build(),
+            );
+        };
+
+        // Turn 1 (`conn 1`, `api-a`) has replacement `[api-c]`; seed an owner on `conn 1` so it stays non-idle.
+        swap_records(vec![
+            mk_up(21, "api-a", addr_a, true),
+            mk_up(22, "api-b", addr_b, false),
+            mk_up(23, "api-c", addr_c, true),
+            mk_up(24, "api-d", addr_d, false),
+        ]);
+        let seed1 = gateway
+            .client_message(
+                auth.clone(),
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "stream_id": "lane-1",
+                        "store": false,
+                        "input": []
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        gateway.assign_connection(seed1.turn_id, 1, up_a.id, "api-a");
+        gateway.commit_send_attempt(seed1.turn_id);
+        gateway.sent(seed1.turn_id);
+        gateway
+            .provider_message(
+                1,
+                &Bytes::from_static(br#"{"type":"response.created","stream_id":"lane-1","response":{"id":"resp_seed_1","status":"in_progress","store":false}}"#),
+            )
+            .await
+            .unwrap();
+        gateway
+            .provider_message(
+                1,
+                &Bytes::from_static(br#"{"type":"response.completed","stream_id":"lane-1","response":{"id":"resp_seed_1","status":"completed","store":false}}"#),
+            )
+            .await
+            .unwrap();
+        let t1 = gateway
+            .client_message(
+                auth.clone(),
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "stream_id": "lane-1",
+                        "store": false,
+                        "input": [{"role": "user", "content": "turn 1"}]
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            t1.candidates
+                .iter()
+                .map(|c| c.upstream_id)
+                .collect::<Vec<_>>(),
+            vec![up_a.id, up_c.id]
+        );
+        gateway.assign_connection(t1.turn_id, 1, up_a.id, "api-a");
+        gateway.commit_send_attempt(t1.turn_id);
+        gateway.sent(t1.turn_id);
+
+        // Turn 2 (`conn 2`, `api-b`) has replacement `[api-d]`; seed an owner on `conn 2` so it stays non-idle.
+        swap_records(vec![
+            mk_up(21, "api-a", addr_a, false),
+            mk_up(22, "api-b", addr_b, true),
+            mk_up(23, "api-c", addr_c, false),
+            mk_up(24, "api-d", addr_d, true),
+        ]);
+        let seed2 = gateway
+            .client_message(
+                auth.clone(),
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "stream_id": "lane-2",
+                        "store": false,
+                        "input": []
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        gateway.assign_connection(seed2.turn_id, 2, up_b.id, "api-b");
+        gateway.commit_send_attempt(seed2.turn_id);
+        gateway.sent(seed2.turn_id);
+        gateway
+            .provider_message(
+                2,
+                &Bytes::from_static(br#"{"type":"response.created","stream_id":"lane-2","response":{"id":"resp_seed_2","status":"in_progress","store":false}}"#),
+            )
+            .await
+            .unwrap();
+        gateway
+            .provider_message(
+                2,
+                &Bytes::from_static(br#"{"type":"response.completed","stream_id":"lane-2","response":{"id":"resp_seed_2","status":"completed","store":false}}"#),
+            )
+            .await
+            .unwrap();
+        let t2 = gateway
+            .client_message(
+                auth,
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "stream_id": "lane-2",
+                        "store": false,
+                        "input": [{"role": "user", "content": "turn 2"}]
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            t2.candidates
+                .iter()
+                .map(|c| c.upstream_id)
+                .collect::<Vec<_>>(),
+            vec![up_b.id, up_d.id]
+        );
+        gateway.assign_connection(t2.turn_id, 2, up_b.id, "api-b");
+        gateway.commit_send_attempt(t2.turn_id);
+        gateway.sent(t2.turn_id);
+
+        // Re-enable all 4 upstreams so slot capacity is the only constraint when both 429 frames arrive in one batch.
+        swap_records(vec![up_a, up_b, up_c.clone(), up_d.clone()]);
+        acc_c.store(0, AtomicOrdering::SeqCst);
+        acc_d.store(0, AtomicOrdering::SeqCst);
+
+        let (events, mut event_rx) = tokio::sync::mpsc::channel(16);
+        events
+            .send(WsProviderEvent::Frame {
+                connection_id: 1,
+                bytes: Bytes::from_static(br#"{"type":"error","stream_id":"lane-1","error":{"code":"rate_limit_exceeded","message":"429 from api-a"}}"#),
+                text: true,
+            })
+            .await
+            .unwrap();
+        events
+            .send(WsProviderEvent::Frame {
+                connection_id: 2,
+                bytes: Bytes::from_static(br#"{"type":"error","stream_id":"lane-2","error":{"code":"rate_limit_exceeded","message":"429 from api-b"}}"#),
+                text: true,
+            })
+            .await
+            .unwrap();
+
+        let (mut downstream_sink, mut client_ws, sink_server) = spawn_test_downstream_sink().await;
+        let mut next_connection_id = 3;
+        let mut pending_connects = HashMap::new();
+        let mut connect_tasks = tokio::task::JoinSet::new();
+        let deferred = VecDeque::new();
+        let mut dispatches = VecDeque::new();
+        let mut carried_budgets = HashMap::new();
+
+        assert!(
+            drain_buffered_ws_events_snapshot(
+                &mut event_rx,
+                &mut gateway,
+                &mut connections,
+                &pending_connects,
+                &deferred,
+                &mut dispatches,
+                &mut downstream_sink,
+                2,
+            )
+            .await
+        );
+        assert_eq!(
+            dispatches.len(),
+            1,
+            "single free slot must be reserved by Turn 1 only, not double-promised to Turn 2"
+        );
+        assert_eq!(dispatches[0].stream_id.as_deref(), Some("lane-1"));
+        assert_eq!(dispatches[0].candidates[0].upstream_id, up_c.id);
+
+        let forwarded = tokio::time::timeout(Duration::from_secs(2), client_ws.next())
+            .await
+            .expect("Turn 2 original 429 is forwarded immediately")
+            .unwrap()
+            .unwrap();
+        let forwarded_json: serde_json::Value =
+            serde_json::from_str(forwarded.to_text().unwrap()).unwrap();
+        assert_eq!(forwarded_json["type"], "error");
+        assert_eq!(forwarded_json["stream_id"], "lane-2");
+        assert_eq!(forwarded_json["error"]["code"], "rate_limit_exceeded");
+        assert_eq!(forwarded_json["error"]["message"], "429 from api-b");
+
+        let mut deferred_mut = deferred;
+        assert!(
+            flush_pending_ws_dispatches(
+                &mut gateway,
+                &state,
+                &mut connections,
+                &events,
+                &mut next_connection_id,
+                3,
+                &mut pending_connects,
+                &mut connect_tasks,
+                &mut deferred_mut,
+                &mut dispatches,
+                &mut carried_budgets,
+                &mut downstream_sink,
+            )
+            .await
+        );
+        let outcome = tokio::time::timeout(Duration::from_secs(2), connect_tasks.join_next())
+            .await
+            .expect("Turn 1 connects to api-c")
+            .expect("connect task joined")
+            .expect("join ok");
+        let errs = handle_connect_outcome(
+            &mut gateway,
+            outcome,
+            &state,
+            &mut connections,
+            &events,
+            &mut next_connection_id,
+            3,
+            &mut pending_connects,
+            &mut connect_tasks,
+            &mut deferred_mut,
+            &mut dispatches,
+            &mut carried_budgets,
+        )
+        .await;
+        assert!(errs.is_empty(), "Turn 1 recovery must not fail: {errs:?}");
+        assert_eq!(acc_c.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(acc_d.load(AtomicOrdering::SeqCst), 0);
+
+        sink_server.abort();
+        task_a.abort();
+        task_b.abort();
+        task_c.abort();
+        task_d.abort();
     }
 }
