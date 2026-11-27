@@ -391,6 +391,30 @@ pub(super) fn websocket_error_message(error: &WebSocketError) -> Message {
     )
 }
 
+pub(super) async fn send_websocket_error(
+    downstream_sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    error: &WebSocketError,
+) -> bool {
+    if let Some(frames) = error.raw_provider_frames() {
+        for frame in frames {
+            let message = Message::Text(
+                frame
+                    .clone()
+                    .try_into()
+                    .expect("suppressed provider error frame is UTF-8"),
+            );
+            if downstream_sink.send(message).await.is_err() {
+                return false;
+            }
+        }
+        return true;
+    }
+    downstream_sink
+        .send(websocket_error_message(error))
+        .await
+        .is_ok()
+}
+
 async fn write_dispatched_frame(
     gateway: &mut ResponsesWebSocketGateway,
     dispatch: WebSocketDispatch,
@@ -778,7 +802,10 @@ struct ConnectedAttempt {
 
 enum ConnectAttemptError {
     Prepare(WebSocketError),
-    Dial(WebSocketError),
+    Dial {
+        error: WebSocketError,
+        contacted_upstream: bool,
+    },
 }
 
 struct ConnectAttemptOutcome {
@@ -1443,11 +1470,14 @@ async fn advance_one_dispatch(
                 drop(permit);
                 return ConnectAttemptOutcome {
                     connection_id,
-                    result: Err(ConnectAttemptError::Dial(WebSocketError::new(
-                        503,
-                        "overloaded_error",
-                        "WebSocket connection budget is full",
-                    ))),
+                    result: Err(ConnectAttemptError::Dial {
+                        error: WebSocketError::new(
+                            503,
+                            "overloaded_error",
+                            "WebSocket connection budget is full",
+                        ),
+                        contacted_upstream: false,
+                    }),
                 };
             }
             let bulkhead = state.websocket_bulkheads.semaphore_only_bulkhead(
@@ -1462,22 +1492,28 @@ async fn advance_one_dispatch(
                         drop(permit);
                         return ConnectAttemptOutcome {
                             connection_id,
-                            result: Err(ConnectAttemptError::Dial(WebSocketError::new(
-                                503,
-                                "overloaded_error",
-                                error.to_string(),
-                            ))),
+                            result: Err(ConnectAttemptError::Dial {
+                                error: WebSocketError::new(
+                                    503,
+                                    "overloaded_error",
+                                    error.to_string(),
+                                ),
+                                contacted_upstream: false,
+                            }),
                         };
                     }
                     Err(_) => {
                         drop(permit);
                         return ConnectAttemptOutcome {
                             connection_id,
-                            result: Err(ConnectAttemptError::Dial(WebSocketError::new(
-                                504,
-                                "upstream_unavailable",
-                                "provider WebSocket connection timed out",
-                            ))),
+                            result: Err(ConnectAttemptError::Dial {
+                                error: WebSocketError::new(
+                                    504,
+                                    "upstream_unavailable",
+                                    "provider WebSocket connection timed out",
+                                ),
+                                contacted_upstream: false,
+                            }),
                         };
                     }
                 };
@@ -1518,11 +1554,10 @@ async fn advance_one_dispatch(
                     drop(permit);
                     return ConnectAttemptOutcome {
                         connection_id,
-                        result: Err(ConnectAttemptError::Dial(WebSocketError::new(
-                            502,
-                            "upstream_unavailable",
-                            error,
-                        ))),
+                        result: Err(ConnectAttemptError::Dial {
+                            error: WebSocketError::new(502, "upstream_unavailable", error),
+                            contacted_upstream: false,
+                        }),
                     };
                 }
             };
@@ -1533,11 +1568,14 @@ async fn advance_one_dispatch(
                 drop(permit);
                 return ConnectAttemptOutcome {
                     connection_id,
-                    result: Err(ConnectAttemptError::Dial(WebSocketError::new(
-                        504,
-                        "upstream_unavailable",
-                        "provider WebSocket connection timed out",
-                    ))),
+                    result: Err(ConnectAttemptError::Dial {
+                        error: WebSocketError::new(
+                            504,
+                            "upstream_unavailable",
+                            "provider WebSocket connection timed out",
+                        ),
+                        contacted_upstream: false,
+                    }),
                 };
             }
             let result = connect_provider_websocket_with_permit(
@@ -1549,7 +1587,10 @@ async fn advance_one_dispatch(
                 remaining_attempt.min(state.upstream_connect_timeout),
             )
             .await
-            .map_err(ConnectAttemptError::Dial)
+            .map_err(|error| ConnectAttemptError::Dial {
+                error,
+                contacted_upstream: true,
+            })
             .map(
                 |(upstream, _headers, bulkhead_guard, connect_timings)| ConnectedAttempt {
                     upstream,
@@ -1882,8 +1923,11 @@ async fn handle_connect_outcome(
                 }
             }
         }
-        Err(ConnectAttemptError::Dial(error)) => {
-            if error.status == 429 {
+        Err(ConnectAttemptError::Dial {
+            error,
+            contacted_upstream,
+        }) => {
+            if contacted_upstream && error.status == 429 {
                 let mut headers = http::HeaderMap::new();
                 error.copy_provider_headers(&mut headers);
                 let retry_after_secs = headers
@@ -1912,6 +1956,9 @@ async fn handle_connect_outcome(
             }
             let now = tokio::time::Instant::now();
             for mut entry in std::iter::once(pending.primary).chain(pending.waiters) {
+                if contacted_upstream {
+                    gateway.mark_failover_replacement_dialed(entry.dispatch.turn_id);
+                }
                 entry.last_error = Some(error.clone());
                 entry.last_attempted_upstream_id = Some(pending.active_upstream_id);
                 entry.attempted_upstreams.insert(pending.active_upstream_id);
@@ -2403,11 +2450,7 @@ async fn flush_pending_ws_dispatches(
             dispatches.push_front(next);
         }
         for error in errors {
-            if downstream_sink
-                .send(websocket_error_message(&error))
-                .await
-                .is_err()
-            {
+            if !send_websocket_error(downstream_sink, &error).await {
                 return false;
             }
         }
@@ -2798,11 +2841,7 @@ async fn relay_responses_websocket(
                     )
                     .await;
                     for error in errors {
-                        if downstream_sink
-                            .send(websocket_error_message(&error))
-                            .await
-                            .is_err()
-                        {
+                        if !send_websocket_error(&mut downstream_sink, &error).await {
                             break 'relay;
                         }
                     }
@@ -2826,11 +2865,7 @@ async fn relay_responses_websocket(
                             )
                             .await;
                             for error in errors {
-                                if downstream_sink
-                                    .send(websocket_error_message(&error))
-                                    .await
-                                    .is_err()
-                                {
+                                if !send_websocket_error(&mut downstream_sink, &error).await {
                                     break 'relay;
                                 }
                             }
@@ -5846,6 +5881,541 @@ mod tests {
             for task in fx.tasks {
                 task.abort();
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_uncommitted_failover_restores_original_provider_error() {
+        use futures_util::StreamExt as _;
+        use std::sync::atomic::Ordering as AtomicOrdering;
+
+        // Subcase 1: Capacity 4 with 3 non-idle sockets retaining owners (`conn 1: api-a`,
+        // `conn 2: api-b`, `conn 3: api-d`) and 1 free slot (`api-c`, `api-e` not connected).
+        // A static filter accepts `[api-b, api-c]` in pool selection but rejects `api-b` alone
+        // at send-time `validate_candidate_for_send`. When a buffered batch receives 429 on `a`
+        // (recovery `[api-b, api-c]`, planned_dials == 0) and 429 on `d` (recovery `[api-e]`,
+        // planned_dials == 1), flushing rejects `api-b`, blocks `api-c` to preserve `api-e`'s
+        // reserved slot, and forwards `a`'s original raw 429 frame rather than 503.
+        {
+            struct RejectSingletonB {
+                b_id: uuid::Uuid,
+            }
+            impl cc_lb_routing::FilterPlugin for RejectSingletonB {
+                fn filter(
+                    &self,
+                    _ctx: &cc_lb_routing::RoutingContext,
+                    _principal: &cc_lb_domain::Principal,
+                    candidates: &[cc_lb_domain::UpstreamCandidate],
+                ) -> Result<cc_lb_routing::FilterOutput, cc_lb_routing::FilterError>
+                {
+                    let kept_upstream_ids =
+                        if candidates.len() == 1 && candidates[0].upstream_id == self.b_id {
+                            Vec::new()
+                        } else {
+                            candidates
+                                .iter()
+                                .map(|candidate| candidate.upstream_id)
+                                .collect()
+                        };
+                    Ok(cc_lb_routing::FilterOutput {
+                        kept_upstream_ids,
+                        reason: "reject singleton B".to_owned(),
+                        per_candidate_reasons: Vec::new(),
+                        subscription_preference: None,
+                    })
+                }
+                fn plugin_id(&self) -> uuid::Uuid {
+                    uuid::Uuid::from_u128(0xBEEF)
+                }
+                fn plugin_name(&self) -> &str {
+                    "reject-singleton-b"
+                }
+            }
+
+            let (addr_a, _acc_a, _rx_a, task_a) = spawn_ws_recorder_server().await;
+            let (addr_b, _acc_b, _rx_b, task_b) = spawn_ws_recorder_server().await;
+            let (addr_c, acc_c, _rx_c, task_c) = spawn_ws_recorder_server().await;
+            let (addr_d, _acc_d, _rx_d, task_d) = spawn_ws_recorder_server().await;
+            let (addr_e, acc_e, mut rx_e, task_e) = spawn_ws_recorder_server().await;
+
+            let mk_up = |id: u128, name: &str, addr: std::net::SocketAddr| {
+                crate::app::tests::websocket_upstream(
+                    id,
+                    name,
+                    url::Url::parse(&format!("http://{addr}/")).unwrap(),
+                )
+            };
+            let up_a = mk_up(51, "api-a", addr_a);
+            let up_b = mk_up(52, "api-b", addr_b);
+            let up_c = mk_up(53, "api-c", addr_c);
+            let up_d = mk_up(54, "api-d", addr_d);
+            let up_e = mk_up(55, "api-e", addr_e);
+
+            let state = crate::app::tests::websocket_test_state(
+                vec![
+                    up_a.clone(),
+                    up_b.clone(),
+                    up_c.clone(),
+                    up_d.clone(),
+                    up_e.clone(),
+                ],
+                cc_lb_domain::TerminalStrategy::FirstPick,
+                DrainController::new(),
+                Arc::new(crate::app::tests::WebSocketTestSignerFactory),
+                Arc::new(crate::app::tests::FixtureKeyStore),
+                vec!["*".to_owned()],
+            )
+            .await;
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-api-key",
+                HeaderValue::from_str(crate::app::tests::TEST_KEY.plaintext.as_str()).unwrap(),
+            );
+            let auth = state.lifecycle.authenticate(&headers).await.unwrap();
+            let mut gateway = ResponsesWebSocketGateway::new(
+                state.lifecycle.clone(),
+                &auth,
+                headers,
+                state.body_caps.messages,
+                4,
+            );
+            let mut connections = HashMap::new();
+            connections.insert(
+                1,
+                connect_existing_ws(&state, up_a.id, "api-a", addr_a).await,
+            );
+            connections.insert(
+                2,
+                connect_existing_ws(&state, up_b.id, "api-b", addr_b).await,
+            );
+            connections.insert(
+                3,
+                connect_existing_ws(&state, up_d.id, "api-d", addr_d).await,
+            );
+
+            let with_enabled = |rec: &UpstreamRecord, enabled: bool| {
+                let mut cloned = rec.clone();
+                cloned.enabled = enabled;
+                cloned
+            };
+            let store_records = |a: bool, b: bool, c: bool, d: bool, e: bool| {
+                let view = state.dynamic_view.load();
+                state.dynamic_view.store(
+                    cc_lb_control::DynamicViewBuilder::from_view(&view)
+                        .upstream_records(vec![
+                            with_enabled(&up_a, a),
+                            with_enabled(&up_b, b),
+                            with_enabled(&up_c, c),
+                            with_enabled(&up_d, d),
+                            with_enabled(&up_e, e),
+                        ])
+                        .build(),
+                );
+            };
+
+            let mut seed_owner = async |conn_id: u64,
+                                        lane: &str,
+                                        resp_id: &str,
+                                        uid: uuid::Uuid,
+                                        uname: &str| {
+                let turn = gateway
+                    .client_message(
+                        auth.clone(),
+                        Bytes::from(format!(
+                            r#"{{"type":"response.create","model":"gpt-5.4","stream_id":"{lane}","store":false,"input":[]}}"#
+                        )),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                gateway.assign_connection(turn.turn_id, conn_id, uid, uname);
+                gateway.commit_send_attempt(turn.turn_id);
+                gateway.sent(turn.turn_id);
+                gateway
+                    .provider_message(
+                        conn_id,
+                        &Bytes::from(format!(
+                            r#"{{"type":"response.created","stream_id":"{lane}","response":{{"id":"{resp_id}","status":"in_progress","store":false}}}}"#
+                        )),
+                    )
+                    .await
+                    .unwrap();
+                gateway
+                    .provider_message(
+                        conn_id,
+                        &Bytes::from(format!(
+                            r#"{{"type":"response.completed","stream_id":"{lane}","response":{{"id":"{resp_id}","status":"completed","store":false}}}}"#
+                        )),
+                    )
+                    .await
+                    .unwrap();
+            };
+
+            store_records(true, false, false, false, false);
+            seed_owner(1, "lane-1", "resp_hold_a", up_a.id, "api-a").await;
+            store_records(false, true, false, false, false);
+            seed_owner(2, "lane-2", "resp_hold_b", up_b.id, "api-b").await;
+            store_records(false, false, false, true, false);
+            seed_owner(3, "lane-3", "resp_hold_d", up_d.id, "api-d").await;
+
+            // Install static filter plugin rejecting singleton `[api-b]` during send validation.
+            let pipeline = Arc::new(
+                cc_lb_control::api_keys::principal_view::RouterPipelineCache {
+                    user_filters: vec![Arc::new(RejectSingletonB { b_id: up_b.id })],
+                    terminal: cc_lb_domain::TerminalStrategy::FirstPick,
+                    instantiation_error: None,
+                    provider_filters: None,
+                },
+            );
+            let principal_id = auth.principal_id().to_owned();
+            let principal_view = Arc::new(
+                cc_lb_control::api_keys::principal_view::PrincipalView::for_tests(
+                    &principal_id,
+                    true,
+                    vec!["*".to_owned()],
+                    Vec::new(),
+                    HashMap::from([(
+                        principal_id.clone(),
+                        (
+                            Some(pipeline),
+                            cc_lb_control::api_keys::principal_view::DialectCache::Inherit,
+                        ),
+                    )]),
+                ),
+            );
+            {
+                let view = state.dynamic_view.load();
+                state.dynamic_view.store(
+                    cc_lb_control::DynamicViewBuilder::from_view(&view)
+                        .principal_view(principal_view)
+                        .build(),
+                );
+            }
+
+            store_records(true, true, true, false, false);
+            let t_a = gateway
+                .client_message(
+                    auth.clone(),
+                    Bytes::from_static(br#"{"type":"response.create","model":"gpt-5.4","stream_id":"lane-1","store":false,"input":[{"role":"user","content":"turn a"}]}"#),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                t_a.candidates
+                    .iter()
+                    .map(|c| c.upstream_id)
+                    .collect::<Vec<_>>(),
+                vec![up_a.id, up_b.id, up_c.id]
+            );
+            gateway.assign_connection(t_a.turn_id, 1, up_a.id, "api-a");
+            gateway.commit_send_attempt(t_a.turn_id);
+            gateway.sent(t_a.turn_id);
+
+            store_records(false, false, false, true, true);
+            let t_d = gateway
+                .client_message(
+                    auth.clone(),
+                    Bytes::from_static(br#"{"type":"response.create","model":"gpt-5.4","stream_id":"lane-2","store":false,"input":[{"role":"user","content":"turn d"}]}"#),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                t_d.candidates
+                    .iter()
+                    .map(|c| c.upstream_id)
+                    .collect::<Vec<_>>(),
+                vec![up_d.id, up_e.id]
+            );
+            gateway.assign_connection(t_d.turn_id, 3, up_d.id, "api-d");
+            gateway.commit_send_attempt(t_d.turn_id);
+            gateway.sent(t_d.turn_id);
+
+            store_records(true, true, true, true, true);
+            acc_c.store(0, AtomicOrdering::SeqCst);
+            acc_e.store(0, AtomicOrdering::SeqCst);
+
+            let (mut downstream_sink, mut client_ws, sink_server) =
+                spawn_test_downstream_sink().await;
+            let (events, mut event_rx) = tokio::sync::mpsc::channel(16);
+            events
+                .send(WsProviderEvent::Frame {
+                    connection_id: 1,
+                    bytes: Bytes::from_static(br#"{"type":"error","stream_id":"lane-1","error":{"code":"rate_limit_exceeded","message":"429 from a"}}"#),
+                    text: true,
+                })
+                .await
+                .unwrap();
+            events
+                .send(WsProviderEvent::Frame {
+                    connection_id: 3,
+                    bytes: Bytes::from_static(br#"{"type":"error","stream_id":"lane-2","error":{"code":"rate_limit_exceeded","message":"429 from d"}}"#),
+                    text: true,
+                })
+                .await
+                .unwrap();
+
+            let mut next_connection_id = 4;
+            let mut pending_connects = HashMap::new();
+            let mut connect_tasks = tokio::task::JoinSet::new();
+            let mut deferred = VecDeque::new();
+            let mut dispatches = VecDeque::new();
+            let mut carried_budgets = HashMap::new();
+
+            assert!(
+                drain_buffered_ws_events_snapshot(
+                    &mut event_rx,
+                    &mut gateway,
+                    &mut connections,
+                    &pending_connects,
+                    &deferred,
+                    &mut dispatches,
+                    &mut downstream_sink,
+                    2,
+                )
+                .await
+            );
+            assert_eq!(dispatches.len(), 2);
+            assert_eq!(
+                dispatches[0]
+                    .candidates
+                    .iter()
+                    .map(|c| c.upstream_id)
+                    .collect::<Vec<_>>(),
+                vec![up_b.id, up_c.id]
+            );
+            assert_eq!(
+                dispatches[1]
+                    .candidates
+                    .iter()
+                    .map(|c| c.upstream_id)
+                    .collect::<Vec<_>>(),
+                vec![up_e.id]
+            );
+
+            assert!(
+                flush_pending_ws_dispatches(
+                    &mut gateway,
+                    &state,
+                    &mut connections,
+                    &events,
+                    &mut next_connection_id,
+                    4,
+                    &mut pending_connects,
+                    &mut connect_tasks,
+                    &mut deferred,
+                    &mut dispatches,
+                    &mut carried_budgets,
+                    &mut downstream_sink,
+                )
+                .await
+            );
+            assert!(dispatches.is_empty());
+            assert_eq!(acc_c.load(AtomicOrdering::SeqCst), 0);
+            assert_eq!(connect_tasks.len(), 1);
+
+            let restored = tokio::time::timeout(Duration::from_secs(2), client_ws.next())
+                .await
+                .expect("lane-1 receives restored original 429 frame")
+                .unwrap()
+                .unwrap();
+            let restored_json: serde_json::Value =
+                serde_json::from_str(restored.to_text().unwrap()).unwrap();
+            assert_eq!(restored_json["type"], "error");
+            assert_eq!(restored_json["stream_id"], "lane-1");
+            assert_eq!(restored_json["error"]["code"], "rate_limit_exceeded");
+            assert_eq!(restored_json["error"]["message"], "429 from a");
+
+            let outcome_e = tokio::time::timeout(Duration::from_secs(2), connect_tasks.join_next())
+                .await
+                .expect("api-e connects")
+                .expect("join ok")
+                .expect("task ok");
+            let errs_after_e = handle_connect_outcome(
+                &mut gateway,
+                outcome_e,
+                &state,
+                &mut connections,
+                &events,
+                &mut next_connection_id,
+                4,
+                &mut pending_connects,
+                &mut connect_tasks,
+                &mut deferred,
+                &mut dispatches,
+                &mut carried_budgets,
+            )
+            .await;
+            assert!(
+                errs_after_e.is_empty(),
+                "lane-2 failover onto api-e must succeed: {errs_after_e:?}"
+            );
+            assert_eq!(acc_e.load(AtomicOrdering::SeqCst), 1);
+            assert_eq!(acc_c.load(AtomicOrdering::SeqCst), 0);
+            let sent_e = tokio::time::timeout(Duration::from_secs(2), rx_e.recv())
+                .await
+                .expect("api-e received turn d")
+                .unwrap();
+            assert!(sent_e.contains("\"turn d\""));
+
+            sink_server.abort();
+            for task in [task_a, task_b, task_c, task_d, task_e] {
+                task.abort();
+            }
+        }
+
+        // Subcase 2: Pre-dispatch owner recovery blocked locally by an open circuit breaker
+        // before contacting replacement `api-c` must restore `api-a`'s original 429 with
+        // `Retry-After: 17` instead of surfacing local `502 upstream_unavailable`.
+        {
+            let (addr_a, acc_a, task_a) = spawn_status_handshake_listener(
+                b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 17\r\nContent-Length: 0\r\n\r\n",
+            )
+            .await;
+            let (addr_c, acc_c, _rx_c, task_c) = spawn_ws_recorder_server().await;
+
+            let up_a = crate::app::tests::websocket_upstream(
+                61,
+                "api-a",
+                url::Url::parse(&format!("http://{addr_a}/")).unwrap(),
+            );
+            let up_c = crate::app::tests::websocket_upstream(
+                62,
+                "api-c",
+                url::Url::parse(&format!("http://{addr_c}/")).unwrap(),
+            );
+
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-api-key",
+                HeaderValue::from_str(crate::app::tests::TEST_KEY.plaintext.as_str()).unwrap(),
+            );
+            let cipher_a = "gAAAAAB_open_breaker_restores_429";
+            let seed_state = crate::app::tests::websocket_test_state(
+                vec![up_a.clone()],
+                cc_lb_domain::TerminalStrategy::FirstPick,
+                DrainController::new(),
+                Arc::new(crate::app::tests::WebSocketTestSignerFactory),
+                Arc::new(crate::app::tests::FixtureKeyStore),
+                vec!["*".to_owned()],
+            )
+            .await;
+            let seed_auth = seed_state.lifecycle.authenticate(&headers).await.unwrap();
+            let state = ws_affinity_test_state(
+                vec![up_a.clone(), up_c.clone()],
+                seed_auth.principal_id(),
+                &[(cipher_a, up_a.id)],
+            )
+            .await;
+            let auth = state.lifecycle.authenticate(&headers).await.unwrap();
+
+            let breaker_c = state.breaker_registry.breaker(
+                websocket_breaker_key(up_c.id),
+                state.breaker_config,
+                state.clock.clone(),
+            );
+            for _ in 0..state.breaker_config.failures_to_open {
+                breaker_c.permit().unwrap().record_failure();
+            }
+            assert!(acquire_websocket_breaker_permit(&state, up_c.id).is_err());
+
+            let mut gateway = ResponsesWebSocketGateway::new(
+                state.lifecycle.clone(),
+                &auth,
+                headers,
+                state.body_caps.messages,
+                4,
+            );
+            let primary = gateway
+                .client_message(
+                    auth,
+                    Bytes::from(
+                        serde_json::json!({
+                            "type": "response.create",
+                            "model": "gpt-5.4",
+                            "stream_id": "lane-1",
+                            "store": false,
+                            "input": [
+                                {"type": "reasoning", "id": "rs_a", "summary": [], "encrypted_content": cipher_a},
+                                {"role": "user", "content": "breaker restore"}
+                            ]
+                        })
+                        .to_string(),
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(primary.candidates.len(), 1);
+            assert_eq!(primary.candidates[0].upstream_id, up_a.id);
+
+            let (events, _rx) = tokio::sync::mpsc::channel(16);
+            let mut connections = HashMap::new();
+            let mut next_connection_id = 1;
+            let mut pending_connects = HashMap::new();
+            let mut connect_tasks = tokio::task::JoinSet::new();
+            let mut deferred = VecDeque::new();
+            let mut dispatches = VecDeque::new();
+            let mut carried_budgets = HashMap::new();
+
+            let (r0, e0) = advance_one_dispatch(
+                &mut gateway,
+                PendingDispatchState::new(
+                    primary,
+                    Duration::from_secs(5),
+                    Duration::from_secs(5),
+                    3,
+                ),
+                &state,
+                &mut connections,
+                &events,
+                &mut next_connection_id,
+                4,
+                &mut pending_connects,
+                &mut connect_tasks,
+                &mut deferred,
+                &dispatches,
+                &mut carried_budgets,
+                QueuedDialReservation::None,
+            )
+            .await;
+            assert!(r0.is_empty() && e0.is_empty());
+
+            let outcome_429 =
+                tokio::time::timeout(Duration::from_secs(2), connect_tasks.join_next())
+                    .await
+                    .expect("Subcase 2 api-a 429 handshake joins")
+                    .expect("join ok")
+                    .expect("task ok");
+            let errs = handle_connect_outcome(
+                &mut gateway,
+                outcome_429,
+                &state,
+                &mut connections,
+                &events,
+                &mut next_connection_id,
+                4,
+                &mut pending_connects,
+                &mut connect_tasks,
+                &mut deferred,
+                &mut dispatches,
+                &mut carried_budgets,
+            )
+            .await;
+
+            assert_eq!(acc_a.load(AtomicOrdering::SeqCst), 1);
+            assert_eq!(acc_c.load(AtomicOrdering::SeqCst), 0);
+            assert_eq!(errs.len(), 1, "expected restored api-a 429, got: {errs:?}");
+            assert_eq!(errs[0].status, 429);
+            let payload = String::from_utf8(errs[0].to_bytes().to_vec()).unwrap();
+            assert!(
+                payload.contains("\"retry-after\":\"17\""),
+                "restored 429 must preserve original Retry-After header: {payload}"
+            );
+
+            task_a.abort();
+            task_c.abort();
         }
     }
 }

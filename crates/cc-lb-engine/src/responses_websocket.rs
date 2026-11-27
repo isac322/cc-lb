@@ -44,6 +44,7 @@ use cc_lb_upstream::{Signer, SseEvent, TransformSseEventRequest, TransformSseEve
 struct WebSocketErrorExtra {
     response_id: Option<Box<str>>,
     provider_headers: Box<[(String, String)]>,
+    raw_provider_frames: Option<Box<[Bytes]>>,
 }
 
 #[derive(Clone, Debug)]
@@ -143,7 +144,23 @@ impl WebSocketError {
         self
     }
 
+    pub fn with_raw_provider_frames(mut self, frames: Vec<Bytes>) -> Self {
+        self.extra
+            .get_or_insert_with(Default::default)
+            .raw_provider_frames = Some(frames.into_boxed_slice());
+        self
+    }
+
+    pub fn raw_provider_frames(&self) -> Option<&[Bytes]> {
+        self.extra
+            .as_deref()
+            .and_then(|extra| extra.raw_provider_frames.as_deref())
+    }
+
     pub fn to_bytes(&self) -> Bytes {
+        if let Some([single]) = self.raw_provider_frames() {
+            return single.clone();
+        }
         let code = self.native_code.as_deref().unwrap_or(self.code);
         let mut error = serde_json::json!({
             "type": "error",
@@ -688,6 +705,13 @@ struct PendingErrorTerminal {
     expires_at: std::time::Instant,
 }
 
+struct SuppressedFailoverError {
+    error: WebSocketError,
+    upstream_id: Option<Uuid>,
+    upstream_name: String,
+    previous_session_upstream: Option<Uuid>,
+}
+
 struct Turn {
     auth: Authenticated,
     prepared: PreparedWebSocketTurn,
@@ -730,6 +754,7 @@ struct Turn {
     owner_failover_requires_api_key: bool,
     owner_failover_fallback: Option<WsOwnerFailoverFallback>,
     live_failover_candidates: Vec<WebSocketCandidate>,
+    suppressed_failover_error: Option<SuppressedFailoverError>,
 }
 
 impl Turn {
@@ -1402,6 +1427,7 @@ impl ResponsesWebSocketGateway {
                 owner_failover_requires_api_key,
                 owner_failover_fallback,
                 live_failover_candidates: Vec::new(),
+                suppressed_failover_error: None,
             },
         );
         if !self.lanes.contains_key(&lane) {
@@ -1632,6 +1658,7 @@ impl ResponsesWebSocketGateway {
                 owner_failover_requires_api_key: false,
                 owner_failover_fallback: None,
                 live_failover_candidates: Vec::new(),
+                suppressed_failover_error: None,
             },
         );
         let lane_state = self.lanes.entry(lane).or_default();
@@ -2621,6 +2648,7 @@ impl ResponsesWebSocketGateway {
             && !turn.attempted
             && let Some(upstream_id) = turn.upstream_id
         {
+            turn.suppressed_failover_error = None;
             turn.attempted = true;
             turn.attempt_num = turn.attempt_num.saturating_add(1);
             turn.prepared.deferred_limit_context = None;
@@ -2638,6 +2666,66 @@ impl ResponsesWebSocketGateway {
                     upstream_id,
                 });
             }
+        }
+    }
+
+    pub fn mark_failover_replacement_dialed(&mut self, turn_id: u64) {
+        if let Some(turn) = self.turns.get_mut(&turn_id) {
+            turn.suppressed_failover_error = None;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_suppressed_live_failover_error(
+        &self,
+        connection_id: u64,
+        kind: &str,
+        value: &Value,
+        lane: &Option<String>,
+        raw_frame: &Bytes,
+        public_frame: Option<&Bytes>,
+        transformed_frames: Option<&[Bytes]>,
+    ) -> WebSocketError {
+        let signer = self.connection_signers.get(&connection_id).map(Arc::as_ref);
+        let (classified, _) = classify_terminal_frame(kind, value, lane, signer);
+        let mut suppressed =
+            classified.unwrap_or_else(|| native_terminal_error_with_signer(value, lane, signer));
+        let outbound_frames: Vec<Bytes> = if let Some(frames) = transformed_frames {
+            frames.to_vec()
+        } else if !self.codex_backend
+            && let Some(public) = public_frame
+        {
+            vec![public.clone()]
+        } else {
+            vec![raw_frame.clone()]
+        };
+        if !outbound_frames.is_empty()
+            && outbound_frames
+                .iter()
+                .all(|bytes| std::str::from_utf8(bytes).is_ok())
+        {
+            suppressed = suppressed.with_raw_provider_frames(outbound_frames);
+        }
+        suppressed
+    }
+
+    fn record_suppressed_failover_error(
+        &mut self,
+        turn_id: u64,
+        failed_upstream_id: Uuid,
+        failed_upstream_name: String,
+        previous_session_upstream: Option<Uuid>,
+        error: WebSocketError,
+    ) {
+        let previous_session_upstream =
+            previous_session_upstream.filter(|_| self.session_upstream.is_none());
+        if let Some(turn) = self.turns.get_mut(&turn_id) {
+            turn.suppressed_failover_error = Some(SuppressedFailoverError {
+                error,
+                upstream_id: Some(failed_upstream_id),
+                upstream_name: failed_upstream_name,
+                previous_session_upstream,
+            });
         }
     }
 
@@ -2983,10 +3071,17 @@ impl ResponsesWebSocketGateway {
             return Ok(WebSocketEventResult::default());
         }
         let transformed = self.transform_provider_frame(connection_id, &processing_frame);
+        let transformed_frames = transformed
+            .as_ref()
+            .ok()
+            .and_then(|(_, frames)| frames.as_deref());
         let mut result = self
             .observe_provider_message(
                 connection_id,
                 &processing_frame,
+                frame,
+                public_frame.as_ref(),
+                transformed_frames,
                 transformed.as_ref().err().map(|boxed| &boxed.1),
                 quota_turn,
                 relay_pool,
@@ -3240,10 +3335,14 @@ impl ResponsesWebSocketGateway {
         .map_err(|error| Box::new((target_turn_id, error.with_stream(lane))))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn observe_provider_message(
         &mut self,
         connection_id: u64,
         frame: &Bytes,
+        raw_frame: &Bytes,
+        public_frame: Option<&Bytes>,
+        transformed_frames: Option<&[Bytes]>,
         transform_error: Option<&WebSocketError>,
         quota_turn: Option<u64>,
         relay_pool: &WsRelayPoolSnapshot,
@@ -3662,6 +3761,12 @@ impl ResponsesWebSocketGateway {
                 .insert(failed_upstream_id);
             self.lifecycle
                 .record_ws_rate_limit_cooldown(failed_upstream_id, Some(&value), None);
+            let previous_session_upstream = self.session_upstream;
+            let failed_upstream_name = self
+                .turns
+                .get(&turn_id)
+                .map(|turn| turn.prepared.route_info.upstream_name.clone())
+                .unwrap_or_default();
             if let Some((dispatches, recovery_error)) = self
                 .try_recover_codex_previous_response_failover(turn_id, failed_upstream_id)
                 .await
@@ -3680,7 +3785,7 @@ impl ResponsesWebSocketGateway {
                     retire_connections,
                 });
             }
-            if let Some(retry_dispatch) = self
+            let retry_dispatch = if let Some(retry_dispatch) = self
                 .try_owner_reasoning_failover_dispatch(
                     turn_id,
                     failed_upstream_id,
@@ -3689,29 +3794,33 @@ impl ResponsesWebSocketGateway {
                 )
                 .await
             {
-                let retire_connections = if self.is_connection_idle(connection_id, None) {
-                    self.retire_idle_connection(connection_id);
-                    vec![connection_id]
-                } else {
-                    Vec::new()
-                };
-                return Ok(WebSocketEventResult {
-                    forward: false,
-                    frames: None,
-                    dispatches: vec![retry_dispatch],
-                    errors: Vec::new(),
-                    retire_connections,
-                });
-            }
-            if let Some(retry_dispatch) = self
-                .try_unpinned_live_failover_dispatch(
+                Some(retry_dispatch)
+            } else {
+                self.try_unpinned_live_failover_dispatch(
                     turn_id,
                     failed_upstream_id,
                     Some(connection_id),
                     relay_pool,
                 )
                 .await
-            {
+            };
+            if let Some(retry_dispatch) = retry_dispatch {
+                let suppressed = self.build_suppressed_live_failover_error(
+                    connection_id,
+                    kind,
+                    &value,
+                    &lane,
+                    raw_frame,
+                    public_frame,
+                    transformed_frames,
+                );
+                self.record_suppressed_failover_error(
+                    turn_id,
+                    failed_upstream_id,
+                    failed_upstream_name,
+                    previous_session_upstream,
+                    suppressed,
+                );
                 let retire_connections = if self.is_connection_idle(connection_id, None) {
                     self.retire_idle_connection(connection_id);
                     vec![connection_id]
@@ -5075,8 +5184,13 @@ impl ResponsesWebSocketGateway {
         let recoverable_turn = self.turns.get(&turn_id).is_some_and(|turn| {
             !turn.sent && !turn.response_created && !turn.provider_frame_forwarded
         });
+        let not_uncommitted_recovery = self
+            .turns
+            .get(&turn_id)
+            .is_some_and(|turn| turn.suppressed_failover_error.is_none());
         if upstream_failure
             && recoverable_turn
+            && not_uncommitted_recovery
             && let Some(failed_id) = failed_id
         {
             if let Some((ready, recovery_error)) = self
@@ -5085,13 +5199,56 @@ impl ResponsesWebSocketGateway {
             {
                 return (ready, Some(recovery_error));
             }
+            let previous_session_upstream = self.session_upstream;
+            let failed_upstream_name = self
+                .turns
+                .get(&turn_id)
+                .map(|turn| {
+                    turn.prepared
+                        .candidates
+                        .iter()
+                        .find(|candidate| candidate.upstream_id == failed_id)
+                        .map(|candidate| candidate.upstream_name.clone())
+                        .unwrap_or_else(|| turn.prepared.route_info.upstream_name.clone())
+                })
+                .unwrap_or_default();
             let failed_conn = self.turns.get(&turn_id).and_then(|t| t.connection_id);
             if let Some(retry_dispatch) = self
                 .try_owner_reasoning_failover_dispatch(turn_id, failed_id, failed_conn, relay_pool)
                 .await
             {
+                let cleared_session_owner =
+                    previous_session_upstream.filter(|_| self.session_upstream.is_none());
+                if let Some(turn) = self.turns.get_mut(&turn_id) {
+                    turn.suppressed_failover_error = Some(SuppressedFailoverError {
+                        error: error.clone(),
+                        upstream_id: Some(failed_id),
+                        upstream_name: failed_upstream_name,
+                        previous_session_upstream: cleared_session_owner,
+                    });
+                }
                 return (vec![retry_dispatch], None);
             }
+        }
+        if error.code != "authentication_error"
+            && let Some(suppressed) = self
+                .turns
+                .get_mut(&turn_id)
+                .and_then(|turn| turn.suppressed_failover_error.take())
+        {
+            if self.session_upstream.is_none() {
+                self.session_upstream = suppressed.previous_session_upstream;
+            }
+            if let Some(turn) = self.turns.get_mut(&turn_id) {
+                if let Some(uid) = suppressed.upstream_id {
+                    turn.upstream_id = Some(uid);
+                }
+                if !suppressed.upstream_name.is_empty() {
+                    turn.prepared.route_info.upstream_name = suppressed.upstream_name;
+                }
+            }
+            let ready = self.fail_dispatch(turn_id, &suppressed.error).await;
+            return (ready, Some(suppressed.error));
         }
         let ready = self.fail_dispatch(turn_id, error).await;
         (ready, Some(error.clone()))
@@ -5964,6 +6121,7 @@ pub(crate) mod tests {
                 owner_failover_requires_api_key: false,
                 owner_failover_fallback: None,
                 live_failover_candidates: Vec::new(),
+                suppressed_failover_error: None,
             },
         );
         gateway.lanes.insert(
@@ -6054,7 +6212,16 @@ pub(crate) mod tests {
         );
         assert!(
             gateway
-                .observe_provider_message(1, &delta, None, None, &WsRelayPoolSnapshot::default())
+                .observe_provider_message(
+                    1,
+                    &delta,
+                    &delta,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &WsRelayPoolSnapshot::default(),
+                )
                 .await
                 .unwrap()
                 .forward
@@ -6138,7 +6305,16 @@ pub(crate) mod tests {
         );
         let original_frame = frame.clone();
         let result = gateway
-            .observe_provider_message(1, &frame, None, None, &WsRelayPoolSnapshot::default())
+            .observe_provider_message(
+                1,
+                &frame,
+                &frame,
+                None,
+                None,
+                None,
+                None,
+                &WsRelayPoolSnapshot::default(),
+            )
             .await
             .unwrap();
         assert!(result.forward);
@@ -6180,6 +6356,9 @@ pub(crate) mod tests {
             .observe_provider_message(
                 1,
                 &frame,
+                &frame,
+                None,
+                None,
                 Some(&error),
                 None,
                 &WsRelayPoolSnapshot::default(),
@@ -6626,6 +6805,7 @@ pub(crate) mod tests {
                     owner_failover_requires_api_key: false,
                     owner_failover_fallback: None,
                     live_failover_candidates: Vec::new(),
+                    suppressed_failover_error: None,
                 },
             );
             gateway.finish_turn(1, None);
@@ -7634,6 +7814,7 @@ pub(crate) mod tests {
             owner_failover_requires_api_key: false,
             owner_failover_fallback: None,
             live_failover_candidates: Vec::new(),
+            suppressed_failover_error: None,
         }
     }
 
