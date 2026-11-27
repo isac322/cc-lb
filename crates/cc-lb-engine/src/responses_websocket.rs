@@ -113,10 +113,16 @@ impl WebSocketError {
                 break;
             }
             let name = name.as_str().to_ascii_lowercase();
+            let is_codex_quota = name.starts_with("x-codex-primary-")
+                || name.starts_with("x-codex-secondary-")
+                || name.starts_with("x-codex-credits-")
+                || name == "x-codex-active-limit"
+                || name == "x-codex-plan-type";
             if name != "retry-after"
                 && !name.starts_with("x-ratelimit-")
                 && !name.starts_with("anthropic-ratelimit-")
                 && !name.starts_with("ratelimit-")
+                && !is_codex_quota
             {
                 continue;
             }
@@ -257,6 +263,14 @@ enum WsUnknownReasoningRetry {
     Pending(HashSet<[u8; 32]>),
 }
 
+pub(crate) struct WsOwnerFailoverFallback {
+    pub(crate) owner_upstream_id: Uuid,
+    pub(crate) stripped_body: Arc<Value>,
+    pub(crate) stripped_frame: Bytes,
+    pub(crate) candidates: Vec<WebSocketCandidate>,
+    pub(crate) requires_api_key: bool,
+}
+
 pub(crate) struct PreparedWebSocketTurn {
     pub candidates: Vec<WebSocketCandidate>,
     pub observer: Option<LifecycleContext>,
@@ -280,6 +294,8 @@ pub(crate) struct PreparedWebSocketTurn {
     pub request_id: String,
     pub unknown_reasoning_plan: WsUnknownReasoningPlan,
     pub has_explicit_affinity: bool,
+    pub owner_failover_fallback: Option<WsOwnerFailoverFallback>,
+    pub reconciled_body: Option<(Arc<Value>, Bytes)>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -695,6 +711,8 @@ struct Turn {
     admitted_session_upstream: Option<Uuid>,
     owner_failover_replacement: bool,
     owner_failover_requires_api_key: bool,
+    owner_failover_fallback: Option<WsOwnerFailoverFallback>,
+    live_failover_candidates: Vec<WebSocketCandidate>,
 }
 
 impl Turn {
@@ -845,6 +863,7 @@ pub struct ResponsesWebSocketGateway {
     connection_lanes: HashMap<u64, Option<String>>,
     session_upstream: Option<Uuid>,
     session_oauth: bool,
+    session_rate_limited_upstreams: HashSet<Uuid>,
     connection_signers: HashMap<u64, Arc<dyn Signer>>,
     successors: HashMap<String, u64>,
     activity_heartbeat_interval_ms: u64,
@@ -878,6 +897,7 @@ impl ResponsesWebSocketGateway {
             connection_lanes: HashMap::new(),
             session_upstream: None,
             session_oauth: false,
+            session_rate_limited_upstreams: HashSet::new(),
             connections: HashMap::new(),
             connection_oauth: HashMap::new(),
             connection_signers: HashMap::new(),
@@ -1098,6 +1118,33 @@ impl ResponsesWebSocketGateway {
             )
             .with_stream(lane));
         }
+        if self.codex_backend
+            && let Some(owner_ref) = owner.as_ref()
+            && previous.as_deref().is_some_and(|id| !id.is_empty())
+            && self
+                .lifecycle
+                .has_healthy_codex_ws_replacement(
+                    &auth,
+                    WebSocketIngress {
+                        headers: &self.headers,
+                        frame: &frame,
+                        query: self.query.as_deref(),
+                    },
+                    &body,
+                    owner_ref.upstream_id,
+                    &self.session_rate_limited_upstreams,
+                    true,
+                )
+                .await
+        {
+            self.evict_upstream_for_failover(owner_ref.upstream_id);
+            return Err(WebSocketError::new(
+                400,
+                "previous_response_not_found",
+                "The previous response owner is unavailable; replay full history",
+            )
+            .with_stream(lane));
+        }
         let charge = frame
             .len()
             .saturating_add(json_owned_bytes(&body))
@@ -1155,9 +1202,28 @@ impl ResponsesWebSocketGateway {
                 self.codex_backend,
                 session_unpinned,
                 other_turns_active,
+                &self.session_rate_limited_upstreams,
             )
             .await
             .map_err(|error| error.with_stream(lane.clone()))?;
+        if let Some(prev_session_upstream) = self.session_upstream
+            && prepared
+                .candidates
+                .first()
+                .is_some_and(|candidate| candidate.upstream_id != prev_session_upstream)
+            && (matches!(
+                prepared.unknown_reasoning_plan,
+                WsUnknownReasoningPlan::StrippedUpfront {
+                    owner_failover: true,
+                    ..
+                }
+            ) || prepared.reconciled_body.is_some()
+                || !prepared.has_explicit_affinity)
+        {
+            self.session_upstream = None;
+        }
+        let owner_failover_fallback = prepared.owner_failover_fallback.take();
+        let (body, frame) = prepared.reconciled_body.take().unwrap_or((body, frame));
         let (
             body,
             frame,
@@ -1316,6 +1382,8 @@ impl ResponsesWebSocketGateway {
                 admitted_session_upstream: self.session_upstream,
                 owner_failover_replacement,
                 owner_failover_requires_api_key,
+                owner_failover_fallback,
+                live_failover_candidates: Vec::new(),
             },
         );
         if !self.lanes.contains_key(&lane) {
@@ -1538,6 +1606,8 @@ impl ResponsesWebSocketGateway {
                 admitted_session_upstream: self.session_upstream,
                 owner_failover_replacement: false,
                 owner_failover_requires_api_key: false,
+                owner_failover_fallback: None,
+                live_failover_candidates: Vec::new(),
             },
         );
         let lane_state = self.lanes.entry(lane).or_default();
@@ -1761,6 +1831,7 @@ impl ResponsesWebSocketGateway {
                         && turn.pinned.is_none()
                         && !turn.prepared.has_explicit_affinity
                         && turn.admitted_session_upstream.is_none()
+                        && !turn.owner_failover_replacement
                         && !turn.owner_failover_requires_api_key,
                     turn.lane.clone(),
                     turn.prepared.has_explicit_affinity,
@@ -1819,6 +1890,16 @@ impl ResponsesWebSocketGateway {
                     && other.upstream_id.is_none()
                     && other.has_any_oauth_candidate
             });
+        let live_failover_candidates = {
+            let Some(turn) = self.turns.get(&turn_id) else {
+                return Ok(None);
+            };
+            if turn.pinned.is_none() && !turn.prepared.has_explicit_affinity {
+                candidates.clone()
+            } else {
+                Vec::new()
+            }
+        };
         let reasoning_res = if candidates.len() <= 1 {
             self.apply_unestablished_reasoning(turn_id, true)
         } else if !defer_for_other_oauth_owner {
@@ -1831,9 +1912,12 @@ impl ResponsesWebSocketGateway {
         {
             return Err(error);
         }
-        let Some(turn) = self.turns.get(&turn_id) else {
+        let Some(turn) = self.turns.get_mut(&turn_id) else {
             return Ok(None);
         };
+        if !live_failover_candidates.is_empty() {
+            turn.live_failover_candidates = live_failover_candidates;
+        }
         let prefer_api_key_on_final_attempt = !self.codex_backend && turn.pinned.is_none();
         Ok(Some(WebSocketDispatch {
             turn_id,
@@ -1925,6 +2009,62 @@ impl ResponsesWebSocketGateway {
     /// Return the OAuth upstream currently pinned for this downstream session, if any.
     pub fn session_upstream(&self) -> Option<Uuid> {
         self.session_upstream
+    }
+
+    /// Record that `upstream_id` returned a 429/rate-limit rejection during this
+    /// WebSocket session so subsequent turns avoid re-selecting it when a healthy
+    /// replacement exists.
+    pub fn record_session_rate_limited(&mut self, upstream_id: Uuid) {
+        self.record_session_rate_limited_with_retry_after(upstream_id, None);
+    }
+
+    pub fn record_session_rate_limited_with_retry_after(
+        &mut self,
+        upstream_id: Uuid,
+        retry_after_secs: Option<u64>,
+    ) {
+        self.session_rate_limited_upstreams.insert(upstream_id);
+        self.lifecycle
+            .record_ws_rate_limit_cooldown(upstream_id, None, retry_after_secs);
+    }
+
+    /// Evict in-session response owners, unsent steer successors, and session
+    /// pin state bound to `upstream_id` so subsequent turns can route onto a
+    /// healthy replacement.
+    fn evict_upstream_for_failover(&mut self, upstream_id: Uuid) {
+        let evicted_ids: Vec<String> = self
+            .owners
+            .iter()
+            .filter_map(|(id, owner)| (owner.upstream_id == upstream_id).then_some(id.clone()))
+            .collect();
+        let evicted_set: HashSet<&str> = evicted_ids.iter().map(String::as_str).collect();
+        self.recent
+            .retain(|_, resp_id| !evicted_set.contains(resp_id.as_str()));
+        let mut pending_unsent_successors = Vec::new();
+        for id in &evicted_ids {
+            self.owners.remove(id);
+            if let Some(successor_id) = self.successors.remove(id)
+                && self.turns.get(&successor_id).is_some_and(|turn| !turn.sent)
+            {
+                pending_unsent_successors.push(successor_id);
+            }
+        }
+        for successor_id in pending_unsent_successors {
+            let lane = self
+                .turns
+                .get(&successor_id)
+                .and_then(|turn| turn.lane.clone());
+            let error = WebSocketError::new(
+                400,
+                "previous_response_not_found",
+                "The previous response is no longer available",
+            )
+            .with_stream(lane);
+            self.finish_turn(successor_id, Some(&error));
+        }
+        if self.session_upstream == Some(upstream_id) {
+            self.session_upstream = None;
+        }
     }
 
     /// Synchronously prepare plugin request state on the relay loop and return a
@@ -3458,6 +3598,60 @@ impl ResponsesWebSocketGateway {
                 }
             }
         }
+        let rate_limited_upstream = (kind == "error"
+            && transform_error.is_none()
+            && turn.response_id.is_none()
+            && !turn.response_created
+            && !turn.provider_frame_forwarded
+            && is_openai_rate_or_usage_limit_ws_error(
+                &value,
+                &lane,
+                self.connection_signers.get(&connection_id).map(Arc::as_ref),
+            ))
+        .then_some(turn.upstream_id)
+        .flatten();
+        if let Some(failed_upstream_id) = rate_limited_upstream {
+            self.session_rate_limited_upstreams
+                .insert(failed_upstream_id);
+            self.lifecycle
+                .record_ws_rate_limit_cooldown(failed_upstream_id, Some(&value), None);
+            if let Some((dispatches, recovery_error)) = self
+                .try_recover_codex_previous_response_failover(turn_id, failed_upstream_id)
+                .await
+            {
+                return Ok(WebSocketEventResult {
+                    forward: false,
+                    frames: None,
+                    dispatches,
+                    errors: vec![recovery_error],
+                });
+            }
+            if let Some(retry_dispatch) = self
+                .try_owner_reasoning_failover_dispatch(turn_id, failed_upstream_id)
+                .await
+            {
+                return Ok(WebSocketEventResult {
+                    forward: false,
+                    frames: None,
+                    dispatches: vec![retry_dispatch],
+                    errors: Vec::new(),
+                });
+            }
+            if let Some(retry_dispatch) = self
+                .try_unpinned_live_failover_dispatch(turn_id, failed_upstream_id)
+                .await
+            {
+                return Ok(WebSocketEventResult {
+                    forward: false,
+                    frames: None,
+                    dispatches: vec![retry_dispatch],
+                    errors: Vec::new(),
+                });
+            }
+        }
+        let Some(turn) = self.turns.get(&turn_id) else {
+            return Ok(WebSocketEventResult::default());
+        };
         if let Some(id) = response_id {
             if turn.response_id.as_deref().is_some_and(|bound| bound != id) {
                 return Err(WebSocketError::new(
@@ -3526,6 +3720,7 @@ impl ResponsesWebSocketGateway {
                 turn.response_id = Some(id.to_owned());
                 if kind == "response.created" {
                     turn.response_created = true;
+                    self.lifecycle.clear_ws_rate_limit_cooldown(upstream_id);
                 }
                 turn.prepared.span.record("gen_ai.response.id", id);
                 if let Some(parent) = turn.steer_parent.as_ref() {
@@ -4275,6 +4470,258 @@ impl ResponsesWebSocketGateway {
         self.dispatch(next)
     }
 
+    async fn try_recover_codex_previous_response_failover(
+        &mut self,
+        turn_id: u64,
+        failed_upstream_id: Uuid,
+    ) -> Option<(Vec<WebSocketDispatch>, WebSocketError)> {
+        if !self.codex_backend {
+            return None;
+        }
+        let (auth, body, lane) = self.turns.get(&turn_id).and_then(|turn| {
+            turn.previous_response_id
+                .is_some()
+                .then(|| (turn.auth.clone(), Arc::clone(&turn.body), turn.lane.clone()))
+        })?;
+        let dummy_frame = Bytes::new();
+        let has_replacement = self
+            .lifecycle
+            .has_healthy_codex_ws_replacement(
+                &auth,
+                WebSocketIngress {
+                    headers: &self.headers,
+                    frame: &dummy_frame,
+                    query: self.query.as_deref(),
+                },
+                &body,
+                failed_upstream_id,
+                &self.session_rate_limited_upstreams,
+                false,
+            )
+            .await;
+        if !has_replacement || !self.turns.contains_key(&turn_id) {
+            return None;
+        }
+        self.evict_upstream_for_failover(failed_upstream_id);
+        tracing::warn!(
+            owner_upstream_id = %failed_upstream_id,
+            "evicting Codex WebSocket response owner and returning previous_response_not_found for full-history failover"
+        );
+        let recovery_error = WebSocketError::new(
+            400,
+            "previous_response_not_found",
+            "The previous response owner is unavailable; replay full history",
+        )
+        .with_stream(lane.clone());
+        self.finish_turn(turn_id, Some(&recovery_error));
+        let dispatches = self.next_in_lane(&lane).into_iter().collect();
+        Some((dispatches, recovery_error))
+    }
+
+    async fn try_owner_reasoning_failover_dispatch(
+        &mut self,
+        turn_id: u64,
+        failed_upstream_id: Uuid,
+    ) -> Option<WebSocketDispatch> {
+        let (auth, fallback) = {
+            let turn = self.turns.get_mut(&turn_id)?;
+            let fallback = turn.owner_failover_fallback.take()?;
+            (turn.auth.clone(), fallback)
+        };
+        let mut excluded = self.session_rate_limited_upstreams.clone();
+        excluded.insert(failed_upstream_id);
+        excluded.insert(fallback.owner_upstream_id);
+        let available = self
+            .lifecycle
+            .filter_available_ws_owner_failover_candidates(
+                &auth,
+                WebSocketIngress {
+                    headers: &self.headers,
+                    frame: &fallback.stripped_frame,
+                    query: self.query.as_deref(),
+                },
+                &fallback.stripped_body,
+                &fallback.candidates,
+                self.codex_backend,
+                fallback.requires_api_key,
+                &excluded,
+            )
+            .await;
+        if available.is_empty() {
+            return None;
+        }
+        let (old_dynamic, released_deferred_original, lane) = {
+            let turn = self.turns.get(&turn_id)?;
+            let old_dynamic = turn
+                .frame
+                .len()
+                .saturating_add(json_owned_bytes(&turn.body))
+                .saturating_add(
+                    turn.plugin_request
+                        .as_ref()
+                        .map_or(0, |(_, req)| req.frame.len()),
+                );
+            let released_deferred_original = turn
+                .deferred_unestablished
+                .as_ref()
+                .filter(|deferred| deferred.currently_stripped)
+                .map_or(0, |deferred| deferred.original_bytes);
+            (old_dynamic, released_deferred_original, turn.lane.clone())
+        };
+        let new_dynamic = fallback
+            .stripped_frame
+            .len()
+            .saturating_add(json_owned_bytes(&fallback.stripped_body));
+        let headroom = self
+            .byte_cap
+            .saturating_sub(self.used_bytes)
+            .saturating_add(old_dynamic)
+            .saturating_add(released_deferred_original);
+        if new_dynamic > headroom {
+            return None;
+        }
+        let released = old_dynamic.saturating_add(released_deferred_original);
+        let turn = self.turns.get_mut(&turn_id)?;
+        let model = turn.prepared.model.clone();
+        self.used_bytes = self
+            .used_bytes
+            .saturating_sub(released)
+            .saturating_add(new_dynamic);
+        turn.charged_bytes = turn
+            .charged_bytes
+            .saturating_sub(released)
+            .saturating_add(new_dynamic);
+        turn.deferred_unestablished = None;
+        turn.body = fallback.stripped_body;
+        turn.frame = fallback.stripped_frame.clone();
+        turn.plugin_request = None;
+        turn.echo_metadata = None;
+        turn.unknown_reasoning_retry = None;
+        turn.pending_affinity_keys.clear();
+        turn.pinned = None;
+        turn.connection_id = None;
+        turn.upstream_id = None;
+        turn.sent = false;
+        turn.attempted = false;
+        turn.metrics.reset_for_retry();
+        turn.admitted_session_upstream = None;
+        turn.prepared.has_explicit_affinity = false;
+        turn.owner_failover_replacement = true;
+        turn.owner_failover_requires_api_key = fallback.requires_api_key;
+        turn.initial_selected_upstream_id = Some(available[0].upstream_id);
+        turn.candidate_oauth = available
+            .iter()
+            .map(|candidate| (candidate.upstream_id, candidate.socket_per_lane))
+            .collect();
+        turn.has_any_oauth_candidate = available.iter().any(|candidate| !candidate.is_api_key);
+        turn.all_candidates_oauth =
+            !available.is_empty() && available.iter().all(|candidate| candidate.socket_per_lane);
+        turn.prepared.candidates = available.clone();
+        turn.live_failover_candidates = available.clone();
+        if self.session_upstream == Some(failed_upstream_id)
+            || self.session_upstream == Some(fallback.owner_upstream_id)
+        {
+            self.session_upstream = None;
+        }
+        tracing::warn!(
+            owner_upstream_id = %fallback.owner_upstream_id,
+            failed_upstream_id = %failed_upstream_id,
+            model = %model,
+            "failing over WebSocket OpenAI encrypted reasoning turn after stripping owner items on upstream failure"
+        );
+        Some(WebSocketDispatch {
+            turn_id,
+            frame: fallback.stripped_frame,
+            connection_id: None,
+            candidates: available,
+            stream_id: lane,
+            control: false,
+            prefer_api_key_on_final_attempt: !self.codex_backend && !fallback.requires_api_key,
+            has_explicit_affinity: false,
+        })
+    }
+
+    async fn try_unpinned_live_failover_dispatch(
+        &mut self,
+        turn_id: u64,
+        failed_upstream_id: Uuid,
+    ) -> Option<WebSocketDispatch> {
+        let (auth, frame, body, candidates, requires_api_key, lane) = {
+            let turn = self.turns.get(&turn_id)?;
+            if turn.pinned.is_some()
+                || turn.prepared.has_explicit_affinity
+                || turn.attempt_num >= 3
+                || turn.live_failover_candidates.is_empty()
+                || turn.unknown_reasoning_retry.is_some()
+                || turn.deferred_unestablished.is_some()
+                || !turn.pending_affinity_keys.is_empty()
+            {
+                return None;
+            }
+            (
+                turn.auth.clone(),
+                turn.frame.clone(),
+                Arc::clone(&turn.body),
+                turn.live_failover_candidates.clone(),
+                turn.owner_failover_requires_api_key,
+                turn.lane.clone(),
+            )
+        };
+        let mut excluded = self.session_rate_limited_upstreams.clone();
+        excluded.insert(failed_upstream_id);
+        let available = self
+            .lifecycle
+            .filter_available_ws_owner_failover_candidates(
+                &auth,
+                WebSocketIngress {
+                    headers: &self.headers,
+                    frame: &frame,
+                    query: self.query.as_deref(),
+                },
+                &body,
+                &candidates,
+                self.codex_backend,
+                requires_api_key,
+                &excluded,
+            )
+            .await;
+        if available.is_empty() {
+            return None;
+        }
+        let turn = self.turns.get_mut(&turn_id)?;
+        turn.connection_id = None;
+        turn.upstream_id = None;
+        turn.sent = false;
+        turn.attempted = false;
+        turn.plugin_request = None;
+        turn.echo_metadata = None;
+        turn.metrics.reset_for_retry();
+        turn.admitted_session_upstream = None;
+        turn.owner_failover_replacement = true;
+        turn.candidate_oauth = available
+            .iter()
+            .map(|candidate| (candidate.upstream_id, candidate.socket_per_lane))
+            .collect();
+        turn.has_any_oauth_candidate = available.iter().any(|candidate| !candidate.is_api_key);
+        turn.all_candidates_oauth =
+            !available.is_empty() && available.iter().all(|candidate| candidate.socket_per_lane);
+        turn.prepared.candidates = available.clone();
+        turn.live_failover_candidates = available.clone();
+        if self.session_upstream == Some(failed_upstream_id) {
+            self.session_upstream = None;
+        }
+        Some(WebSocketDispatch {
+            turn_id,
+            frame,
+            connection_id: None,
+            candidates: available,
+            stream_id: lane,
+            control: false,
+            prefer_api_key_on_final_attempt: !self.codex_backend && !requires_api_key,
+            has_explicit_affinity: false,
+        })
+    }
+
     pub async fn fail_dispatch(
         &mut self,
         turn_id: u64,
@@ -4285,6 +4732,56 @@ impl ResponsesWebSocketGateway {
         lane.and_then(|lane| self.next_in_lane(&lane))
             .into_iter()
             .collect()
+    }
+
+    pub async fn fail_dispatch_with_recovery(
+        &mut self,
+        turn_id: u64,
+        failed_upstream_id: Option<Uuid>,
+        error: &WebSocketError,
+    ) -> (Vec<WebSocketDispatch>, Option<WebSocketError>) {
+        let failed_id = failed_upstream_id.or_else(|| {
+            self.turns
+                .get(&turn_id)
+                .and_then(|turn| turn.upstream_id.or(turn.initial_selected_upstream_id))
+        });
+        if error.status == 429
+            && let Some(id) = failed_id
+        {
+            self.session_rate_limited_upstreams.insert(id);
+            self.lifecycle.record_ws_rate_limit_cooldown(id, None, None);
+        }
+        let upstream_failure = error.status == 429
+            || (error.status == 401 && error.code != "authentication_error")
+            || matches!(
+                error.code,
+                "upstream_unavailable"
+                    | "upstream_connection_closed"
+                    | "route_no_upstream_after_filter"
+                    | "upstream_affinity_unavailable"
+            );
+        let recoverable_turn = self.turns.get(&turn_id).is_some_and(|turn| {
+            !turn.sent && !turn.response_created && !turn.provider_frame_forwarded
+        });
+        if upstream_failure
+            && recoverable_turn
+            && let Some(failed_id) = failed_id
+        {
+            if let Some((ready, recovery_error)) = self
+                .try_recover_codex_previous_response_failover(turn_id, failed_id)
+                .await
+            {
+                return (ready, Some(recovery_error));
+            }
+            if let Some(retry_dispatch) = self
+                .try_owner_reasoning_failover_dispatch(turn_id, failed_id)
+                .await
+            {
+                return (vec![retry_dispatch], None);
+            }
+        }
+        let ready = self.fail_dispatch(turn_id, error).await;
+        (ready, Some(error.clone()))
     }
 
     fn evict_oldest_pending_error_terminal(&mut self) -> Option<Option<WebSocketError>> {
@@ -4535,6 +5032,8 @@ impl ResponsesWebSocketGateway {
         self.connection_oauth.clear();
         self.connection_signers.clear();
         self.session_upstream = None;
+        self.session_oauth = false;
+        self.session_rate_limited_upstreams.clear();
         self.successors.clear();
         self.used_bytes = 0;
         self.control_slots = 0;
@@ -4686,6 +5185,14 @@ fn native_terminal_error(value: &Value, lane: &Option<String>) -> WebSocketError
     native_terminal_error_with_signer(value, lane, None)
 }
 
+fn is_openai_rate_or_usage_limit_ws_error(
+    value: &Value,
+    lane: &Option<String>,
+    signer: Option<&dyn Signer>,
+) -> bool {
+    native_terminal_error_with_signer(value, lane, signer).status == 429
+}
+
 fn native_terminal_error_with_signer(
     value: &Value,
     lane: &Option<String>,
@@ -4713,8 +5220,16 @@ fn native_terminal_error_with_signer(
         .unwrap_or(match (native_code, error_type) {
             (Some("server_is_overloaded" | "service_unavailable_error"), _)
             | (_, Some("service_unavailable_error")) => 503,
-            (Some("rate_limit_exceeded" | "rate_limit_error"), _)
-            | (_, Some("rate_limit_error")) => 429,
+            (
+                Some(
+                    "rate_limit_exceeded"
+                    | "rate_limit_error"
+                    | "usage_limit_reached"
+                    | "usage_limit_exceeded",
+                ),
+                _,
+            )
+            | (_, Some("rate_limit_error" | "usage_limit_reached" | "usage_limit_exceeded")) => 429,
             (Some("invalid_request_error"), _) | (_, Some("invalid_request_error")) => 400,
             _ => 502,
         });
@@ -5097,6 +5612,8 @@ pub(crate) mod tests {
                     request_id: "terminal-fixture".to_owned(),
                     unknown_reasoning_plan: WsUnknownReasoningPlan::None,
                     has_explicit_affinity: false,
+                    owner_failover_fallback: None,
+                    reconciled_body: None,
                 },
                 body: Arc::new(serde_json::json!({})),
                 frame: Bytes::new(),
@@ -5132,6 +5649,8 @@ pub(crate) mod tests {
                 admitted_session_upstream: None,
                 owner_failover_replacement: false,
                 owner_failover_requires_api_key: false,
+                owner_failover_fallback: None,
+                live_failover_candidates: Vec::new(),
             },
         );
         gateway.lanes.insert(
@@ -5749,6 +6268,8 @@ pub(crate) mod tests {
                         request_id: "embedded-turn".to_owned(),
                         unknown_reasoning_plan: WsUnknownReasoningPlan::None,
                         has_explicit_affinity: false,
+                        owner_failover_fallback: None,
+                        reconciled_body: None,
                     },
                     body: Arc::new(serde_json::json!({})),
                     frame: Bytes::new(),
@@ -5784,6 +6305,8 @@ pub(crate) mod tests {
                     admitted_session_upstream: None,
                     owner_failover_replacement: false,
                     owner_failover_requires_api_key: false,
+                    owner_failover_fallback: None,
+                    live_failover_candidates: Vec::new(),
                 },
             );
             gateway.finish_turn(1, None);
@@ -6753,6 +7276,8 @@ pub(crate) mod tests {
                 request_id: "synthetic-turn".to_owned(),
                 unknown_reasoning_plan: WsUnknownReasoningPlan::None,
                 has_explicit_affinity: false,
+                owner_failover_fallback: None,
+                reconciled_body: None,
             },
             body: Arc::new(serde_json::json!({})),
             frame: Bytes::new(),
@@ -6788,6 +7313,8 @@ pub(crate) mod tests {
             admitted_session_upstream: None,
             owner_failover_replacement: false,
             owner_failover_requires_api_key: false,
+            owner_failover_fallback: None,
+            live_failover_candidates: Vec::new(),
         }
     }
 
@@ -10305,5 +10832,1660 @@ pub(crate) mod tests {
         assert_eq!(err.status, 503);
         assert_eq!(err.code, "overloaded_error");
         assert_eq!(single_tight_gw.used_bytes, 0);
+    }
+
+    #[test]
+    fn native_terminal_error_maps_usage_limit_codes_to_429() {
+        for payload in [
+            serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "usage_limit_reached",
+                    "code": "usage_limit_reached",
+                    "message": "limit reached"
+                }
+            }),
+            serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "rate_limit_error",
+                    "code": "usage_limit_exceeded",
+                    "message": "exceeded"
+                }
+            }),
+            serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "id": "resp_1",
+                    "error": {
+                        "code": "usage_limit_reached",
+                        "message": "limit reached"
+                    }
+                }
+            }),
+        ] {
+            let err = native_terminal_error(&payload, &None);
+            assert_eq!(err.status, 429, "{payload}");
+            assert!(is_openai_rate_or_usage_limit_ws_error(
+                &payload, &None, None
+            ));
+        }
+
+        let unrelated = serde_json::json!({
+            "type": "error",
+            "error": {"code": "something_else", "message": "boom"}
+        });
+        assert_eq!(native_terminal_error(&unrelated, &None).status, 502);
+        assert!(!is_openai_rate_or_usage_limit_ws_error(
+            &unrelated, &None, None
+        ));
+    }
+
+    #[test]
+    fn codex_ws_previous_response_failover_eligibility_contract() {
+        let cap = crate::provider_capability::ProviderCapability::OpenaiResponses;
+        assert!(
+            crate::upstream_affinity::is_openai_codex_ws_previous_response_failover_eligible(
+                cap,
+                &serde_json::json!({
+                    "type": "response.create",
+                    "model": "gpt-5.4",
+                    "previous_response_id": "resp_1",
+                    "store": false,
+                    "input": [{"type": "function_call_output", "call_id": "c1", "output": "ok"}]
+                })
+            )
+        );
+        for ineligible in [
+            serde_json::json!({"type": "response.create", "model": "gpt-5.4", "store": false, "input": []}),
+            serde_json::json!({"type": "response.create", "model": "gpt-5.4", "previous_response_id": "resp_1", "store": true, "input": []}),
+            serde_json::json!({"type": "response.create", "model": "gpt-5.4", "previous_response_id": "resp_1", "conversation": "conv_1", "store": false, "input": []}),
+            serde_json::json!({"type": "response.create", "model": "gpt-5.4", "previous_response_id": "resp_1", "store": false, "input": [{"type": "compaction", "encrypted_content": "c"}]}),
+            serde_json::json!({"type": "response.create", "model": "gpt-5.4", "previous_response_id": "resp_1", "store": false, "input": [{"role": "user", "content": [{"type": "input_file", "file_id": "file-1"}]}]}),
+            serde_json::json!({"type": "response.create", "model": "gpt-5.4", "previous_response_id": "resp_1", "store": false, "input": [{"type": "item_reference", "id": "item_1"}]}),
+        ] {
+            assert!(
+                !crate::upstream_affinity::is_openai_codex_ws_previous_response_failover_eligible(
+                    cap,
+                    &ineligible,
+                ),
+                "{ineligible}"
+            );
+        }
+    }
+
+    #[derive(Default)]
+    struct WsQuotaTestCache {
+        snapshots: Mutex<HashMap<Uuid, Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot>>>,
+    }
+
+    impl WsQuotaTestCache {
+        fn set_state(&self, upstream_id: Uuid, utilization: f64, status: &str) {
+            let make =
+                |window: &str, reset_delta: u64| cc_lb_domain::SubscriptionQuotaCandidateSnapshot {
+                    window: window.to_owned(),
+                    state: cc_lb_domain::SubscriptionQuotaDataState::Fresh,
+                    source: Some("test".to_owned()),
+                    utilization: Some(utilization),
+                    status: Some(status.to_owned()),
+                    resets_at_unix_secs: Some(4_100_000_000 + reset_delta),
+                    surpassed_threshold: None,
+                    representative_claim: None,
+                    disabled_reason: None,
+                    extra_usage_enabled: None,
+                    extra_usage_monthly_limit: None,
+                    extra_usage_used_credits: None,
+                    credits: None,
+                    observed_at_unix_millis: Some(4_100_000_000 * 1000),
+                    max_staleness_secs: 60,
+                    fallback_available: None,
+                    overage_in_use: None,
+                    overage_period_monthly_utilization: None,
+                    upgrade_paths: None,
+                };
+            self.snapshots
+                .lock()
+                .unwrap()
+                .insert(upstream_id, vec![make("5h", 1800), make("7d", 86400)]);
+        }
+    }
+
+    impl cc_lb_control::SubscriptionQuotaCacheLike for WsQuotaTestCache {
+        fn upsert_observation(&self, _record: &cc_lb_storage_api::SubscriptionQuotaSample) {}
+
+        fn snapshot_for_upstream(
+            &self,
+            upstream_id: Uuid,
+            _now_unix_millis: u64,
+            _max_staleness_secs: u64,
+        ) -> Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot> {
+            self.snapshots
+                .lock()
+                .unwrap()
+                .get(&upstream_id)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    async fn setup_codex_ws_quota_fixture(
+        policy: cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy,
+    ) -> (
+        Arc<Lifecycle>,
+        Authenticated,
+        HeaderMap,
+        Uuid,
+        Uuid,
+        Arc<WsQuotaTestCache>,
+        Arc<PrewarmAffinityStore>,
+    ) {
+        use crate::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
+        use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+        use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+        use cc_lb_control::api_keys::principal_view::{
+            DialectCache, PrincipalView, RouterPipelineCache,
+        };
+        use cc_lb_control::dynamic_view::DynamicViewHolder;
+        use cc_lb_domain::TerminalStrategy;
+        use cc_lb_routing::FilterPlugin;
+        use cc_lb_storage_api::upstream::{UpstreamKind as StorageRecordKind, UpstreamRecord};
+        use cc_lb_upstream::{
+            ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer,
+            SignerError, SignerFactory, SigningCapability, UpstreamError,
+        };
+
+        struct DummySignerFactory;
+        impl ApiKeyAwareSignerFactory for DummySignerFactory {
+            fn with_router_choice(&self, _name: String) -> Arc<dyn SignerFactory> {
+                Arc::new(Self)
+            }
+        }
+        #[async_trait::async_trait]
+        impl SignerFactory for DummySignerFactory {
+            async fn build(
+                &self,
+                _upstream: &cc_lb_domain::Upstream,
+            ) -> Result<Arc<dyn Signer>, SignerError> {
+                Ok(Arc::new(DummySigner))
+            }
+        }
+        struct DummySigner;
+        #[async_trait::async_trait]
+        impl Signer for DummySigner {
+            async fn sign(
+                &self,
+                shaped: ShapedRequest,
+                capability: &mut SigningCapability,
+            ) -> Result<SignedRequest, SignerError> {
+                Ok(SignedRequest::from_shaped(shaped, capability))
+            }
+            async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+                RetryDecision::Fail
+            }
+        }
+        struct UnusedDispatcher;
+        #[async_trait::async_trait]
+        impl crate::UpstreamDispatch for UnusedDispatcher {
+            async fn dispatch(
+                &self,
+                _request: SignedRequest,
+            ) -> Result<http::Response<crate::Body>, crate::DispatchError> {
+                unreachable!("unused dispatcher in codex ws quota test")
+            }
+        }
+
+        let quota_cache = Arc::new(WsQuotaTestCache::default());
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(4_100_000_000));
+        let storage = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite("sqlite::memory:", clock.clone())
+                .await
+                .expect("open in-memory codex ws quota db"),
+        );
+        storage
+            .initialize()
+            .await
+            .expect("migrate codex ws quota db");
+        let keys = Arc::new(KeyStore::new(storage));
+        let (_record, secret) = keys
+            .create(
+                DIRECT_PRINCIPAL,
+                CreateParams {
+                    label: "codex-ws-quota-test".to_owned(),
+                    description: None,
+                    expires_at_unix_secs: None,
+                    limit_overrides: Vec::new(),
+                },
+            )
+            .await
+            .expect("issue codex ws quota key");
+        let filter: Arc<dyn FilterPlugin> =
+            Arc::new(SubscriptionPreferenceFilter::with_clock(clock.clone()));
+        let pipeline = Arc::new(RouterPipelineCache {
+            user_filters: vec![filter],
+            terminal: TerminalStrategy::FirstPick,
+            instantiation_error: None,
+            provider_filters: None,
+        });
+        let chains = HashMap::from([(
+            DIRECT_PRINCIPAL.to_owned(),
+            (Some(pipeline), DialectCache::Inherit),
+        )]);
+        let principal_view = Arc::new(PrincipalView::for_tests(
+            DIRECT_PRINCIPAL,
+            true,
+            vec!["*".to_owned()],
+            Vec::new(),
+            chains,
+        ));
+        let authn = Arc::new(BuiltinAuthn::new(keys, clock.clone()));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            secret.expose().parse().expect("fixture key header"),
+        );
+        let auth = crate::authenticate_first(&authn, &headers, &principal_view)
+            .await
+            .expect("authenticate codex ws quota caller");
+
+        let upstream_a = Uuid::from_u128(0xA001);
+        let upstream_b = Uuid::from_u128(0xB002);
+        let records = vec![
+            UpstreamRecord {
+                id: upstream_a,
+                name: "oauth-a".to_owned(),
+                kind: StorageRecordKind::OpenaiOauth,
+                base_url: Some(url::Url::parse("https://oauth-a.local/").unwrap()),
+                enabled: true,
+                oauth_never_refresh: true,
+                ..Default::default()
+            },
+            UpstreamRecord {
+                id: upstream_b,
+                name: "oauth-b".to_owned(),
+                kind: StorageRecordKind::OpenaiOauth,
+                base_url: Some(url::Url::parse("https://oauth-b.local/").unwrap()),
+                enabled: true,
+                oauth_never_refresh: true,
+                ..Default::default()
+            },
+        ];
+        let view = cc_lb_control::DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(DummySignerFactory))
+            .principal_view(principal_view)
+            .subscription_quota_cache(quota_cache.clone())
+            .subscription_quota_routing_max_staleness_secs(60)
+            .upstream_records(records)
+            .build();
+        let store = Arc::new(PrewarmAffinityStore::default());
+        let lifecycle = Arc::new(
+            Lifecycle::new_with_dynamic_view(
+                authn.clone(),
+                Arc::new(DynamicViewHolder::new(view)),
+                Arc::new(UnusedDispatcher),
+                crate::LifecycleConfig {
+                    unavailable_openai_reasoning_owner: policy,
+                    ..Default::default()
+                },
+                clock,
+            )
+            .with_upstream_affinity_store(store.clone()),
+        );
+        (
+            lifecycle,
+            auth,
+            headers,
+            upstream_a,
+            upstream_b,
+            quota_cache,
+            store,
+        )
+    }
+
+    #[tokio::test]
+    async fn ws_quota_exhaustion_yields_session_hint_evicts_chained_owner_and_live_429_recovers() {
+        let (lifecycle, auth, headers, upstream_a, upstream_b, quota_cache, _store) =
+            setup_codex_ws_quota_fixture(
+                cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover,
+            )
+            .await;
+
+        // 1. Pre-dispatch `SessionHint(A)` yields cleanly to healthy B when A is quota-exhausted.
+        quota_cache.set_state(upstream_a, 1.0, "rejected");
+        quota_cache.set_state(upstream_b, 0.1, "allowed");
+        let mut hint_gw = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            1024 * 1024,
+            16,
+        )
+        .with_codex_backend(true);
+        hint_gw.session_upstream = Some(upstream_a);
+        hint_gw.session_oauth = true;
+        let d_hint = hint_gw
+            .client_message(
+                auth.clone(),
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "store": false,
+                        "input": [{"role": "user", "content": "unchained"}]
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .expect("SessionHint(A) must yield to healthy B when A is exhausted")
+            .expect("dispatches");
+        assert_eq!(d_hint.candidates[0].upstream_id, upstream_b);
+        assert!(hint_gw.session_upstream.is_none());
+        hint_gw.close();
+
+        // 2. Codex WS chained `previous_response_id` live pre-response.created 429 `usage_limit_reached`:
+        // evicts A's owners + session_upstream, emits 400 `previous_response_not_found`, and replay completes on B.
+        quota_cache.set_state(upstream_a, 0.05, "allowed");
+        quota_cache.set_state(upstream_b, 0.2, "allowed");
+        let mut ws_gw = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            1024 * 1024,
+            16,
+        )
+        .with_codex_backend(true);
+        let turn1 = ws_gw
+            .client_message(
+                auth.clone(),
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "store": false,
+                        "include": ["reasoning.encrypted_content"],
+                        "input": [{"role": "user", "content": "turn1"}]
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let chosen_first = turn1.candidates[0].upstream_id;
+        let replacement = if chosen_first == upstream_a {
+            upstream_b
+        } else {
+            upstream_a
+        };
+        ws_gw.assign_connection(turn1.turn_id, 1, chosen_first, "oauth-first");
+        ws_gw.commit_send_attempt(turn1.turn_id);
+        ws_gw.sent(turn1.turn_id);
+        ws_gw
+            .provider_message(
+                1,
+                &Bytes::from(
+                    serde_json::json!({
+                        "type": "response.created",
+                        "response": {"id": "resp_t1", "object": "response", "status": "in_progress", "output": []}
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap();
+        ws_gw
+            .provider_message(
+                1,
+                &Bytes::from(
+                    serde_json::json!({
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_t1",
+                            "object": "response",
+                            "status": "completed",
+                            "usage": {"input_tokens": 10, "output_tokens": 5},
+                            "output": [{
+                                "type": "reasoning",
+                                "id": "rs_1",
+                                "summary": [],
+                                "encrypted_content": "gAAAAAB_turn1_cipher"
+                            }]
+                        }
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap();
+
+        let turn2 = ws_gw
+            .client_message(
+                auth.clone(),
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "previous_response_id": "resp_t1",
+                        "store": false,
+                        "input": [{"type": "function_call_output", "call_id": "c1", "output": "ok"}]
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        ws_gw.assign_connection(turn2.turn_id, 1, chosen_first, "oauth-first");
+        ws_gw.commit_send_attempt(turn2.turn_id);
+        ws_gw.sent(turn2.turn_id);
+
+        // Live pre-response.created `429 usage_limit_reached`: must NOT forward raw 429,
+        // must evict owner + session_upstream, and must emit `previous_response_not_found`.
+        let recovery_res = ws_gw
+            .provider_message(
+                1,
+                &Bytes::from(
+                    serde_json::json!({
+                        "type": "error",
+                        "error": {
+                            "type": "usage_limit_reached",
+                            "code": "usage_limit_reached",
+                            "message": "The usage limit has been reached"
+                        }
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(!recovery_res.forward);
+        assert_eq!(recovery_res.errors.len(), 1);
+        assert_eq!(recovery_res.errors[0].status, 400);
+        assert_eq!(recovery_res.errors[0].code, "previous_response_not_found");
+        assert!(ws_gw.session_upstream.is_none());
+        assert!(ws_gw.session_rate_limited_upstreams.contains(&chosen_first));
+
+        // Simulate Codex closing and opening a fresh WS (`session_rate_limited_upstreams` empty):
+        // process-wide `WsRateLimitCooldownCache` still excludes `chosen_first`, strips its
+        // encrypted reasoning upfront, and routes directly to `replacement`.
+        let mut reconnect_gw = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            1024 * 1024,
+            16,
+        )
+        .with_codex_backend(true);
+        let reconnect_replay = reconnect_gw
+            .client_message(
+                auth.clone(),
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "store": false,
+                        "include": ["reasoning.encrypted_content"],
+                        "input": [
+                            {
+                                "type": "reasoning",
+                                "id": "rs_reconnect",
+                                "summary": [],
+                                "encrypted_content": "gAAAAAB_turn1_cipher"
+                            },
+                            {"type": "function_call_output", "call_id": "c1", "output": "ok"}
+                        ]
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reconnect_replay.candidates[0].upstream_id, replacement);
+        let parsed_reconnect: Value = serde_json::from_slice(&reconnect_replay.frame).unwrap();
+        assert_eq!(parsed_reconnect["input"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed_reconnect["input"][0]["type"], "function_call_output");
+        reconnect_gw.close();
+
+        // Same-socket replay also strips & routes to replacement.
+        let replay = ws_gw
+            .client_message(
+                auth.clone(),
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "store": false,
+                        "include": ["reasoning.encrypted_content"],
+                        "input": [
+                            {
+                                "type": "reasoning",
+                                "id": "rs_1",
+                                "summary": [],
+                                "encrypted_content": "gAAAAAB_turn1_cipher"
+                            },
+                            {"type": "function_call_output", "call_id": "c1", "output": "ok"}
+                        ]
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.candidates[0].upstream_id, replacement);
+        let parsed_replay: Value = serde_json::from_slice(&replay.frame).unwrap();
+        assert_eq!(parsed_replay["input"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed_replay["input"][0]["type"], "function_call_output");
+
+        // 3. Post-`response.created` 429 NEVER retries or synthesizes `previous_response_not_found`.
+        ws_gw.assign_connection(replay.turn_id, 2, replacement, "oauth-replacement");
+        ws_gw.commit_send_attempt(replay.turn_id);
+        ws_gw.sent(replay.turn_id);
+        ws_gw
+            .provider_message(
+                2,
+                &Bytes::from(
+                    serde_json::json!({
+                        "type": "response.created",
+                        "response": {"id": "resp_r2", "object": "response", "status": "in_progress", "output": []}
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap();
+        let post_created_err = ws_gw
+            .provider_message(
+                2,
+                &Bytes::from(
+                    serde_json::json!({
+                        "type": "error",
+                        "error": {"code": "usage_limit_reached", "message": "mid-stream"}
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(post_created_err.dispatches.is_empty());
+        assert!(post_created_err.errors.is_empty());
+        assert!(post_created_err.forward);
+        ws_gw.close();
+
+        // 4. Negative controls:
+        // (a) Public `/v1/responses` (`codex_backend == false`) never synthesizes `previous_response_not_found` on 429.
+        let (pub_lifecycle, pub_auth, pub_headers, pub_a, pub_b, pub_quota, _) =
+            setup_codex_ws_quota_fixture(
+                cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover,
+            )
+            .await;
+        pub_quota.set_state(pub_a, 0.05, "allowed");
+        pub_quota.set_state(pub_b, 0.2, "allowed");
+        let mut pub_gw =
+            ResponsesWebSocketGateway::new(pub_lifecycle, &pub_auth, pub_headers, 1024 * 1024, 16);
+        let pub_t1 = pub_gw
+            .client_message(
+                pub_auth.clone(),
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "store": true,
+                        "input": [{"role": "user", "content": "pub1"}]
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let pub_owner = pub_t1.candidates[0].upstream_id;
+        pub_gw.assign_connection(pub_t1.turn_id, 1, pub_owner, "oauth-a");
+        pub_gw.commit_send_attempt(pub_t1.turn_id);
+        pub_gw.sent(pub_t1.turn_id);
+        pub_gw
+            .provider_message(
+                1,
+                &Bytes::from(
+                    serde_json::json!({
+                        "type": "response.created",
+                        "response": {"id": "resp_pub_1", "object": "response", "status": "in_progress", "output": []}
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap();
+        pub_gw
+            .provider_message(
+                1,
+                &Bytes::from(
+                    serde_json::json!({
+                        "type": "response.completed",
+                        "response": {"id": "resp_pub_1", "object": "response", "status": "completed", "usage": {"input_tokens": 1, "output_tokens": 1}}
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap();
+        let pub_t2 = pub_gw
+            .client_message(
+                auth.clone(),
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "previous_response_id": "resp_pub_1",
+                        "store": false,
+                        "input": [{"role": "user", "content": "pub2"}]
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        pub_gw.assign_connection(pub_t2.turn_id, 1, pub_owner, "oauth-a");
+        pub_gw.commit_send_attempt(pub_t2.turn_id);
+        pub_gw.sent(pub_t2.turn_id);
+        let pub_429 = pub_gw
+            .provider_message(
+                1,
+                &Bytes::from(
+                    serde_json::json!({
+                        "type": "error",
+                        "status": 429,
+                        "error": {"code": "rate_limit_exceeded", "message": "real 429"}
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(pub_429.forward);
+        assert!(pub_429.dispatches.is_empty());
+        assert!(pub_429.errors.is_empty());
+        pub_gw.close();
+
+        // (b1) `FailClosed` bound encrypted reasoning owner never fails over on live 429.
+        let (fc_lifecycle, fc_auth, fc_headers, fc_a, fc_b, fc_quota, fc_store) =
+            setup_codex_ws_quota_fixture(
+                cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::FailClosed,
+            )
+            .await;
+        fc_quota.set_state(fc_a, 0.05, "allowed");
+        fc_quota.set_state(fc_b, 0.2, "allowed");
+        let fc_bound_cipher = "gAAAAAB_bound_fc_a";
+        fc_store.bindings.lock().unwrap().insert(
+            UpstreamAffinityKey {
+                principal_id: fc_auth.principal_id().to_owned(),
+                provider: "openai".to_owned(),
+                kind: cc_lb_storage_api::UpstreamAffinityKind::OpenaiResponseId,
+                value_sha256: <sha2::Sha256 as sha2::Digest>::digest(fc_bound_cipher.as_bytes())
+                    .into(),
+            },
+            cc_lb_storage_api::upstream_affinity::UpstreamAffinityBinding {
+                key: UpstreamAffinityKey {
+                    principal_id: fc_auth.principal_id().to_owned(),
+                    provider: "openai".to_owned(),
+                    kind: cc_lb_storage_api::UpstreamAffinityKind::OpenaiResponseId,
+                    value_sha256: <sha2::Sha256 as sha2::Digest>::digest(
+                        fc_bound_cipher.as_bytes(),
+                    )
+                    .into(),
+                },
+                upstream_id: fc_a,
+                owner_epoch: 0,
+                observed_at_unix_secs: 4_100_000_000,
+                expires_at_unix_secs: None,
+            },
+        );
+        let mut fc_gw = ResponsesWebSocketGateway::new(
+            fc_lifecycle.clone(),
+            &fc_auth,
+            fc_headers.clone(),
+            1024 * 1024,
+            16,
+        )
+        .with_codex_backend(true);
+        let fc_turn = fc_gw
+            .client_message(
+                fc_auth.clone(),
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "store": false,
+                        "input": [
+                            {"type": "reasoning", "id": "rs_fc", "summary": [], "encrypted_content": fc_bound_cipher},
+                            {"role": "user", "content": "u"}
+                        ]
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fc_turn.candidates[0].upstream_id, fc_a);
+        fc_gw.assign_connection(fc_turn.turn_id, 1, fc_a, "oauth-a");
+        fc_gw.commit_send_attempt(fc_turn.turn_id);
+        fc_gw.sent(fc_turn.turn_id);
+        let fc_res = fc_gw
+            .provider_message(
+                1,
+                &Bytes::from(
+                    serde_json::json!({
+                        "type": "error",
+                        "status": 429,
+                        "error": {"code": "rate_limit_exceeded", "message": "429"}
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(fc_res.forward);
+        assert!(fc_res.dispatches.is_empty());
+        fc_gw.close();
+
+        // (b2) Unestablished turn with unstripped pending unknown reasoning (`SessionHint(fc_a)`)
+        // never uses `try_unpinned_live_failover_dispatch` on live 429.
+        let mut fc_gw2 =
+            ResponsesWebSocketGateway::new(fc_lifecycle, &fc_auth, fc_headers, 1024 * 1024, 16)
+                .with_codex_backend(true);
+        fc_gw2.session_upstream = Some(fc_a);
+        fc_gw2.session_oauth = true;
+        let fc_turn2 = fc_gw2
+            .client_message(
+                fc_auth,
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "store": false,
+                        "input": [
+                            {"type": "reasoning", "id": "rs_u", "summary": [], "encrypted_content": "gAAAAAB_unknown"},
+                            {"role": "user", "content": "u"}
+                        ]
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let fc_up2 = fc_turn2.candidates[0].upstream_id;
+        assert!(
+            String::from_utf8_lossy(&fc_turn2.frame).contains("gAAAAAB_unknown"),
+            "session-hinted unestablished turn must keep unknown reasoning verbatim"
+        );
+        fc_gw2.assign_connection(fc_turn2.turn_id, 1, fc_up2, "oauth-a");
+        fc_gw2.commit_send_attempt(fc_turn2.turn_id);
+        fc_gw2.sent(fc_turn2.turn_id);
+        let fc_res2 = fc_gw2
+            .provider_message(
+                1,
+                &Bytes::from(
+                    serde_json::json!({
+                        "type": "error",
+                        "status": 429,
+                        "error": {"code": "rate_limit_exceeded", "message": "429"}
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(fc_res2.forward);
+        assert!(fc_res2.dispatches.is_empty());
+        fc_gw2.close();
+    }
+
+    #[tokio::test]
+    async fn ws_pre_dispatch_chained_exhaustion_and_live_encrypted_reasoning_429_fail_over() {
+        let (lifecycle, auth, headers, upstream_a, upstream_b, quota_cache, store) =
+            setup_codex_ws_quota_fixture(
+                cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover,
+            )
+            .await;
+
+        // 1. Pre-dispatch exhausted Codex WS chained `previous_response_id` returns 400
+        // `previous_response_not_found` at admission and evicts A when B is healthy;
+        // when B is also exhausted, keeps A verbatim (no false 400 eviction).
+        quota_cache.set_state(upstream_a, 0.05, "allowed");
+        quota_cache.set_state(upstream_b, 0.2, "allowed");
+        let mut chain_gw = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            1024 * 1024,
+            16,
+        )
+        .with_codex_backend(true);
+        let t1 = chain_gw
+            .client_message(
+                auth.clone(),
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "store": false,
+                        "input": [{"role": "user", "content": "pre-chain-1"}]
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let owner_up = t1.candidates[0].upstream_id;
+        let other_up = if owner_up == upstream_a {
+            upstream_b
+        } else {
+            upstream_a
+        };
+        chain_gw.assign_connection(t1.turn_id, 1, owner_up, "oauth-owner");
+        chain_gw.commit_send_attempt(t1.turn_id);
+        chain_gw.sent(t1.turn_id);
+        chain_gw
+            .provider_message(
+                1,
+                &Bytes::from(
+                    serde_json::json!({
+                        "type": "response.created",
+                        "response": {
+                            "id": "resp_pre_chain_1",
+                            "object": "response",
+                            "status": "in_progress",
+                            "output": []
+                        }
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap();
+        chain_gw
+            .provider_message(
+                1,
+                &Bytes::from(
+                    serde_json::json!({
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_pre_chain_1",
+                            "object": "response",
+                            "status": "completed",
+                            "usage": {"input_tokens": 5, "output_tokens": 5}
+                        }
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap();
+
+        // Exhaust both -> must NOT evict or emit `previous_response_not_found`, admits on owner_up.
+        quota_cache.set_state(owner_up, 1.0, "rejected");
+        quota_cache.set_state(other_up, 1.0, "rejected");
+        let kept_both_exhausted = chain_gw
+            .client_message(
+                auth.clone(),
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "previous_response_id": "resp_pre_chain_1",
+                        "store": false,
+                        "input": [{"type": "function_call_output", "call_id": "c_both", "output": "ok"}]
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .expect("must admit verbatim on owner when replacement is also exhausted")
+            .expect("dispatches");
+        assert_eq!(kept_both_exhausted.candidates[0].upstream_id, owner_up);
+        chain_gw
+            .fail_dispatch(
+                kept_both_exhausted.turn_id,
+                &WebSocketError::new(429, "rate_limit_exceeded", "both exhausted"),
+            )
+            .await;
+        // Note: `fail_dispatch` does not record session_rate_limited_upstreams; clear other_up back to healthy.
+        quota_cache.set_state(other_up, 0.1, "allowed");
+        let evict_err = chain_gw
+            .client_message(
+                auth.clone(),
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "previous_response_id": "resp_pre_chain_1",
+                        "store": false,
+                        "input": [{"type": "function_call_output", "call_id": "c_evict", "output": "ok"}]
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .expect_err("exhausted chained owner with healthy B must emit 400 previous_response_not_found");
+        assert_eq!(evict_err.status, 400);
+        assert_eq!(evict_err.code, "previous_response_not_found");
+        assert!(chain_gw.session_upstream.is_none());
+        chain_gw.close();
+
+        // 2. Live pre-response.created `429 usage_limit_reached` on encrypted-reasoning-only WS turn:
+        // exercises `try_owner_reasoning_failover_dispatch`, strips A's reasoning, and retries onto B.
+        quota_cache.set_state(upstream_a, 0.05, "allowed");
+        quota_cache.set_state(upstream_b, 0.2, "allowed");
+        let owned_cipher = "gAAAAAB_ws_live_reasoning_429";
+        let key = UpstreamAffinityKey {
+            principal_id: auth.principal_id().to_owned(),
+            provider: "openai".to_owned(),
+            kind: cc_lb_storage_api::UpstreamAffinityKind::OpenaiResponseId,
+            value_sha256: <sha2::Sha256 as sha2::Digest>::digest(owned_cipher.as_bytes()).into(),
+        };
+        store.bindings.lock().unwrap().insert(
+            key,
+            cc_lb_storage_api::upstream_affinity::UpstreamAffinityBinding {
+                key: UpstreamAffinityKey {
+                    principal_id: auth.principal_id().to_owned(),
+                    provider: "openai".to_owned(),
+                    kind: cc_lb_storage_api::UpstreamAffinityKind::OpenaiResponseId,
+                    value_sha256: <sha2::Sha256 as sha2::Digest>::digest(owned_cipher.as_bytes())
+                        .into(),
+                },
+                upstream_id: upstream_a,
+                owner_epoch: 0,
+                observed_at_unix_secs: 4_100_000_000,
+                expires_at_unix_secs: None,
+            },
+        );
+        let mut live_gw =
+            ResponsesWebSocketGateway::new(lifecycle, &auth, headers, 1024 * 1024, 16)
+                .with_codex_backend(true);
+        let pinned_turn = live_gw
+            .client_message(
+                auth,
+                Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "store": false,
+                        "include": ["reasoning.encrypted_content"],
+                        "input": [
+                            {
+                                "type": "reasoning",
+                                "id": "rs_live_429",
+                                "summary": [],
+                                "encrypted_content": owned_cipher
+                            },
+                            {"role": "user", "content": "follow up"}
+                        ]
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pinned_turn.candidates[0].upstream_id, upstream_a);
+        live_gw.assign_connection(pinned_turn.turn_id, 1, upstream_a, "oauth-a");
+        live_gw.commit_send_attempt(pinned_turn.turn_id);
+        live_gw.sent(pinned_turn.turn_id);
+
+        let retry_res = live_gw
+            .provider_message(
+                1,
+                &Bytes::from(
+                    serde_json::json!({
+                        "type": "error",
+                        "error": {
+                            "type": "usage_limit_reached",
+                            "code": "usage_limit_reached",
+                            "message": "The usage limit has been reached"
+                        }
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(!retry_res.forward);
+        assert!(retry_res.errors.is_empty());
+        assert_eq!(retry_res.dispatches.len(), 1);
+        let failover_dispatch = &retry_res.dispatches[0];
+        assert_eq!(failover_dispatch.candidates[0].upstream_id, upstream_b);
+        let stripped_frame: Value = serde_json::from_slice(&failover_dispatch.frame).unwrap();
+        assert_eq!(stripped_frame["input"].as_array().unwrap().len(), 1);
+        assert_eq!(stripped_frame["input"][0]["content"], "follow up");
+        live_gw.close();
+    }
+
+    #[tokio::test]
+    async fn multi_owner_openai_reasoning_reconciliation_ws() {
+        use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+        use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+        use cc_lb_control::api_keys::principal_view::{
+            DialectCache, PrincipalView, RouterPipelineCache,
+        };
+        use cc_lb_control::dynamic_view::{DynamicViewBuilder, DynamicViewHolder};
+        use cc_lb_domain::TerminalStrategy;
+        use cc_lb_routing::FilterPlugin;
+        use cc_lb_storage_api::upstream::{UpstreamKind as StorageRecordKind, UpstreamRecord};
+        use cc_lb_upstream::{
+            ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer,
+            SignerError, SignerFactory, SigningCapability, UpstreamError,
+        };
+
+        struct DummySignerFactory;
+        impl ApiKeyAwareSignerFactory for DummySignerFactory {
+            fn with_router_choice(&self, _name: String) -> Arc<dyn SignerFactory> {
+                Arc::new(Self)
+            }
+        }
+        #[async_trait::async_trait]
+        impl SignerFactory for DummySignerFactory {
+            async fn build(
+                &self,
+                _upstream: &cc_lb_domain::Upstream,
+            ) -> Result<Arc<dyn Signer>, SignerError> {
+                Ok(Arc::new(DummySigner))
+            }
+        }
+        struct DummySigner;
+        #[async_trait::async_trait]
+        impl Signer for DummySigner {
+            async fn sign(
+                &self,
+                shaped: ShapedRequest,
+                capability: &mut SigningCapability,
+            ) -> Result<SignedRequest, SignerError> {
+                Ok(SignedRequest::from_shaped(shaped, capability))
+            }
+            async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+                RetryDecision::Fail
+            }
+        }
+        struct UnusedDispatcher;
+        #[async_trait::async_trait]
+        impl crate::UpstreamDispatch for UnusedDispatcher {
+            async fn dispatch(
+                &self,
+                _request: SignedRequest,
+            ) -> Result<http::Response<crate::Body>, crate::DispatchError> {
+                unreachable!("unused dispatcher in multi-owner ws test")
+            }
+        }
+
+        let quota_cache = Arc::new(WsQuotaTestCache::default());
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(4_100_000_000));
+        let storage = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite("sqlite::memory:", clock.clone())
+                .await
+                .unwrap(),
+        );
+        storage.initialize().await.unwrap();
+        let keys = Arc::new(KeyStore::new(storage));
+        let (_record, secret) = keys
+            .create(
+                DIRECT_PRINCIPAL,
+                CreateParams {
+                    label: "ws-multi-owner".to_owned(),
+                    description: None,
+                    expires_at_unix_secs: None,
+                    limit_overrides: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let filter: Arc<dyn FilterPlugin> = Arc::new(
+            crate::builtin_filters::subscription_preference::SubscriptionPreferenceFilter::with_clock(
+                clock.clone(),
+            ),
+        );
+        let pipeline = Arc::new(RouterPipelineCache {
+            user_filters: vec![filter],
+            terminal: TerminalStrategy::FirstPick,
+            instantiation_error: None,
+            provider_filters: None,
+        });
+        let chains = HashMap::from([(
+            DIRECT_PRINCIPAL.to_owned(),
+            (Some(pipeline), DialectCache::Inherit),
+        )]);
+        let principal_view = Arc::new(PrincipalView::for_tests(
+            DIRECT_PRINCIPAL,
+            true,
+            vec!["*".to_owned()],
+            Vec::new(),
+            chains,
+        ));
+        let authn = Arc::new(BuiltinAuthn::new(keys, clock.clone()));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", secret.expose().parse().unwrap());
+        let auth = crate::authenticate_first(&authn, &headers, &principal_view)
+            .await
+            .unwrap();
+
+        let upstream_a = Uuid::parse_str("30000000-0000-0000-0000-000000000701").unwrap();
+        let upstream_b = Uuid::parse_str("30000000-0000-0000-0000-000000000702").unwrap();
+        let upstream_c = Uuid::parse_str("30000000-0000-0000-0000-000000000703").unwrap();
+        let records = vec![
+            UpstreamRecord {
+                id: upstream_a,
+                name: "oauth-a".to_owned(),
+                kind: StorageRecordKind::OpenaiOauth,
+                base_url: Some(url::Url::parse("https://oauth-a.local/").unwrap()),
+                enabled: true,
+                oauth_never_refresh: true,
+                ..Default::default()
+            },
+            UpstreamRecord {
+                id: upstream_b,
+                name: "oauth-b".to_owned(),
+                kind: StorageRecordKind::OpenaiOauth,
+                base_url: Some(url::Url::parse("https://oauth-b.local/").unwrap()),
+                enabled: true,
+                oauth_never_refresh: true,
+                ..Default::default()
+            },
+            UpstreamRecord {
+                id: upstream_c,
+                name: "oauth-c".to_owned(),
+                kind: StorageRecordKind::OpenaiOauth,
+                base_url: Some(url::Url::parse("https://oauth-c.local/").unwrap()),
+                enabled: true,
+                oauth_never_refresh: true,
+                ..Default::default()
+            },
+        ];
+        let view = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(DummySignerFactory))
+            .principal_view(principal_view)
+            .subscription_quota_cache(quota_cache.clone())
+            .subscription_quota_routing_max_staleness_secs(60)
+            .upstream_records(records)
+            .build();
+        let store = Arc::new(PrewarmAffinityStore::default());
+        let cipher_a = "gAAAAAB_multi_ws_a";
+        let cipher_b = "gAAAAAB_multi_ws_b";
+        for (cipher, owner) in [(cipher_a, upstream_a), (cipher_b, upstream_b)] {
+            store.bindings.lock().unwrap().insert(
+                UpstreamAffinityKey {
+                    principal_id: auth.principal_id().to_owned(),
+                    provider: "openai".to_owned(),
+                    kind: cc_lb_storage_api::UpstreamAffinityKind::OpenaiResponseId,
+                    value_sha256: <sha2::Sha256 as sha2::Digest>::digest(cipher.as_bytes()).into(),
+                },
+                cc_lb_storage_api::upstream_affinity::UpstreamAffinityBinding {
+                    key: UpstreamAffinityKey {
+                        principal_id: auth.principal_id().to_owned(),
+                        provider: "openai".to_owned(),
+                        kind: cc_lb_storage_api::UpstreamAffinityKind::OpenaiResponseId,
+                        value_sha256: <sha2::Sha256 as sha2::Digest>::digest(cipher.as_bytes())
+                            .into(),
+                    },
+                    upstream_id: owner,
+                    owner_epoch: 0,
+                    observed_at_unix_secs: 4_100_000_000,
+                    expires_at_unix_secs: None,
+                },
+            );
+        }
+        let view_holder = Arc::new(DynamicViewHolder::new(view));
+        let lifecycle = Arc::new(
+            Lifecycle::new_with_dynamic_view(
+                authn.clone(),
+                view_holder.clone(),
+                Arc::new(UnusedDispatcher),
+                crate::LifecycleConfig::default(),
+                clock.clone(),
+            )
+            .with_upstream_affinity_store(store.clone()),
+        );
+        let multi_frame = || {
+            Bytes::from(
+                serde_json::json!({
+                    "type": "response.create",
+                    "model": "gpt-5.4",
+                    "store": false,
+                    "include": ["reasoning.encrypted_content"],
+                    "input": [
+                        {"type": "reasoning", "id": "rs_a", "summary": [], "encrypted_content": cipher_a},
+                        {"role": "user", "content": "turn 1"},
+                        {"type": "reasoning", "id": "rs_b", "summary": [], "encrypted_content": cipher_b},
+                        {"role": "user", "content": "turn 2"}
+                    ]
+                })
+                .to_string(),
+            )
+        };
+
+        // 1. `[rs_A (exhausted), rs_B (healthy)]`: yields even stale SessionHint(A), routes to B, strips ONLY rs_A, keeps rs_B.
+        quota_cache.set_state(upstream_a, 1.0, "rejected");
+        quota_cache.set_state(upstream_b, 0.1, "allowed");
+        quota_cache.set_state(upstream_c, 0.5, "allowed");
+        let mut gw = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            1024 * 1024,
+            16,
+        )
+        .with_codex_backend(true);
+        gw.session_upstream = Some(upstream_a);
+        gw.session_oauth = true;
+        let d1 = gw
+            .client_message(auth.clone(), multi_frame())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(d1.candidates[0].upstream_id, upstream_b);
+        assert!(gw.session_upstream.is_none());
+        let f1: Value = serde_json::from_slice(&d1.frame).unwrap();
+        assert_eq!(f1["input"].as_array().unwrap().len(), 3);
+        assert_eq!(f1["input"][1]["encrypted_content"], cipher_b);
+        gw.close();
+
+        // 2. `[rs_A (healthy), rs_B (healthy)]`: picks later owner B, strips ONLY rs_A.
+        quota_cache.set_state(upstream_a, 0.05, "allowed");
+        let mut gw2 = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            1024 * 1024,
+            16,
+        )
+        .with_codex_backend(true);
+        let d2 = gw2
+            .client_message(auth.clone(), multi_frame())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(d2.candidates[0].upstream_id, upstream_b);
+        let f2: Value = serde_json::from_slice(&d2.frame).unwrap();
+        assert_eq!(f2["input"].as_array().unwrap().len(), 3);
+        assert_eq!(f2["input"][1]["encrypted_content"], cipher_b);
+        gw2.close();
+
+        // 3. `[rs_A (exhausted), rs_B (exhausted)]` with healthy C: strips ALL and routes to C.
+        quota_cache.set_state(upstream_a, 1.0, "rejected");
+        quota_cache.set_state(upstream_b, 1.0, "rejected");
+        quota_cache.set_state(upstream_c, 0.1, "allowed");
+        let mut gw3 = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            1024 * 1024,
+            16,
+        )
+        .with_codex_backend(true);
+        let d3 = gw3
+            .client_message(auth.clone(), multi_frame())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(d3.candidates[0].upstream_id, upstream_c);
+        let f3: Value = serde_json::from_slice(&d3.frame).unwrap();
+        assert_eq!(f3["input"].as_array().unwrap().len(), 2);
+        gw3.close();
+
+        // 4. `[rs_A (exhausted), rs_B (exhausted), rs_C (exhausted)]`: no healthy replacement -> keeps B (with rs_A stripped) without false 400/409.
+        quota_cache.set_state(upstream_c, 1.0, "rejected");
+        let mut gw4 = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            1024 * 1024,
+            16,
+        )
+        .with_codex_backend(true);
+        let d4 = gw4
+            .client_message(auth.clone(), multi_frame())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(d4.candidates[0].upstream_id, upstream_b);
+        let f4: Value = serde_json::from_slice(&d4.frame).unwrap();
+        assert_eq!(f4["input"].as_array().unwrap().len(), 3);
+        assert_eq!(f4["input"][1]["encrypted_content"], cipher_b);
+        gw4.close();
+
+        // 5. `PrewarmResponse(B)` (`generate: false` -> `resp_prewarm_b`) + multi-owner `[rs_A (exhausted), rs_B (healthy)]`:
+        // reconciles onto B, keeps `previous_response_id` and `rs_B` verbatim, strips ONLY `rs_A`.
+        quota_cache.set_state(upstream_a, 1.0, "rejected");
+        quota_cache.set_state(upstream_b, 0.1, "allowed");
+        quota_cache.set_state(upstream_c, 0.5, "allowed");
+        let mut gw_prewarm_match = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            1024 * 1024,
+            16,
+        )
+        .with_codex_backend(true);
+        let prewarm_b_req = Bytes::from(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "generate": false,
+                "store": false,
+                "input": []
+            })
+            .to_string(),
+        );
+        let prewarm_b_dispatch = gw_prewarm_match
+            .client_message(auth.clone(), prewarm_b_req)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(prewarm_b_dispatch.candidates[0].upstream_id, upstream_b);
+        gw_prewarm_match.assign_connection(prewarm_b_dispatch.turn_id, 1, upstream_b, "oauth-b");
+        gw_prewarm_match.commit_send_attempt(prewarm_b_dispatch.turn_id);
+        let _ = gw_prewarm_match.sent_with_timings(
+            prewarm_b_dispatch.turn_id,
+            ResponsesDispatchTimings::reused(),
+            std::time::Instant::now(),
+        );
+        gw_prewarm_match
+            .provider_message(
+                1,
+                &Bytes::from_static(
+                    br#"{"type":"response.created","response":{"id":"resp_prewarm_b","status":"in_progress","store":false}}"#,
+                ),
+            )
+            .await
+            .unwrap();
+        gw_prewarm_match
+            .provider_message(
+                1,
+                &Bytes::from_static(
+                    br#"{"type":"response.completed","response":{"id":"resp_prewarm_b","status":"completed","store":false}}"#,
+                ),
+            )
+            .await
+            .unwrap();
+        let prewarm_multi_req = |prev_id: &str| {
+            Bytes::from(
+                serde_json::json!({
+                    "type": "response.create",
+                    "model": "gpt-5.4",
+                    "previous_response_id": prev_id,
+                    "store": false,
+                    "include": ["reasoning.encrypted_content"],
+                    "input": [
+                        {"type": "reasoning", "id": "rs_a", "summary": [], "encrypted_content": cipher_a},
+                        {"role": "user", "content": "turn 1"},
+                        {"type": "reasoning", "id": "rs_b", "summary": [], "encrypted_content": cipher_b},
+                        {"role": "user", "content": "turn 3 resume"}
+                    ]
+                })
+                .to_string(),
+            )
+        };
+        let d5 = gw_prewarm_match
+            .client_message(auth.clone(), prewarm_multi_req("resp_prewarm_b"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(d5.candidates[0].upstream_id, upstream_b);
+        let f5: Value = serde_json::from_slice(&d5.frame).unwrap();
+        assert_eq!(f5["previous_response_id"], "resp_prewarm_b");
+        assert_eq!(f5["input"].as_array().unwrap().len(), 3);
+        assert_eq!(f5["input"][1]["encrypted_content"], cipher_b);
+        gw_prewarm_match.close();
+
+        // 6. `PrewarmResponse(A)` (`resp_prewarm_a`) + `[rs_A, rs_B (later & healthy)]`:
+        // reconciles to B != prewarm_owner A -> returns 400 `previous_response_not_found` so Codex replays without `previous_response_id`.
+        quota_cache.set_state(upstream_a, 0.05, "allowed");
+        quota_cache.set_state(upstream_b, 0.1, "allowed");
+        let mut gw_prewarm_mismatch = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            1024 * 1024,
+            16,
+        )
+        .with_codex_backend(true);
+        let prewarm_a_req = Bytes::from(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "generate": false,
+                "store": false,
+                "input": []
+            })
+            .to_string(),
+        );
+        let prewarm_a_dispatch = gw_prewarm_mismatch
+            .client_message(auth.clone(), prewarm_a_req)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(prewarm_a_dispatch.candidates[0].upstream_id, upstream_a);
+        gw_prewarm_mismatch.assign_connection(prewarm_a_dispatch.turn_id, 2, upstream_a, "oauth-a");
+        gw_prewarm_mismatch.commit_send_attempt(prewarm_a_dispatch.turn_id);
+        let _ = gw_prewarm_mismatch.sent_with_timings(
+            prewarm_a_dispatch.turn_id,
+            ResponsesDispatchTimings::reused(),
+            std::time::Instant::now(),
+        );
+        gw_prewarm_mismatch
+            .provider_message(
+                2,
+                &Bytes::from_static(
+                    br#"{"type":"response.created","response":{"id":"resp_prewarm_a","status":"in_progress","store":false}}"#,
+                ),
+            )
+            .await
+            .unwrap();
+        gw_prewarm_mismatch
+            .provider_message(
+                2,
+                &Bytes::from_static(
+                    br#"{"type":"response.completed","response":{"id":"resp_prewarm_a","status":"completed","store":false}}"#,
+                ),
+            )
+            .await
+            .unwrap();
+        let mismatch_err = gw_prewarm_mismatch
+            .client_message(auth.clone(), prewarm_multi_req("resp_prewarm_a"))
+            .await
+            .expect_err("mismatched prewarm owner must return 400 previous_response_not_found");
+        assert_eq!(mismatch_err.status, 400);
+        assert_eq!(mismatch_err.code, "previous_response_not_found");
+        gw_prewarm_mismatch.close();
+
+        // 7. Non-prewarm `WebSocketTurnOwner::Response(B)` negative control -> still rejects 400 "multiple upstreams".
+        quota_cache.set_state(upstream_a, 1.0, "rejected");
+        quota_cache.set_state(upstream_b, 0.1, "allowed");
+        let mut gw_resp_owner = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            1024 * 1024,
+            16,
+        )
+        .with_codex_backend(true);
+        let resp_b_req = Bytes::from(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "store": false,
+                "input": [{"role": "user", "content": "turn 1"}]
+            })
+            .to_string(),
+        );
+        let resp_b_dispatch = gw_resp_owner
+            .client_message(auth.clone(), resp_b_req)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp_b_dispatch.candidates[0].upstream_id, upstream_b);
+        gw_resp_owner.assign_connection(resp_b_dispatch.turn_id, 3, upstream_b, "oauth-b");
+        gw_resp_owner.commit_send_attempt(resp_b_dispatch.turn_id);
+        let _ = gw_resp_owner.sent_with_timings(
+            resp_b_dispatch.turn_id,
+            ResponsesDispatchTimings::reused(),
+            std::time::Instant::now(),
+        );
+        gw_resp_owner
+            .provider_message(
+                3,
+                &Bytes::from_static(
+                    br#"{"type":"response.created","response":{"id":"resp_non_prewarm_b","status":"in_progress","store":false}}"#,
+                ),
+            )
+            .await
+            .unwrap();
+        gw_resp_owner
+            .provider_message(
+                3,
+                &Bytes::from_static(
+                    br#"{"type":"response.completed","response":{"id":"resp_non_prewarm_b","status":"completed","store":false}}"#,
+                ),
+            )
+            .await
+            .unwrap();
+        let resp_owner_err = gw_resp_owner
+            .client_message(auth.clone(), prewarm_multi_req("resp_non_prewarm_b"))
+            .await
+            .expect_err("non-prewarm Response owner must reject multi-owner 400");
+        assert_eq!(resp_owner_err.status, 400);
+        assert_eq!(
+            resp_owner_err.code,
+            error_codes::UPSTREAM_AFFINITY_UNAVAILABLE
+        );
+        assert!(
+            resp_owner_err.message.contains("multiple upstreams"),
+            "{resp_owner_err:?}"
+        );
+        gw_resp_owner.close();
+
+        // 8. Negative controls: `FailClosed` or `compaction` / unowned `previous_response_id` rejects 400 "opaque request content resolves to multiple upstreams".
+        quota_cache.set_state(upstream_a, 0.05, "allowed");
+        quota_cache.set_state(upstream_b, 0.1, "allowed");
+        for bad in [
+            Bytes::from(
+                serde_json::json!({
+                    "type": "response.create",
+                    "model": "gpt-5.4",
+                    "previous_response_id": "resp_prev",
+                    "store": false,
+                    "input": [
+                        {"type": "reasoning", "id": "rs_a", "summary": [], "encrypted_content": cipher_a},
+                        {"type": "reasoning", "id": "rs_b", "summary": [], "encrypted_content": cipher_b}
+                    ]
+                })
+                .to_string(),
+            ),
+            Bytes::from(
+                serde_json::json!({
+                    "type": "response.create",
+                    "model": "gpt-5.4",
+                    "store": false,
+                    "input": [
+                        {"type": "compaction", "id": "cmp_1", "encrypted_content": cipher_a},
+                        {"type": "reasoning", "id": "rs_b", "summary": [], "encrypted_content": cipher_b}
+                    ]
+                })
+                .to_string(),
+            ),
+        ] {
+            let mut bad_gw = ResponsesWebSocketGateway::new(
+                lifecycle.clone(),
+                &auth,
+                headers.clone(),
+                1024 * 1024,
+                16,
+            )
+            .with_codex_backend(true);
+            let err = bad_gw
+                .client_message(auth.clone(), bad)
+                .await
+                .expect_err("must reject 400");
+            assert_eq!(err.status, 400);
+            assert!(err.message.contains("multiple upstreams"), "{err:?}");
+            bad_gw.close();
+        }
+        let fc_lifecycle = Arc::new(
+            Lifecycle::new_with_dynamic_view(
+                authn,
+                view_holder,
+                Arc::new(UnusedDispatcher),
+                crate::LifecycleConfig {
+                    unavailable_openai_reasoning_owner:
+                        cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::FailClosed,
+                    ..Default::default()
+                },
+                clock,
+            )
+            .with_upstream_affinity_store(store),
+        );
+        let mut fc_gw =
+            ResponsesWebSocketGateway::new(fc_lifecycle, &auth, headers, 1024 * 1024, 16)
+                .with_codex_backend(true);
+        let fc_err = fc_gw
+            .client_message(auth, multi_frame())
+            .await
+            .expect_err("FailClosed must reject multi-owner 400");
+        assert_eq!(fc_err.status, 400);
+        assert!(fc_err.message.contains("multiple upstreams"), "{fc_err:?}");
+        fc_gw.close();
+    }
+
+    #[test]
+    fn ws_rate_limit_cooldown_respects_reset_fields_expiry_and_clear() {
+        use crate::lifecycle::{
+            DEFAULT_WS_RATE_LIMIT_COOLDOWN_SECS, WsRateLimitCooldownCache,
+            ws_rate_limit_cooldown_secs,
+        };
+
+        let now = 4_100_000_000_u64;
+        assert_eq!(
+            ws_rate_limit_cooldown_secs(None, None, now),
+            DEFAULT_WS_RATE_LIMIT_COOLDOWN_SECS
+        );
+        assert_eq!(
+            ws_rate_limit_cooldown_secs(
+                Some(&serde_json::json!({
+                    "type": "error",
+                    "error": {"code": "usage_limit_reached", "resets_at": now + 180, "resets_in_seconds": 30}
+                })),
+                Some(12),
+                now,
+            ),
+            180
+        );
+        assert_eq!(
+            ws_rate_limit_cooldown_secs(
+                Some(&serde_json::json!({
+                    "type": "response.failed",
+                    "response": {"error": {"code": "usage_limit_reached", "resets_in_seconds": 45}}
+                })),
+                Some(12),
+                now,
+            ),
+            45
+        );
+        assert_eq!(ws_rate_limit_cooldown_secs(None, Some(90), now), 90);
+
+        let cache = WsRateLimitCooldownCache::default();
+        let a = Uuid::from_u128(0xAA01);
+        assert!(!cache.has_any());
+        cache.record(a, now + 60, now);
+        assert!(cache.has_any());
+        assert!(cache.is_blocked(a, now + 59));
+        assert!(!cache.is_blocked(a, now + 60));
+
+        cache.record(a, now + 120, now);
+        assert!(cache.is_blocked(a, now + 100));
+        cache.clear(a);
+        assert!(!cache.has_any());
+        assert!(!cache.is_blocked(a, now + 100));
     }
 }

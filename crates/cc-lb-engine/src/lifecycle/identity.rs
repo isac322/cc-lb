@@ -688,6 +688,107 @@ impl OpenaiSessionHintCache {
     }
 }
 
+pub(crate) const DEFAULT_WS_RATE_LIMIT_COOLDOWN_SECS: u64 = 60;
+pub(super) const MAX_WS_RATE_LIMIT_COOLDOWN_SECS: u64 = 18_000;
+const MAX_WS_RATE_LIMIT_COOLDOWN_ENTRIES: usize = 4096;
+
+#[derive(Clone, Default)]
+pub(crate) struct WsRateLimitCooldownCache {
+    active_count: Arc<std::sync::atomic::AtomicUsize>,
+    entries: Arc<Mutex<HashMap<Uuid, u64>>>,
+}
+
+impl WsRateLimitCooldownCache {
+    pub(crate) fn has_any(&self) -> bool {
+        self.active_count.load(Ordering::Relaxed) > 0
+    }
+
+    pub(crate) fn is_blocked(&self, upstream_id: Uuid, now_unix_secs: u64) -> bool {
+        if !self.has_any() {
+            return false;
+        }
+        let entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        entries
+            .get(&upstream_id)
+            .is_some_and(|&blocked_until| blocked_until > now_unix_secs)
+    }
+
+    pub(crate) fn record(
+        &self,
+        upstream_id: Uuid,
+        blocked_until_unix_secs: u64,
+        now_unix_secs: u64,
+    ) {
+        if blocked_until_unix_secs <= now_unix_secs {
+            return;
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        entries.retain(|_, until| *until > now_unix_secs);
+        if !entries.contains_key(&upstream_id)
+            && entries.len() >= MAX_WS_RATE_LIMIT_COOLDOWN_ENTRIES
+            && let Some(earliest_id) = entries
+                .iter()
+                .min_by_key(|(_, until)| **until)
+                .map(|(id, _)| *id)
+        {
+            entries.remove(&earliest_id);
+        }
+        entries
+            .entry(upstream_id)
+            .and_modify(|existing| *existing = (*existing).max(blocked_until_unix_secs))
+            .or_insert(blocked_until_unix_secs);
+        self.active_count.store(entries.len(), Ordering::Relaxed);
+    }
+
+    pub(crate) fn clear(&self, upstream_id: Uuid) {
+        if !self.has_any() {
+            return;
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if entries.remove(&upstream_id).is_some() {
+            self.active_count.store(entries.len(), Ordering::Relaxed);
+        }
+    }
+}
+
+pub(crate) fn ws_rate_limit_cooldown_secs(
+    payload: Option<&Value>,
+    retry_after_secs: Option<u64>,
+    now_unix_secs: u64,
+) -> u64 {
+    if let Some(resets_at) = payload.and_then(|value| {
+        value
+            .pointer("/error/resets_at")
+            .or_else(|| value.pointer("/response/error/resets_at"))
+            .and_then(Value::as_u64)
+    }) && resets_at > now_unix_secs
+    {
+        return (resets_at - now_unix_secs).clamp(1, MAX_WS_RATE_LIMIT_COOLDOWN_SECS);
+    }
+    if let Some(resets_in) = payload.and_then(|value| {
+        value
+            .pointer("/error/resets_in_seconds")
+            .or_else(|| value.pointer("/response/error/resets_in_seconds"))
+            .and_then(Value::as_u64)
+    }) && resets_in > 0
+    {
+        return resets_in.clamp(1, MAX_WS_RATE_LIMIT_COOLDOWN_SECS);
+    }
+    if let Some(retry_after) = retry_after_secs.filter(|secs| *secs > 0) {
+        return retry_after.clamp(1, MAX_WS_RATE_LIMIT_COOLDOWN_SECS);
+    }
+    DEFAULT_WS_RATE_LIMIT_COOLDOWN_SECS
+}
+
 impl Default for OpenaiSessionHintCache {
     fn default() -> Self {
         Self::new()

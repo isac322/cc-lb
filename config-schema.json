@@ -1396,15 +1396,15 @@
       }
     },
     "UnavailableOpenaiReasoningOwnerPolicy": {
-      "description": "Handling for OpenAI Responses requests whose only referenced opaque\naffinity state is `reasoning.encrypted_content` owned by an upstream that\nis currently disabled or otherwise ineligible for routing.",
+      "description": "Handling for OpenAI Responses requests whose only referenced opaque\naffinity state is `reasoning.encrypted_content` (or Codex backend WebSocket\nchained `previous_response_id` with `store != true`) whose recorded owner\nupstream is disabled, quota-exhausted, rate-limited (`429`), or otherwise\nunavailable before the upstream starts generating a response.",
       "oneOf": [
         {
-          "description": "Reject with `409 upstream_affinity_unavailable` instead of stripping\nencrypted reasoning items and rerouting to another OpenAI upstream.",
+          "description": "Reject or stay pinned to the owner (relaying the owner's real upstream\nresponse such as `429`, or `409 upstream_affinity_unavailable` when\nunroutable) instead of stripping encrypted reasoning items or rerouting.",
           "type": "string",
           "const": "fail_closed"
         },
         {
-          "description": "Strip `reasoning.encrypted_content` items from `input` and fail over to\nanother eligible OpenAI upstream when the recorded owner is ineligible\nand no `previous_response_id`, `conversation`, `compaction`, or\n`compaction_summary` is present; still fails closed with `409` if no\nother eligible OpenAI upstream exists.",
+          "description": "Strip `reasoning.encrypted_content` items from `input` and fail over to\nanother healthy non-exhausted eligible OpenAI upstream when the recorded\nowner is disabled, quota-exhausted (`subscription_hard_blocked`), or\nfails pre-processing (`429`, `401` after refresh, signer failure, or open\ncircuit breaker) before a response starts—provided no `previous_response_id`,\n`conversation`, `prompt`, `compaction`, `compaction_summary`, or\naccount-owned reference is present. On Codex backend WebSocket chained\n`previous_response_id` turns (`store != true`), evicts the owner and\nreturns `400 previous_response_not_found` so the client replays full\nhistory onto a replacement upstream. When a multi-turn OpenAI Responses\ntranscript carries `reasoning.encrypted_content` items from both an\nearlier failed-over owner and a later active owner, selects the\nsurviving eligible owner, strips stale items from earlier owners, and\npreserves the surviving owner's reasoning verbatim. When no healthy\nreplacement exists, preserves the owner's real response (for example\n`429`) or returns `409` if the owner itself cannot route.",
           "type": "string",
           "const": "strip_and_failover"
         }

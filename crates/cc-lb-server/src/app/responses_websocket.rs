@@ -566,8 +566,10 @@ async fn send_responses_dispatch(
     match validation {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
-            let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
-            return (ready, vec![error]);
+            let (ready, emitted_error) = gateway
+                .fail_dispatch_with_recovery(dispatch.turn_id, Some(upstream_id), &error)
+                .await;
+            return (ready, emitted_error.into_iter().collect());
         }
         Err(_) => {
             let error = WebSocketError::new(
@@ -576,8 +578,10 @@ async fn send_responses_dispatch(
                 "provider WebSocket connection timed out",
             )
             .with_stream(dispatch.stream_id.clone());
-            let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
-            return (ready, vec![error]);
+            let (ready, emitted_error) = gateway
+                .fail_dispatch_with_recovery(dispatch.turn_id, Some(upstream_id), &error)
+                .await;
+            return (ready, emitted_error.into_iter().collect());
         }
     }
     if drain_controller.is_draining() {
@@ -626,6 +630,7 @@ struct PendingDispatchState {
     deadline: tokio::time::Instant,
     per_attempt_timeout: Duration,
     last_error: Option<WebSocketError>,
+    last_attempted_upstream_id: Option<uuid::Uuid>,
     pinned_to_single_owner: bool,
 }
 
@@ -646,6 +651,7 @@ impl PendingDispatchState {
             deadline: bounded_deadline(tokio::time::Instant::now(), connect_budget),
             per_attempt_timeout,
             last_error: None,
+            last_attempted_upstream_id: None,
             pinned_to_single_owner,
         }
     }
@@ -724,10 +730,14 @@ async fn finish_failed_dispatch(
             )
         })
         .with_stream(pending.dispatch.stream_id);
-    let ready = gateway
-        .fail_dispatch(pending.dispatch.turn_id, &error)
+    let (ready, emitted_error) = gateway
+        .fail_dispatch_with_recovery(
+            pending.dispatch.turn_id,
+            pending.last_attempted_upstream_id,
+            &error,
+        )
         .await;
-    (ready, vec![error])
+    (ready, emitted_error.into_iter().collect())
 }
 
 async fn finish_draining_dispatch(
@@ -776,6 +786,7 @@ async fn advance_one_dispatch(
         pending.max_attempts,
         pending.dispatch.prefer_api_key_on_final_attempt,
     ) {
+        pending.last_attempted_upstream_id = Some(candidate.upstream_id);
         let existing = connections.iter().find_map(|(id, connection)| {
             (connection.upstream_id == candidate.upstream_id
                 && (!candidate.socket_per_lane || connection.lane == pending.dispatch.stream_id))
@@ -1387,6 +1398,25 @@ async fn handle_connect_outcome(
             }
         }
         Err(ConnectAttemptError::Dial(error)) => {
+            if error.status == 429 {
+                let mut headers = http::HeaderMap::new();
+                error.copy_provider_headers(&mut headers);
+                let retry_after_secs = headers
+                    .get(http::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|raw| raw.trim().parse::<u64>().ok());
+                gateway.record_session_rate_limited_with_retry_after(
+                    pending.active_upstream_id,
+                    retry_after_secs,
+                );
+                if !headers.is_empty() {
+                    state.lifecycle.ingest_subscription_quota_headers(
+                        &headers,
+                        pending.active_upstream_id,
+                        state.clock.now(),
+                    );
+                }
+            }
             if state.drain_controller.is_draining() {
                 for entry in std::iter::once(pending.primary).chain(pending.waiters) {
                     let (ready, errs) = finish_draining_dispatch(gateway, entry.dispatch).await;
@@ -1398,6 +1428,7 @@ async fn handle_connect_outcome(
             let now = tokio::time::Instant::now();
             for mut entry in std::iter::once(pending.primary).chain(pending.waiters) {
                 entry.last_error = Some(error.clone());
+                entry.last_attempted_upstream_id = Some(pending.active_upstream_id);
                 if is_fatal_ws_connect_error(&error) || now >= entry.deadline {
                     let (ready, errs) = finish_failed_dispatch(gateway, entry).await;
                     dispatches.extend(ready);

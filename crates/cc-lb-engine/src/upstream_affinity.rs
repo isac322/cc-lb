@@ -720,18 +720,12 @@ fn input_item_has_account_owned_reference(item: &Value) -> bool {
 /// `tool_search_output` / `namespace` tool lists), while leaving schemas,
 /// annotations, and fresh auto containers (`{"type": "auto"}` /
 /// `{"type": "container_auto"}` without `file_ids`) eligible for failover.
-pub(crate) fn is_openai_reasoning_owner_failover_eligible(
-    capability: ProviderCapability,
-    value: &Value,
-) -> bool {
-    if !is_openai_unknown_reasoning_only(capability, value) {
-        return false;
-    }
+pub(crate) fn openai_responses_has_account_owned_reference(value: &Value) -> bool {
     let Some(object) = value.as_object() else {
-        return false;
+        return true;
     };
     if object.get("prompt").is_some_and(|v| !v.is_null()) {
-        return false;
+        return true;
     }
     if object
         .get("prompt_cache_options")
@@ -739,19 +733,82 @@ pub(crate) fn is_openai_reasoning_owner_failover_eligible(
         .is_some_and(|opts| reference_id(opts.get("comparison_response_id")).is_some())
         || reference_id(object.get("comparison_response_id")).is_some()
     {
-        return false;
+        return true;
     }
     if object
         .get("tools")
         .and_then(Value::as_array)
         .is_some_and(|tools| tools.iter().any(tool_has_account_owned_reference))
     {
-        return false;
+        return true;
     }
-    !object
+    object
         .get("input")
         .and_then(Value::as_array)
         .is_some_and(|items| items.iter().any(input_item_has_account_owned_reference))
+}
+
+pub(crate) fn is_openai_reasoning_owner_failover_eligible(
+    capability: ProviderCapability,
+    value: &Value,
+) -> bool {
+    if !is_openai_unknown_reasoning_only(capability, value) {
+        return false;
+    }
+    !openai_responses_has_account_owned_reference(value)
+}
+
+fn input_has_compaction_item(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(input_has_compaction_item),
+        Value::Object(object) => matches!(
+            object.get("type").and_then(Value::as_str),
+            Some("compaction" | "compaction_summary")
+        ),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+    }
+}
+
+/// Returns whether a Codex backend WebSocket turn carrying `previous_response_id`
+/// (`store != true`) can recover onto a replacement OAuth upstream by
+/// returning `400 previous_response_not_found`, prompting Codex to replay full
+/// history. Rejects `store: true`, `conversation`, `compaction` items, and any
+/// non-reasoning account- or org-owned references.
+pub(crate) fn is_openai_codex_ws_previous_response_failover_eligible(
+    capability: ProviderCapability,
+    value: &Value,
+) -> bool {
+    if !is_openai_responses_affinity_capability(capability) {
+        return false;
+    }
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object.get("store").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
+    if reference_id(object.get("previous_response_id")).is_none()
+        || reference_id(object.get("conversation")).is_some()
+    {
+        return false;
+    }
+    if object.get("input").is_some_and(input_has_compaction_item) {
+        return false;
+    }
+    !openai_responses_has_account_owned_reference(value)
+}
+
+pub(crate) fn extract_openai_reasoning_affinity_keys(
+    capability: ProviderCapability,
+    value: &Value,
+    principal_id: &str,
+) -> Result<Vec<UpstreamAffinityKey>, UpstreamAffinityExtractionError> {
+    if !is_openai_responses_affinity_capability(capability) {
+        return Ok(Vec::new());
+    }
+    let mut collector = KeyCollector::new(capability, principal_id);
+    collector.openai_reasoning_tree(value.get("input"))?;
+    Ok(collector.keys)
 }
 
 /// Returns SHA-256 digests for `reasoning.encrypted_content` items present in
