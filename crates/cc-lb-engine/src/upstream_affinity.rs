@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 
 use crate::provider_capability::{ProviderCapability, safe_openai_resource_path};
@@ -850,6 +850,27 @@ pub(crate) fn collect_openai_pending_reasoning_digests(
         ControlFlow::<()>::Continue(())
     });
     matched
+}
+
+/// Returns SHA-256 digests of `reasoning.encrypted_content` items in `value`
+/// ordered by their last occurrence within `input`.
+pub(crate) fn openai_reasoning_digests_by_last_occurrence(value: &Value) -> Vec<[u8; 32]> {
+    let Some(input) = value.get("input").filter(|v| v.is_array()) else {
+        return Vec::new();
+    };
+    let mut last_pos_by_digest: HashMap<[u8; 32], usize> = HashMap::new();
+    let mut ordinal = 0_usize;
+    let _ = walk_openai_reasoning_items(input, &mut |item_type, encrypted_content| {
+        if item_type == "reasoning" {
+            let digest: [u8; 32] = Sha256::digest(encrypted_content.as_bytes()).into();
+            last_pos_by_digest.insert(digest, ordinal);
+            ordinal += 1;
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    let mut ordered: Vec<([u8; 32], usize)> = last_pos_by_digest.into_iter().collect();
+    ordered.sort_unstable_by_key(|(_, pos)| *pos);
+    ordered.into_iter().map(|(digest, _)| digest).collect()
 }
 
 fn strip_reasoning_array_tree(

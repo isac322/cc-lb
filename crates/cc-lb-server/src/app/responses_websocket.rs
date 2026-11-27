@@ -907,6 +907,14 @@ async fn advance_one_dispatch(
             return (Vec::new(), Vec::new());
         }
 
+        while connections.len() + pending_connects.len() >= connection_capacity {
+            let Some(retired_id) =
+                gateway.reclaim_idle_connection_for_failover(candidate.upstream_id)
+            else {
+                break;
+            };
+            connections.remove(&retired_id);
+        }
         if connections.len() + pending_connects.len() >= connection_capacity {
             pending.last_error = Some(WebSocketError::new(
                 503,
@@ -1370,6 +1378,7 @@ async fn handle_connect_outcome(
             let now = tokio::time::Instant::now();
             let mut primary = pending.primary;
             primary.last_error = Some(error.clone());
+            primary.last_attempted_upstream_id = Some(pending.active_upstream_id);
             if is_fatal_ws_connect_error(&error) || now >= primary.deadline {
                 let (ready, errs) = finish_failed_dispatch(gateway, primary).await;
                 dispatches.extend(ready);
@@ -1670,6 +1679,9 @@ async fn handle_ws_provider_event(
                     }
                     if sending_downstream {
                         gateway.finish_downstream_send(connection_id);
+                    }
+                    for retire_id in result.retire_connections {
+                        connections.remove(&retire_id);
                     }
                     dispatches.extend(result.dispatches);
                 }

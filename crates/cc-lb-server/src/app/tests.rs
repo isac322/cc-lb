@@ -7703,3 +7703,554 @@ async fn responses_websocket_drain_waits_for_pending_error_terminal_response_fai
     let _ = client2.close(None).await;
     proxy_task2.abort();
 }
+
+#[tokio::test]
+async fn ws_relay_signing_failure_triggers_owner_failover_to_replacement() {
+    use cc_lb_storage_api::upstream::UpstreamKind as StorageRecordKind;
+    use sha2::{Digest, Sha256};
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let b_seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let b_seen_srv = Arc::clone(&b_seen);
+    let listener_b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_b = listener_b.local_addr().unwrap();
+    let _task_b = tokio::spawn(async move {
+        let (stream, _) = listener_b.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        if let Some(Ok(UpstreamMessage::Text(text))) = ws.next().await {
+            let val: Value = serde_json::from_str(&text).unwrap();
+            b_seen_srv.lock().unwrap().push(val);
+            let _ = ws
+                .send(UpstreamMessage::Text(
+                    r#"{"type":"response.created","response":{"id":"resp_sign_b","store":false}}"#
+                        .into(),
+                ))
+                .await;
+            let _ = ws
+                .send(UpstreamMessage::Text(
+                    r#"{"type":"response.completed","response":{"id":"resp_sign_b","status":"completed","store":false,"usage":{"input_tokens":5,"output_tokens":2}}}"#
+                        .into(),
+                ))
+                .await;
+        }
+    });
+
+    let up_a = Uuid::from_u128(0xAA010);
+    let up_b = Uuid::from_u128(0xBB020);
+    struct FailASignerFactory {
+        fail_name: &'static str,
+        chosen: Option<String>,
+    }
+    impl ApiKeyAwareSignerFactory for FailASignerFactory {
+        fn with_router_choice(
+            &self,
+            router_chosen_upstream_name: String,
+        ) -> Arc<dyn SignerFactory> {
+            Arc::new(Self {
+                fail_name: self.fail_name,
+                chosen: Some(router_chosen_upstream_name),
+            })
+        }
+    }
+    #[async_trait]
+    impl SignerFactory for FailASignerFactory {
+        async fn build(
+            &self,
+            _upstream: &cc_lb_domain::Upstream,
+        ) -> Result<Arc<dyn Signer>, SignerError> {
+            Ok(Arc::new(FailASigner {
+                fail: self.chosen.as_deref() == Some(self.fail_name),
+            }))
+        }
+    }
+    struct FailASigner {
+        fail: bool,
+    }
+    #[async_trait]
+    impl Signer for FailASigner {
+        async fn sign(
+            &self,
+            shaped: ShapedRequest,
+            capability: &mut SigningCapability,
+        ) -> Result<SignedRequest, SignerError> {
+            if self.fail {
+                return Err(SignerError::SigningFailed {
+                    reason: "simulated signing failure on A".to_owned(),
+                });
+            }
+            Ok(SignedRequest::from_shaped(shaped, capability))
+        }
+        async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+            RetryDecision::Fail
+        }
+    }
+
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("sign-fail.sqlite");
+    let db_url = format!("sqlite://{}", db_path.display());
+    let rec_a = cc_lb_storage_api::upstream::UpstreamRecord {
+        id: up_a,
+        name: "api-a".to_owned(),
+        kind: StorageRecordKind::OpenaiApiKey,
+        base_url: Some(Url::parse("http://127.0.0.1:9/").unwrap()),
+        enabled: true,
+        ..Default::default()
+    };
+    let rec_b = cc_lb_storage_api::upstream::UpstreamRecord {
+        id: up_b,
+        name: "api-b".to_owned(),
+        kind: StorageRecordKind::OpenaiApiKey,
+        base_url: Some(Url::parse(&format!("http://{addr_b}/")).unwrap()),
+        enabled: true,
+        ..Default::default()
+    };
+    let state = websocket_test_state_with_affinity_store(
+        vec![rec_a, rec_b],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(FailASignerFactory {
+            fail_name: "api-a",
+            chosen: None,
+        }),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+        Some(db_url),
+    )
+    .await;
+
+    let cipher_a = "gAAAAAB_relay_sign_fail_a";
+    let now_secs = cc_lb_clock::unix_secs(state.clock.now());
+    state
+        .storage
+        .bind_upstream_affinities(
+            &[cc_lb_storage_api::UpstreamAffinityBinding {
+                key: cc_lb_storage_api::UpstreamAffinityKey {
+                    principal_id: TEST_PRINCIPAL.to_owned(),
+                    provider: "openai".to_owned(),
+                    kind: cc_lb_storage_api::UpstreamAffinityKind::OpenaiResponseId,
+                    value_sha256: Sha256::digest(cipher_a.as_bytes()).into(),
+                },
+                upstream_id: up_a,
+                owner_epoch: 0,
+                observed_at_unix_secs: now_secs,
+                expires_at_unix_secs: None,
+            }],
+            now_secs,
+            3600,
+        )
+        .await
+        .unwrap();
+
+    let (proxy_addr, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let (mut client, _) = connect_async(websocket_request(proxy_addr)).await.unwrap();
+    client
+        .send(UpstreamMessage::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "store": false,
+                "include": ["reasoning.encrypted_content"],
+                "input": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_sign_fail",
+                        "summary": [],
+                        "encrypted_content": cipher_a
+                    },
+                    {"role": "user", "content": "failover after sign err"}
+                ]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let created = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        created.to_text().unwrap().contains("resp_sign_b"),
+        "{created:?}"
+    );
+    let completed = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        completed.to_text().unwrap().contains("response.completed"),
+        "{completed:?}"
+    );
+    {
+        let recorded = b_seen.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0]["input"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            recorded[0]["input"][0]["content"],
+            "failover after sign err"
+        );
+    }
+    let _ = client.close(None).await;
+    proxy_task.abort();
+}
+
+#[tokio::test]
+async fn ws_relay_slot_cap_one_reclaims_idle_socket_on_live_429_and_eviction_replay() {
+    use cc_lb_storage_api::upstream::UpstreamKind as StorageRecordKind;
+    use sha2::{Digest, Sha256};
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let listener_a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_a = listener_a.local_addr().unwrap();
+    let _task_a = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener_a.accept().await {
+            tokio::spawn(async move {
+                let mut ws = accept_async(stream).await.unwrap();
+                while let Some(Ok(UpstreamMessage::Text(_))) = ws.next().await {
+                    let _ = ws
+                        .send(UpstreamMessage::Text(
+                            r#"{"type":"error","status":429,"error":{"code":"rate_limit_exceeded","message":"429"}}"#
+                                .into(),
+                        ))
+                        .await;
+                }
+            });
+        }
+    });
+
+    let b_seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let b_seen_srv = Arc::clone(&b_seen);
+    let listener_b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_b = listener_b.local_addr().unwrap();
+    let _task_b = tokio::spawn(async move {
+        let (stream, _) = listener_b.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        if let Some(Ok(UpstreamMessage::Text(text))) = ws.next().await {
+            let val: Value = serde_json::from_str(&text).unwrap();
+            b_seen_srv.lock().unwrap().push(val);
+            let _ = ws
+                .send(UpstreamMessage::Text(
+                    r#"{"type":"response.created","response":{"id":"resp_slot1_b","store":false}}"#
+                        .into(),
+                ))
+                .await;
+            let _ = ws
+                .send(UpstreamMessage::Text(
+                    r#"{"type":"response.completed","response":{"id":"resp_slot1_b","status":"completed","store":false,"usage":{"input_tokens":5,"output_tokens":2}}}"#
+                        .into(),
+                ))
+                .await;
+        }
+    });
+
+    let up_a = Uuid::from_u128(0xAA030);
+    let up_b = Uuid::from_u128(0xBB040);
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("slot1.sqlite");
+    let db_url = format!("sqlite://{}", db_path.display());
+    let rec_a = cc_lb_storage_api::upstream::UpstreamRecord {
+        id: up_a,
+        name: "api-a".to_owned(),
+        kind: StorageRecordKind::OpenaiApiKey,
+        base_url: Some(Url::parse(&format!("http://{addr_a}/")).unwrap()),
+        enabled: true,
+        ..Default::default()
+    };
+    let rec_b = cc_lb_storage_api::upstream::UpstreamRecord {
+        id: up_b,
+        name: "api-b".to_owned(),
+        kind: StorageRecordKind::OpenaiApiKey,
+        base_url: Some(Url::parse(&format!("http://{addr_b}/")).unwrap()),
+        enabled: true,
+        ..Default::default()
+    };
+    let state_arg_url = Some(db_url);
+    let mut state = websocket_test_state_with_affinity_store(
+        vec![rec_a, rec_b],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+        state_arg_url,
+    )
+    .await;
+    state.websocket_bulkhead_config = BulkheadRuntimeConfig {
+        max_conns_per_upstream: 1,
+        semaphore_permits: 1,
+        acquire_timeout: Duration::from_secs(1),
+    };
+
+    let cipher_a = "gAAAAAB_slot1_relay_a";
+    let now_secs = cc_lb_clock::unix_secs(state.clock.now());
+    state
+        .storage
+        .bind_upstream_affinities(
+            &[cc_lb_storage_api::UpstreamAffinityBinding {
+                key: cc_lb_storage_api::UpstreamAffinityKey {
+                    principal_id: TEST_PRINCIPAL.to_owned(),
+                    provider: "openai".to_owned(),
+                    kind: cc_lb_storage_api::UpstreamAffinityKind::OpenaiResponseId,
+                    value_sha256: Sha256::digest(cipher_a.as_bytes()).into(),
+                },
+                upstream_id: up_a,
+                owner_epoch: 0,
+                observed_at_unix_secs: now_secs,
+                expires_at_unix_secs: None,
+            }],
+            now_secs,
+            3600,
+        )
+        .await
+        .unwrap();
+
+    let (proxy_addr, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+    let (mut client, _) = connect_async(websocket_request(proxy_addr)).await.unwrap();
+    client
+        .send(UpstreamMessage::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "store": false,
+                "include": ["reasoning.encrypted_content"],
+                "input": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_s1_relay",
+                        "summary": [],
+                        "encrypted_content": cipher_a
+                    },
+                    {"role": "user", "content": "slot1 live 429"}
+                ]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let created = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        created.to_text().unwrap().contains("resp_slot1_b"),
+        "{created:?}"
+    );
+    let completed = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        completed.to_text().unwrap().contains("response.completed"),
+        "{completed:?}"
+    );
+    {
+        let recorded = b_seen.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0]["input"].as_array().unwrap().len(), 1);
+    }
+    let _ = client.close(None).await;
+    proxy_task.abort();
+
+    // Part 2: Codex WS 1-slot pre-dispatch eviction (`400 previous_response_not_found`) leaves idle
+    // socket A open; full-history replay on the same client WS reclaims A via
+    // `reclaim_idle_connection_for_failover` and completes on OAuth B without 503.
+    let listener_codex_a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_codex_a = listener_codex_a.local_addr().unwrap();
+    let cipher_codex_a = "gAAAAAB_codex_slot1_a";
+    let _task_codex_a = tokio::spawn(async move {
+        let (stream, _) = listener_codex_a.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        if let Some(Ok(UpstreamMessage::Text(_))) = ws.next().await {
+            let _ = ws
+                .send(UpstreamMessage::Text(
+                    r#"{"type":"response.created","response":{"id":"resp_codex_slot1_a","status":"in_progress","store":false}}"#
+                        .into(),
+                ))
+                .await;
+            let _ = ws
+                .send(UpstreamMessage::Text(
+                    format!(
+                        r#"{{"type":"response.completed","response":{{"id":"resp_codex_slot1_a","status":"completed","store":false,"output":[{{"type":"reasoning","id":"rs_ca","summary":[],"encrypted_content":"{cipher_codex_a}"}}],"usage":{{"input_tokens":5,"output_tokens":2}}}}}}"#
+                    )
+                    .into(),
+                ))
+                .await;
+        }
+        // Keep socket A open so the relay still sees `connections.len() == 1` until it reclaims A.
+        let _ = ws.next().await;
+    });
+
+    let codex_b_seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let codex_b_seen_srv = Arc::clone(&codex_b_seen);
+    let listener_codex_b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_codex_b = listener_codex_b.local_addr().unwrap();
+    let _task_codex_b = tokio::spawn(async move {
+        let (stream, _) = listener_codex_b.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        if let Some(Ok(UpstreamMessage::Text(text))) = ws.next().await {
+            let val: Value = serde_json::from_str(&text).unwrap();
+            codex_b_seen_srv.lock().unwrap().push(val);
+            let _ = ws
+                .send(UpstreamMessage::Text(
+                    r#"{"type":"response.created","response":{"id":"resp_codex_slot1_b","status":"in_progress","store":false}}"#
+                        .into(),
+                ))
+                .await;
+            let _ = ws
+                .send(UpstreamMessage::Text(
+                    r#"{"type":"response.completed","response":{"id":"resp_codex_slot1_b","status":"completed","store":false,"usage":{"input_tokens":5,"output_tokens":2}}}"#
+                        .into(),
+                ))
+                .await;
+        }
+    });
+
+    let mut oauth_a = websocket_upstream(
+        1,
+        "oauth-slot1-a",
+        Url::parse(&format!("http://{addr_codex_a}/")).unwrap(),
+    );
+    oauth_a.kind = UpstreamKind::OpenaiOauth;
+    oauth_a.oauth_never_refresh = true;
+    let mut oauth_b = websocket_upstream(
+        2,
+        "oauth-slot1-b",
+        Url::parse(&format!("http://{addr_codex_b}/")).unwrap(),
+    );
+    oauth_b.kind = UpstreamKind::OpenaiOauth;
+    oauth_b.oauth_never_refresh = true;
+
+    let db_dir2 = tempfile::tempdir().unwrap();
+    let db_url2 = format!(
+        "sqlite://{}",
+        db_dir2.path().join("codex-slot1.sqlite").display()
+    );
+    let mut codex_state = websocket_test_state_with_affinity_store(
+        vec![oauth_a.clone(), oauth_b.clone()],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+        Some(db_url2),
+    )
+    .await;
+    codex_state.websocket_bulkhead_config = BulkheadRuntimeConfig {
+        max_conns_per_upstream: 1,
+        semaphore_permits: 1,
+        acquire_timeout: Duration::from_secs(1),
+    };
+    let codex_state_ref = codex_state.clone();
+    let (codex_proxy, codex_task) = spawn_proxy_router(proxy_router(codex_state, 30)).await;
+    let mut codex_req = websocket_request(codex_proxy);
+    *codex_req.uri_mut() = format!("ws://{codex_proxy}/openai/backend-api/codex/responses")
+        .parse()
+        .unwrap();
+    let (mut codex_client, _) = connect_async(codex_req).await.unwrap();
+
+    codex_client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-5.4","store":false,"include":["reasoning.encrypted_content"],"input":[{"role":"user","content":"turn1"}]}"#
+                .into(),
+        ))
+        .await
+        .unwrap();
+    for expected in ["response.created", "response.completed"] {
+        let frame = tokio::time::timeout(Duration::from_secs(5), codex_client.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(frame.to_text().unwrap().contains(expected), "{frame:?}");
+    }
+
+    // Disable `oauth-slot1-a` so Turn 2 `previous_response_id` evicts A with `400 previous_response_not_found`,
+    // leaving idle socket A open on the relay.
+    oauth_a.enabled = false;
+    replace_websocket_upstreams(&codex_state_ref, vec![oauth_a, oauth_b]);
+
+    codex_client
+        .send(UpstreamMessage::Text(
+            r#"{"type":"response.create","model":"gpt-5.4","previous_response_id":"resp_codex_slot1_a","store":false,"input":[{"role":"user","content":"turn2"}]}"#
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let evict_err = tokio::time::timeout(Duration::from_secs(5), codex_client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let evict_json: Value = serde_json::from_str(evict_err.to_text().unwrap()).unwrap();
+    assert_eq!(evict_json["status"], 400, "{evict_json}");
+    assert_eq!(
+        evict_json["error"]["code"], "previous_response_not_found",
+        "{evict_json}"
+    );
+
+    // Replay full history on the SAME client WS under slot_cap = 1: relay must reclaim idle socket A
+    // and dispatch to B without failing 503.
+    codex_client
+        .send(UpstreamMessage::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "store": false,
+                "include": ["reasoning.encrypted_content"],
+                "input": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_ca",
+                        "summary": [],
+                        "encrypted_content": cipher_codex_a
+                    },
+                    {"role": "user", "content": "replay turn"}
+                ]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let replay_created = tokio::time::timeout(Duration::from_secs(5), codex_client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        replay_created
+            .to_text()
+            .unwrap()
+            .contains("resp_codex_slot1_b"),
+        "{replay_created:?}"
+    );
+    let replay_completed = tokio::time::timeout(Duration::from_secs(5), codex_client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        replay_completed
+            .to_text()
+            .unwrap()
+            .contains("response.completed"),
+        "{replay_completed:?}"
+    );
+    {
+        let codex_recorded = codex_b_seen.lock().unwrap();
+        assert_eq!(codex_recorded.len(), 1);
+        assert_eq!(codex_recorded[0]["input"].as_array().unwrap().len(), 1);
+        assert_eq!(codex_recorded[0]["input"][0]["content"], "replay turn");
+    }
+    let _ = codex_client.close(None).await;
+    codex_task.abort();
+}
