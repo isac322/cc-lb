@@ -119,7 +119,7 @@ metrics-exporter-prometheus.workspace = true
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }
 flate2.workspace = true
 hex.workspace = true
-nix = { version = "0.31.3", features = ["resource"] }
+nix = { version = "0.32.0", features = ["resource"] }
 opentelemetry.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 reqwest = { workspace = true, features = ["multipart"] }
