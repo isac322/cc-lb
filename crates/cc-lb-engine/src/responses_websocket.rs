@@ -346,6 +346,7 @@ pub struct WebSocketDispatch {
 pub struct WsRelayPoolSnapshot {
     pub pending_connects: usize,
     pub coalescable_upstreams: HashSet<Uuid>,
+    pub reserved_connections: HashSet<u64>,
     pub excluded_upstreams: HashSet<Uuid>,
     pub dial_attempts_exhausted: bool,
     pub connect_budget_expired: bool,
@@ -4620,6 +4621,7 @@ impl ResponsesWebSocketGateway {
         needed_upstream_id: Uuid,
         needed_socket_per_lane: bool,
         needed_lane: &Option<String>,
+        reserved_connections: &HashSet<u64>,
     ) -> Option<u64> {
         let retire_id = self
             .connections
@@ -4629,6 +4631,7 @@ impl ResponsesWebSocketGateway {
                     && (!needed_socket_per_lane
                         || self.connection_lanes.get(conn_id) == Some(needed_lane));
                 (!needed_existing
+                    && !reserved_connections.contains(conn_id)
                     && self.session_upstream != Some(*uid)
                     && self.is_connection_idle(*conn_id, None))
                 .then_some(*conn_id)
@@ -4639,52 +4642,54 @@ impl ResponsesWebSocketGateway {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn has_slot_or_reusable_connection(
+    fn retain_viable_failover_candidates(
         &self,
         failed_connection_id: Option<u64>,
         failed_upstream_id: Uuid,
         owner_upstream_id: Option<Uuid>,
         turn_id: u64,
         lane: &Option<String>,
-        candidates: &[WebSocketCandidate],
+        candidates: &mut Vec<WebSocketCandidate>,
         relay_pool: &WsRelayPoolSnapshot,
     ) -> bool {
-        let has_reusable = candidates.iter().any(|candidate| {
-            self.connections.iter().any(|(conn_id, uid)| {
-                *uid == candidate.upstream_id
-                    && (!candidate.socket_per_lane
-                        || self.connection_lanes.get(conn_id) == Some(lane))
-            }) || (!candidate.socket_per_lane
-                && relay_pool
-                    .coalescable_upstreams
-                    .contains(&candidate.upstream_id))
-        });
-        if has_reusable {
-            return true;
-        }
-        if relay_pool.dial_attempts_exhausted {
-            return false;
-        }
         let capacity = self.slot_cap.max(1);
         let total_in_use = self
             .connections
             .len()
             .saturating_add(relay_pool.pending_connects);
-        if total_in_use < capacity {
-            return true;
+        let reclaimable_idle_excluding = |protected_conn_id: Option<u64>| {
+            self.connections
+                .iter()
+                .filter(|(conn_id, uid)| {
+                    Some(**conn_id) != protected_conn_id
+                        && !relay_pool.reserved_connections.contains(conn_id)
+                        && self.is_connection_idle(**conn_id, Some(turn_id))
+                        && (failed_connection_id == Some(**conn_id)
+                            || self.session_upstream != Some(**uid)
+                            || **uid == failed_upstream_id
+                            || owner_upstream_id == Some(**uid))
+                })
+                .count()
+        };
+        let can_open_new_dial = !relay_pool.dial_attempts_exhausted
+            && total_in_use.saturating_sub(reclaimable_idle_excluding(None)) < capacity;
+        if can_open_new_dial {
+            return !candidates.is_empty();
         }
-        let reclaimable_idle = self
-            .connections
-            .iter()
-            .filter(|(conn_id, uid)| {
-                self.is_connection_idle(**conn_id, Some(turn_id))
-                    && (failed_connection_id == Some(**conn_id)
-                        || self.session_upstream != Some(**uid)
-                        || **uid == failed_upstream_id
-                        || owner_upstream_id == Some(**uid))
-            })
-            .count();
-        total_in_use.saturating_sub(reclaimable_idle) < capacity
+        candidates.retain(|candidate| {
+            (!candidate.socket_per_lane
+                && relay_pool
+                    .coalescable_upstreams
+                    .contains(&candidate.upstream_id))
+                || self.connections.iter().any(|(conn_id, uid)| {
+                    *uid == candidate.upstream_id
+                        && (!candidate.socket_per_lane
+                            || self.connection_lanes.get(conn_id) == Some(lane))
+                        && total_in_use.saturating_sub(reclaimable_idle_excluding(Some(*conn_id)))
+                            <= capacity
+                })
+        });
+        !candidates.is_empty()
     }
 
     async fn try_owner_reasoning_failover_dispatch(
@@ -4755,7 +4760,7 @@ impl ResponsesWebSocketGateway {
         excluded.insert(failed_upstream_id);
         excluded.insert(fallback.owner_upstream_id);
         excluded.extend(relay_pool.excluded_upstreams.iter().copied());
-        let available = self
+        let mut available = self
             .lifecycle
             .filter_available_ws_owner_failover_candidates(
                 &auth,
@@ -4771,16 +4776,13 @@ impl ResponsesWebSocketGateway {
                 &excluded,
             )
             .await;
-        if available.is_empty() {
-            return None;
-        }
-        if !self.has_slot_or_reusable_connection(
+        if !self.retain_viable_failover_candidates(
             failed_connection_id,
             failed_upstream_id,
             Some(fallback.owner_upstream_id),
             turn_id,
             &lane,
-            &available,
+            &mut available,
             relay_pool,
         ) {
             return None;
@@ -4906,7 +4908,7 @@ impl ResponsesWebSocketGateway {
         let mut excluded = self.session_rate_limited_upstreams.clone();
         excluded.insert(failed_upstream_id);
         excluded.extend(relay_pool.excluded_upstreams.iter().copied());
-        let available = self
+        let mut available = self
             .lifecycle
             .filter_available_ws_owner_failover_candidates(
                 &auth,
@@ -4922,16 +4924,13 @@ impl ResponsesWebSocketGateway {
                 &excluded,
             )
             .await;
-        if available.is_empty() {
-            return None;
-        }
-        if !self.has_slot_or_reusable_connection(
+        if !self.retain_viable_failover_candidates(
             failed_connection_id,
             failed_upstream_id,
             None,
             turn_id,
             &lane,
-            &available,
+            &mut available,
             relay_pool,
         ) {
             return None;

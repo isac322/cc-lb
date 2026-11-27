@@ -808,6 +808,71 @@ fn next_ws_candidate(
     }
 }
 
+fn matching_ws_connections<'a>(
+    connections: &'a HashMap<u64, WsProviderConnection>,
+    candidate: &'a cc_lb_engine::responses_websocket::WebSocketCandidate,
+    stream_id: &'a Option<String>,
+) -> impl Iterator<Item = u64> + 'a {
+    connections.iter().filter_map(move |(conn_id, conn)| {
+        (conn.upstream_id == candidate.upstream_id
+            && (!candidate.socket_per_lane || &conn.lane == stream_id))
+            .then_some(*conn_id)
+    })
+}
+
+fn collect_reserved_ws_connections(
+    connections: &HashMap<u64, WsProviderConnection>,
+    queued_dispatches: &VecDeque<WebSocketDispatch>,
+    deferred_for_session_owner: &VecDeque<PendingDispatchState>,
+) -> std::collections::HashSet<u64> {
+    let mut reserved = std::collections::HashSet::new();
+    for dispatch in queued_dispatches {
+        if let Some(conn_id) = dispatch.connection_id {
+            reserved.insert(conn_id);
+            continue;
+        }
+        if dispatch.control {
+            continue;
+        }
+        if let Some(candidate) = dispatch.candidates.first() {
+            reserved.extend(matching_ws_connections(
+                connections,
+                candidate,
+                &dispatch.stream_id,
+            ));
+        }
+    }
+    for deferred in deferred_for_session_owner {
+        if let Some(conn_id) = deferred.dispatch.connection_id {
+            reserved.insert(conn_id);
+            continue;
+        }
+        if deferred.dispatch.control {
+            continue;
+        }
+        if deferred.attempts >= deferred.max_attempts {
+            if let Some(candidate) = deferred.remaining.iter().find(|candidate| {
+                matching_ws_connections(connections, candidate, &deferred.dispatch.stream_id)
+                    .next()
+                    .is_some()
+            }) {
+                reserved.extend(matching_ws_connections(
+                    connections,
+                    candidate,
+                    &deferred.dispatch.stream_id,
+                ));
+            }
+        } else if let Some(candidate) = deferred.remaining.front() {
+            reserved.extend(matching_ws_connections(
+                connections,
+                candidate,
+                &deferred.dispatch.stream_id,
+            ));
+        }
+    }
+    reserved
+}
+
 fn ws_relay_pool_snapshot(
     connections: &HashMap<u64, WsProviderConnection>,
     pending_connects: &HashMap<u64, PendingConnect>,
@@ -823,11 +888,11 @@ fn ws_relay_pool_snapshot(
     let has_existing_or_coalescable =
         |candidate: &cc_lb_engine::responses_websocket::WebSocketCandidate,
          stream_id: &Option<String>| {
-            connections.values().any(|conn| {
-                conn.upstream_id == candidate.upstream_id
-                    && (!candidate.socket_per_lane || &conn.lane == stream_id)
-            }) || (!candidate.socket_per_lane
-                && coalescable_upstreams.contains(&candidate.upstream_id))
+            matching_ws_connections(connections, candidate, stream_id)
+                .next()
+                .is_some()
+                || (!candidate.socket_per_lane
+                    && coalescable_upstreams.contains(&candidate.upstream_id))
         };
     let mut planned_dials = 0_usize;
     for dispatch in queued_dispatches {
@@ -855,9 +920,12 @@ fn ws_relay_pool_snapshot(
             planned_dials = planned_dials.saturating_add(1);
         }
     }
+    let reserved_connections =
+        collect_reserved_ws_connections(connections, queued_dispatches, deferred_for_session_owner);
     cc_lb_engine::responses_websocket::WsRelayPoolSnapshot {
         pending_connects: pending_connects.len().saturating_add(planned_dials),
         coalescable_upstreams,
+        reserved_connections,
         ..Default::default()
     }
 }
@@ -1123,11 +1191,17 @@ async fn advance_one_dispatch(
         }
         pending.last_attempted_upstream_id = Some(candidate.upstream_id);
 
+        let reserved_connections = collect_reserved_ws_connections(
+            connections,
+            queued_dispatches,
+            deferred_for_session_owner,
+        );
         while connections.len() + pending_connects.len() >= connection_capacity {
             let Some(retired_id) = gateway.reclaim_idle_connection_for_failover(
                 candidate.upstream_id,
                 candidate.socket_per_lane,
                 &pending.dispatch.stream_id,
+                &reserved_connections,
             ) else {
                 break;
             };
@@ -4208,5 +4282,630 @@ mod tests {
         task_b.abort();
         task_c.abort();
         task_d.abort();
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_buffered_429_batch_honors_reclamation_and_reuse_reservations() {
+        use futures_util::StreamExt as _;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        async fn spawn_ws_recorder_server() -> (
+            std::net::SocketAddr,
+            Arc<AtomicUsize>,
+            tokio::sync::mpsc::UnboundedReceiver<String>,
+            JoinHandle<()>,
+        ) {
+            let accepts = Arc::new(AtomicUsize::new(0));
+            let accepts_task = Arc::clone(&accepts);
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind ws recorder server");
+            let addr = listener.local_addr().unwrap();
+            let task = tokio::spawn(async move {
+                while let Ok((tcp, _)) = listener.accept().await {
+                    accepts_task.fetch_add(1, AtomicOrdering::SeqCst);
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        if let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await {
+                            while let Some(Ok(msg)) = ws.next().await {
+                                if let Ok(text) = msg.to_text() {
+                                    let _ = tx.send(text.to_owned());
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+            (addr, accepts, rx, task)
+        }
+
+        async fn connect_existing_ws(
+            state: &ProxyState,
+            upstream_id: uuid::Uuid,
+            upstream_name: &str,
+            addr: std::net::SocketAddr,
+        ) -> WsProviderConnection {
+            let (ws_client, _) =
+                tokio_tungstenite::connect_async(format!("ws://{addr}/v1/responses"))
+                    .await
+                    .expect("connect existing mock socket");
+            let (sink, _stream) = ws_client.split();
+            let bulkhead = state
+                .websocket_bulkheads
+                .semaphore_only_bulkhead(
+                    websocket_breaker_key(upstream_id),
+                    state.websocket_bulkhead_config,
+                )
+                .acquire_owned()
+                .await
+                .expect("bulkhead permit");
+            WsProviderConnection {
+                upstream_id,
+                upstream_name: upstream_name.to_owned(),
+                sink,
+                task: None,
+                lane: None,
+                _bulkhead_guard: bulkhead,
+            }
+        }
+
+        struct Fixture {
+            state: ProxyState,
+            gateway: ResponsesWebSocketGateway,
+            connections: HashMap<u64, WsProviderConnection>,
+            acc_b: Arc<AtomicUsize>,
+            rx_b: tokio::sync::mpsc::UnboundedReceiver<String>,
+            rx_c: tokio::sync::mpsc::UnboundedReceiver<String>,
+            up_b_id: uuid::Uuid,
+            up_c_id: uuid::Uuid,
+            tasks: Vec<JoinHandle<()>>,
+        }
+
+        async fn setup_case(slot_cap: usize, with_idle_e: bool) -> Fixture {
+            let (addr_a, _acc_a, _rx_a, task_a) = spawn_ws_recorder_server().await;
+            let (addr_b, acc_b, rx_b, task_b) = spawn_ws_recorder_server().await;
+            let (addr_c, _acc_c, rx_c, task_c) = spawn_ws_recorder_server().await;
+            let (addr_d, _acc_d, _rx_d, task_d) = spawn_ws_recorder_server().await;
+            let (addr_e, _acc_e, _rx_e, task_e) = spawn_ws_recorder_server().await;
+
+            let mk_up = |id: u128, name: &str, addr: std::net::SocketAddr, enabled: bool| {
+                let mut rec = crate::app::tests::websocket_upstream(
+                    id,
+                    name,
+                    url::Url::parse(&format!("http://{addr}/")).unwrap(),
+                );
+                rec.enabled = enabled;
+                rec
+            };
+            let up_a = mk_up(31, "api-a", addr_a, true);
+            let up_b = mk_up(32, "api-b", addr_b, true);
+            let up_d = mk_up(33, "api-d", addr_d, true);
+            let up_c = mk_up(34, "api-c", addr_c, true);
+            let up_e = mk_up(35, "api-e", addr_e, with_idle_e);
+
+            let state = crate::app::tests::websocket_test_state(
+                vec![
+                    up_a.clone(),
+                    up_b.clone(),
+                    up_d.clone(),
+                    up_c.clone(),
+                    up_e.clone(),
+                ],
+                cc_lb_domain::TerminalStrategy::FirstPick,
+                DrainController::new(),
+                Arc::new(crate::app::tests::WebSocketTestSignerFactory),
+                Arc::new(crate::app::tests::FixtureKeyStore),
+                vec!["*".to_owned()],
+            )
+            .await;
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-api-key",
+                HeaderValue::from_str(crate::app::tests::TEST_KEY.plaintext.as_str()).unwrap(),
+            );
+            let auth = state.lifecycle.authenticate(&headers).await.unwrap();
+            let mut gateway = ResponsesWebSocketGateway::new(
+                state.lifecycle.clone(),
+                &auth,
+                headers,
+                state.body_caps.messages,
+                slot_cap,
+            );
+            let mut connections = HashMap::new();
+            connections.insert(
+                1,
+                connect_existing_ws(&state, up_a.id, "api-a", addr_a).await,
+            );
+            connections.insert(
+                2,
+                connect_existing_ws(&state, up_c.id, "api-c", addr_c).await,
+            );
+            connections.insert(
+                3,
+                connect_existing_ws(&state, up_d.id, "api-d", addr_d).await,
+            );
+            if with_idle_e {
+                connections.insert(
+                    4,
+                    connect_existing_ws(&state, up_e.id, "api-e", addr_e).await,
+                );
+            }
+
+            let with_enabled = |rec: &UpstreamRecord, enabled: bool| {
+                let mut cloned = rec.clone();
+                cloned.enabled = enabled;
+                cloned
+            };
+            let set_enabled = |a: bool, b: bool, c: bool, d: bool, e: bool| {
+                let view = state.dynamic_view.load();
+                state.dynamic_view.store(
+                    cc_lb_control::DynamicViewBuilder::from_view(&view)
+                        .upstream_records(vec![
+                            with_enabled(&up_a, a),
+                            with_enabled(&up_b, b),
+                            with_enabled(&up_d, d),
+                            with_enabled(&up_c, c),
+                            with_enabled(&up_e, e),
+                        ])
+                        .build(),
+                );
+            };
+
+            // Seed idle C on conn 2 (lowest idle id) and optional idle E on conn 4 (higher idle id).
+            set_enabled(false, false, true, false, false);
+            let seed_c = gateway
+                .client_message(
+                    auth.clone(),
+                    Bytes::from_static(br#"{"type":"response.create","model":"gpt-5.4","stream_id":"lane-1","store":false,"input":[]}"#),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            gateway.assign_connection(seed_c.turn_id, 2, up_c.id, "api-c");
+            let seed_fail = WebSocketError::new(502, "upstream_unavailable", "seed idle");
+            gateway.fail_dispatch(seed_c.turn_id, &seed_fail).await;
+
+            if with_idle_e {
+                set_enabled(false, false, false, false, true);
+                let seed_e = gateway
+                    .client_message(
+                        auth.clone(),
+                        Bytes::from_static(br#"{"type":"response.create","model":"gpt-5.4","stream_id":"lane-1","store":false,"input":[]}"#),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                gateway.assign_connection(seed_e.turn_id, 4, up_e.id, "api-e");
+                gateway.fail_dispatch(seed_e.turn_id, &seed_fail).await;
+            }
+
+            // Busy conn 1 (`api-a`) with completed owner + active Turn 1 `[api-a, api-b]`.
+            set_enabled(true, true, false, false, false);
+            let owner_a = gateway
+                .client_message(
+                    auth.clone(),
+                    Bytes::from_static(br#"{"type":"response.create","model":"gpt-5.4","stream_id":"lane-1","store":false,"input":[]}"#),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            gateway.assign_connection(owner_a.turn_id, 1, up_a.id, "api-a");
+            gateway.commit_send_attempt(owner_a.turn_id);
+            gateway.sent(owner_a.turn_id);
+            gateway
+                .provider_message(
+                    1,
+                    &Bytes::from_static(br#"{"type":"response.created","stream_id":"lane-1","response":{"id":"resp_busy_a","status":"in_progress","store":false}}"#),
+                )
+                .await
+                .unwrap();
+            gateway
+                .provider_message(
+                    1,
+                    &Bytes::from_static(br#"{"type":"response.completed","stream_id":"lane-1","response":{"id":"resp_busy_a","status":"completed","store":false}}"#),
+                )
+                .await
+                .unwrap();
+            let t1 = gateway
+                .client_message(
+                    auth.clone(),
+                    Bytes::from_static(br#"{"type":"response.create","model":"gpt-5.4","stream_id":"lane-1","store":false,"input":[{"role":"user","content":"turn a"}]}"#),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                t1.candidates
+                    .iter()
+                    .map(|c| c.upstream_id)
+                    .collect::<Vec<_>>(),
+                vec![up_a.id, up_b.id]
+            );
+            gateway.assign_connection(t1.turn_id, 1, up_a.id, "api-a");
+            gateway.commit_send_attempt(t1.turn_id);
+            gateway.sent(t1.turn_id);
+
+            // Busy conn 3 (`api-d`) with completed owner + active Turn 2 `[api-d, api-c]`.
+            set_enabled(false, false, true, true, false);
+            let owner_d = gateway
+                .client_message(
+                    auth.clone(),
+                    Bytes::from_static(br#"{"type":"response.create","model":"gpt-5.4","stream_id":"lane-2","store":false,"input":[]}"#),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            gateway.assign_connection(owner_d.turn_id, 3, up_d.id, "api-d");
+            gateway.commit_send_attempt(owner_d.turn_id);
+            gateway.sent(owner_d.turn_id);
+            gateway
+                .provider_message(
+                    3,
+                    &Bytes::from_static(br#"{"type":"response.created","stream_id":"lane-2","response":{"id":"resp_busy_d","status":"in_progress","store":false}}"#),
+                )
+                .await
+                .unwrap();
+            gateway
+                .provider_message(
+                    3,
+                    &Bytes::from_static(br#"{"type":"response.completed","stream_id":"lane-2","response":{"id":"resp_busy_d","status":"completed","store":false}}"#),
+                )
+                .await
+                .unwrap();
+            let t2 = gateway
+                .client_message(
+                    auth,
+                    Bytes::from_static(br#"{"type":"response.create","model":"gpt-5.4","stream_id":"lane-2","store":false,"input":[{"role":"user","content":"turn d"}]}"#),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                t2.candidates
+                    .iter()
+                    .map(|c| c.upstream_id)
+                    .collect::<Vec<_>>(),
+                vec![up_d.id, up_c.id]
+            );
+            gateway.assign_connection(t2.turn_id, 3, up_d.id, "api-d");
+            gateway.commit_send_attempt(t2.turn_id);
+            gateway.sent(t2.turn_id);
+
+            // Restore all upstreams healthy before processing the buffered 429 batch.
+            set_enabled(true, true, true, true, with_idle_e);
+            acc_b.store(0, AtomicOrdering::SeqCst);
+
+            Fixture {
+                state,
+                gateway,
+                connections,
+                acc_b,
+                rx_b,
+                rx_c,
+                up_b_id: up_b.id,
+                up_c_id: up_c.id,
+                tasks: vec![task_a, task_b, task_c, task_d, task_e],
+            }
+        }
+
+        let err_a = Bytes::from_static(br#"{"type":"error","stream_id":"lane-1","error":{"code":"rate_limit_exceeded","message":"429 from a"}}"#);
+        let err_d = Bytes::from_static(br#"{"type":"error","stream_id":"lane-2","error":{"code":"rate_limit_exceeded","message":"429 from d"}}"#);
+
+        // Subcase 1: Cap=3, [A 429 -> dial B, D 429 -> reuse idle C].
+        // D's reuse of C must be rejected because A's queued dial to B will reclaim C,
+        // so D forwards its 429 immediately and flush reclaims C for B without 503.
+        {
+            let mut fx = setup_case(3, false).await;
+            let (mut downstream_sink, mut client_ws, sink_server) =
+                spawn_test_downstream_sink().await;
+            let (events, mut event_rx) = tokio::sync::mpsc::channel(16);
+            events
+                .send(WsProviderEvent::Frame {
+                    connection_id: 1,
+                    bytes: err_a.clone(),
+                    text: true,
+                })
+                .await
+                .unwrap();
+            events
+                .send(WsProviderEvent::Frame {
+                    connection_id: 3,
+                    bytes: err_d.clone(),
+                    text: true,
+                })
+                .await
+                .unwrap();
+
+            let pending_connects = HashMap::new();
+            let mut deferred = VecDeque::new();
+            let mut dispatches = VecDeque::new();
+            let mut carried_budgets = HashMap::new();
+            assert!(
+                drain_buffered_ws_events_snapshot(
+                    &mut event_rx,
+                    &mut fx.gateway,
+                    &mut fx.connections,
+                    &pending_connects,
+                    &deferred,
+                    &mut dispatches,
+                    &mut downstream_sink,
+                    2,
+                )
+                .await
+            );
+            assert_eq!(dispatches.len(), 1);
+            assert_eq!(dispatches[0].stream_id.as_deref(), Some("lane-1"));
+            assert_eq!(dispatches[0].candidates[0].upstream_id, fx.up_b_id);
+
+            let fwd = tokio::time::timeout(Duration::from_secs(2), client_ws.next())
+                .await
+                .expect("Subcase 1: D's 429 forwards immediately")
+                .unwrap()
+                .unwrap();
+            let fwd_json: serde_json::Value = serde_json::from_str(fwd.to_text().unwrap()).unwrap();
+            assert_eq!(fwd_json["stream_id"], "lane-2");
+            assert_eq!(fwd_json["error"]["code"], "rate_limit_exceeded");
+
+            let mut pending_mut = pending_connects;
+            let mut connect_tasks = tokio::task::JoinSet::new();
+            let mut next_connection_id = 4;
+            assert!(
+                flush_pending_ws_dispatches(
+                    &mut fx.gateway,
+                    &fx.state,
+                    &mut fx.connections,
+                    &events,
+                    &mut next_connection_id,
+                    3,
+                    &mut pending_mut,
+                    &mut connect_tasks,
+                    &mut deferred,
+                    &mut dispatches,
+                    &mut carried_budgets,
+                    &mut downstream_sink,
+                )
+                .await
+            );
+            assert!(
+                !fx.connections.contains_key(&2),
+                "idle C must be reclaimed for B dial"
+            );
+            let outcome = tokio::time::timeout(Duration::from_secs(2), connect_tasks.join_next())
+                .await
+                .expect("B connects")
+                .expect("connect joined")
+                .expect("join ok");
+            let errs = handle_connect_outcome(
+                &mut fx.gateway,
+                outcome,
+                &fx.state,
+                &mut fx.connections,
+                &events,
+                &mut next_connection_id,
+                3,
+                &mut pending_mut,
+                &mut connect_tasks,
+                &mut deferred,
+                &mut dispatches,
+                &mut carried_budgets,
+            )
+            .await;
+            assert!(errs.is_empty(), "Subcase 1 flush must succeed: {errs:?}");
+            assert_eq!(fx.acc_b.load(AtomicOrdering::SeqCst), 1);
+            let sent_b = tokio::time::timeout(Duration::from_secs(2), fx.rx_b.recv())
+                .await
+                .expect("B received lane-1 turn")
+                .unwrap();
+            assert!(sent_b.contains("\"turn a\""));
+
+            sink_server.abort();
+            for task in fx.tasks {
+                task.abort();
+            }
+        }
+
+        // Subcase 2: Reverse order, Cap=3, [D 429 -> reuse idle C, A 429 -> dial B].
+        // D's queued reuse reserves idle C, so A sees no reclaimable slot, forwards its 429,
+        // and flush sends D on C without reclaiming it or emitting 503.
+        {
+            let mut fx = setup_case(3, false).await;
+            let (mut downstream_sink, mut client_ws, sink_server) =
+                spawn_test_downstream_sink().await;
+            let (events, mut event_rx) = tokio::sync::mpsc::channel(16);
+            events
+                .send(WsProviderEvent::Frame {
+                    connection_id: 3,
+                    bytes: err_d.clone(),
+                    text: true,
+                })
+                .await
+                .unwrap();
+            events
+                .send(WsProviderEvent::Frame {
+                    connection_id: 1,
+                    bytes: err_a.clone(),
+                    text: true,
+                })
+                .await
+                .unwrap();
+
+            let pending_connects = HashMap::new();
+            let mut deferred = VecDeque::new();
+            let mut dispatches = VecDeque::new();
+            let mut carried_budgets = HashMap::new();
+            assert!(
+                drain_buffered_ws_events_snapshot(
+                    &mut event_rx,
+                    &mut fx.gateway,
+                    &mut fx.connections,
+                    &pending_connects,
+                    &deferred,
+                    &mut dispatches,
+                    &mut downstream_sink,
+                    2,
+                )
+                .await
+            );
+            assert_eq!(dispatches.len(), 1);
+            assert_eq!(dispatches[0].stream_id.as_deref(), Some("lane-2"));
+            assert_eq!(dispatches[0].candidates[0].upstream_id, fx.up_c_id);
+
+            let fwd = tokio::time::timeout(Duration::from_secs(2), client_ws.next())
+                .await
+                .expect("Subcase 2: A's 429 forwards immediately")
+                .unwrap()
+                .unwrap();
+            let fwd_json: serde_json::Value = serde_json::from_str(fwd.to_text().unwrap()).unwrap();
+            assert_eq!(fwd_json["stream_id"], "lane-1");
+            assert_eq!(fwd_json["error"]["code"], "rate_limit_exceeded");
+
+            let mut pending_mut = pending_connects;
+            let mut connect_tasks = tokio::task::JoinSet::new();
+            let mut next_connection_id = 4;
+            assert!(
+                flush_pending_ws_dispatches(
+                    &mut fx.gateway,
+                    &fx.state,
+                    &mut fx.connections,
+                    &events,
+                    &mut next_connection_id,
+                    3,
+                    &mut pending_mut,
+                    &mut connect_tasks,
+                    &mut deferred,
+                    &mut dispatches,
+                    &mut carried_budgets,
+                    &mut downstream_sink,
+                )
+                .await
+            );
+            assert!(
+                fx.connections.contains_key(&2),
+                "reserved C must remain open"
+            );
+            assert_eq!(fx.acc_b.load(AtomicOrdering::SeqCst), 0);
+            let sent_c = tokio::time::timeout(Duration::from_secs(2), fx.rx_c.recv())
+                .await
+                .expect("C received lane-2 turn")
+                .unwrap();
+            assert!(sent_c.contains("\"turn d\""));
+
+            sink_server.abort();
+            for task in fx.tasks {
+                task.abort();
+            }
+        }
+
+        // Subcase 3: Cap=4 with lower-ID idle C (`conn 2`) and higher-ID idle E (`conn 4`).
+        // Buffered [A 429 -> dial B, D 429 -> reuse C] queues both; flush skips reserved
+        // lower-ID C, reclaims higher-ID E for B, and dispatches D onto still-open C without 503.
+        {
+            let mut fx = setup_case(4, true).await;
+            let (mut downstream_sink, _client_ws, sink_server) = spawn_test_downstream_sink().await;
+            let (events, mut event_rx) = tokio::sync::mpsc::channel(16);
+            events
+                .send(WsProviderEvent::Frame {
+                    connection_id: 1,
+                    bytes: err_a,
+                    text: true,
+                })
+                .await
+                .unwrap();
+            events
+                .send(WsProviderEvent::Frame {
+                    connection_id: 3,
+                    bytes: err_d,
+                    text: true,
+                })
+                .await
+                .unwrap();
+
+            let pending_connects = HashMap::new();
+            let mut deferred = VecDeque::new();
+            let mut dispatches = VecDeque::new();
+            let mut carried_budgets = HashMap::new();
+            assert!(
+                drain_buffered_ws_events_snapshot(
+                    &mut event_rx,
+                    &mut fx.gateway,
+                    &mut fx.connections,
+                    &pending_connects,
+                    &deferred,
+                    &mut dispatches,
+                    &mut downstream_sink,
+                    2,
+                )
+                .await
+            );
+            assert_eq!(dispatches.len(), 2);
+            assert_eq!(dispatches[0].candidates[0].upstream_id, fx.up_b_id);
+            assert_eq!(dispatches[1].candidates[0].upstream_id, fx.up_c_id);
+
+            let mut pending_mut = pending_connects;
+            let mut connect_tasks = tokio::task::JoinSet::new();
+            let mut next_connection_id = 5;
+            assert!(
+                flush_pending_ws_dispatches(
+                    &mut fx.gateway,
+                    &fx.state,
+                    &mut fx.connections,
+                    &events,
+                    &mut next_connection_id,
+                    4,
+                    &mut pending_mut,
+                    &mut connect_tasks,
+                    &mut deferred,
+                    &mut dispatches,
+                    &mut carried_budgets,
+                    &mut downstream_sink,
+                )
+                .await
+            );
+            assert!(
+                fx.connections.contains_key(&2),
+                "reserved lower-id C must not be reclaimed while D is queued to reuse it"
+            );
+            assert!(
+                !fx.connections.contains_key(&4),
+                "higher-id unreserved idle E must be reclaimed for B"
+            );
+            let sent_c = tokio::time::timeout(Duration::from_secs(2), fx.rx_c.recv())
+                .await
+                .expect("C received lane-2 turn")
+                .unwrap();
+            assert!(sent_c.contains("\"turn d\""));
+
+            let outcome = tokio::time::timeout(Duration::from_secs(2), connect_tasks.join_next())
+                .await
+                .expect("B connects after reclaiming E")
+                .expect("connect joined")
+                .expect("join ok");
+            let errs = handle_connect_outcome(
+                &mut fx.gateway,
+                outcome,
+                &fx.state,
+                &mut fx.connections,
+                &events,
+                &mut next_connection_id,
+                4,
+                &mut pending_mut,
+                &mut connect_tasks,
+                &mut deferred,
+                &mut dispatches,
+                &mut carried_budgets,
+            )
+            .await;
+            assert!(
+                errs.is_empty(),
+                "Subcase 3 B connect must succeed: {errs:?}"
+            );
+            assert_eq!(fx.acc_b.load(AtomicOrdering::SeqCst), 1);
+
+            sink_server.abort();
+            for task in fx.tasks {
+                task.abort();
+            }
+        }
     }
 }
