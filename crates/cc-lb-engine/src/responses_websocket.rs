@@ -15462,15 +15462,81 @@ pub(crate) mod tests {
         );
 
         gw.mark_failover_replacement_dialed(d1.turn_id);
+        assert!(gw.turns[&d1.turn_id].suppressed_failover_error.is_none());
         assert_eq!(gw.used_bytes, used_before);
         assert_eq!(gw.turns[&d1.turn_id].charged_bytes, charge_before);
-
-        // Verify `commit_send_attempt` also releases suppressed bytes cleanly.
-        gw.assign_connection(d1.turn_id, 2, upstream_b, "oauth-b");
-        gw.commit_send_attempt(d1.turn_id);
         gw.finish_turn(d1.turn_id, None);
         gw.prune_empty_lanes();
         assert_eq!(gw.used_bytes, 0);
+
+        // Verify `commit_send_attempt` releases suppressed bytes immediately when reusing a socket
+        // without calling `mark_failover_replacement_dialed`.
+        let (
+            lifecycle_commit,
+            auth_commit,
+            headers_commit,
+            commit_a,
+            commit_b,
+            commit_quota,
+            _commit_store,
+        ) = setup_codex_ws_quota_fixture(
+            cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover,
+        )
+        .await;
+        commit_quota.set_state(commit_a, 0.05, "allowed");
+        commit_quota.set_state(commit_b, 0.1, "allowed");
+        let mut gw_commit = ResponsesWebSocketGateway::new(
+            lifecycle_commit,
+            &auth_commit,
+            headers_commit,
+            1024 * 1024,
+            16,
+        )
+        .with_codex_backend(true);
+        let d_commit = gw_commit
+            .client_message(auth_commit.clone(), req.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let commit_used_before = gw_commit.used_bytes;
+        let commit_charge_before = gw_commit.turns[&d_commit.turn_id].charged_bytes;
+        gw_commit.assign_connection(d_commit.turn_id, 1, commit_a, "oauth-a");
+        gw_commit.commit_send_attempt(d_commit.turn_id);
+        gw_commit.sent(d_commit.turn_id);
+
+        let commit_res = gw_commit
+            .provider_message_with_pool_and_opcode(1, &error_frame, true, &pool)
+            .await
+            .unwrap();
+        assert!(!commit_res.forward);
+        assert_eq!(commit_res.dispatches.len(), 1);
+        assert_eq!(gw_commit.used_bytes, commit_used_before + suppressed_charge);
+        assert_eq!(
+            gw_commit.turns[&d_commit.turn_id].charged_bytes,
+            commit_charge_before + suppressed_charge
+        );
+        assert!(
+            gw_commit.turns[&d_commit.turn_id]
+                .suppressed_failover_error
+                .is_some()
+        );
+
+        gw_commit.assign_connection(d_commit.turn_id, 2, commit_b, "oauth-b");
+        gw_commit.commit_send_attempt(d_commit.turn_id);
+        assert_eq!(gw_commit.used_bytes, commit_used_before);
+        assert_eq!(
+            gw_commit.turns[&d_commit.turn_id].charged_bytes,
+            commit_charge_before
+        );
+        assert!(
+            gw_commit.turns[&d_commit.turn_id]
+                .suppressed_failover_error
+                .is_none()
+        );
+        gw_commit.finish_turn(d_commit.turn_id, None);
+        gw_commit.prune_empty_lanes();
+        assert_eq!(gw_commit.used_bytes, 0);
+        gw_commit.close();
 
         // With `byte_cap` 1 byte below `used_before + suppressed_charge`, failover is rejected
         // and the original 429 error frame is forwarded directly instead of suppressed.
