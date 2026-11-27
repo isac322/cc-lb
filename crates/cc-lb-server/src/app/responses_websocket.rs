@@ -514,6 +514,7 @@ async fn send_responses_dispatch(
     attempted_upstreams: &std::collections::HashSet<uuid::Uuid>,
     dispatch_timings: cc_lb_engine::responses_websocket::ResponsesDispatchTimings,
     deadline: tokio::time::Instant,
+    per_attempt_timeout: Duration,
     drain_controller: &DrainController,
 ) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
     let Some(connection) = connections.get_mut(&connection_id) else {
@@ -631,6 +632,7 @@ async fn send_responses_dispatch(
                 attempts,
                 max_attempts,
                 deadline,
+                per_attempt_timeout,
                 attempted_upstreams: attempted,
             },
         )
@@ -678,6 +680,7 @@ struct CarriedConnectBudget {
     attempts: usize,
     max_attempts: usize,
     deadline: tokio::time::Instant,
+    per_attempt_timeout: Duration,
     attempted_upstreams: std::collections::HashSet<uuid::Uuid>,
 }
 
@@ -720,20 +723,23 @@ impl PendingDispatchState {
     ) -> Self {
         let remaining = dispatch.candidates.iter().cloned().collect();
         let pinned_to_single_owner = dispatch.candidates.len() <= 1;
-        let (attempts, max_attempts, deadline, attempted_upstreams) = match carried {
-            Some(carried) => (
-                carried.attempts,
-                carried.max_attempts,
-                carried.deadline,
-                carried.attempted_upstreams,
-            ),
-            None => (
-                0,
-                max_attempts,
-                bounded_deadline(tokio::time::Instant::now(), connect_budget),
-                std::collections::HashSet::new(),
-            ),
-        };
+        let (attempts, max_attempts, deadline, per_attempt_timeout, attempted_upstreams) =
+            match carried {
+                Some(carried) => (
+                    carried.attempts,
+                    carried.max_attempts,
+                    carried.deadline,
+                    carried.per_attempt_timeout,
+                    carried.attempted_upstreams,
+                ),
+                None => (
+                    0,
+                    max_attempts,
+                    bounded_deadline(tokio::time::Instant::now(), connect_budget),
+                    per_attempt_timeout,
+                    std::collections::HashSet::new(),
+                ),
+            };
         Self {
             dispatch,
             remaining,
@@ -873,18 +879,56 @@ fn collect_reserved_ws_connections(
     reserved
 }
 
-fn ws_relay_pool_snapshot(
-    connections: &HashMap<u64, WsProviderConnection>,
-    pending_connects: &HashMap<u64, PendingConnect>,
-    queued_dispatches: &VecDeque<WebSocketDispatch>,
-    deferred_for_session_owner: &VecDeque<PendingDispatchState>,
-) -> cc_lb_engine::responses_websocket::WsRelayPoolSnapshot {
-    let mut coalescable_upstreams = std::collections::HashSet::new();
-    for entry in pending_connects.values() {
-        if !entry.active_socket_per_lane {
-            coalescable_upstreams.insert(entry.active_upstream_id);
+fn enqueue_outcome_ready(
+    ready: Vec<WebSocketDispatch>,
+    dispatches: &mut VecDeque<WebSocketDispatch>,
+    resumed: &mut VecDeque<PendingDispatchState>,
+    carried_budgets: &mut HashMap<u64, CarriedConnectBudget>,
+) {
+    let mut prioritized = Vec::new();
+    for dispatch in ready {
+        if let Some(carried) = carried_budgets.remove(&dispatch.turn_id) {
+            prioritized.push(PendingDispatchState::with_carried_budget(
+                dispatch,
+                WS_PROVIDER_CONNECT_TIMEOUT,
+                WS_DISPATCH_CONNECT_BUDGET,
+                WS_MAX_UPSTREAM_ATTEMPTS,
+                Some(carried),
+            ));
+        } else {
+            dispatches.push_back(dispatch);
         }
     }
+    for pending in prioritized.into_iter().rev() {
+        resumed.push_front(pending);
+    }
+}
+
+fn coalescable_ws_upstreams(
+    pending_connects: &HashMap<u64, PendingConnect>,
+) -> std::collections::HashSet<uuid::Uuid> {
+    pending_connects
+        .values()
+        .filter(|entry| !entry.active_socket_per_lane)
+        .map(|entry| entry.active_upstream_id)
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+enum QueuedDialReservation {
+    #[cfg(test)]
+    None,
+    FailoverRecoveriesOnly,
+    AllQueued,
+}
+
+fn count_planned_ws_dials_with_coalescable(
+    connections: &HashMap<u64, WsProviderConnection>,
+    coalescable_upstreams: &std::collections::HashSet<uuid::Uuid>,
+    queued_dispatches: &VecDeque<WebSocketDispatch>,
+    deferred_for_session_owner: &VecDeque<PendingDispatchState>,
+    failover_recoveries_only: bool,
+) -> usize {
     let has_existing_or_coalescable =
         |candidate: &cc_lb_engine::responses_websocket::WebSocketCandidate,
          stream_id: &Option<String>| {
@@ -896,7 +940,10 @@ fn ws_relay_pool_snapshot(
         };
     let mut planned_dials = 0_usize;
     for dispatch in queued_dispatches {
-        if dispatch.control || dispatch.connection_id.is_some() {
+        if dispatch.control
+            || dispatch.connection_id.is_some()
+            || (failover_recoveries_only && !dispatch.is_failover_recovery)
+        {
             continue;
         }
         let Some(candidate) = dispatch.candidates.first() else {
@@ -910,6 +957,7 @@ fn ws_relay_pool_snapshot(
         if deferred.dispatch.control
             || deferred.dispatch.connection_id.is_some()
             || deferred.attempts >= deferred.max_attempts
+            || (failover_recoveries_only && !deferred.dispatch.is_failover_recovery)
         {
             continue;
         }
@@ -920,6 +968,40 @@ fn ws_relay_pool_snapshot(
             planned_dials = planned_dials.saturating_add(1);
         }
     }
+    planned_dials
+}
+
+fn count_planned_ws_dials(
+    connections: &HashMap<u64, WsProviderConnection>,
+    pending_connects: &HashMap<u64, PendingConnect>,
+    queued_dispatches: &VecDeque<WebSocketDispatch>,
+    deferred_for_session_owner: &VecDeque<PendingDispatchState>,
+    failover_recoveries_only: bool,
+) -> usize {
+    let coalescable_upstreams = coalescable_ws_upstreams(pending_connects);
+    count_planned_ws_dials_with_coalescable(
+        connections,
+        &coalescable_upstreams,
+        queued_dispatches,
+        deferred_for_session_owner,
+        failover_recoveries_only,
+    )
+}
+
+fn ws_relay_pool_snapshot(
+    connections: &HashMap<u64, WsProviderConnection>,
+    pending_connects: &HashMap<u64, PendingConnect>,
+    queued_dispatches: &VecDeque<WebSocketDispatch>,
+    deferred_for_session_owner: &VecDeque<PendingDispatchState>,
+) -> cc_lb_engine::responses_websocket::WsRelayPoolSnapshot {
+    let coalescable_upstreams = coalescable_ws_upstreams(pending_connects);
+    let planned_dials = count_planned_ws_dials_with_coalescable(
+        connections,
+        &coalescable_upstreams,
+        queued_dispatches,
+        deferred_for_session_owner,
+        false,
+    );
     let reserved_connections =
         collect_reserved_ws_connections(connections, queued_dispatches, deferred_for_session_owner);
     cc_lb_engine::responses_websocket::WsRelayPoolSnapshot {
@@ -946,6 +1028,7 @@ async fn finish_failed_dispatch(
         attempts: pending.attempts,
         max_attempts: pending.max_attempts,
         deadline: pending.deadline,
+        per_attempt_timeout: pending.per_attempt_timeout,
         attempted_upstreams: pending.attempted_upstreams,
     };
     let error = pending
@@ -997,6 +1080,7 @@ async fn advance_one_dispatch(
     deferred_for_session_owner: &mut VecDeque<PendingDispatchState>,
     queued_dispatches: &VecDeque<WebSocketDispatch>,
     carried_budgets: &mut HashMap<u64, CarriedConnectBudget>,
+    queued_dial_reservation: QueuedDialReservation,
 ) -> (Vec<WebSocketDispatch>, Vec<WebSocketError>) {
     if state.drain_controller.is_draining() && !pending.dispatch.control {
         return finish_draining_dispatch(gateway, pending.dispatch).await;
@@ -1017,6 +1101,7 @@ async fn advance_one_dispatch(
             &pending.attempted_upstreams,
             cc_lb_engine::responses_websocket::ResponsesDispatchTimings::reused(),
             pending.deadline,
+            pending.per_attempt_timeout,
             &state.drain_controller,
         )
         .await;
@@ -1196,18 +1281,59 @@ async fn advance_one_dispatch(
             queued_dispatches,
             deferred_for_session_owner,
         );
-        while connections.len() + pending_connects.len() >= connection_capacity {
-            let Some(retired_id) = gateway.reclaim_idle_connection_for_failover(
-                candidate.upstream_id,
-                candidate.socket_per_lane,
-                &pending.dispatch.stream_id,
-                &reserved_connections,
-            ) else {
-                break;
-            };
-            connections.remove(&retired_id);
+        let reserved_dials = match queued_dial_reservation {
+            #[cfg(test)]
+            QueuedDialReservation::None => 0,
+            QueuedDialReservation::FailoverRecoveriesOnly => count_planned_ws_dials(
+                connections,
+                pending_connects,
+                queued_dispatches,
+                deferred_for_session_owner,
+                true,
+            ),
+            QueuedDialReservation::AllQueued => count_planned_ws_dials(
+                connections,
+                pending_connects,
+                queued_dispatches,
+                deferred_for_session_owner,
+                false,
+            ),
+        };
+        let in_use = connections
+            .len()
+            .saturating_add(pending_connects.len())
+            .saturating_add(reserved_dials);
+        let reclaimable = gateway.count_reclaimable_idle_connections_for_failover(
+            candidate.upstream_id,
+            candidate.socket_per_lane,
+            &pending.dispatch.stream_id,
+            &reserved_connections,
+        );
+        if in_use >= connection_capacity && in_use.saturating_sub(reclaimable) < connection_capacity
+        {
+            while connections
+                .len()
+                .saturating_add(pending_connects.len())
+                .saturating_add(reserved_dials)
+                >= connection_capacity
+            {
+                let Some(retired_id) = gateway.reclaim_idle_connection_for_failover(
+                    candidate.upstream_id,
+                    candidate.socket_per_lane,
+                    &pending.dispatch.stream_id,
+                    &reserved_connections,
+                ) else {
+                    break;
+                };
+                connections.remove(&retired_id);
+            }
         }
-        if connections.len() + pending_connects.len() >= connection_capacity {
+        if connections
+            .len()
+            .saturating_add(pending_connects.len())
+            .saturating_add(reserved_dials)
+            >= connection_capacity
+        {
             pending.last_error = Some(WebSocketError::new(
                 503,
                 "overloaded_error",
@@ -1524,7 +1650,7 @@ async fn handle_connect_outcome(
                         carried_budgets,
                     )
                     .await;
-                    dispatches.extend(ready);
+                    enqueue_outcome_ready(ready, dispatches, &mut resumed, carried_budgets);
                     errors.extend(errs);
                     continue;
                 }
@@ -1565,7 +1691,7 @@ async fn handle_connect_outcome(
                         carried_budgets,
                     )
                     .await;
-                    dispatches.extend(ready);
+                    enqueue_outcome_ready(ready, dispatches, &mut resumed, carried_budgets);
                     errors.extend(errs);
                     continue;
                 }
@@ -1639,7 +1765,7 @@ async fn handle_connect_outcome(
                             timings,
                         )
                         .await;
-                        dispatches.extend(ready);
+                        enqueue_outcome_ready(ready, dispatches, &mut resumed, carried_budgets);
                         errors.extend(errs);
                     }
                     Ok(Err(error)) => {
@@ -1665,7 +1791,7 @@ async fn handle_connect_outcome(
                                 carried_budgets,
                             )
                             .await;
-                            dispatches.extend(ready);
+                            enqueue_outcome_ready(ready, dispatches, &mut resumed, carried_budgets);
                             errors.extend(errs);
                         } else {
                             resumed.push_back(entry);
@@ -1689,7 +1815,7 @@ async fn handle_connect_outcome(
                             carried_budgets,
                         )
                         .await;
-                        dispatches.extend(ready);
+                        enqueue_outcome_ready(ready, dispatches, &mut resumed, carried_budgets);
                         errors.extend(errs);
                     }
                 }
@@ -1722,7 +1848,7 @@ async fn handle_connect_outcome(
                     carried_budgets,
                 )
                 .await;
-                dispatches.extend(ready);
+                enqueue_outcome_ready(ready, dispatches, &mut resumed, carried_budgets);
                 errors.extend(errs);
             } else {
                 resumed.push_back(primary);
@@ -1748,7 +1874,7 @@ async fn handle_connect_outcome(
                         carried_budgets,
                     )
                     .await;
-                    dispatches.extend(ready);
+                    enqueue_outcome_ready(ready, dispatches, &mut resumed, carried_budgets);
                     errors.extend(errs);
                 } else {
                     entry.remaining.push_front(pending.active_candidate.clone());
@@ -1800,7 +1926,7 @@ async fn handle_connect_outcome(
                         carried_budgets,
                     )
                     .await;
-                    dispatches.extend(ready);
+                    enqueue_outcome_ready(ready, dispatches, &mut resumed, carried_budgets);
                     errors.extend(errs);
                 } else {
                     resumed.push_back(entry);
@@ -1829,7 +1955,7 @@ async fn handle_connect_outcome(
                     carried_budgets,
                 )
                 .await;
-                dispatches.extend(ready);
+                enqueue_outcome_ready(ready, dispatches, &mut resumed, carried_budgets);
                 errors.extend(errs);
                 continue;
             }
@@ -1853,7 +1979,7 @@ async fn handle_connect_outcome(
                         carried_budgets,
                     )
                     .await;
-                    dispatches.extend(ready);
+                    enqueue_outcome_ready(ready, dispatches, &mut resumed, carried_budgets);
                     errors.extend(errs);
                     continue;
                 }
@@ -1884,9 +2010,10 @@ async fn handle_connect_outcome(
             deferred_for_session_owner,
             dispatches,
             carried_budgets,
+            QueuedDialReservation::AllQueued,
         )
         .await;
-        dispatches.extend(ready);
+        enqueue_outcome_ready(ready, dispatches, &mut resumed, carried_budgets);
         errors.extend(errs);
     }
 
@@ -1968,6 +2095,7 @@ pub(super) async fn dispatch_responses_websocket_with_limits(
         &mut deferred_for_session_owner,
         &empty_dispatches,
         &mut carried_budgets,
+        QueuedDialReservation::None,
     )
     .await;
     ready_dispatches.extend(ready);
@@ -2260,9 +2388,20 @@ async fn flush_pending_ws_dispatches(
             deferred_for_session_owner,
             dispatches,
             carried_budgets,
+            QueuedDialReservation::FailoverRecoveriesOnly,
         )
         .await;
-        dispatches.extend(ready);
+        let mut prioritized = Vec::new();
+        for next in ready {
+            if carried_budgets.contains_key(&next.turn_id) {
+                prioritized.push(next);
+            } else {
+                dispatches.push_back(next);
+            }
+        }
+        for next in prioritized.into_iter().rev() {
+            dispatches.push_front(next);
+        }
         for error in errors {
             if downstream_sink
                 .send(websocket_error_message(&error))
@@ -3024,6 +3163,7 @@ mod tests {
             &mut deferred,
             &ready,
             &mut carried_budgets,
+            QueuedDialReservation::None,
         )
         .await;
         assert!(r1.is_empty() && e1.is_empty());
@@ -3045,6 +3185,7 @@ mod tests {
             &mut deferred,
             &ready,
             &mut carried_budgets,
+            QueuedDialReservation::None,
         )
         .await;
         assert!(r2.is_empty() && e2.is_empty());
@@ -3292,6 +3433,7 @@ mod tests {
                 &mut deferred,
                 &empty_dispatches,
                 &mut carried_budgets,
+                QueuedDialReservation::None,
             ),
         )
         .await
@@ -3422,6 +3564,7 @@ mod tests {
                 &empty_attempted,
                 cc_lb_engine::responses_websocket::ResponsesDispatchTimings::reused(),
                 tokio::time::Instant::now() + Duration::from_secs(30),
+                WS_PROVIDER_CONNECT_TIMEOUT,
                 &drain,
             ),
         )
@@ -3476,29 +3619,54 @@ mod tests {
         (downstream_sink, client_ws, server_task)
     }
 
-    async fn spawn_502_handshake_listener() -> (
+    async fn spawn_status_handshake_listener(
+        status_response: &'static [u8],
+    ) -> (
         std::net::SocketAddr,
         Arc<std::sync::atomic::AtomicUsize>,
         JoinHandle<()>,
     ) {
-        use tokio::io::AsyncWriteExt as _;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let accepts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let accepts_task = Arc::clone(&accepts);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind 502 handshake listener");
+            .expect("bind status handshake listener");
         let addr = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
             while let Ok((mut tcp, _)) = listener.accept().await {
                 accepts_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let _ = tcp
-                    .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
-                    .await;
-                let _ = tcp.shutdown().await;
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 1024];
+                    let mut total = 0;
+                    while total < buf.len() {
+                        let Ok(n) = tcp.read(&mut buf[total..]).await else {
+                            break;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        total += n;
+                        if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let _ = tcp.write_all(status_response).await;
+                    let _ = tcp.shutdown().await;
+                });
             }
         });
         (addr, accepts, task)
+    }
+
+    async fn spawn_502_handshake_listener() -> (
+        std::net::SocketAddr,
+        Arc<std::sync::atomic::AtomicUsize>,
+        JoinHandle<()>,
+    ) {
+        spawn_status_handshake_listener(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+            .await
     }
 
     async fn ws_affinity_test_state(
@@ -3887,6 +4055,7 @@ mod tests {
             &mut deferred_b,
             &ready_b,
             &mut carried_b,
+            QueuedDialReservation::None,
         )
         .await;
         assert!(r0.is_empty() && e0.is_empty());
@@ -4284,71 +4453,73 @@ mod tests {
         task_d.abort();
     }
 
+    async fn spawn_ws_recorder_server() -> (
+        std::net::SocketAddr,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+        JoinHandle<()>,
+    ) {
+        use futures_util::StreamExt as _;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let accepts_task = Arc::clone(&accepts);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ws recorder server");
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                accepts_task.fetch_add(1, AtomicOrdering::SeqCst);
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await {
+                        while let Some(Ok(msg)) = ws.next().await {
+                            if let Ok(text) = msg.to_text() {
+                                let _ = tx.send(text.to_owned());
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        (addr, accepts, rx, task)
+    }
+
+    async fn connect_existing_ws(
+        state: &ProxyState,
+        upstream_id: uuid::Uuid,
+        upstream_name: &str,
+        addr: std::net::SocketAddr,
+    ) -> WsProviderConnection {
+        let (ws_client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/v1/responses"))
+            .await
+            .expect("connect existing mock socket");
+        let (sink, _stream) = ws_client.split();
+        let bulkhead = state
+            .websocket_bulkheads
+            .semaphore_only_bulkhead(
+                websocket_breaker_key(upstream_id),
+                state.websocket_bulkhead_config,
+            )
+            .acquire_owned()
+            .await
+            .expect("bulkhead permit");
+        WsProviderConnection {
+            upstream_id,
+            upstream_name: upstream_name.to_owned(),
+            sink,
+            task: None,
+            lane: None,
+            _bulkhead_guard: bulkhead,
+        }
+    }
+
     #[tokio::test]
     async fn responses_websocket_buffered_429_batch_honors_reclamation_and_reuse_reservations() {
         use futures_util::StreamExt as _;
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-
-        async fn spawn_ws_recorder_server() -> (
-            std::net::SocketAddr,
-            Arc<AtomicUsize>,
-            tokio::sync::mpsc::UnboundedReceiver<String>,
-            JoinHandle<()>,
-        ) {
-            let accepts = Arc::new(AtomicUsize::new(0));
-            let accepts_task = Arc::clone(&accepts);
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("bind ws recorder server");
-            let addr = listener.local_addr().unwrap();
-            let task = tokio::spawn(async move {
-                while let Ok((tcp, _)) = listener.accept().await {
-                    accepts_task.fetch_add(1, AtomicOrdering::SeqCst);
-                    let tx = tx.clone();
-                    tokio::spawn(async move {
-                        if let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await {
-                            while let Some(Ok(msg)) = ws.next().await {
-                                if let Ok(text) = msg.to_text() {
-                                    let _ = tx.send(text.to_owned());
-                                }
-                            }
-                        }
-                    });
-                }
-            });
-            (addr, accepts, rx, task)
-        }
-
-        async fn connect_existing_ws(
-            state: &ProxyState,
-            upstream_id: uuid::Uuid,
-            upstream_name: &str,
-            addr: std::net::SocketAddr,
-        ) -> WsProviderConnection {
-            let (ws_client, _) =
-                tokio_tungstenite::connect_async(format!("ws://{addr}/v1/responses"))
-                    .await
-                    .expect("connect existing mock socket");
-            let (sink, _stream) = ws_client.split();
-            let bulkhead = state
-                .websocket_bulkheads
-                .semaphore_only_bulkhead(
-                    websocket_breaker_key(upstream_id),
-                    state.websocket_bulkhead_config,
-                )
-                .acquire_owned()
-                .await
-                .expect("bulkhead permit");
-            WsProviderConnection {
-                upstream_id,
-                upstream_name: upstream_name.to_owned(),
-                sink,
-                task: None,
-                lane: None,
-                _bulkhead_guard: bulkhead,
-            }
-        }
 
         struct Fixture {
             state: ProxyState,
@@ -4901,6 +5072,775 @@ mod tests {
                 "Subcase 3 B connect must succeed: {errs:?}"
             );
             assert_eq!(fx.acc_b.load(AtomicOrdering::SeqCst), 1);
+
+            sink_server.abort();
+            for task in fx.tasks {
+                task.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_coalesced_429_recovery_claims_slot_before_resumed_waiter() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        struct CoalesceFixture {
+            state: ProxyState,
+            auth: cc_lb_engine::Authenticated,
+            gateway: ResponsesWebSocketGateway,
+            connections: HashMap<u64, WsProviderConnection>,
+            acc_a: Arc<AtomicUsize>,
+            acc_c: Arc<AtomicUsize>,
+            acc_d: Arc<AtomicUsize>,
+            rx_c: tokio::sync::mpsc::UnboundedReceiver<String>,
+            up_a: UpstreamRecord,
+            up_c: UpstreamRecord,
+            up_d: UpstreamRecord,
+            up_e: UpstreamRecord,
+            up_f: UpstreamRecord,
+            tasks: Vec<JoinHandle<()>>,
+        }
+
+        async fn setup_coalesce_case(cipher_a: &str) -> CoalesceFixture {
+            let (addr_a, acc_a, task_a) = spawn_status_handshake_listener(
+                b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n",
+            )
+            .await;
+            let (addr_c, acc_c, rx_c, task_c) = spawn_ws_recorder_server().await;
+            let (addr_d, acc_d, _rx_d, task_d) = spawn_ws_recorder_server().await;
+            let (addr_e, _acc_e, _rx_e, task_e) = spawn_ws_recorder_server().await;
+            let (addr_f, _acc_f, _rx_f, task_f) = spawn_ws_recorder_server().await;
+
+            let mk_up = |id: u128, name: &str, addr: std::net::SocketAddr| {
+                crate::app::tests::websocket_upstream(
+                    id,
+                    name,
+                    url::Url::parse(&format!("http://{addr}/")).unwrap(),
+                )
+            };
+            let up_a = mk_up(41, "api-a", addr_a);
+            let up_f = mk_up(42, "api-f", addr_f);
+            let up_c = mk_up(43, "api-c", addr_c);
+            let up_e = mk_up(44, "api-e", addr_e);
+            let up_d = mk_up(45, "api-d", addr_d);
+
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-api-key",
+                HeaderValue::from_str(crate::app::tests::TEST_KEY.plaintext.as_str()).unwrap(),
+            );
+            let seed_state = crate::app::tests::websocket_test_state(
+                vec![up_a.clone()],
+                cc_lb_domain::TerminalStrategy::FirstPick,
+                DrainController::new(),
+                Arc::new(crate::app::tests::WebSocketTestSignerFactory),
+                Arc::new(crate::app::tests::FixtureKeyStore),
+                vec!["*".to_owned()],
+            )
+            .await;
+            let seed_auth = seed_state.lifecycle.authenticate(&headers).await.unwrap();
+            let state = ws_affinity_test_state(
+                vec![
+                    up_a.clone(),
+                    up_f.clone(),
+                    up_c.clone(),
+                    up_e.clone(),
+                    up_d.clone(),
+                ],
+                seed_auth.principal_id(),
+                &[(cipher_a, up_a.id)],
+            )
+            .await;
+            let auth = state.lifecycle.authenticate(&headers).await.unwrap();
+            let mut gateway = ResponsesWebSocketGateway::new(
+                state.lifecycle.clone(),
+                &auth,
+                headers,
+                state.body_caps.messages,
+                3,
+            );
+            let mut connections = HashMap::new();
+            connections.insert(
+                1,
+                connect_existing_ws(&state, up_e.id, "api-e", addr_e).await,
+            );
+            connections.insert(
+                2,
+                connect_existing_ws(&state, up_f.id, "api-f", addr_f).await,
+            );
+
+            let with_enabled = |rec: &UpstreamRecord, enabled: bool| {
+                let mut cloned = rec.clone();
+                cloned.enabled = enabled;
+                cloned
+            };
+            let store_records = |a: bool, c: bool, d: bool, e: bool, f: bool| {
+                let view = state.dynamic_view.load();
+                state.dynamic_view.store(
+                    cc_lb_control::DynamicViewBuilder::from_view(&view)
+                        .upstream_records(vec![
+                            with_enabled(&up_a, a),
+                            with_enabled(&up_f, f),
+                            with_enabled(&up_c, c),
+                            with_enabled(&up_e, e),
+                            with_enabled(&up_d, d),
+                        ])
+                        .build(),
+                );
+            };
+
+            // Seed completed response owners on `conn 1` (`api-e`) and `conn 2` (`api-f`) so
+            // both open sockets remain non-idle while freeing both lanes for the test turns.
+            store_records(false, false, false, true, false);
+            let seed_e = gateway
+                .client_message(
+                    auth.clone(),
+                    Bytes::from_static(br#"{"type":"response.create","model":"gpt-5.4","stream_id":"lane-1","store":false,"input":[]}"#),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            gateway.assign_connection(seed_e.turn_id, 1, up_e.id, "api-e");
+            gateway.commit_send_attempt(seed_e.turn_id);
+            gateway.sent(seed_e.turn_id);
+            gateway
+                .provider_message(
+                    1,
+                    &Bytes::from_static(br#"{"type":"response.created","stream_id":"lane-1","response":{"id":"resp_hold_e","status":"in_progress","store":false}}"#),
+                )
+                .await
+                .unwrap();
+            gateway
+                .provider_message(
+                    1,
+                    &Bytes::from_static(br#"{"type":"response.completed","stream_id":"lane-1","response":{"id":"resp_hold_e","status":"completed","store":false}}"#),
+                )
+                .await
+                .unwrap();
+
+            store_records(false, false, false, false, true);
+            let seed_f = gateway
+                .client_message(
+                    auth.clone(),
+                    Bytes::from_static(br#"{"type":"response.create","model":"gpt-5.4","stream_id":"lane-2","store":false,"input":[]}"#),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            gateway.assign_connection(seed_f.turn_id, 2, up_f.id, "api-f");
+            gateway.commit_send_attempt(seed_f.turn_id);
+            gateway.sent(seed_f.turn_id);
+            gateway
+                .provider_message(
+                    2,
+                    &Bytes::from_static(br#"{"type":"response.created","stream_id":"lane-2","response":{"id":"resp_hold_f","status":"in_progress","store":false}}"#),
+                )
+                .await
+                .unwrap();
+            gateway
+                .provider_message(
+                    2,
+                    &Bytes::from_static(br#"{"type":"response.completed","stream_id":"lane-2","response":{"id":"resp_hold_f","status":"completed","store":false}}"#),
+                )
+                .await
+                .unwrap();
+
+            CoalesceFixture {
+                state,
+                auth,
+                gateway,
+                connections,
+                acc_a,
+                acc_c,
+                acc_d,
+                rx_c,
+                up_a,
+                up_c,
+                up_d,
+                up_e,
+                up_f,
+                tasks: vec![task_a, task_c, task_d, task_e, task_f],
+            }
+        }
+
+        let set_all_enabled =
+            |fx: &CoalesceFixture, a: bool, c: bool, d: bool, e: bool, f: bool| {
+                let with_enabled = |rec: &UpstreamRecord, enabled: bool| {
+                    let mut cloned = rec.clone();
+                    cloned.enabled = enabled;
+                    cloned
+                };
+                let view = fx.state.dynamic_view.load();
+                fx.state.dynamic_view.store(
+                    cc_lb_control::DynamicViewBuilder::from_view(&view)
+                        .upstream_records(vec![
+                            with_enabled(&fx.up_a, a),
+                            with_enabled(&fx.up_f, f),
+                            with_enabled(&fx.up_c, c),
+                            with_enabled(&fx.up_e, e),
+                            with_enabled(&fx.up_d, d),
+                        ])
+                        .build(),
+                );
+            };
+        let set_enabled = |fx: &CoalesceFixture, a: bool, c: bool, d: bool| {
+            set_all_enabled(fx, a, c, d, false, false);
+        };
+
+        // Subcase 1: Capacity 3 with 2 non-idle owner-retaining sockets; owner-pinned `primary`
+        // (`[api-a]`, recovery `api-c`) and ordinary `waiter` (`[api-a, api-d]`) coalesce onto the
+        // 3rd handshake (`api-a` -> 429). `primary`'s recovery (`api-c`) must claim the slot ahead
+        // of resumed `waiter` so `api-d` gets 0 dials and `api-c` receives the stripped turn.
+        {
+            let cipher_a = "gAAAAAB_coalesce_slot_owner_a";
+            let mut fx = setup_coalesce_case(cipher_a).await;
+            set_enabled(&fx, true, true, true);
+            let primary = fx
+                .gateway
+                .client_message(
+                    fx.auth.clone(),
+                    Bytes::from(
+                        serde_json::json!({
+                            "type": "response.create",
+                            "model": "gpt-5.4",
+                            "stream_id": "lane-1",
+                            "store": false,
+                            "input": [
+                                {"type": "reasoning", "id": "rs_a", "summary": [], "encrypted_content": cipher_a},
+                                {"role": "user", "content": "pinned turn"}
+                            ]
+                        })
+                        .to_string(),
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(primary.candidates.len(), 1);
+            assert_eq!(primary.candidates[0].upstream_id, fx.up_a.id);
+
+            set_enabled(&fx, true, false, true);
+            let waiter = fx
+                .gateway
+                .client_message(
+                    fx.auth.clone(),
+                    Bytes::from_static(br#"{"type":"response.create","model":"gpt-5.4","stream_id":"lane-2","store":false,"input":[{"role":"user","content":"waiter turn"}]}"#),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                waiter
+                    .candidates
+                    .iter()
+                    .map(|c| c.upstream_id)
+                    .collect::<Vec<_>>(),
+                vec![fx.up_a.id, fx.up_d.id]
+            );
+            set_enabled(&fx, true, true, true);
+
+            let (events, _rx) = tokio::sync::mpsc::channel(16);
+            let mut next_connection_id = 3;
+            let mut pending_connects = HashMap::new();
+            let mut connect_tasks = tokio::task::JoinSet::new();
+            let mut deferred = VecDeque::new();
+            let mut dispatches = VecDeque::new();
+            let mut carried_budgets = HashMap::new();
+
+            let (r1, e1) = advance_one_dispatch(
+                &mut fx.gateway,
+                PendingDispatchState::new(
+                    primary,
+                    Duration::from_secs(5),
+                    Duration::from_secs(5),
+                    3,
+                ),
+                &fx.state,
+                &mut fx.connections,
+                &events,
+                &mut next_connection_id,
+                3,
+                &mut pending_connects,
+                &mut connect_tasks,
+                &mut deferred,
+                &dispatches,
+                &mut carried_budgets,
+                QueuedDialReservation::None,
+            )
+            .await;
+            assert!(r1.is_empty() && e1.is_empty());
+
+            let (r2, e2) = advance_one_dispatch(
+                &mut fx.gateway,
+                PendingDispatchState::new(
+                    waiter,
+                    Duration::from_secs(5),
+                    Duration::from_secs(5),
+                    3,
+                ),
+                &fx.state,
+                &mut fx.connections,
+                &events,
+                &mut next_connection_id,
+                3,
+                &mut pending_connects,
+                &mut connect_tasks,
+                &mut deferred,
+                &dispatches,
+                &mut carried_budgets,
+                QueuedDialReservation::None,
+            )
+            .await;
+            assert!(r2.is_empty() && e2.is_empty());
+            assert_eq!(pending_connects.len(), 1);
+            assert_eq!(pending_connects.values().next().unwrap().waiters.len(), 1);
+
+            let outcome_429 =
+                tokio::time::timeout(Duration::from_secs(2), connect_tasks.join_next())
+                    .await
+                    .expect("api-a 429 handshake joins")
+                    .expect("join ok")
+                    .expect("task ok");
+            let errs_after_429 = handle_connect_outcome(
+                &mut fx.gateway,
+                outcome_429,
+                &fx.state,
+                &mut fx.connections,
+                &events,
+                &mut next_connection_id,
+                3,
+                &mut pending_connects,
+                &mut connect_tasks,
+                &mut deferred,
+                &mut dispatches,
+                &mut carried_budgets,
+            )
+            .await;
+            assert_eq!(fx.acc_a.load(AtomicOrdering::SeqCst), 1);
+            assert_eq!(
+                fx.acc_d.load(AtomicOrdering::SeqCst),
+                0,
+                "resumed waiter must not dial api-d ahead of owner recovery"
+            );
+            assert_eq!(
+                connect_tasks.len(),
+                1,
+                "owner recovery onto api-c must claim the freed 3rd dial slot"
+            );
+            assert!(
+                errs_after_429
+                    .iter()
+                    .any(|err| err.stream_id.as_deref() == Some("lane-2") && err.status == 503),
+                "waiter must fail with 503 budget full rather than stealing api-c's slot: {errs_after_429:?}"
+            );
+
+            let outcome_c = tokio::time::timeout(Duration::from_secs(2), connect_tasks.join_next())
+                .await
+                .expect("api-c recovery connect joins")
+                .expect("join ok")
+                .expect("task ok");
+            let errs_after_c = handle_connect_outcome(
+                &mut fx.gateway,
+                outcome_c,
+                &fx.state,
+                &mut fx.connections,
+                &events,
+                &mut next_connection_id,
+                3,
+                &mut pending_connects,
+                &mut connect_tasks,
+                &mut deferred,
+                &mut dispatches,
+                &mut carried_budgets,
+            )
+            .await;
+            assert!(
+                errs_after_c.is_empty(),
+                "Subcase 1 recovery onto api-c must succeed: {errs_after_c:?}"
+            );
+            assert_eq!(fx.acc_c.load(AtomicOrdering::SeqCst), 1);
+            assert_eq!(fx.acc_d.load(AtomicOrdering::SeqCst), 0);
+            let sent_c = tokio::time::timeout(Duration::from_secs(2), fx.rx_c.recv())
+                .await
+                .expect("api-c received primary stripped turn")
+                .unwrap();
+            assert!(sent_c.contains("\"pinned turn\""));
+            assert!(!sent_c.contains("encrypted_content"));
+
+            for task in fx.tasks {
+                task.abort();
+            }
+        }
+
+        // Subcase 2: Capacity 3 with 2 non-idle owner-retaining sockets; a queued recovery
+        // dispatch (`api-c`) already sits in `dispatches` while an in-flight dial (`api-a` -> 429)
+        // resumes `waiter` (`[api-a, api-d]`). Resumed `waiter` must respect `dispatches`'s
+        // planned dial so `flush_pending_ws_dispatches` dials `api-c` without hitting 503.
+        {
+            let cipher_b = "gAAAAAB_coalesce_queued_guard";
+            let mut fx = setup_coalesce_case(cipher_b).await;
+
+            set_enabled(&fx, false, true, false);
+            let queued_recovery = fx
+                .gateway
+                .client_message(
+                    fx.auth.clone(),
+                    Bytes::from_static(br#"{"type":"response.create","model":"gpt-5.4","stream_id":"lane-3","store":false,"input":[{"role":"user","content":"queued recovery"}]}"#),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(queued_recovery.candidates.len(), 1);
+            assert_eq!(queued_recovery.candidates[0].upstream_id, fx.up_c.id);
+
+            set_enabled(&fx, true, false, true);
+            let waiter = fx
+                .gateway
+                .client_message(
+                    fx.auth.clone(),
+                    Bytes::from_static(br#"{"type":"response.create","model":"gpt-5.4","stream_id":"lane-1","store":false,"input":[{"role":"user","content":"waiter turn"}]}"#),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                waiter
+                    .candidates
+                    .iter()
+                    .map(|c| c.upstream_id)
+                    .collect::<Vec<_>>(),
+                vec![fx.up_a.id, fx.up_d.id]
+            );
+            set_enabled(&fx, true, true, true);
+
+            let (mut downstream_sink, client_ws, sink_server) = spawn_test_downstream_sink().await;
+            let (events, _rx) = tokio::sync::mpsc::channel(16);
+            let mut next_connection_id = 3;
+            let mut pending_connects = HashMap::new();
+            let mut connect_tasks = tokio::task::JoinSet::new();
+            let mut deferred = VecDeque::new();
+            let mut dispatches = VecDeque::from([queued_recovery]);
+            let mut carried_budgets = HashMap::new();
+
+            let (r_waiter, e_waiter) = advance_one_dispatch(
+                &mut fx.gateway,
+                PendingDispatchState::new(
+                    waiter,
+                    Duration::from_secs(5),
+                    Duration::from_secs(5),
+                    3,
+                ),
+                &fx.state,
+                &mut fx.connections,
+                &events,
+                &mut next_connection_id,
+                3,
+                &mut pending_connects,
+                &mut connect_tasks,
+                &mut deferred,
+                &dispatches,
+                &mut carried_budgets,
+                QueuedDialReservation::None,
+            )
+            .await;
+            assert!(r_waiter.is_empty() && e_waiter.is_empty());
+
+            let outcome_429 =
+                tokio::time::timeout(Duration::from_secs(2), connect_tasks.join_next())
+                    .await
+                    .expect("Subcase 2 api-a 429 joins")
+                    .expect("join ok")
+                    .expect("task ok");
+            let errs_after_429 = handle_connect_outcome(
+                &mut fx.gateway,
+                outcome_429,
+                &fx.state,
+                &mut fx.connections,
+                &events,
+                &mut next_connection_id,
+                3,
+                &mut pending_connects,
+                &mut connect_tasks,
+                &mut deferred,
+                &mut dispatches,
+                &mut carried_budgets,
+            )
+            .await;
+            assert_eq!(fx.acc_d.load(AtomicOrdering::SeqCst), 0);
+            assert!(connect_tasks.is_empty());
+            assert!(
+                errs_after_429
+                    .iter()
+                    .any(|err| err.stream_id.as_deref() == Some("lane-1") && err.status == 503),
+                "resumed waiter must yield to queued dial in dispatches: {errs_after_429:?}"
+            );
+
+            assert!(
+                flush_pending_ws_dispatches(
+                    &mut fx.gateway,
+                    &fx.state,
+                    &mut fx.connections,
+                    &events,
+                    &mut next_connection_id,
+                    3,
+                    &mut pending_connects,
+                    &mut connect_tasks,
+                    &mut deferred,
+                    &mut dispatches,
+                    &mut carried_budgets,
+                    &mut downstream_sink,
+                )
+                .await
+            );
+            assert!(dispatches.is_empty());
+            assert_eq!(connect_tasks.len(), 1);
+
+            let outcome_c = tokio::time::timeout(Duration::from_secs(2), connect_tasks.join_next())
+                .await
+                .expect("Subcase 2 api-c connects")
+                .expect("join ok")
+                .expect("task ok");
+            let errs_after_c = handle_connect_outcome(
+                &mut fx.gateway,
+                outcome_c,
+                &fx.state,
+                &mut fx.connections,
+                &events,
+                &mut next_connection_id,
+                3,
+                &mut pending_connects,
+                &mut connect_tasks,
+                &mut deferred,
+                &mut dispatches,
+                &mut carried_budgets,
+            )
+            .await;
+            assert!(
+                errs_after_c.is_empty(),
+                "Subcase 2 queued recovery must connect without 503: {errs_after_c:?}"
+            );
+            assert_eq!(fx.acc_c.load(AtomicOrdering::SeqCst), 1);
+            assert_eq!(fx.acc_d.load(AtomicOrdering::SeqCst), 0);
+            let sent_c = tokio::time::timeout(Duration::from_secs(2), fx.rx_c.recv())
+                .await
+                .expect("api-c received queued recovery")
+                .unwrap();
+            assert!(sent_c.contains("\"queued recovery\""));
+            drop(client_ws);
+            sink_server.abort();
+            for task in fx.tasks {
+                task.abort();
+            }
+        }
+
+        // Subcase 3: Flush-time protection for queued failover recoveries:
+        // Capacity 3 with 2 non-idle owner-retaining sockets (`conn 1` api-e, `conn 2` api-f).
+        // `ordinary_turn` (`[api-e, api-d]`) is queued on `lane-1`, and `t_f` (`[api-f, api-c]`)
+        // is active on `lane-2`. A single buffered batch completes `t_e` (`dispatches[0]` =
+        // `ordinary_turn`, matching open `conn 1` so `planned_dials == 0`) and returns 429 for
+        // `t_f` (`dispatches[1]` = failover recovery `[api-c]`). When `api-e` is then disabled
+        // before flush, `ordinary_turn` falls back to `api-d`, must yield the 3rd dial slot to
+        // queued `is_failover_recovery` `api-c` (`FailoverRecoveriesOnly`), fail with 503, and
+        // let `api-c` dial and succeed without `acc_d` receiving any dial.
+        {
+            use futures_util::StreamExt as _;
+
+            let cipher_c = "gAAAAAB_coalesce_flush_guard";
+            let mut fx = setup_coalesce_case(cipher_c).await;
+
+            set_all_enabled(&fx, false, false, false, true, false);
+            let t_e = fx
+                .gateway
+                .client_message(
+                    fx.auth.clone(),
+                    Bytes::from_static(br#"{"type":"response.create","model":"gpt-5.4","stream_id":"lane-1","store":false,"input":[{"role":"user","content":"turn e"}]}"#),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(t_e.candidates.len(), 1);
+            assert_eq!(t_e.candidates[0].upstream_id, fx.up_e.id);
+            fx.gateway
+                .assign_connection(t_e.turn_id, 1, fx.up_e.id, "api-e");
+            fx.gateway.commit_send_attempt(t_e.turn_id);
+            fx.gateway.sent(t_e.turn_id);
+            fx.gateway
+                .provider_message(
+                    1,
+                    &Bytes::from_static(br#"{"type":"response.created","stream_id":"lane-1","response":{"id":"resp_turn_e","status":"in_progress","store":false}}"#),
+                )
+                .await
+                .unwrap();
+
+            set_all_enabled(&fx, false, false, true, true, false);
+            let queued_ordinary = fx
+                .gateway
+                .client_message(
+                    fx.auth.clone(),
+                    Bytes::from_static(br#"{"type":"response.create","model":"gpt-5.4","stream_id":"lane-1","store":false,"input":[{"role":"user","content":"ordinary turn"}]}"#),
+                )
+                .await
+                .unwrap();
+            assert!(
+                queued_ordinary.is_none(),
+                "ordinary_turn must queue behind active t_e on lane-1"
+            );
+
+            set_all_enabled(&fx, false, true, false, false, true);
+            let t_f = fx
+                .gateway
+                .client_message(
+                    fx.auth.clone(),
+                    Bytes::from_static(br#"{"type":"response.create","model":"gpt-5.4","stream_id":"lane-2","store":false,"input":[{"role":"user","content":"turn f"}]}"#),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                t_f.candidates
+                    .iter()
+                    .map(|c| c.upstream_id)
+                    .collect::<Vec<_>>(),
+                vec![fx.up_f.id, fx.up_c.id]
+            );
+            fx.gateway
+                .assign_connection(t_f.turn_id, 2, fx.up_f.id, "api-f");
+            fx.gateway.commit_send_attempt(t_f.turn_id);
+            fx.gateway.sent(t_f.turn_id);
+
+            set_all_enabled(&fx, true, true, true, true, true);
+            fx.acc_c.store(0, AtomicOrdering::SeqCst);
+            fx.acc_d.store(0, AtomicOrdering::SeqCst);
+
+            let (mut downstream_sink, mut client_ws, sink_server) =
+                spawn_test_downstream_sink().await;
+            let (events, mut event_rx) = tokio::sync::mpsc::channel(16);
+            events
+                .send(WsProviderEvent::Frame {
+                    connection_id: 1,
+                    bytes: Bytes::from_static(br#"{"type":"response.completed","stream_id":"lane-1","response":{"id":"resp_turn_e","status":"completed","store":false}}"#),
+                    text: true,
+                })
+                .await
+                .unwrap();
+            events
+                .send(WsProviderEvent::Frame {
+                    connection_id: 2,
+                    bytes: Bytes::from_static(br#"{"type":"error","stream_id":"lane-2","error":{"code":"rate_limit_exceeded","message":"429 from f"}}"#),
+                    text: true,
+                })
+                .await
+                .unwrap();
+
+            let mut next_connection_id = 3;
+            let mut pending_connects = HashMap::new();
+            let mut connect_tasks = tokio::task::JoinSet::new();
+            let mut deferred = VecDeque::new();
+            let mut dispatches = VecDeque::new();
+            let mut carried_budgets = HashMap::new();
+
+            assert!(
+                drain_buffered_ws_events_snapshot(
+                    &mut event_rx,
+                    &mut fx.gateway,
+                    &mut fx.connections,
+                    &pending_connects,
+                    &deferred,
+                    &mut dispatches,
+                    &mut downstream_sink,
+                    2,
+                )
+                .await
+            );
+            assert_eq!(dispatches.len(), 2);
+            assert!(!dispatches[0].is_failover_recovery);
+            assert_eq!(dispatches[0].stream_id.as_deref(), Some("lane-1"));
+            assert!(dispatches[1].is_failover_recovery);
+            assert_eq!(dispatches[1].stream_id.as_deref(), Some("lane-2"));
+            assert_eq!(dispatches[1].candidates.len(), 1);
+            assert_eq!(dispatches[1].candidates[0].upstream_id, fx.up_c.id);
+
+            // Disable api-e so `ordinary_turn` fails `validate_candidate_for_send` on `conn 1`
+            // and falls back to `api-d`.
+            set_all_enabled(&fx, true, true, true, false, true);
+            assert!(
+                flush_pending_ws_dispatches(
+                    &mut fx.gateway,
+                    &fx.state,
+                    &mut fx.connections,
+                    &events,
+                    &mut next_connection_id,
+                    3,
+                    &mut pending_connects,
+                    &mut connect_tasks,
+                    &mut deferred,
+                    &mut dispatches,
+                    &mut carried_budgets,
+                    &mut downstream_sink,
+                )
+                .await
+            );
+            assert!(dispatches.is_empty());
+            assert_eq!(
+                fx.acc_d.load(AtomicOrdering::SeqCst),
+                0,
+                "ordinary_turn fallback must not dial api-d ahead of queued failover recovery api-c"
+            );
+            assert_eq!(connect_tasks.len(), 1);
+
+            let outcome_c = tokio::time::timeout(Duration::from_secs(2), connect_tasks.join_next())
+                .await
+                .expect("Subcase 3 api-c connects")
+                .expect("join ok")
+                .expect("task ok");
+            let errs_after_c = handle_connect_outcome(
+                &mut fx.gateway,
+                outcome_c,
+                &fx.state,
+                &mut fx.connections,
+                &events,
+                &mut next_connection_id,
+                3,
+                &mut pending_connects,
+                &mut connect_tasks,
+                &mut deferred,
+                &mut dispatches,
+                &mut carried_budgets,
+            )
+            .await;
+            assert!(
+                errs_after_c.is_empty(),
+                "Subcase 3 recovery onto api-c must succeed: {errs_after_c:?}"
+            );
+            assert_eq!(fx.acc_c.load(AtomicOrdering::SeqCst), 1);
+            assert_eq!(fx.acc_d.load(AtomicOrdering::SeqCst), 0);
+            let sent_c = tokio::time::timeout(Duration::from_secs(2), fx.rx_c.recv())
+                .await
+                .expect("api-c received t_f failover payload")
+                .unwrap();
+            assert!(sent_c.contains("\"turn f\""));
+
+            let first_msg = tokio::time::timeout(Duration::from_secs(2), client_ws.next())
+                .await
+                .expect("Subcase 3 response.completed forwarded")
+                .unwrap()
+                .unwrap();
+            let first_json: serde_json::Value =
+                serde_json::from_str(first_msg.to_text().unwrap()).unwrap();
+            assert_eq!(first_json["type"], "response.completed");
+            assert_eq!(first_json["stream_id"], "lane-1");
+
+            let second_msg = tokio::time::timeout(Duration::from_secs(2), client_ws.next())
+                .await
+                .expect("Subcase 3 ordinary_turn 503 forwarded")
+                .unwrap()
+                .unwrap();
+            let second_json: serde_json::Value =
+                serde_json::from_str(second_msg.to_text().unwrap()).unwrap();
+            assert_eq!(second_json["type"], "error");
+            assert_eq!(second_json["stream_id"], "lane-1");
+            assert_eq!(second_json["error"]["code"], "overloaded_error");
+            assert_eq!(second_json["status"], 503);
 
             sink_server.abort();
             for task in fx.tasks {

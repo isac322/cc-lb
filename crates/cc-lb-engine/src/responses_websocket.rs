@@ -337,6 +337,9 @@ pub struct WebSocketDispatch {
     pub control: bool,
     pub prefer_api_key_on_final_attempt: bool,
     pub has_explicit_affinity: bool,
+    /// Marks a failover recovery dispatch whose original upstream failure was
+    /// already suppressed after checking pool capacity.
+    pub is_failover_recovery: bool,
 }
 
 /// Snapshot of in-flight relay dial slots outside `ResponsesWebSocketGateway`'s
@@ -1523,6 +1526,7 @@ impl ResponsesWebSocketGateway {
                 control: false,
                 prefer_api_key_on_final_attempt: false,
                 has_explicit_affinity: false,
+                is_failover_recovery: false,
             }));
         }
         let body = owner.body.clone();
@@ -1706,6 +1710,7 @@ impl ResponsesWebSocketGateway {
             control: true,
             prefer_api_key_on_final_attempt: false,
             has_explicit_affinity: false,
+            is_failover_recovery: false,
         }))
     }
 
@@ -1948,6 +1953,7 @@ impl ResponsesWebSocketGateway {
             control: false,
             prefer_api_key_on_final_attempt,
             has_explicit_affinity,
+            is_failover_recovery: false,
         }))
     }
 
@@ -2718,6 +2724,7 @@ impl ResponsesWebSocketGateway {
                 control: false,
                 prefer_api_key_on_final_attempt: false,
                 has_explicit_affinity: false,
+                is_failover_recovery: false,
             });
         }
         ready
@@ -3626,6 +3633,7 @@ impl ResponsesWebSocketGateway {
                         control: false,
                         prefer_api_key_on_final_attempt: false,
                         has_explicit_affinity: false,
+                        is_failover_recovery: false,
                     };
                     return Ok(WebSocketEventResult {
                         forward: false,
@@ -4614,6 +4622,48 @@ impl ResponsesWebSocketGateway {
         self.prune_empty_lanes();
     }
 
+    fn is_reclaimable_idle_connection(
+        &self,
+        conn_id: u64,
+        uid: Uuid,
+        needed_upstream_id: Uuid,
+        needed_socket_per_lane: bool,
+        needed_lane: &Option<String>,
+        reserved_connections: &HashSet<u64>,
+    ) -> bool {
+        let needed_existing = uid == needed_upstream_id
+            && (!needed_socket_per_lane
+                || self.connection_lanes.get(&conn_id) == Some(needed_lane));
+        !needed_existing
+            && !reserved_connections.contains(&conn_id)
+            && self.session_upstream != Some(uid)
+            && self.is_connection_idle(conn_id, None)
+    }
+
+    /// Count idle provider connections that can currently be reclaimed for `needed_upstream_id`
+    /// without disturbing reserved sockets or the active session owner.
+    pub fn count_reclaimable_idle_connections_for_failover(
+        &self,
+        needed_upstream_id: Uuid,
+        needed_socket_per_lane: bool,
+        needed_lane: &Option<String>,
+        reserved_connections: &HashSet<u64>,
+    ) -> usize {
+        self.connections
+            .iter()
+            .filter(|(conn_id, uid)| {
+                self.is_reclaimable_idle_connection(
+                    **conn_id,
+                    **uid,
+                    needed_upstream_id,
+                    needed_socket_per_lane,
+                    needed_lane,
+                    reserved_connections,
+                )
+            })
+            .count()
+    }
+
     /// Reclaim the oldest idle provider connection not needed for `needed_upstream_id`
     /// and not currently pinned as the session owner, freeing a WebSocket slot for failover.
     pub fn reclaim_idle_connection_for_failover(
@@ -4627,13 +4677,14 @@ impl ResponsesWebSocketGateway {
             .connections
             .iter()
             .filter_map(|(conn_id, uid)| {
-                let needed_existing = *uid == needed_upstream_id
-                    && (!needed_socket_per_lane
-                        || self.connection_lanes.get(conn_id) == Some(needed_lane));
-                (!needed_existing
-                    && !reserved_connections.contains(conn_id)
-                    && self.session_upstream != Some(*uid)
-                    && self.is_connection_idle(*conn_id, None))
+                self.is_reclaimable_idle_connection(
+                    *conn_id,
+                    *uid,
+                    needed_upstream_id,
+                    needed_socket_per_lane,
+                    needed_lane,
+                    reserved_connections,
+                )
                 .then_some(*conn_id)
             })
             .min()?;
@@ -4846,6 +4897,7 @@ impl ResponsesWebSocketGateway {
             control: false,
             prefer_api_key_on_final_attempt: !self.codex_backend && !fallback.requires_api_key,
             has_explicit_affinity: false,
+            is_failover_recovery: true,
         })
     }
 
@@ -4967,6 +5019,7 @@ impl ResponsesWebSocketGateway {
             control: false,
             prefer_api_key_on_final_attempt: !self.codex_backend && !requires_api_key,
             has_explicit_affinity: false,
+            is_failover_recovery: true,
         })
     }
 
