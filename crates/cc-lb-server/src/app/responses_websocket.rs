@@ -397,12 +397,17 @@ pub(super) async fn send_websocket_error(
 ) -> bool {
     if let Some(frames) = error.raw_provider_frames() {
         for frame in frames {
-            let message = Message::Text(
-                frame
-                    .clone()
-                    .try_into()
-                    .expect("suppressed provider error frame is UTF-8"),
-            );
+            let message = if frame.text {
+                Message::Text(
+                    frame
+                        .bytes
+                        .clone()
+                        .try_into()
+                        .expect("suppressed provider error frame is UTF-8"),
+                )
+            } else {
+                Message::Binary(frame.bytes.clone())
+            };
             if downstream_sink.send(message).await.is_err() {
                 return false;
             }
@@ -2228,7 +2233,7 @@ async fn handle_ws_provider_event(
                 deferred_for_session_owner,
             );
             match gateway
-                .provider_message_with_pool(connection_id, &bytes, &pool)
+                .provider_message_with_pool_and_opcode(connection_id, &bytes, text, &pool)
                 .await
             {
                 Ok(result) => {
@@ -2257,11 +2262,7 @@ async fn handle_ws_provider_event(
                         }
                     }
                     for error in result.errors {
-                        if downstream_sink
-                            .send(websocket_error_message(&error))
-                            .await
-                            .is_err()
-                        {
+                        if !send_websocket_error(downstream_sink, &error).await {
                             return false;
                         }
                     }
@@ -6416,6 +6417,170 @@ mod tests {
 
             task_a.abort();
             task_c.abort();
+        }
+
+        // Subcase 3: Live binary JSON 429 from `api-a` must preserve the Binary opcode when
+        // uncommitted failover onto `api-b` fails locally on an open circuit breaker.
+        {
+            let (addr_a, _acc_a, _rx_a, task_a) = spawn_ws_recorder_server().await;
+            let (addr_b, acc_b, _rx_b, task_b) = spawn_ws_recorder_server().await;
+            let up_a = crate::app::tests::websocket_upstream(
+                71,
+                "api-a",
+                url::Url::parse(&format!("http://{addr_a}/")).unwrap(),
+            );
+            let up_b = crate::app::tests::websocket_upstream(
+                72,
+                "api-b",
+                url::Url::parse(&format!("http://{addr_b}/")).unwrap(),
+            );
+            let state = crate::app::tests::websocket_test_state(
+                vec![up_a.clone(), up_b.clone()],
+                cc_lb_domain::TerminalStrategy::FirstPick,
+                DrainController::new(),
+                Arc::new(crate::app::tests::WebSocketTestSignerFactory),
+                Arc::new(crate::app::tests::FixtureKeyStore),
+                vec!["*".to_owned()],
+            )
+            .await;
+
+            let breaker_b = state.breaker_registry.breaker(
+                websocket_breaker_key(up_b.id),
+                state.breaker_config,
+                state.clock.clone(),
+            );
+            for _ in 0..state.breaker_config.failures_to_open {
+                breaker_b.permit().unwrap().record_failure();
+            }
+            assert!(acquire_websocket_breaker_permit(&state, up_b.id).is_err());
+
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-api-key",
+                HeaderValue::from_str(crate::app::tests::TEST_KEY.plaintext.as_str()).unwrap(),
+            );
+            let auth = state.lifecycle.authenticate(&headers).await.unwrap();
+            let mut gateway = ResponsesWebSocketGateway::new(
+                state.lifecycle.clone(),
+                &auth,
+                headers,
+                state.body_caps.messages,
+                4,
+            );
+            let mut connections = HashMap::new();
+            connections.insert(
+                1,
+                connect_existing_ws(&state, up_a.id, "api-a", addr_a).await,
+            );
+
+            let t_a = gateway
+                .client_message(
+                    auth,
+                    Bytes::from_static(br#"{"type":"response.create","model":"gpt-5.4","stream_id":"lane-1","store":false,"input":[{"role":"user","content":"binary opcode"}]}"#),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                t_a.candidates
+                    .iter()
+                    .map(|c| c.upstream_id)
+                    .collect::<Vec<_>>(),
+                vec![up_a.id, up_b.id]
+            );
+            gateway.assign_connection(t_a.turn_id, 1, up_a.id, "api-a");
+            gateway.commit_send_attempt(t_a.turn_id);
+            gateway.sent(t_a.turn_id);
+
+            let (mut downstream_sink, mut client_ws, sink_server) =
+                spawn_test_downstream_sink().await;
+            let (events, mut event_rx) = tokio::sync::mpsc::channel(16);
+            let binary_429 = Bytes::from_static(
+                br#"{"type":"error","stream_id":"lane-1","error":{"code":"rate_limit_exceeded","message":"binary 429 from a"}}"#,
+            );
+            events
+                .send(WsProviderEvent::Frame {
+                    connection_id: 1,
+                    bytes: binary_429.clone(),
+                    text: false,
+                })
+                .await
+                .unwrap();
+
+            let mut next_connection_id = 2;
+            let mut pending_connects = HashMap::new();
+            let mut connect_tasks = tokio::task::JoinSet::new();
+            let mut deferred = VecDeque::new();
+            let mut dispatches = VecDeque::new();
+            let mut carried_budgets = HashMap::new();
+
+            assert!(
+                drain_buffered_ws_events_snapshot(
+                    &mut event_rx,
+                    &mut gateway,
+                    &mut connections,
+                    &pending_connects,
+                    &deferred,
+                    &mut dispatches,
+                    &mut downstream_sink,
+                    1,
+                )
+                .await
+            );
+            assert_eq!(dispatches.len(), 1);
+            assert!(
+                flush_pending_ws_dispatches(
+                    &mut gateway,
+                    &state,
+                    &mut connections,
+                    &events,
+                    &mut next_connection_id,
+                    4,
+                    &mut pending_connects,
+                    &mut connect_tasks,
+                    &mut deferred,
+                    &mut dispatches,
+                    &mut carried_budgets,
+                    &mut downstream_sink,
+                )
+                .await
+            );
+
+            let restored = tokio::time::timeout(Duration::from_secs(2), client_ws.next())
+                .await
+                .expect("lane-1 receives restored binary 429 frame")
+                .unwrap()
+                .unwrap();
+            assert!(
+                restored.is_binary(),
+                "restored binary 429 must preserve Binary opcode: {restored:?}"
+            );
+            assert_eq!(restored.into_data().as_ref(), binary_429.as_ref());
+            assert_eq!(acc_b.load(AtomicOrdering::SeqCst), 0);
+
+            sink_server.abort();
+            task_a.abort();
+            task_b.abort();
+        }
+
+        // Subcase 4: Restoring a `TransformSseEventResult::Drop` error emits zero wire frames.
+        {
+            let (mut downstream_sink, mut client_ws, sink_server) =
+                spawn_test_downstream_sink().await;
+            let dropped = WebSocketError::new(429, "rate_limit_exceeded", "dropped 429")
+                .with_raw_provider_frames(Vec::new());
+            assert!(send_websocket_error(&mut downstream_sink, &dropped).await);
+            downstream_sink
+                .send(Message::Text("sentinel".into()))
+                .await
+                .unwrap();
+            let first = tokio::time::timeout(Duration::from_secs(2), client_ws.next())
+                .await
+                .expect("sentinel frame arrives immediately after dropped error")
+                .unwrap()
+                .unwrap();
+            assert_eq!(first.to_text().unwrap(), "sentinel");
+            sink_server.abort();
         }
     }
 }

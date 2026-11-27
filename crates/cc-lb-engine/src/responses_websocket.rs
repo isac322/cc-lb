@@ -40,11 +40,17 @@ use crate::upstream_affinity::{
 use crate::usage_parser::{UsageCounts, observe_non_stream_json_value_for_shape};
 use cc_lb_upstream::{Signer, SseEvent, TransformSseEventRequest, TransformSseEventResult};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebSocketWireFrame {
+    pub bytes: Bytes,
+    pub text: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 struct WebSocketErrorExtra {
     response_id: Option<Box<str>>,
     provider_headers: Box<[(String, String)]>,
-    raw_provider_frames: Option<Box<[Bytes]>>,
+    raw_provider_frames: Option<Box<[WebSocketWireFrame]>>,
 }
 
 #[derive(Clone, Debug)]
@@ -144,22 +150,24 @@ impl WebSocketError {
         self
     }
 
-    pub fn with_raw_provider_frames(mut self, frames: Vec<Bytes>) -> Self {
+    pub fn with_raw_provider_frames(mut self, frames: Vec<WebSocketWireFrame>) -> Self {
         self.extra
             .get_or_insert_with(Default::default)
             .raw_provider_frames = Some(frames.into_boxed_slice());
         self
     }
 
-    pub fn raw_provider_frames(&self) -> Option<&[Bytes]> {
+    pub fn raw_provider_frames(&self) -> Option<&[WebSocketWireFrame]> {
         self.extra
             .as_deref()
             .and_then(|extra| extra.raw_provider_frames.as_deref())
     }
 
     pub fn to_bytes(&self) -> Bytes {
-        if let Some([single]) = self.raw_provider_frames() {
-            return single.clone();
+        if let Some([single]) = self.raw_provider_frames()
+            && std::str::from_utf8(&single.bytes).is_ok()
+        {
+            return single.bytes.clone();
         }
         let code = self.native_code.as_deref().unwrap_or(self.code);
         let mut error = serde_json::json!({
@@ -710,6 +718,41 @@ struct SuppressedFailoverError {
     upstream_id: Option<Uuid>,
     upstream_name: String,
     previous_session_upstream: Option<Uuid>,
+    charged_bytes: usize,
+}
+
+fn websocket_error_retained_bytes(error: &WebSocketError) -> usize {
+    let extra = error.extra.as_deref().map_or(0, |extra| {
+        std::mem::size_of::<WebSocketErrorExtra>()
+            .saturating_add(extra.response_id.as_deref().map_or(0, str::len))
+            .saturating_add(
+                extra
+                    .provider_headers
+                    .iter()
+                    .fold(0usize, |acc, (name, value)| {
+                        acc.saturating_add(name.len()).saturating_add(value.len())
+                    }),
+            )
+            .saturating_add(extra.raw_provider_frames.as_deref().map_or(0, |frames| {
+                frames.iter().fold(0usize, |acc, frame| {
+                    acc.saturating_add(std::mem::size_of::<WebSocketWireFrame>())
+                        .saturating_add(frame.bytes.len())
+                })
+            }))
+    });
+    error
+        .message
+        .len()
+        .saturating_add(error.native_code.as_deref().map_or(0, str::len))
+        .saturating_add(error.stream_id.as_deref().map_or(0, str::len))
+        .saturating_add(error.param.as_deref().map_or(0, str::len))
+        .saturating_add(extra)
+}
+
+fn suppressed_failover_retained_bytes(error: &WebSocketError, upstream_name: &str) -> usize {
+    std::mem::size_of::<SuppressedFailoverError>()
+        .saturating_add(websocket_error_retained_bytes(error))
+        .saturating_add(upstream_name.len())
 }
 
 struct Turn {
@@ -2643,12 +2686,23 @@ impl ResponsesWebSocketGateway {
         Ok(())
     }
 
+    fn clear_suppressed_failover_error_on_turn(
+        used_bytes: &mut usize,
+        turn: &mut Turn,
+    ) -> Option<SuppressedFailoverError> {
+        let suppressed = turn.suppressed_failover_error.take()?;
+        let released = suppressed.charged_bytes.min(turn.charged_bytes);
+        *used_bytes = used_bytes.saturating_sub(released);
+        turn.charged_bytes = turn.charged_bytes.saturating_sub(released);
+        Some(suppressed)
+    }
+
     pub fn commit_send_attempt(&mut self, turn_id: u64) {
         if let Some(turn) = self.turns.get_mut(&turn_id)
             && !turn.attempted
             && let Some(upstream_id) = turn.upstream_id
         {
-            turn.suppressed_failover_error = None;
+            Self::clear_suppressed_failover_error_on_turn(&mut self.used_bytes, turn);
             turn.attempted = true;
             turn.attempt_num = turn.attempt_num.saturating_add(1);
             turn.prepared.deferred_limit_context = None;
@@ -2671,7 +2725,7 @@ impl ResponsesWebSocketGateway {
 
     pub fn mark_failover_replacement_dialed(&mut self, turn_id: u64) {
         if let Some(turn) = self.turns.get_mut(&turn_id) {
-            turn.suppressed_failover_error = None;
+            Self::clear_suppressed_failover_error_on_turn(&mut self.used_bytes, turn);
         }
     }
 
@@ -2683,6 +2737,7 @@ impl ResponsesWebSocketGateway {
         value: &Value,
         lane: &Option<String>,
         raw_frame: &Bytes,
+        raw_text: bool,
         public_frame: Option<&Bytes>,
         transformed_frames: Option<&[Bytes]>,
     ) -> WebSocketError {
@@ -2690,21 +2745,37 @@ impl ResponsesWebSocketGateway {
         let (classified, _) = classify_terminal_frame(kind, value, lane, signer);
         let mut suppressed =
             classified.unwrap_or_else(|| native_terminal_error_with_signer(value, lane, signer));
-        let outbound_frames: Vec<Bytes> = if let Some(frames) = transformed_frames {
-            frames.to_vec()
-        } else if !self.codex_backend
-            && let Some(public) = public_frame
-        {
-            vec![public.clone()]
-        } else {
-            vec![raw_frame.clone()]
-        };
-        if !outbound_frames.is_empty()
-            && outbound_frames
-                .iter()
-                .all(|bytes| std::str::from_utf8(bytes).is_ok())
-        {
-            suppressed = suppressed.with_raw_provider_frames(outbound_frames);
+        let outbound_frames: Option<Vec<WebSocketWireFrame>> =
+            if let Some(frames) = transformed_frames {
+                frames
+                    .iter()
+                    .all(|bytes| std::str::from_utf8(bytes).is_ok())
+                    .then(|| {
+                        frames
+                            .iter()
+                            .cloned()
+                            .map(|bytes| WebSocketWireFrame { bytes, text: true })
+                            .collect()
+                    })
+            } else if !self.codex_backend
+                && let Some(public) = public_frame
+            {
+                std::str::from_utf8(public).is_ok().then(|| {
+                    vec![WebSocketWireFrame {
+                        bytes: public.clone(),
+                        text: true,
+                    }]
+                })
+            } else {
+                (!raw_text || std::str::from_utf8(raw_frame).is_ok()).then(|| {
+                    vec![WebSocketWireFrame {
+                        bytes: raw_frame.clone(),
+                        text: raw_text,
+                    }]
+                })
+            };
+        if let Some(frames) = outbound_frames {
+            suppressed = suppressed.with_raw_provider_frames(frames);
         }
         suppressed
     }
@@ -2716,15 +2787,20 @@ impl ResponsesWebSocketGateway {
         failed_upstream_name: String,
         previous_session_upstream: Option<Uuid>,
         error: WebSocketError,
+        charged_bytes: usize,
     ) {
         let previous_session_upstream =
             previous_session_upstream.filter(|_| self.session_upstream.is_none());
         if let Some(turn) = self.turns.get_mut(&turn_id) {
+            Self::clear_suppressed_failover_error_on_turn(&mut self.used_bytes, turn);
+            self.used_bytes = self.used_bytes.saturating_add(charged_bytes);
+            turn.charged_bytes = turn.charged_bytes.saturating_add(charged_bytes);
             turn.suppressed_failover_error = Some(SuppressedFailoverError {
                 error,
                 upstream_id: Some(failed_upstream_id),
                 upstream_name: failed_upstream_name,
                 previous_session_upstream,
+                charged_bytes,
             });
         }
     }
@@ -3060,6 +3136,17 @@ impl ResponsesWebSocketGateway {
         frame: &Bytes,
         relay_pool: &WsRelayPoolSnapshot,
     ) -> Result<WebSocketEventResult, WebSocketError> {
+        self.provider_message_with_pool_and_opcode(connection_id, frame, true, relay_pool)
+            .await
+    }
+
+    pub async fn provider_message_with_pool_and_opcode(
+        &mut self,
+        connection_id: u64,
+        frame: &Bytes,
+        text: bool,
+        relay_pool: &WsRelayPoolSnapshot,
+    ) -> Result<WebSocketEventResult, WebSocketError> {
         let public_frame = self.oauth_public_frame(connection_id, frame);
         let processing_frame = if self.codex_backend {
             self.native_observation_frame(connection_id, frame)
@@ -3080,6 +3167,7 @@ impl ResponsesWebSocketGateway {
                 connection_id,
                 &processing_frame,
                 frame,
+                text,
                 public_frame.as_ref(),
                 transformed_frames,
                 transformed.as_ref().err().map(|boxed| &boxed.1),
@@ -3341,6 +3429,7 @@ impl ResponsesWebSocketGateway {
         connection_id: u64,
         frame: &Bytes,
         raw_frame: &Bytes,
+        raw_text: bool,
         public_frame: Option<&Bytes>,
         transformed_frames: Option<&[Bytes]>,
         transform_error: Option<&WebSocketError>,
@@ -3785,12 +3874,25 @@ impl ResponsesWebSocketGateway {
                     retire_connections,
                 });
             }
+            let suppressed = self.build_suppressed_live_failover_error(
+                connection_id,
+                kind,
+                &value,
+                &lane,
+                raw_frame,
+                raw_text,
+                public_frame,
+                transformed_frames,
+            );
+            let suppressed_bytes =
+                suppressed_failover_retained_bytes(&suppressed, &failed_upstream_name);
             let retry_dispatch = if let Some(retry_dispatch) = self
                 .try_owner_reasoning_failover_dispatch(
                     turn_id,
                     failed_upstream_id,
                     Some(connection_id),
                     relay_pool,
+                    suppressed_bytes,
                 )
                 .await
             {
@@ -3801,25 +3903,18 @@ impl ResponsesWebSocketGateway {
                     failed_upstream_id,
                     Some(connection_id),
                     relay_pool,
+                    suppressed_bytes,
                 )
                 .await
             };
             if let Some(retry_dispatch) = retry_dispatch {
-                let suppressed = self.build_suppressed_live_failover_error(
-                    connection_id,
-                    kind,
-                    &value,
-                    &lane,
-                    raw_frame,
-                    public_frame,
-                    transformed_frames,
-                );
                 self.record_suppressed_failover_error(
                     turn_id,
                     failed_upstream_id,
                     failed_upstream_name,
                     previous_session_upstream,
                     suppressed,
+                    suppressed_bytes,
                 );
                 let retire_connections = if self.is_connection_idle(connection_id, None) {
                     self.retire_idle_connection(connection_id);
@@ -4858,6 +4953,7 @@ impl ResponsesWebSocketGateway {
         failed_upstream_id: Uuid,
         failed_connection_id: Option<u64>,
         relay_pool: &WsRelayPoolSnapshot,
+        extra_retained_bytes: usize,
     ) -> Option<WebSocketDispatch> {
         if relay_pool.connect_budget_expired {
             return None;
@@ -4913,7 +5009,7 @@ impl ResponsesWebSocketGateway {
             .saturating_sub(self.used_bytes)
             .saturating_add(old_dynamic)
             .saturating_add(released_deferred_original);
-        if new_dynamic > headroom {
+        if new_dynamic.saturating_add(extra_retained_bytes) > headroom {
             return None;
         }
         let mut excluded = self.session_rate_limited_upstreams.clone();
@@ -5016,11 +5112,12 @@ impl ResponsesWebSocketGateway {
         failed_upstream_id: Uuid,
         failed_connection_id: Option<u64>,
         relay_pool: &WsRelayPoolSnapshot,
+        extra_retained_bytes: usize,
     ) -> Option<WebSocketDispatch> {
         if relay_pool.connect_budget_expired {
             return None;
         }
-        let (auth, frame, body, candidates, requires_api_key, lane) = {
+        let (auth, frame, body, candidates, requires_api_key, lane, released_plugin) = {
             let turn = self.turns.get(&turn_id)?;
             if turn.pinned.is_some()
                 || turn.prepared.has_explicit_affinity
@@ -5057,6 +5154,10 @@ impl ResponsesWebSocketGateway {
                 .unwrap_or(true);
             let requires_api_key =
                 turn.owner_failover_requires_api_key || (explicit_store_true && failed_is_api_key);
+            let released_plugin = turn
+                .plugin_request
+                .as_ref()
+                .map_or(0, |(_, req)| req.frame.len());
             (
                 turn.auth.clone(),
                 turn.frame.clone(),
@@ -5064,8 +5165,16 @@ impl ResponsesWebSocketGateway {
                 turn.live_failover_candidates.clone(),
                 requires_api_key,
                 turn.lane.clone(),
+                released_plugin,
             )
         };
+        let headroom = self
+            .byte_cap
+            .saturating_sub(self.used_bytes)
+            .saturating_add(released_plugin);
+        if extra_retained_bytes > headroom {
+            return None;
+        }
         let mut excluded = self.session_rate_limited_upstreams.clone();
         excluded.insert(failed_upstream_id);
         excluded.extend(relay_pool.excluded_upstreams.iter().copied());
@@ -5101,7 +5210,11 @@ impl ResponsesWebSocketGateway {
         turn.upstream_id = None;
         turn.sent = false;
         turn.attempted = false;
-        turn.plugin_request = None;
+        if let Some((_, req)) = turn.plugin_request.take() {
+            let req_len = req.frame.len().min(turn.charged_bytes);
+            self.used_bytes = self.used_bytes.saturating_sub(req_len);
+            turn.charged_bytes = turn.charged_bytes.saturating_sub(req_len);
+        }
         turn.echo_metadata = None;
         turn.metrics.reset_for_retry();
         turn.admitted_session_upstream = None;
@@ -5213,28 +5326,32 @@ impl ResponsesWebSocketGateway {
                 })
                 .unwrap_or_default();
             let failed_conn = self.turns.get(&turn_id).and_then(|t| t.connection_id);
+            let suppressed_bytes = suppressed_failover_retained_bytes(error, &failed_upstream_name);
             if let Some(retry_dispatch) = self
-                .try_owner_reasoning_failover_dispatch(turn_id, failed_id, failed_conn, relay_pool)
+                .try_owner_reasoning_failover_dispatch(
+                    turn_id,
+                    failed_id,
+                    failed_conn,
+                    relay_pool,
+                    suppressed_bytes,
+                )
                 .await
             {
-                let cleared_session_owner =
-                    previous_session_upstream.filter(|_| self.session_upstream.is_none());
-                if let Some(turn) = self.turns.get_mut(&turn_id) {
-                    turn.suppressed_failover_error = Some(SuppressedFailoverError {
-                        error: error.clone(),
-                        upstream_id: Some(failed_id),
-                        upstream_name: failed_upstream_name,
-                        previous_session_upstream: cleared_session_owner,
-                    });
-                }
+                self.record_suppressed_failover_error(
+                    turn_id,
+                    failed_id,
+                    failed_upstream_name,
+                    previous_session_upstream,
+                    error.clone(),
+                    suppressed_bytes,
+                );
                 return (vec![retry_dispatch], None);
             }
         }
         if error.code != "authentication_error"
-            && let Some(suppressed) = self
-                .turns
-                .get_mut(&turn_id)
-                .and_then(|turn| turn.suppressed_failover_error.take())
+            && let Some(suppressed) = self.turns.get_mut(&turn_id).and_then(|turn| {
+                Self::clear_suppressed_failover_error_on_turn(&mut self.used_bytes, turn)
+            })
         {
             if self.session_upstream.is_none() {
                 self.session_upstream = suppressed.previous_session_upstream;
@@ -6216,6 +6333,7 @@ pub(crate) mod tests {
                     1,
                     &delta,
                     &delta,
+                    true,
                     None,
                     None,
                     None,
@@ -6309,6 +6427,7 @@ pub(crate) mod tests {
                 1,
                 &frame,
                 &frame,
+                true,
                 None,
                 None,
                 None,
@@ -6357,6 +6476,7 @@ pub(crate) mod tests {
                 1,
                 &frame,
                 &frame,
+                true,
                 None,
                 None,
                 Some(&error),
@@ -13507,6 +13627,7 @@ pub(crate) mod tests {
                 upstream_a,
                 Some(1),
                 &WsRelayPoolSnapshot::default(),
+                0,
             )
             .await
             .expect("within budget lazy failover strips & dispatches");
@@ -15231,6 +15352,243 @@ pub(crate) mod tests {
             .expect_err("public WS PrewarmResponse multi-owner conflict must keep upstream_affinity_unavailable");
         assert_eq!(err.status, 400);
         assert_eq!(err.code, error_codes::UPSTREAM_AFFINITY_UNAVAILABLE);
+        gw.close();
+    }
+
+    #[tokio::test]
+    async fn ws_suppressed_failover_error_budget_drop_and_opcode() {
+        struct DropTransformDialect;
+
+        impl cc_lb_upstream::UpstreamDialect for DropTransformDialect {
+            fn shape(
+                &self,
+                _context: &cc_lb_upstream::DialectShapeContext,
+                _upstream: &cc_lb_domain::Upstream,
+                _principal: &cc_lb_domain::Principal,
+                _builder: &mut cc_lb_upstream::ShapedRequestBuilder,
+            ) -> Result<cc_lb_upstream::ShapedRequest, cc_lb_upstream::DialectError> {
+                unreachable!("not shaping request")
+            }
+
+            fn sse_event_transform_hook(
+                &self,
+            ) -> Option<&dyn cc_lb_upstream::SseEventTransformHook> {
+                Some(self)
+            }
+        }
+
+        impl cc_lb_upstream::SseEventTransformHook for DropTransformDialect {
+            fn transform_sse_event(
+                &self,
+                _request: cc_lb_upstream::TransformSseEventRequest,
+            ) -> Result<TransformSseEventResult, cc_lb_upstream::ResponseTransformError>
+            {
+                Ok(TransformSseEventResult::Drop)
+            }
+        }
+
+        let (lifecycle, auth, headers, upstream_a, upstream_b, quota_cache, _store) =
+            setup_codex_ws_quota_fixture(
+                cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover,
+            )
+            .await;
+        quota_cache.set_state(upstream_a, 0.05, "allowed");
+        quota_cache.set_state(upstream_b, 0.1, "allowed");
+
+        let req = Bytes::from_static(
+            br#"{"type":"response.create","model":"gpt-5.4","store":false,"input":[{"role":"user","content":"budget check"}]}"#,
+        );
+        let error_frame = Bytes::from(
+            serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "rate_limit_error",
+                    "code": "rate_limit_exceeded",
+                    "message": format!("quota exhausted {}", "X".repeat(256)),
+                }
+            })
+            .to_string(),
+        );
+        let pool = WsRelayPoolSnapshot::default();
+
+        // Part A: Suppressed failover error charges `used_bytes` + `turn.charged_bytes`
+        // and releases on both `mark_failover_replacement_dialed` and `commit_send_attempt`,
+        // while tightening `byte_cap` below `used_bytes + suppressed_bytes` declines failover
+        // and forwards the original error frame.
+        let mut gw = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            headers.clone(),
+            1024 * 1024,
+            16,
+        )
+        .with_codex_backend(true);
+        let d1 = gw
+            .client_message(auth.clone(), req.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(d1.candidates[0].upstream_id, upstream_a);
+        let used_before = gw.used_bytes;
+        let charge_before = gw.turns[&d1.turn_id].charged_bytes;
+        gw.assign_connection(d1.turn_id, 1, upstream_a, "oauth-a");
+        gw.commit_send_attempt(d1.turn_id);
+        gw.sent(d1.turn_id);
+
+        let res1 = gw
+            .provider_message_with_pool_and_opcode(1, &error_frame, false, &pool)
+            .await
+            .unwrap();
+        assert!(!res1.forward);
+        assert_eq!(res1.dispatches.len(), 1);
+        let suppressed_charge = gw.used_bytes.checked_sub(used_before).expect("charged");
+        assert!(suppressed_charge > error_frame.len());
+        assert_eq!(
+            gw.turns[&d1.turn_id].charged_bytes,
+            charge_before + suppressed_charge
+        );
+        assert_eq!(
+            gw.turns[&d1.turn_id]
+                .suppressed_failover_error
+                .as_ref()
+                .and_then(|s| s.error.raw_provider_frames()),
+            Some(
+                [WebSocketWireFrame {
+                    bytes: error_frame.clone(),
+                    text: false,
+                }]
+                .as_slice()
+            )
+        );
+
+        gw.mark_failover_replacement_dialed(d1.turn_id);
+        assert_eq!(gw.used_bytes, used_before);
+        assert_eq!(gw.turns[&d1.turn_id].charged_bytes, charge_before);
+
+        // Verify `commit_send_attempt` also releases suppressed bytes cleanly.
+        gw.assign_connection(d1.turn_id, 2, upstream_b, "oauth-b");
+        gw.commit_send_attempt(d1.turn_id);
+        gw.finish_turn(d1.turn_id, None);
+        gw.prune_empty_lanes();
+        assert_eq!(gw.used_bytes, 0);
+
+        // With `byte_cap` 1 byte below `used_before + suppressed_charge`, failover is rejected
+        // and the original 429 error frame is forwarded directly instead of suppressed.
+        let (lifecycle_cap, auth_cap, headers_cap, cap_a, cap_b, cap_quota, _cap_store) =
+            setup_codex_ws_quota_fixture(
+                cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover,
+            )
+            .await;
+        cap_quota.set_state(cap_a, 0.05, "allowed");
+        cap_quota.set_state(cap_b, 0.1, "allowed");
+        let mut gw_cap =
+            ResponsesWebSocketGateway::new(lifecycle_cap, &auth_cap, headers_cap, 1024 * 1024, 16)
+                .with_codex_backend(true);
+        let d_cap = gw_cap
+            .client_message(auth_cap.clone(), req.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        gw_cap.assign_connection(d_cap.turn_id, 1, cap_a, "oauth-a");
+        gw_cap.commit_send_attempt(d_cap.turn_id);
+        gw_cap.sent(d_cap.turn_id);
+        gw_cap.byte_cap = gw_cap.used_bytes + suppressed_charge - 1;
+        let cap_res = gw_cap
+            .provider_message_with_pool_and_opcode(1, &error_frame, true, &pool)
+            .await
+            .unwrap();
+        assert!(cap_res.forward);
+        assert!(cap_res.dispatches.is_empty());
+        assert!(gw_cap.turns.is_empty());
+        assert_eq!(gw_cap.used_bytes, 0);
+        gw_cap.close();
+
+        // Part B: `TransformSseEventResult::Drop` preserves empty `raw_provider_frames`
+        // across uncommitted failover restoration, releases `plugin_request` bytes on
+        // failover, and settles `used_bytes` to zero when restoration fails.
+        let (lifecycle_drop, auth_drop, headers_drop, drop_a, drop_b, drop_quota, _drop_store) =
+            setup_codex_ws_quota_fixture(
+                cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover,
+            )
+            .await;
+        drop_quota.set_state(drop_a, 0.05, "allowed");
+        drop_quota.set_state(drop_b, 0.1, "allowed");
+        let mut gw_drop = ResponsesWebSocketGateway::new(
+            lifecycle_drop,
+            &auth_drop,
+            headers_drop,
+            1024 * 1024,
+            16,
+        )
+        .with_codex_backend(true);
+        let d_drop = gw_drop
+            .client_message(auth_drop.clone(), req)
+            .await
+            .unwrap()
+            .unwrap();
+        gw_drop.assign_connection(d_drop.turn_id, 1, drop_a, "oauth-a");
+        let plugin_req_bytes = Bytes::from_static(b"plugin-req");
+        let extra_plugin_charge = plugin_req_bytes.len();
+        if let Some(turn) = gw_drop.turns.get_mut(&d_drop.turn_id) {
+            gw_drop.used_bytes = gw_drop.used_bytes.saturating_add(extra_plugin_charge);
+            turn.charged_bytes = turn.charged_bytes.saturating_add(extra_plugin_charge);
+            turn.plugin_request = Some((
+                drop_a,
+                WebSocketPluginRequest {
+                    frame: plugin_req_bytes,
+                    headers: HeaderMap::new(),
+                    context: ResponseTransformContext {
+                        principal: cc_lb_domain::Principal {
+                            id: auth_drop.principal_id().to_owned(),
+                            kind: cc_lb_domain::PrincipalKind::InternalKey,
+                        },
+                        upstream: cc_lb_domain::Upstream::OpenaiDirect { base_url: None },
+                        request_method: http::Method::POST,
+                        request_path: "/v1/responses".to_owned(),
+                        dialect: Arc::new(DropTransformDialect),
+                        gemini_oauth: false,
+                        vertex: false,
+                        codex_backend: true,
+                        vertex_location: None,
+                    },
+                    oauth_compat: false,
+                    echo_metadata: None,
+                },
+            ));
+        }
+        gw_drop.commit_send_attempt(d_drop.turn_id);
+        gw_drop.sent(d_drop.turn_id);
+
+        let drop_res = gw_drop
+            .provider_message_with_pool_and_opcode(1, &error_frame, false, &pool)
+            .await
+            .unwrap();
+        assert!(!drop_res.forward);
+        assert!(drop_res.frames.is_none());
+        assert_eq!(drop_res.dispatches.len(), 1);
+        assert_eq!(
+            gw_drop.turns[&d_drop.turn_id]
+                .suppressed_failover_error
+                .as_ref()
+                .and_then(|s| s.error.raw_provider_frames()),
+            Some(&[][..])
+        );
+        assert!(gw_drop.turns[&d_drop.turn_id].plugin_request.is_none());
+
+        let (ready, restored) = gw_drop
+            .fail_dispatch_with_recovery_and_pool(
+                d_drop.turn_id,
+                Some(drop_b),
+                &WebSocketError::new(502, "upstream_unavailable", "breaker open"),
+                &pool,
+            )
+            .await;
+        assert!(ready.is_empty());
+        let restored = restored.expect("restored dropped 429 error");
+        assert_eq!(restored.raw_provider_frames(), Some(&[][..]));
+        assert!(gw_drop.turns.is_empty());
+        assert_eq!(gw_drop.used_bytes, 0);
+        gw_drop.close();
         gw.close();
     }
 }
