@@ -409,6 +409,7 @@ struct ResponseOwner {
     oauth_transport: bool,
     oauth_compat: bool,
     echo_metadata: Option<Value>,
+    sent_service_tier: Option<String>,
     terminal_delivery: TerminalDelivery,
     evicted_for_continuation: bool,
 }
@@ -1668,10 +1669,7 @@ impl ResponsesWebSocketGateway {
                 .iter()
                 .all(|candidate| candidate.socket_per_lane);
         self.successors.insert(parent.clone(), turn_id);
-        let initial_service_tier = body
-            .get("service_tier")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
+        let initial_service_tier = owner.sent_service_tier.clone();
         self.turns.insert(
             turn_id,
             Turn {
@@ -3647,6 +3645,10 @@ impl ResponsesWebSocketGateway {
                         .expect("pending error terminal exists");
                     if let Some((mut usage, complete)) = usage_update {
                         if is_oauth.unwrap_or(pending.turn.prepared.oauth_transport) {
+                            crate::usage_parser::preserve_prior_openai_oauth_service_tier(
+                                pending.turn.usage.as_ref(),
+                                &mut usage,
+                            );
                             crate::usage_parser::apply_openai_oauth_service_tier(
                                 &mut usage,
                                 pending.turn.sent_service_tier(),
@@ -4020,6 +4022,7 @@ impl ResponsesWebSocketGateway {
                 let oauth_transport = turn.prepared.oauth_transport;
                 let oauth_compat = turn.prepared.oauth_compat;
                 let echo_metadata = turn.echo_metadata.clone();
+                let sent_service_tier = turn.sent_service_tier.clone();
                 let previous = turn.previous_response_id.clone();
                 if let Some(turn) = self.turns.get_mut(&turn_id) {
                     turn.previous_response_id = None;
@@ -4037,6 +4040,7 @@ impl ResponsesWebSocketGateway {
                         oauth_transport,
                         oauth_compat,
                         echo_metadata,
+                        sent_service_tier,
                         terminal_delivery: TerminalDelivery::None,
                         evicted_for_continuation: false,
                     },
@@ -4067,6 +4071,10 @@ impl ResponsesWebSocketGateway {
             let is_oauth = self.connection_oauth.get(&connection_id).copied();
             let turn = self.turns.get_mut(&turn_id).expect("bound turn exists");
             if is_oauth.unwrap_or(turn.prepared.oauth_transport) {
+                crate::usage_parser::preserve_prior_openai_oauth_service_tier(
+                    turn.usage.as_ref(),
+                    &mut usage,
+                );
                 crate::usage_parser::apply_openai_oauth_service_tier(
                     &mut usage,
                     turn.sent_service_tier(),
@@ -6031,6 +6039,7 @@ fn owner_bytes(id: &str, owner: &ResponseOwner) -> usize {
         .saturating_add(owner.lane.as_ref().map_or(0, String::len).saturating_mul(2))
         .saturating_add(json_owned_bytes(&owner.body))
         .saturating_add(owner.echo_metadata.as_ref().map_or(0, json_owned_bytes))
+        .saturating_add(owner.sent_service_tier.as_ref().map_or(0, String::len))
 }
 
 fn parse_client_frame(
@@ -6102,23 +6111,11 @@ fn observed_response_usage(response: &Value) -> Option<(UsageCounts, bool)> {
     if input.is_none() && output.is_none() {
         return None;
     }
-    let mut usage = observe_non_stream_json_value_for_shape(
+    let usage = observe_non_stream_json_value_for_shape(
         response,
         crate::provider_capability::UsageShape::OpenaiResponses,
     )
     .usage;
-    if let Some(tier) = response
-        .get("service_tier")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            response
-                .get("response")
-                .and_then(|value| value.get("service_tier"))
-                .and_then(Value::as_str)
-        })
-    {
-        usage.service_tier = Some(tier.to_owned());
-    }
     Some((usage, input.is_some() && output.is_some()))
 }
 
@@ -16094,6 +16091,419 @@ pub(crate) mod tests {
             observed_tier.as_deref(),
             Some("default"),
             "delayed settlement must keep backend default instead of reverting to stripped ingress priority"
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_ws_steer_successor_uses_parent_dispatched_tier_not_unshaped_ingress() {
+        use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+        use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+        use cc_lb_control::api_keys::principal_view::{
+            DialectCache, PrincipalView, ShapePluginCache,
+        };
+        use cc_lb_control::dynamic_view::{DynamicViewBuilder, DynamicViewHolder};
+        use cc_lb_control::event_bus::{InMemoryBus, RequestEventBus};
+        use cc_lb_domain::{Principal, Upstream};
+        use cc_lb_upstream::{
+            DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
+        };
+
+        struct SteerTierDialect {
+            replacement: Option<&'static str>,
+        }
+        impl UpstreamDialect for SteerTierDialect {
+            fn shape(
+                &self,
+                context: &DialectShapeContext,
+                _upstream: &Upstream,
+                _principal: &Principal,
+                builder: &mut ShapedRequestBuilder,
+            ) -> Result<ShapedRequest, DialectError> {
+                let mut body: Value = serde_json::from_slice(&context.body_bytes).map_err(|e| {
+                    DialectError::UnsupportedRequest {
+                        reason: e.to_string(),
+                    }
+                })?;
+                if let Some(obj) = body.as_object_mut() {
+                    match self.replacement {
+                        Some(tier) => {
+                            obj.insert("service_tier".to_owned(), Value::String(tier.to_owned()));
+                        }
+                        None => {
+                            obj.remove("service_tier");
+                        }
+                    }
+                }
+                let rewritten = Bytes::from(serde_json::to_vec(&body).map_err(|e| {
+                    DialectError::UnsupportedRequest {
+                        reason: e.to_string(),
+                    }
+                })?);
+                let url = url::Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("valid test URL");
+                Ok(builder.shaped_request(
+                    url,
+                    context.method.clone(),
+                    context.downstream_headers.clone(),
+                    rewritten,
+                ))
+            }
+        }
+        struct UnusedWsDispatcher;
+        #[async_trait::async_trait]
+        impl crate::UpstreamDispatch for UnusedWsDispatcher {
+            async fn dispatch(
+                &self,
+                _request: cc_lb_upstream::SignedRequest,
+            ) -> Result<http::Response<crate::Body>, crate::DispatchError> {
+                unreachable!("websocket test does not dispatch HTTP")
+            }
+        }
+
+        for (case, replacement, expected_child_tier) in [
+            ("omitted_by_hook", None, "default"),
+            ("preserved_priority", Some("priority"), "priority"),
+        ] {
+            let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+            let storage = Arc::new(
+                cc_lb_storage_sqlite::open_sqlite("sqlite::memory:", clock.clone())
+                    .await
+                    .expect("open in-memory db"),
+            );
+            storage.initialize().await.expect("migrate db");
+            let keys = Arc::new(KeyStore::new(storage.clone()));
+            let (_rec, secret) = keys
+                .create(
+                    DIRECT_PRINCIPAL,
+                    CreateParams {
+                        label: format!("ws-steer-{case}"),
+                        description: None,
+                        expires_at_unix_secs: None,
+                        limit_overrides: Vec::new(),
+                    },
+                )
+                .await
+                .expect("create test key");
+            let upstream_id = Uuid::new_v4();
+            let record = cc_lb_storage_api::upstream::UpstreamRecord {
+                id: upstream_id,
+                name: format!("oauth-steer-{case}"),
+                kind: cc_lb_storage_api::upstream::UpstreamKind::OpenaiOauth,
+                enabled: true,
+                base_url: Some(
+                    url::Url::parse("https://chatgpt.com/backend-api/codex")
+                        .expect("valid test URL"),
+                ),
+                ..Default::default()
+            };
+
+            let mut chains = HashMap::new();
+            chains.insert(
+                DIRECT_PRINCIPAL.to_owned(),
+                (
+                    None,
+                    DialectCache::Explicit(ShapePluginCache {
+                        dialect: Arc::new(SteerTierDialect { replacement }),
+                    }),
+                ),
+            );
+            let pview = Arc::new(PrincipalView::for_tests(
+                DIRECT_PRINCIPAL,
+                true,
+                vec!["*".to_owned()],
+                Vec::new(),
+                chains,
+            ));
+            let authn = Arc::new(BuiltinAuthn::new(keys, clock.clone()));
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-api-key",
+                secret.expose().parse().expect("valid auth header"),
+            );
+            let auth = crate::authenticate_first(&authn, &headers, &pview)
+                .await
+                .expect("authenticate");
+            let bus = Arc::new(InMemoryBus::new());
+            let mut events = bus.subscribe_lifecycle();
+            let dynamic = DynamicViewBuilder::new(0)
+                .signer_factory(Arc::new(UnusedSignerFactory))
+                .principal_view(pview)
+                .upstream_records(vec![record])
+                .build();
+            let lifecycle_bus: Arc<dyn RequestEventBus> = bus.clone();
+            let lifecycle = Arc::new(
+                Lifecycle::new_with_dynamic_view(
+                    authn,
+                    Arc::new(DynamicViewHolder::new(dynamic)),
+                    Arc::new(UnusedWsDispatcher),
+                    crate::LifecycleConfig::default(),
+                    clock.clone(),
+                )
+                .with_event_bus(lifecycle_bus.clone()),
+            );
+
+            let mut gw = ResponsesWebSocketGateway::new(
+                lifecycle.clone(),
+                &auth,
+                HeaderMap::new(),
+                65_536,
+                8,
+            );
+            gw.connection_oauth.insert(1, true);
+            gw.connections.insert(1, upstream_id);
+            gw.connection_lanes.insert(1, None);
+            let parent_obs = LifecycleContext::new(
+                format!("ws-steer-parent-{case}"),
+                lifecycle_bus.clone(),
+                &(clock.clone() as cc_lb_clock::ClockHandle),
+            );
+            parent_obs.mark_authn_reached();
+            let mut parent_turn = Turn {
+                body: Arc::new(serde_json::json!({
+                    "type": "response.create",
+                    "model": "gpt-test",
+                    "service_tier": "priority"
+                })),
+                frame: Bytes::from_static(
+                    br#"{"type":"response.create","model":"gpt-test","service_tier":"priority"}"#,
+                ),
+                upstream_id: Some(upstream_id),
+                connection_id: Some(1),
+                sent: true,
+                attempted: true,
+                attempt_num: 1,
+                sent_service_tier: Some("priority".to_owned()),
+                ..make_synthetic_turn(
+                    &DirectAccountingFixture::new().await,
+                    Some(parent_obs),
+                    None,
+                    true,
+                    true,
+                    Some(false),
+                    None,
+                )
+            };
+            parent_turn.candidate_oauth.insert(upstream_id, true);
+            gw.turns.insert(1, parent_turn);
+            gw.next_turn_id = 1;
+            gw.lanes.insert(
+                None,
+                Lane {
+                    active: Some(1),
+                    ..Default::default()
+                },
+            );
+
+            gw.prepare_plugin_request(1, upstream_id)
+                .expect("shape parent turn");
+            let pool = WsRelayPoolSnapshot::default();
+            let parent_id = format!("resp_steer_parent_{case}");
+            let parent_created = Bytes::from(
+                serde_json::json!({
+                    "type": "response.created",
+                    "response": { "id": parent_id, "object": "response", "status": "in_progress", "store": false, "service_tier": "auto" }
+                })
+                .to_string(),
+            );
+            gw.provider_message_with_pool_and_opcode(1, &parent_created, false, &pool)
+                .await
+                .unwrap();
+
+            let steer_frame = Bytes::from(
+                serde_json::json!({
+                    "type": "response.steer",
+                    "previous_response_id": parent_id,
+                    "input": "steer update"
+                })
+                .to_string(),
+            );
+            let steer_dispatch = gw
+                .client_message(auth.clone(), steer_frame)
+                .await
+                .expect("admit steer")
+                .expect("steer dispatch");
+            let steer_event_id = gw.turns[&steer_dispatch.turn_id]
+                .prepared
+                .observer
+                .as_ref()
+                .expect("steer turn has observer")
+                .event_id()
+                .to_owned();
+            let _ = gw.frame_for_send(&steer_dispatch).expect("steer frame");
+            gw.turns.get_mut(&steer_dispatch.turn_id).unwrap().sent = true;
+
+            let parent_incomplete = Bytes::from(
+                serde_json::json!({
+                    "type": "response.incomplete",
+                    "response": {
+                        "id": parent_id,
+                        "object": "response",
+                        "status": "incomplete",
+                        "store": false,
+                        "service_tier": "default",
+                        "incomplete_details": { "reason": "steered" },
+                        "usage": { "input_tokens": 5, "output_tokens": 2, "total_tokens": 7 }
+                    }
+                })
+                .to_string(),
+            );
+            gw.provider_message_with_pool_and_opcode(1, &parent_incomplete, false, &pool)
+                .await
+                .unwrap();
+
+            let child_id = format!("resp_steer_child_{case}");
+            let child_created = Bytes::from(
+                serde_json::json!({
+                    "type": "response.created",
+                    "response": { "id": child_id, "previous_response_id": parent_id, "object": "response", "status": "in_progress", "store": false, "service_tier": "auto" }
+                })
+                .to_string(),
+            );
+            gw.provider_message_with_pool_and_opcode(1, &child_created, false, &pool)
+                .await
+                .unwrap();
+
+            let child_completed = Bytes::from(
+                serde_json::json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": child_id,
+                        "object": "response",
+                        "status": "completed",
+                        "store": false,
+                        "service_tier": "default",
+                        "usage": { "input_tokens": 10, "output_tokens": 5, "total_tokens": 15 }
+                    }
+                })
+                .to_string(),
+            );
+            gw.provider_message_with_pool_and_opcode(1, &child_completed, false, &pool)
+                .await
+                .unwrap();
+            gw.close();
+
+            let mut observed_tier = None;
+            while let Ok(ev) = events.try_recv() {
+                if let LifecycleEvent::UsageObserved {
+                    event_id: ev_id,
+                    usage,
+                    ..
+                } = ev
+                    && ev_id == steer_event_id
+                {
+                    observed_tier = usage.service_tier;
+                }
+            }
+            assert_eq!(
+                observed_tier.as_deref(),
+                Some(expected_child_tier),
+                "case={case}: steering successor must inherit parent dispatched tier rather than unshaped ingress body"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_ws_preserves_measured_priority_across_later_default_completed_frame() {
+        use cc_lb_control::RequestEventBus;
+
+        let fixture = DirectAccountingFixture::new().await;
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let mut events = bus.subscribe_lifecycle();
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+        let upstream_id = Uuid::new_v4();
+        let mut gw = ResponsesWebSocketGateway::new(
+            fixture.lifecycle.clone(),
+            &fixture.auth,
+            HeaderMap::new(),
+            65_536,
+            8,
+        );
+        gw.connection_oauth.insert(1, true);
+        gw.connections.insert(1, upstream_id);
+        gw.connection_lanes.insert(1, None);
+        let obs = LifecycleContext::new("ws-measured-priority-evt".to_owned(), bus, &clock);
+        obs.mark_authn_reached();
+        let event_id = obs.event_id().to_owned();
+        let mut turn = Turn {
+            body: Arc::new(serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-test",
+                "service_tier": "default"
+            })),
+            frame: Bytes::from_static(
+                br#"{"type":"response.create","model":"gpt-test","service_tier":"default"}"#,
+            ),
+            upstream_id: Some(upstream_id),
+            connection_id: Some(1),
+            sent: true,
+            attempted: true,
+            attempt_num: 1,
+            sent_service_tier: Some("default".to_owned()),
+            ..make_synthetic_turn(&fixture, Some(obs), None, true, true, Some(false), None)
+        };
+        turn.candidate_oauth.insert(upstream_id, true);
+        gw.turns.insert(1, turn);
+        gw.next_turn_id = 1;
+        gw.lanes.insert(
+            None,
+            Lane {
+                active: Some(1),
+                ..Default::default()
+            },
+        );
+
+        let pool = WsRelayPoolSnapshot::default();
+        for payload in [
+            serde_json::json!({
+                "type": "response.created",
+                "response": { "id": "resp_measured_prio", "object": "response", "status": "in_progress", "store": false, "service_tier": "auto" }
+            }),
+            serde_json::json!({
+                "type": "response.in_progress",
+                "response": {
+                    "id": "resp_measured_prio",
+                    "object": "response",
+                    "status": "in_progress",
+                    "store": false,
+                    "service_tier": "priority",
+                    "usage": { "input_tokens": 10, "output_tokens": 2, "total_tokens": 12 }
+                }
+            }),
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_measured_prio",
+                    "object": "response",
+                    "status": "completed",
+                    "store": false,
+                    "service_tier": "default",
+                    "usage": { "input_tokens": 10, "output_tokens": 8, "total_tokens": 18 }
+                }
+            }),
+        ] {
+            let frame = Bytes::from(payload.to_string());
+            gw.provider_message_with_pool_and_opcode(1, &frame, false, &pool)
+                .await
+                .unwrap();
+        }
+        gw.close();
+
+        let mut observed_tier = None;
+        while let Ok(ev) = events.try_recv() {
+            if let LifecycleEvent::UsageObserved {
+                event_id: ev_id,
+                usage,
+                ..
+            } = ev
+                && ev_id == event_id
+            {
+                observed_tier = usage.service_tier;
+            }
+        }
+        assert_eq!(
+            observed_tier.as_deref(),
+            Some("priority"),
+            "earlier measured priority tier must survive later OAuth default placeholder frame"
         );
     }
 }

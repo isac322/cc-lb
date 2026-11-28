@@ -930,7 +930,12 @@ pub(super) fn resolve_fanout_call_usage(
     body: &[u8],
     openai_oauth_sent_service_tier: Option<&Option<String>>,
 ) -> Option<UsageCounts> {
-    let observed = crate::openai_compat::chat::responses_usage_from_sse(body)?;
+    let policy = if openai_oauth_sent_service_tier.is_some() {
+        usage_parser::ServiceTierMergePolicy::OpenaiOauth
+    } else {
+        usage_parser::ServiceTierMergePolicy::Standard
+    };
+    let observed = crate::openai_compat::chat::responses_usage_from_sse_with_policy(body, policy)?;
     let mut counts = responses_usage_value_to_counts(&observed);
     if let Some(sent) = openai_oauth_sent_service_tier {
         usage_parser::apply_openai_oauth_service_tier(&mut counts, sent.as_deref());

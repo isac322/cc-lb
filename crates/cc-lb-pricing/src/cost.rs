@@ -3,7 +3,7 @@ use crate::tier_resolver::{
     resolve_tier_rate,
 };
 use crate::{
-    ComputedCostBreakdown, NativePricingStatus, PricingStatus, UsdPerMillion,
+    CatalogSnapshot, ComputedCostBreakdown, NativePricingStatus, PricingStatus, UsdPerMillion,
     canonical_service_tier, global_catalog, normalize_model_id,
 };
 
@@ -130,8 +130,43 @@ pub fn virtual_cost_micros_full_with_context_and_provider_writes(
     cache_write_12h_input: Option<u64>,
     service_tier: Option<&str>,
 ) -> Option<ComputedCostBreakdown> {
-    let normalized = normalize_model_id(model);
     let snapshot = global_catalog().current();
+    virtual_cost_micros_full_with_context_and_provider_writes_in_snapshot(
+        &snapshot,
+        model,
+        input,
+        output,
+        input_image_tokens,
+        output_image_tokens,
+        cache_creation_input_tokens,
+        cache_creation_5m_input,
+        cache_creation_1h_input,
+        cache_read_input,
+        cache_write_input,
+        cache_write_30m_input,
+        cache_write_12h_input,
+        service_tier,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn virtual_cost_micros_full_with_context_and_provider_writes_in_snapshot(
+    snapshot: &CatalogSnapshot,
+    model: &str,
+    input: u64,
+    output: u64,
+    input_image_tokens: u64,
+    output_image_tokens: u64,
+    cache_creation_input_tokens: u64,
+    cache_creation_5m_input: u64,
+    cache_creation_1h_input: u64,
+    cache_read_input: u64,
+    cache_write_input: Option<u64>,
+    cache_write_30m_input: Option<u64>,
+    cache_write_12h_input: Option<u64>,
+    service_tier: Option<&str>,
+) -> Option<ComputedCostBreakdown> {
+    let normalized = normalize_model_id(model);
     let Some((model_key, pricing)) = snapshot
         .models
         .get_key_value(model)

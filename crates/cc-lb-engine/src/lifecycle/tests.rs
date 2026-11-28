@@ -9960,3 +9960,172 @@ fn fanout_usage_aggregation_is_order_independent_for_mixed_tiers() {
     assert_eq!(forward.pricing_slices.len(), 2);
     assert_eq!(reversed.pricing_slices.len(), 2);
 }
+
+#[tokio::test]
+async fn openai_oauth_truncation_retry_inspection_error_retains_prior_attempt_sent_service_tier() {
+    struct AttemptTierDialect {
+        attempts: AtomicUsize,
+    }
+    impl UpstreamDialect for AttemptTierDialect {
+        fn shape(
+            &self,
+            context: &DialectShapeContext,
+            upstream: &Upstream,
+            principal: &Principal,
+            builder: &mut ShapedRequestBuilder,
+        ) -> Result<ShapedRequest, DialectError> {
+            let attempt = self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let tier = if attempt == 0 { "priority" } else { "default" };
+            let mut body: Value = serde_json::from_slice(&context.body_bytes).map_err(|e| {
+                DialectError::UnsupportedRequest {
+                    reason: e.to_string(),
+                }
+            })?;
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("service_tier".to_owned(), Value::String(tier.to_owned()));
+            }
+            let rewritten = Bytes::from(serde_json::to_vec(&body).map_err(|e| {
+                DialectError::UnsupportedRequest {
+                    reason: e.to_string(),
+                }
+            })?);
+            let mut inner_ctx = context.clone();
+            inner_ctx.body_bytes = rewritten;
+            RawPassthroughDialect {
+                base_url: Url::parse("https://chatgpt.com/backend-api/codex")
+                    .expect("test URL parses"),
+                openai_oauth: true,
+            }
+            .shape(&inner_ctx, upstream, principal, builder)
+        }
+    }
+
+    struct NoopAffinityStore;
+    #[async_trait]
+    impl UpstreamAffinityStore for NoopAffinityStore {
+        async fn resolve_upstream_affinities(
+            &self,
+            _keys: &[UpstreamAffinityKey],
+            _now_unix_secs: u64,
+            _ttl_secs: u64,
+        ) -> cc_lb_storage_api::StorageResult<Vec<UpstreamAffinityBinding>> {
+            Ok(Vec::new())
+        }
+
+        async fn read_upstream_owner_epoch(
+            &self,
+            _upstream_id: cc_lb_storage_api::UpstreamRecordId,
+            _expected_spec_revision: u64,
+        ) -> cc_lb_storage_api::StorageResult<Option<u64>> {
+            Ok(Some(0))
+        }
+
+        async fn bind_upstream_affinities(
+            &self,
+            _bindings: &[UpstreamAffinityBinding],
+            _now_unix_secs: u64,
+            _ttl_secs: u64,
+        ) -> cc_lb_storage_api::StorageResult<()> {
+            Ok(())
+        }
+
+        async fn purge_expired_upstream_affinities(
+            &self,
+            _now_unix_secs: u64,
+            _ttl_secs: u64,
+            _batch_size: usize,
+        ) -> cc_lb_storage_api::StorageResult<u64> {
+            Ok(0)
+        }
+    }
+
+    let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+    let mut rx = subscribe_lifecycle(&bus);
+    let up_id = Uuid::new_v4();
+    let mut record = upstream_record_with_kind(StorageRecordKind::OpenaiOauth);
+    record.id = up_id;
+    let view = provenance_view(
+        failure_principal_view(
+            "principal-test",
+            (
+                None,
+                cc_lb_control::api_keys::principal_view::DialectCache::Explicit(
+                    cc_lb_control::api_keys::principal_view::ShapePluginCache {
+                        dialect: Arc::new(AttemptTierDialect {
+                            attempts: AtomicUsize::new(0),
+                        }),
+                    },
+                ),
+            ),
+        ),
+        Arc::new(TestSignerFactory),
+        vec![record],
+    );
+
+    let attempt1_sse = "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_trunc_1\",\"object\":\"response\",\"status\":\"in_progress\",\"service_tier\":\"auto\",\"output\":[]}}\n\n\
+event: response.failed\ndata: {\"type\":\"response.failed\",\"sequence_number\":1,\"response\":{\"id\":\"resp_trunc_1\",\"object\":\"response\",\"status\":\"failed\",\"service_tier\":\"default\",\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"overflow\"},\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"total_tokens\":120},\"output\":[]}}\n\n";
+    let attempt1_resp = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/event-stream")
+        .body(Body::from(attempt1_sse))
+        .expect("attempt 1 response");
+    let attempt2_resp = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/event-stream")
+        .body(Body::from_stream(async_stream::stream! {
+            yield Err::<Bytes, _>(std::io::Error::other("injected retry body read error"));
+        }))
+        .expect("attempt 2 response");
+    let dispatcher = Arc::new(QueueDispatch::new(vec![
+        Ok(attempt1_resp),
+        Ok(attempt2_resp),
+    ]));
+    let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus)
+        .with_upstream_affinity_store(Arc::new(NoopAffinityStore));
+
+    let req = Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/responses")
+        .header("x-api-key", failure_key_fixture().plaintext.as_str())
+        .body(Bytes::from_static(
+            br#"{"model":"gpt-6.2-sol","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}],"stream":true,"store":false,"truncation":"auto","service_tier":"priority"}"#,
+        ))
+        .expect("request builds");
+    let auth = lifecycle
+        .authenticate(req.headers())
+        .await
+        .expect("request authenticates");
+    let response = lifecycle
+        .handle(req, &auth)
+        .await
+        .expect("lifecycle handles request");
+    let (status, body) = collect_response_body(response).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body={}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        dispatcher.call_count(),
+        2,
+        "expected initial attempt plus failed truncation retry attempt"
+    );
+
+    let events = drain_events(&mut rx);
+    let observed_tier = events.iter().rev().find_map(|event| match event {
+        cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
+            result: Ok(success),
+            ..
+        } => success.usage.service_tier.clone(),
+        cc_lb_lifecycle::LifecycleEvent::UsageObserved { usage, .. } => usage.service_tier.clone(),
+        _ => None,
+    });
+    assert_eq!(
+        observed_tier.as_deref(),
+        Some("priority"),
+        "failed truncation retry inspection must retain prior attempt's dispatched tier; events={events:?}"
+    );
+}

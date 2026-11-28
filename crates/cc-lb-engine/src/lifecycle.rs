@@ -6045,10 +6045,10 @@ impl Lifecycle {
                     Ok(attempt) => attempt,
                     Err(_) => break,
                 };
-                compat_response_plan = retry_attempt.compat_response_plan;
-                openai_oauth_sent_service_tier = retry_attempt.openai_oauth_sent_service_tier;
+                let retry_compat_response_plan = retry_attempt.compat_response_plan;
+                let retry_openai_oauth_sent_service_tier =
+                    retry_attempt.openai_oauth_sent_service_tier;
                 let retry_response = retry_attempt.response;
-                retry_body = Some(next);
                 (inspected, overflow) = match compat_response::inspect_truncation_response(
                     retry_response,
                     decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
@@ -6058,6 +6058,9 @@ impl Lifecycle {
                     Ok(result) => result,
                     Err(_) => break,
                 };
+                compat_response_plan = retry_compat_response_plan;
+                openai_oauth_sent_service_tier = retry_openai_oauth_sent_service_tier;
+                retry_body = Some(next);
             }
             response = inspected;
         }
@@ -6875,6 +6878,14 @@ impl Lifecycle {
             .map_or_else(usage_parser::NonStreamObservation::default, |value| {
                 usage_parser::observe_non_stream_json_value_for_shape(value, usage_shape)
             });
+        let tier_policy = if response_affinity_context
+            .openai_oauth_sent_service_tier
+            .is_some()
+        {
+            usage_parser::ServiceTierMergePolicy::OpenaiOauth
+        } else {
+            usage_parser::ServiceTierMergePolicy::Standard
+        };
         let chat_raw_usage = response_affinity_context
             .precomputed_usage
             .clone()
@@ -6883,8 +6894,11 @@ impl Lifecycle {
                     .as_ref()
                     .filter(|plan| matches!(plan.kind, CompatResponseKind::Chat { .. }))
                     .and_then(|_| {
-                        crate::openai_compat::chat::responses_usage_from_sse(&body)
-                            .map(|usage| responses_usage_value_to_counts(&usage))
+                        crate::openai_compat::chat::responses_usage_from_sse_with_policy(
+                            &body,
+                            tier_policy,
+                        )
+                        .map(|usage| responses_usage_value_to_counts(&usage))
                     })
             });
         let observation = match chat_raw_usage {
@@ -8958,19 +8972,31 @@ impl Lifecycle {
                                         parsed_event.value().ok().flatten(),
                                     );
                                 }
-                                let usage_update = usage_parser::accumulate_sse_usage_for_shape(
-                                    &parsed_event,
-                                    &mut usage,
-                                    if precomputed_usage_present {
-                                        crate::provider_capability::UsageShape::None
-                                    } else {
-                                        response_affinity_context
-                                            .usage_shape
-                                            .unwrap_or_else(|| {
-                                                response_affinity_context.capability.usage_shape()
-                                            })
-                                    },
-                                );
+                                let tier_policy = if response_affinity_context
+                                    .openai_oauth_sent_service_tier
+                                    .is_some()
+                                {
+                                    usage_parser::ServiceTierMergePolicy::OpenaiOauth
+                                } else {
+                                    usage_parser::ServiceTierMergePolicy::Standard
+                                };
+                                let usage_update =
+                                    usage_parser::accumulate_sse_usage_for_shape_with_policy(
+                                        &parsed_event,
+                                        &mut usage,
+                                        if precomputed_usage_present {
+                                            crate::provider_capability::UsageShape::None
+                                        } else {
+                                            response_affinity_context
+                                                .usage_shape
+                                                .unwrap_or_else(|| {
+                                                    response_affinity_context
+                                                        .capability
+                                                        .usage_shape()
+                                                })
+                                        },
+                                        tier_policy,
+                                    );
                                 if !precomputed_usage_present
                                     && let Some(sent) = response_affinity_context
                                         .openai_oauth_sent_service_tier
@@ -9934,19 +9960,29 @@ impl Lifecycle {
                                 responses_error_context
                                     .observe(parsed_event.value().ok().flatten());
                             }
-                            let usage_update = usage_parser::accumulate_sse_usage_for_shape(
-                                &parsed_event,
-                                &mut usage,
-                                if precomputed_usage_present {
-                                    crate::provider_capability::UsageShape::None
-                                } else {
-                                    response_affinity_context
-                                        .usage_shape
-                                        .unwrap_or_else(|| {
-                                            response_affinity_context.capability.usage_shape()
-                                        })
-                                },
-                            );
+                            let tier_policy = if response_affinity_context
+                                .openai_oauth_sent_service_tier
+                                .is_some()
+                            {
+                                usage_parser::ServiceTierMergePolicy::OpenaiOauth
+                            } else {
+                                usage_parser::ServiceTierMergePolicy::Standard
+                            };
+                            let usage_update =
+                                usage_parser::accumulate_sse_usage_for_shape_with_policy(
+                                    &parsed_event,
+                                    &mut usage,
+                                    if precomputed_usage_present {
+                                        crate::provider_capability::UsageShape::None
+                                    } else {
+                                        response_affinity_context
+                                            .usage_shape
+                                            .unwrap_or_else(|| {
+                                                response_affinity_context.capability.usage_shape()
+                                            })
+                                    },
+                                    tier_policy,
+                                );
                             if !precomputed_usage_present
                                 && let Some(sent) = response_affinity_context
                                     .openai_oauth_sent_service_tier

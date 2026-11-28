@@ -488,23 +488,7 @@ impl Partial {
     // reconciliation, which must stay driven solely by the real `Priced` event.
     fn estimated_cost_options(&self) -> Option<CostBreakdownOptions> {
         self.estimated_cost_options_with(|model, usage| {
-            cc_lb_pricing::virtual_cost_micros_full_with_context_and_provider_writes(
-                model,
-                usage.input_tokens,
-                usage.output_tokens,
-                0,
-                0,
-                usage.cache_creation_input_tokens,
-                usage.cache_creation_input_tokens_5m,
-                usage.cache_creation_input_tokens_1h,
-                usage.cache_read_input_tokens,
-                usage.cache_write_input_tokens,
-                usage.cache_write_input_tokens_30m,
-                usage.cache_write_input_tokens_12h,
-                usage.service_tier.as_deref(),
-            )
-            .unwrap_or_else(cc_lb_pricing::ComputedCostBreakdown::unknown)
-            .into()
+            cc_lb_pricing::compute_usage_snapshot_cost(model, usage, true).into()
         })
     }
 
@@ -2210,6 +2194,77 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(partial.cost_options().total, Some(4242));
+    }
+
+    #[test]
+    fn cost_options_estimates_sliced_usage_using_pricing_slices() {
+        use cc_lb_lifecycle::UsagePricingSlice;
+        use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, TierRate, UsdPerMillion};
+        use std::collections::BTreeMap;
+
+        struct RestoreCatalog(std::sync::Arc<CatalogSnapshot>);
+        impl Drop for RestoreCatalog {
+            fn drop(&mut self) {
+                cc_lb_pricing::global_catalog().install_snapshot(self.0.as_ref().clone());
+            }
+        }
+
+        const TEST_MODEL: &str = "test-sliced-estimate-model";
+        let prev = cc_lb_pricing::global_catalog().current();
+        let _restore = RestoreCatalog(prev.clone());
+        let mut snap = prev.as_ref().clone();
+        snap.status = CatalogStatus::Ok;
+        snap.models.insert(
+            TEST_MODEL.to_owned(),
+            Pricing {
+                model: TEST_MODEL.to_owned(),
+                input_per_million_usd: UsdPerMillion::from_whole_usd(1),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(1),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
+                native: None,
+                by_tier: BTreeMap::from([(
+                    "priority".to_owned(),
+                    TierRate {
+                        input_per_million_usd: UsdPerMillion::from_whole_usd(2),
+                        output_per_million_usd: UsdPerMillion::from_whole_usd(2),
+                    },
+                )]),
+            },
+        );
+        cc_lb_pricing::global_catalog().install_snapshot(snap);
+
+        let slice_default = UsagePricingSlice {
+            input_tokens: 1_000_000,
+            service_tier: Some("default".to_owned()),
+            ..Default::default()
+        };
+        let slice_priority = UsagePricingSlice {
+            input_tokens: 1_000_000,
+            service_tier: Some("priority".to_owned()),
+            ..Default::default()
+        };
+
+        let make_partial = |slices: Vec<UsagePricingSlice>| Partial {
+            parse: Some(ParseInfo {
+                model: Some(TEST_MODEL.to_owned()),
+                ..Default::default()
+            }),
+            usage: UsageSnapshot {
+                input_tokens: 2_000_000,
+                service_tier: Some("priority".to_owned()),
+                pricing_slices: slices,
+                ..Default::default()
+            },
+            usage_seen: true,
+            ..Default::default()
+        };
+
+        // Combined fallback would estimate 2M * 2 = 4_000_000; per-slice estimate is 1M*1 + 1M*2 = 3_000_000.
+        let forward = make_partial(vec![slice_default.clone(), slice_priority.clone()]);
+        let reversed = make_partial(vec![slice_priority, slice_default]);
+        assert_eq!(forward.cost_options().total, Some(3_000_000));
+        assert_eq!(reversed.cost_options().total, Some(3_000_000));
     }
 
     #[test]

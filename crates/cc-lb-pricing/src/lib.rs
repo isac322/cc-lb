@@ -16,7 +16,10 @@ use serde::{Deserialize, Serialize};
 pub use cost::{
     cache_creation_1h_micros_from_input, virtual_cost_micros_full_with_context_and_provider_writes,
 };
-use cost::{record_missing_price_field, resolved_cache_creation_1h_price};
+use cost::{
+    record_missing_price_field, resolved_cache_creation_1h_price,
+    virtual_cost_micros_full_with_context_and_provider_writes_in_snapshot,
+};
 use tier_resolver::{resolve_optional_price, resolve_tier_rate};
 
 #[cfg(test)]
@@ -26,6 +29,50 @@ pub use lifecycle_pricing_subscriber::{
     PricingSubscriberHandle, spawn_lifecycle_pricing_subscriber,
 };
 pub use loader::{FetchedCatalog, LiteLlmLoader, LoaderError};
+
+/// Prices normalized usage counters using a caller-supplied catalog snapshot.
+#[allow(clippy::too_many_arguments)]
+fn compute_usage_fields_cost_in_snapshot(
+    snapshot: &CatalogSnapshot,
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    input_image_tokens: Option<u64>,
+    output_image_tokens: Option<u64>,
+    cache_creation_input_tokens: u64,
+    cache_creation_input_tokens_5m: u64,
+    cache_creation_input_tokens_1h: u64,
+    cache_read_input_tokens: u64,
+    cache_write_input_tokens: Option<u64>,
+    cache_write_input_tokens_30m: Option<u64>,
+    cache_write_input_tokens_12h: Option<u64>,
+    cache_write_evidence: Option<cc_lb_request_log::RequestCacheEvidence>,
+    service_tier: Option<&str>,
+    usage_present: bool,
+) -> ComputedCostBreakdown {
+    if !usage_present
+        || cache_write_evidence == Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+    {
+        return ComputedCostBreakdown::unknown();
+    }
+    virtual_cost_micros_full_with_context_and_provider_writes_in_snapshot(
+        snapshot,
+        model,
+        input_tokens,
+        output_tokens,
+        input_image_tokens.unwrap_or_default(),
+        output_image_tokens.unwrap_or_default(),
+        cache_creation_input_tokens,
+        cache_creation_input_tokens_5m,
+        cache_creation_input_tokens_1h,
+        cache_read_input_tokens,
+        cache_write_input_tokens,
+        cache_write_input_tokens_30m,
+        cache_write_input_tokens_12h,
+        service_tier,
+    )
+    .unwrap_or_else(ComputedCostBreakdown::unknown)
+}
 
 /// Prices normalized usage counters without treating absent or invalid usage as free.
 #[allow(clippy::too_many_arguments)]
@@ -51,12 +98,14 @@ pub(crate) fn compute_usage_fields_cost(
     {
         return ComputedCostBreakdown::unknown();
     }
-    virtual_cost_micros_full_with_context_and_provider_writes(
+    let snapshot = global_catalog().current();
+    compute_usage_fields_cost_in_snapshot(
+        &snapshot,
         model,
         input_tokens,
         output_tokens,
-        input_image_tokens.unwrap_or_default(),
-        output_image_tokens.unwrap_or_default(),
+        input_image_tokens,
+        output_image_tokens,
         cache_creation_input_tokens,
         cache_creation_input_tokens_5m,
         cache_creation_input_tokens_1h,
@@ -64,16 +113,21 @@ pub(crate) fn compute_usage_fields_cost(
         cache_write_input_tokens,
         cache_write_input_tokens_30m,
         cache_write_input_tokens_12h,
+        cache_write_evidence,
         service_tier,
+        usage_present,
     )
-    .unwrap_or_else(ComputedCostBreakdown::unknown)
 }
 
-/// Prices each upstream call slice independently and sums the resulting cost components.
-pub(crate) fn compute_usage_slices_cost(
+/// Prices each upstream call slice against one coherent catalog snapshot and sums components.
+pub(crate) fn compute_usage_slices_cost_in_snapshot(
+    snapshot: &CatalogSnapshot,
     model: &str,
     slices: &[cc_lb_lifecycle::UsagePricingSlice],
 ) -> ComputedCostBreakdown {
+    if slices.is_empty() {
+        return ComputedCostBreakdown::unknown();
+    }
     let mut total = ComputedCostBreakdown {
         input_micros: 0,
         output_micros: 0,
@@ -92,7 +146,8 @@ pub(crate) fn compute_usage_slices_cost(
         }
     };
     for slice in slices {
-        let slice_cost = compute_usage_fields_cost(
+        let slice_cost = compute_usage_fields_cost_in_snapshot(
+            snapshot,
             model,
             slice.input_tokens,
             slice.output_tokens,
@@ -135,6 +190,18 @@ pub(crate) fn compute_usage_slices_cost(
         total.total_micros = total.total_micros.saturating_add(slice_cost.total_micros);
     }
     total
+}
+
+/// Prices each upstream call slice independently against a single catalog snapshot.
+pub(crate) fn compute_usage_slices_cost(
+    model: &str,
+    slices: &[cc_lb_lifecycle::UsagePricingSlice],
+) -> ComputedCostBreakdown {
+    if slices.is_empty() {
+        return ComputedCostBreakdown::unknown();
+    }
+    let snapshot = global_catalog().current();
+    compute_usage_slices_cost_in_snapshot(&snapshot, model, slices)
 }
 
 /// Prices a normalized usage snapshot without treating absent or invalid usage as free.
