@@ -427,7 +427,7 @@ fn update_turn_usage_budget(
     used_bytes: &mut usize,
     byte_cap: usize,
     turn: &mut Turn,
-    usage: UsageCounts,
+    mut usage: UsageCounts,
     complete: bool,
 ) -> Result<(), ()> {
     let old_tier_bytes = usage_service_tier_bytes(turn.usage.as_ref());
@@ -435,6 +435,22 @@ fn update_turn_usage_budget(
     if new_tier_bytes > old_tier_bytes {
         let delta = new_tier_bytes - old_tier_bytes;
         if delta > byte_cap.saturating_sub(*used_bytes) {
+            let released_old = old_tier_bytes.min(turn.charged_bytes);
+            *used_bytes = (*used_bytes).saturating_sub(released_old);
+            turn.charged_bytes = turn.charged_bytes.saturating_sub(released_old);
+            if usage.service_tier.as_deref().is_some_and(|tier| {
+                !crate::usage_parser::is_openai_oauth_placeholder_service_tier(tier)
+            }) && let Some(stale_sent_tier) = turn.sent_service_tier.take()
+            {
+                let released_sent =
+                    sent_service_tier_bytes(Some(&stale_sent_tier)).min(turn.charged_bytes);
+                *used_bytes = (*used_bytes).saturating_sub(released_sent);
+                turn.charged_bytes = turn.charged_bytes.saturating_sub(released_sent);
+            }
+            usage.service_tier = None;
+            usage.service_tier_source = crate::usage_parser::ServiceTierSource::None;
+            turn.usage = Some(usage);
+            turn.usage_complete = complete;
             return Err(());
         }
         *used_bytes = (*used_bytes).saturating_add(delta);
@@ -3827,7 +3843,8 @@ impl ResponsesWebSocketGateway {
                         "overloaded_error",
                         "WebSocket session buffer capacity exceeded",
                     )
-                    .with_stream(lane);
+                    .with_stream(lane)
+                    .with_response_id(id);
                     if let Some(owner) = self.owners.get_mut(id) {
                         owner.terminal_delivery = TerminalDelivery::ResponseTerminalDelivered;
                     }
@@ -4250,7 +4267,7 @@ impl ResponsesWebSocketGateway {
             && let Some((mut usage, complete)) = observed_response_usage(response, tier_policy)
         {
             let byte_cap = self.byte_cap;
-            let (usage_overflow, usage_lane) = {
+            let (usage_overflow, usage_lane, usage_response_id) = {
                 let turn = self.turns.get_mut(&turn_id).expect("bound turn exists");
                 if let Some(oauth) = is_oauth {
                     turn.prepared.oauth_transport = oauth;
@@ -4269,15 +4286,18 @@ impl ResponsesWebSocketGateway {
                     terminal && complete,
                 )
                 .is_err();
-                (overflow, turn.lane.clone())
+                (overflow, turn.lane.clone(), turn.response_id.clone())
             };
             if usage_overflow {
-                let err = WebSocketError::new(
+                let mut err = WebSocketError::new(
                     503,
                     "overloaded_error",
                     "WebSocket session buffer capacity exceeded",
                 )
                 .with_stream(usage_lane);
+                if let Some(id) = usage_response_id {
+                    err = err.with_response_id(id);
+                }
                 self.finish_turn(turn_id, Some(&err));
                 return Err(err);
             }
@@ -4576,7 +4596,8 @@ impl ResponsesWebSocketGateway {
                             503,
                             "overloaded_error",
                             "WebSocket steering ownership budget is full",
-                        ));
+                        )
+                        .with_stream(lane.clone()));
                     }
                     turn.accepted_steers.insert(id.to_owned());
                     self.control_slots += 1;
@@ -17688,5 +17709,250 @@ pub(crate) mod tests {
         );
         gw_failover.finish_turn(d2.turn_id, None);
         assert_eq!(gw_failover.used_bytes, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ws_first_usage_report_with_oversized_tier_settles_counters_and_reconciles_reservation()
+    {
+        let _guard = DIRECT_PRICING_LOCK.lock().await;
+        install_direct_pricing();
+
+        let oversized_tier = format!("oversized_{}", "z".repeat(200));
+        let pool = WsRelayPoolSnapshot::default();
+
+        // Case A: Live turn whose very first usage report arrives on `response.completed`
+        // with an oversized `service_tier` still reconciles its reservation with the measured counters.
+        {
+            let fixture = DirectAccountingFixture::new().await;
+            let reservation = fixture.reserve("ws-openai-known");
+            let reservation_id = reservation.id().to_owned();
+            let expected_cost =
+                cc_lb_pricing::virtual_cost_micros_full_with_context_and_provider_writes(
+                    "ws-openai-known",
+                    1_000,
+                    500,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .total_micros;
+            let mut gw = ResponsesWebSocketGateway::new(
+                fixture.lifecycle.clone(),
+                &fixture.auth,
+                HeaderMap::new(),
+                65_536,
+                8,
+            );
+            let mut turn =
+                make_synthetic_turn(&fixture, None, None, true, false, Some(false), None);
+            let padded_body = serde_json::json!({
+                "type": "response.create",
+                "model": "ws-openai-known",
+                "store": false,
+                "input": "x".repeat(600),
+            });
+            turn.frame = Bytes::from(serde_json::to_vec(&padded_body).unwrap());
+            turn.body = Arc::new(padded_body);
+            turn.prepared.model = "ws-openai-known".to_owned();
+            turn.prepared.reservation = Some(reservation);
+            turn.prepared.limit_engine = Some(fixture.engine.clone());
+            turn.upstream_id = Some(Uuid::nil());
+            turn.connection_id = Some(1);
+            let frame_charge = turn
+                .frame
+                .len()
+                .saturating_add(json_owned_bytes(&turn.body));
+            turn.charged_bytes = frame_charge;
+            gw.turns.insert(1, turn);
+            gw.next_turn_id = 1;
+            gw.used_bytes = frame_charge;
+            gw.lanes.insert(
+                None,
+                Lane {
+                    active: Some(1),
+                    ..Default::default()
+                },
+            );
+            gw.connections.insert(1, Uuid::nil());
+            gw.connection_oauth.insert(1, false);
+            let created = Bytes::from_static(
+                br#"{"type":"response.created","response":{"id":"resp_live_first_overflow","object":"response","status":"in_progress","store":false}}"#,
+            );
+            gw.provider_message_with_pool_and_opcode(1, &created, false, &pool)
+                .await
+                .unwrap();
+            gw.byte_cap = gw.used_bytes + 8;
+
+            let completed = Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_live_first_overflow",
+                        "object": "response",
+                        "status": "completed",
+                        "store": false,
+                        "service_tier": oversized_tier,
+                        "usage": {"input_tokens": 1_000, "output_tokens": 500, "total_tokens": 1_500}
+                    }
+                }))
+                .unwrap(),
+            );
+            let Err(err) = gw
+                .provider_message_with_pool_and_opcode(1, &completed, false, &pool)
+                .await
+            else {
+                panic!("oversized live usage tier must fail closed");
+            };
+            assert_eq!(err.code, "overloaded_error");
+            let non_turn_used = owner_bytes(
+                "resp_live_first_overflow",
+                gw.owners
+                    .get("resp_live_first_overflow")
+                    .expect("owner retained for continuation"),
+            );
+            assert_eq!(gw.used_bytes, non_turn_used);
+            gw.connection_closed(1, "cleanup");
+            assert_eq!(gw.used_bytes, 0);
+            fixture
+                .assert_settled(
+                    &reservation_id,
+                    "ws-openai-known",
+                    expected_cost,
+                    1_000,
+                    500,
+                )
+                .await;
+        }
+
+        // Case B: Parked PendingErrorTerminal whose first usage arrives in delayed `response.failed`
+        // with an oversized `service_tier` still settles newly measured counters and labels the error.
+        {
+            let fixture = DirectAccountingFixture::new().await;
+            let reservation = fixture.reserve("ws-openai-known");
+            let reservation_id = reservation.id().to_owned();
+            let expected_cost =
+                cc_lb_pricing::virtual_cost_micros_full_with_context_and_provider_writes(
+                    "ws-openai-known",
+                    800,
+                    400,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .total_micros;
+            let mut gw = ResponsesWebSocketGateway::new(
+                fixture.lifecycle.clone(),
+                &fixture.auth,
+                HeaderMap::new(),
+                65_536,
+                8,
+            );
+            let mut turn =
+                make_synthetic_turn(&fixture, None, None, true, false, Some(false), None);
+            let padded_body = serde_json::json!({
+                "type": "response.create",
+                "model": "ws-openai-known",
+                "store": false,
+                "input": "x".repeat(600),
+            });
+            turn.frame = Bytes::from(serde_json::to_vec(&padded_body).unwrap());
+            turn.body = Arc::new(padded_body);
+            turn.prepared.model = "ws-openai-known".to_owned();
+            turn.prepared.reservation = Some(reservation);
+            turn.prepared.limit_engine = Some(fixture.engine.clone());
+            turn.upstream_id = Some(Uuid::nil());
+            turn.connection_id = Some(1);
+            let frame_charge = turn
+                .frame
+                .len()
+                .saturating_add(json_owned_bytes(&turn.body));
+            turn.charged_bytes = frame_charge;
+            gw.turns.insert(1, turn);
+            gw.next_turn_id = 1;
+            gw.used_bytes = frame_charge;
+            gw.lanes.insert(
+                None,
+                Lane {
+                    active: Some(1),
+                    ..Default::default()
+                },
+            );
+            gw.connections.insert(1, Uuid::nil());
+            gw.connection_oauth.insert(1, false);
+
+            let created = Bytes::from_static(
+                br#"{"type":"response.created","response":{"id":"resp_parked_first_usage","object":"response","status":"in_progress","store":false}}"#,
+            );
+            gw.provider_message_with_pool_and_opcode(1, &created, false, &pool)
+                .await
+                .unwrap();
+            let park_error = Bytes::from_static(
+                br#"{"type":"error","response":{"id":"resp_parked_first_usage","object":"response","status":"failed","store":false},"error":{"code":"upstream_error","message":"boom"}}"#,
+            );
+            gw.provider_message_with_pool_and_opcode(1, &park_error, false, &pool)
+                .await
+                .unwrap();
+            assert!(
+                gw.pending_error_terminals
+                    .contains_key("resp_parked_first_usage")
+            );
+            gw.byte_cap = gw.used_bytes + 8;
+
+            let delayed_failed = Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_parked_first_usage",
+                        "object": "response",
+                        "status": "failed",
+                        "store": false,
+                        "service_tier": oversized_tier,
+                        "error": {"code": "upstream_error", "message": "boom"},
+                        "usage": {"input_tokens": 800, "output_tokens": 400, "total_tokens": 1_200}
+                    }
+                }))
+                .unwrap(),
+            );
+            let Err(err) = gw
+                .provider_message_with_pool_and_opcode(1, &delayed_failed, false, &pool)
+                .await
+            else {
+                panic!("oversized parked usage tier must fail closed");
+            };
+            assert_eq!(err.code, "overloaded_error");
+            assert_eq!(err.response_id(), Some("resp_parked_first_usage"));
+            assert!(
+                !gw.pending_error_terminals
+                    .contains_key("resp_parked_first_usage")
+            );
+            let non_turn_used = owner_bytes(
+                "resp_parked_first_usage",
+                gw.owners
+                    .get("resp_parked_first_usage")
+                    .expect("owner retained"),
+            );
+            assert_eq!(gw.used_bytes, non_turn_used);
+            gw.connection_closed(1, "cleanup");
+            assert_eq!(gw.used_bytes, 0);
+            fixture
+                .assert_settled(&reservation_id, "ws-openai-known", expected_cost, 800, 400)
+                .await;
+        }
     }
 }
