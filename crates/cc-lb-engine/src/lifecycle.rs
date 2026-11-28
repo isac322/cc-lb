@@ -5811,7 +5811,7 @@ impl Lifecycle {
                     let body_refs = [body.as_ref()];
                     precomputed_usage =
                         crate::openai_compat::chat::responses_usage_from_sse_bodies(&body_refs)
-                            .map(&resolve_chat_usage);
+                            .map(resolve_chat_usage);
                     bodies.push(body);
                 }
                 Err(_) => {
@@ -5895,7 +5895,7 @@ impl Lifecycle {
                     let body_refs = bodies.iter().map(|body| body.as_ref()).collect::<Vec<_>>();
                     precomputed_usage =
                         crate::openai_compat::chat::responses_usage_from_sse_bodies(&body_refs)
-                            .map(&resolve_chat_usage);
+                            .map(resolve_chat_usage);
                     if !status.is_success() {
                         let converted = match compat_response_plan.as_ref() {
                             Some(error_plan) => compat_response::convert_buffered_plan(
