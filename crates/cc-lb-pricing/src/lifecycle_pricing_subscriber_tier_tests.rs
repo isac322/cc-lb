@@ -202,3 +202,87 @@ fn observed_gemini_flex_priority_and_omitted_tiers_price_each_component() {
         }
     }
 }
+
+#[test]
+fn pricing_slices_price_each_fanout_call_independently_regardless_of_order() {
+    use cc_lb_lifecycle::UsagePricingSlice;
+
+    let _guard = crate::GLOBAL_TEST_LOCK
+        .lock()
+        .expect("global catalog test lock");
+    let mut snapshot = CatalogSnapshot::empty_cost_disabled();
+    snapshot.status = CatalogStatus::Ok;
+    snapshot.models.insert(
+        MODEL.to_owned(),
+        Pricing {
+            model: MODEL.to_owned(),
+            input_per_million_usd: UsdPerMillion::from_whole_usd(2),
+            output_per_million_usd: UsdPerMillion::from_whole_usd(8),
+            input_image_per_million_usd: None,
+            output_image_per_million_usd: None,
+            native: None,
+            by_tier: BTreeMap::from([(
+                "priority".to_owned(),
+                TierRate {
+                    input_per_million_usd: UsdPerMillion::from_whole_usd(4),
+                    output_per_million_usd: UsdPerMillion::from_whole_usd(16),
+                },
+            )]),
+        },
+    );
+    crate::global_catalog().install_snapshot(snapshot);
+
+    let default_slice = UsagePricingSlice {
+        input_tokens: 1_000,
+        output_tokens: 500,
+        service_tier: Some("default".to_owned()),
+        ..UsagePricingSlice::default()
+    };
+    let priority_slice = UsagePricingSlice {
+        input_tokens: 2_000,
+        output_tokens: 1_000,
+        service_tier: Some("priority".to_owned()),
+        ..UsagePricingSlice::default()
+    };
+    // default(1000, 500) = 2000 + 4000 = 6000 micros
+    // priority(2000, 1000) = 8000 + 16000 = 24000 micros
+    // sum = 30000 micros regardless of slice order
+    let mut forward = partial_with_model();
+    merge(
+        &mut forward,
+        LifecycleEvent::UsageObserved {
+            event_id: "fanout-forward".to_owned(),
+            source: UsageSource::NonStreamBody,
+            usage: UsageSnapshot {
+                input_tokens: 3_000,
+                output_tokens: 1_500,
+                service_tier: Some("priority".to_owned()),
+                pricing_slices: vec![default_slice.clone(), priority_slice.clone()],
+                ..UsageSnapshot::default()
+            },
+        },
+    );
+    let forward_cost = compute_cost(&forward).expect("forward slices priced");
+
+    let mut reversed = partial_with_model();
+    merge(
+        &mut reversed,
+        LifecycleEvent::UsageObserved {
+            event_id: "fanout-reversed".to_owned(),
+            source: UsageSource::NonStreamBody,
+            usage: UsageSnapshot {
+                input_tokens: 3_000,
+                output_tokens: 1_500,
+                service_tier: Some("priority".to_owned()),
+                pricing_slices: vec![priority_slice, default_slice],
+                ..UsageSnapshot::default()
+            },
+        },
+    );
+    let reversed_cost = compute_cost(&reversed).expect("reversed slices priced");
+
+    assert_eq!(forward_cost.input_micros, Some(10_000));
+    assert_eq!(forward_cost.output_micros, Some(20_000));
+    assert_eq!(forward_cost.total_micros, Some(30_000));
+    assert_eq!(forward_cost, reversed_cost);
+}

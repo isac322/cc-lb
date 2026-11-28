@@ -1200,28 +1200,6 @@ pub(crate) fn responses_usage_from_sse(body: &[u8]) -> Option<ResponsesSseUsage>
     })
 }
 
-/// Sums raw Responses usage across fan-out SSE bodies while preserving observed `service_tier`.
-pub(crate) fn responses_usage_from_sse_bodies(bodies: &[&[u8]]) -> Option<ResponsesSseUsage> {
-    let mut total = None;
-    let mut service_tier = None;
-    for body in bodies {
-        let Some(observed) = responses_usage_from_sse(body) else {
-            continue;
-        };
-        if let Some(tier) = observed.service_tier {
-            service_tier = Some(tier);
-        }
-        match total.as_mut() {
-            Some(existing) => add_responses_usage(existing, &observed.usage),
-            None => total = Some(observed.usage),
-        }
-    }
-    total.map(|usage| ResponsesSseUsage {
-        usage,
-        service_tier,
-    })
-}
-
 fn add_responses_usage(total: &mut Value, usage: &Value) {
     for path in [
         &["input_tokens"][..],
@@ -1614,17 +1592,6 @@ data: {\"type\":\"response.completed\",\"response\":{\"service_tier\":\"priority
         assert_eq!(observed.usage["input_tokens"], 4);
         assert_eq!(observed.usage["output_tokens"], 3);
         assert_eq!(observed.usage["input_tokens_details"]["cached_tokens"], 2);
-        assert_eq!(observed.service_tier.as_deref(), Some("priority"));
-    }
-    #[test]
-    fn responses_usage_sums_fanout_bodies() {
-        let first = b"data: {\"type\":\"response.completed\",\"response\":{\"service_tier\":\"default\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"total_tokens\":3}}}\n\n";
-        let second = b"data: {\"type\":\"response.completed\",\"response\":{\"service_tier\":\"priority\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n";
-        let observed =
-            responses_usage_from_sse_bodies(&[first.as_slice(), second.as_slice()]).expect("usage");
-        assert_eq!(observed.usage["input_tokens"], 5);
-        assert_eq!(observed.usage["output_tokens"], 3);
-        assert_eq!(observed.usage["total_tokens"], 8);
         assert_eq!(observed.service_tier.as_deref(), Some("priority"));
     }
 

@@ -1176,6 +1176,7 @@ impl RealtimeUsage {
                 tool_use_prompt_tokens: counts.tool_use_prompt_tokens,
                 service_tier: counts.service_tier.clone(),
                 iterations: counts.iterations.clone(),
+                pricing_slices: counts.pricing_slices.clone(),
             })
             .unwrap_or_default()
     }

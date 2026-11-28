@@ -670,28 +670,20 @@ fn keepalive_cache_rates_for_prompt_tokens_checks_selected_ttl_sensitivity() {
 }
 
 #[test]
-fn canonical_service_tier_treats_base_and_provider_default_labels_as_none() {
-    for base in [
-        "",
-        " ",
-        "standard",
-        "STANDARD",
-        "standard_only",
-        "auto",
-        "default",
-        "Default",
-        "unspecified",
-    ] {
+fn canonical_service_tier_treats_base_aliases_as_none_while_preserving_catalog_override_keys() {
+    for base in ["", " ", "standard", "STANDARD", "standard_only", "auto"] {
         assert_eq!(canonical_service_tier(Some(base)), None, "base={base:?}");
     }
     assert_eq!(canonical_service_tier(None), None);
+    for explicit in ["default", "Default", "unspecified", "priority", "ultrafast"] {
+        assert_eq!(
+            canonical_service_tier(Some(explicit)).as_deref(),
+            Some(explicit.trim().to_ascii_lowercase().as_str())
+        );
+    }
     assert_eq!(
         canonical_service_tier(Some(" priority ")).as_deref(),
         Some("priority")
-    );
-    assert_eq!(
-        canonical_service_tier(Some("ultrafast")).as_deref(),
-        Some("ultrafast")
     );
     assert_eq!(
         canonical_service_tier(Some("batches")).as_deref(),
@@ -708,4 +700,77 @@ fn default_tier_uses_base_pricing_while_priority_applies_priority_rates() {
     assert!(total_for(Some("priority"), true) > base_total);
     // An uncataloged tier such as `ultrafast` falls back gracefully to base pricing.
     assert_eq!(total_for(Some("ultrafast"), true), base_total);
+}
+
+#[test]
+fn explicit_default_and_unspecified_catalog_rates_override_base_rates() {
+    let raw = serde_json::json!({
+        "override-tier-model": {
+            "litellm_provider": "openai",
+            "input_cost_per_token": 0.000002,
+            "output_cost_per_token": 0.000008,
+            "input_cost_per_token_default": 0.000003,
+            "output_cost_per_token_default": 0.000010,
+            "input_cost_per_token_unspecified": 0.000001,
+            "output_cost_per_token_unspecified": 0.000004,
+            "cache_read_input_token_cost": 0.0000005,
+            "cache_read_input_token_cost_default": 0.00000075
+        }
+    });
+    let snapshot = crate::catalog_parser::parse_litellm_json(
+        raw.to_string().as_bytes(),
+        &cc_lb_clock::SystemClock,
+    )
+    .expect("catalog parses");
+
+    let catalog = PriceCatalog::new_empty();
+    catalog.install_snapshot(snapshot.clone());
+
+    assert_eq!(
+        catalog.estimate_max("override-tier-model", 1_000_000, 1_000_000, None),
+        Some(10_000_000)
+    );
+    assert_eq!(
+        catalog.estimate_max("override-tier-model", 1_000_000, 1_000_000, Some("default")),
+        Some(13_000_000)
+    );
+    assert_eq!(
+        catalog.estimate_max(
+            "override-tier-model",
+            1_000_000,
+            1_000_000,
+            Some("unspecified")
+        ),
+        Some(5_000_000)
+    );
+
+    let _guard = GLOBAL_TEST_LOCK.lock().expect("global catalog test lock");
+    global_catalog().install_snapshot(snapshot);
+    let default_cost = crate::cost::virtual_cost_micros_full(
+        "override-tier-model",
+        1_000_000,
+        1_000_000,
+        0,
+        0,
+        1_000_000,
+        Some("default"),
+    );
+    assert_eq!(default_cost.input_micros, 3_000_000);
+    assert_eq!(default_cost.output_micros, 10_000_000);
+    assert_eq!(default_cost.cache_read_micros, 750_000);
+    assert_eq!(default_cost.total_micros, 13_750_000);
+
+    let unspecified_cost = crate::cost::virtual_cost_micros_full(
+        "override-tier-model",
+        1_000_000,
+        1_000_000,
+        0,
+        0,
+        1_000_000,
+        Some("unspecified"),
+    );
+    assert_eq!(unspecified_cost.input_micros, 1_000_000);
+    assert_eq!(unspecified_cost.output_micros, 4_000_000);
+    assert_eq!(unspecified_cost.cache_read_micros, 500_000);
+    assert_eq!(unspecified_cost.total_micros, 5_500_000);
 }

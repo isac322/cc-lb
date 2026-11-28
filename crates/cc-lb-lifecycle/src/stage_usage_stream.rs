@@ -5,6 +5,33 @@ use serde_json::Value as JsonValue;
 // Stage payloads: Usage
 // ---------------------------------------------------------------------------
 
+/// Normalized billable counters and service tier for a single upstream call
+/// when one proxy request aggregates multiple calls (such as OpenAI `n > 1`
+/// chat fan-out).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UsagePricingSlice {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_image_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_image_tokens: Option<u64>,
+    pub cache_creation_input_tokens: u64,
+    pub cache_creation_input_tokens_5m: u64,
+    pub cache_creation_input_tokens_1h: u64,
+    pub cache_read_input_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_evidence: Option<cc_lb_request_log::RequestCacheEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_30m: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_12h: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+}
+
 /// Compact snapshot of the Anthropic usage counters observed so far.
 ///
 /// Mirrors the fields in `cc_lb_engine::usage_parser::UsageCounts` that are
@@ -47,6 +74,11 @@ pub struct UsageSnapshot {
     pub service_tier: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iterations: Option<JsonValue>,
+    /// Per-call usage slices used for order-independent fan-out pricing when
+    /// one request dispatches multiple upstream calls that may settle on
+    /// different tiers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pricing_slices: Vec<UsagePricingSlice>,
 }
 
 /// Where a usage snapshot was observed or finalized.

@@ -24,6 +24,15 @@ const UPSTREAM_ERROR_MESSAGE_COLLECT_BYTES: usize = UPSTREAM_ERROR_MESSAGE_MAX_B
 const UPSTREAM_ERROR_TYPE_MAX_BYTES: usize = 256;
 const TRUNCATION_MARKER: &str = "...";
 
+/// Authority level for the currently recorded `service_tier`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ServiceTierSource {
+    #[default]
+    None,
+    Envelope,
+    Usage,
+}
+
 /// Cumulative token + extended usage state extracted from a single request's
 /// SSE stream (or non-stream JSON body).
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -66,6 +75,8 @@ pub(crate) struct UsageCounts {
     /// so partial updates can retain it without adding cumulative counts.
     pub(crate) last_candidates_tokens: u64,
     pub(crate) service_tier: Option<String>,
+    pub(crate) service_tier_source: ServiceTierSource,
+    pub(crate) pricing_slices: Vec<cc_lb_lifecycle::UsagePricingSlice>,
     pub(crate) iterations: Option<Value>,
     /// Accumulator for the per-frame `delta.estimated_tokens` field surfaced by
     /// the beta `thinking-token-count-2026-05-13` header on
@@ -502,7 +513,7 @@ fn accumulate_sse_usage_value(
     if !reported_has_service_tier(reported)
         && let Some(tier) = service_tier_from_envelope(value)
     {
-        usage.service_tier = Some(tier.to_owned());
+        apply_service_tier_with_source(usage, tier, ServiceTierSource::Envelope);
     }
 }
 
@@ -607,7 +618,7 @@ fn usage_from_value_for_shape(value: &Value, shape: Option<UsageShape>) -> Usage
             if !reported_has_service_tier(usage_value)
                 && let Some(tier) = service_tier_from_envelope(element)
             {
-                usage.service_tier = Some(tier.to_owned());
+                apply_service_tier_with_source(&mut usage, tier, ServiceTierSource::Envelope);
             }
         }
         return usage;
@@ -626,7 +637,7 @@ fn usage_from_value_for_shape(value: &Value, shape: Option<UsageShape>) -> Usage
     if !reported_has_service_tier(usage_value)
         && let Some(tier) = service_tier_from_envelope(value)
     {
-        usage.service_tier = Some(tier.to_owned());
+        apply_service_tier_with_source(&mut usage, tier, ServiceTierSource::Envelope);
     }
     usage
 }
@@ -640,6 +651,47 @@ fn reported_has_service_tier(reported: &Value) -> bool {
             .get("serviceTier")
             .and_then(Value::as_str)
             .is_some()
+}
+
+fn is_placeholder_service_tier_for_merge(tier: &str) -> bool {
+    let trimmed = tier.trim();
+    trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("auto")
+        || trimmed.eq_ignore_ascii_case("unspecified")
+        || trimmed.eq_ignore_ascii_case("service_tier_unspecified")
+}
+
+fn apply_service_tier_with_source(
+    usage: &mut UsageCounts,
+    tier: &str,
+    incoming_source: ServiceTierSource,
+) {
+    let incoming_placeholder = is_placeholder_service_tier_for_merge(tier);
+    let current_placeholder = usage
+        .service_tier
+        .as_deref()
+        .is_none_or(is_placeholder_service_tier_for_merge);
+
+    let accept = match usage.service_tier_source {
+        ServiceTierSource::None => true,
+        ServiceTierSource::Envelope => match incoming_source {
+            ServiceTierSource::None => false,
+            ServiceTierSource::Envelope | ServiceTierSource::Usage => {
+                !incoming_placeholder || current_placeholder
+            }
+        },
+        ServiceTierSource::Usage => match incoming_source {
+            ServiceTierSource::None => false,
+            // Lower-authority envelope fallbacks fill absent/placeholder usage tiers,
+            // never overwriting an explicit tier from nested usage metadata.
+            ServiceTierSource::Envelope => current_placeholder && !incoming_placeholder,
+            ServiceTierSource::Usage => !incoming_placeholder || current_placeholder,
+        },
+    };
+    if accept {
+        usage.service_tier = Some(tier.to_owned());
+        usage.service_tier_source = incoming_source;
+    }
 }
 
 fn is_openai_oauth_placeholder_service_tier(tier: &str) -> bool {
@@ -1008,7 +1060,7 @@ pub(crate) fn merge_usage_value_for_shape(
         .or_else(|| reported.get("serviceTier"))
         .and_then(Value::as_str)
     {
-        usage.service_tier = Some(tier.to_owned());
+        apply_service_tier_with_source(usage, tier, ServiceTierSource::Usage);
     }
     if let Some(iterations) = reported.get("iterations").filter(|v| !v.is_null()) {
         usage.iterations = Some(iterations.clone());
@@ -4107,5 +4159,62 @@ mod tests {
         assert_eq!(usage.service_tier.as_deref(), Some("priority"));
         accumulate_sse_usage_for_shape(&trailing_null, &mut usage, UsageShape::OpenaiResponses);
         assert_eq!(usage.service_tier.as_deref(), Some("priority"));
+    }
+
+    #[test]
+    fn gemini_nested_service_tier_survives_later_envelope_unspecified_fallback() {
+        let mut sse_usage = UsageCounts::default();
+        let chunk1 = parse_sse_event(
+            br#"data: {"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":5,"serviceTier":"FLEX"}}
+
+"#,
+        );
+        let chunk2 = parse_sse_event(
+            br#"data: {"serviceTier":"UNSPECIFIED","usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":10}}
+
+"#,
+        );
+        accumulate_sse_usage_for_shape(&chunk1, &mut sse_usage, UsageShape::GeminiGenerateContent);
+        assert_eq!(sse_usage.service_tier.as_deref(), Some("FLEX"));
+        accumulate_sse_usage_for_shape(&chunk2, &mut sse_usage, UsageShape::GeminiGenerateContent);
+        assert_eq!(
+            sse_usage.service_tier.as_deref(),
+            Some("FLEX"),
+            "later envelope fallback UNSPECIFIED must not clobber explicit nested FLEX tier"
+        );
+
+        let array_payload = serde_json::json!([
+            {"usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 2, "serviceTier": "FLEX"}},
+            {"serviceTier": "UNSPECIFIED", "usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 4}}
+        ]);
+        let array_usage = observe_non_stream_json_value_for_shape(
+            &array_payload,
+            UsageShape::GeminiGenerateContent,
+        )
+        .usage;
+        assert_eq!(array_usage.service_tier.as_deref(), Some("FLEX"));
+
+        let mut upgrade_usage = UsageCounts::default();
+        let placeholder_chunk = parse_sse_event(
+            br#"data: {"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"serviceTier":"UNSPECIFIED"}}
+
+"#,
+        );
+        let upgrade_chunk = parse_sse_event(
+            br#"data: {"serviceTier":"FLEX","usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2}}
+
+"#,
+        );
+        accumulate_sse_usage_for_shape(
+            &placeholder_chunk,
+            &mut upgrade_usage,
+            UsageShape::GeminiGenerateContent,
+        );
+        accumulate_sse_usage_for_shape(
+            &upgrade_chunk,
+            &mut upgrade_usage,
+            UsageShape::GeminiGenerateContent,
+        );
+        assert_eq!(upgrade_usage.service_tier.as_deref(), Some("FLEX"));
     }
 }

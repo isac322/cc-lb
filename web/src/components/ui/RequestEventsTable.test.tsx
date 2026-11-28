@@ -340,7 +340,7 @@ describe('RequestEventsTable', () => {
     expect(screen.getByText('500')).toBeDefined();
   });
 
-  it('renders explicit request-kind badges in a dedicated column', () => {
+  it('renders explicit request-kind badges in a dedicated column including review labels', () => {
     const events: RequestEventWithPhase[] = [
       {
         event_id: 'evt_advisor',
@@ -362,6 +362,17 @@ describe('RequestEventsTable', () => {
         model: 'claude-sonnet',
         _phase: 'final',
       },
+      {
+        event_id: 'evt_review',
+        request_id: 'req_review',
+        ts: 1718553122,
+        status: 200,
+        duration_ms: 100,
+        model: 'gpt-6.2-sol',
+        request_kind: 'review',
+        service_tier: 'priority',
+        _phase: 'final',
+      },
     ];
 
     const { container } = render(
@@ -377,10 +388,24 @@ describe('RequestEventsTable', () => {
     expect(screen.getByRole('columnheader', { name: 'Kind' })).toBeDefined();
     expect(screen.queryByText('advisor')).toBeNull();
     expect(screen.queryByText('main')).toBeNull();
+    expect(screen.getByText('review')).toBeDefined();
 
     const kindColumnIndex = [
       ...container.querySelectorAll('thead th'),
     ].findIndex((th) => th.textContent === 'Kind');
+    const kindCol = container.querySelectorAll('colgroup col')[kindColumnIndex];
+    const kindWidth = kindCol?.getAttribute('style') ?? '';
+    expect(kindWidth).toContain('4rem');
+    const shareMatch = /\* (0\.\d+)/.exec(kindWidth);
+    const tableStyle =
+      container.querySelector('table')?.getAttribute('style') ?? '';
+    expect(tableStyle).toContain('--events-desktop-w: 71.5rem');
+    const tabletSpanMatch = /--events-tablet-span:\s*([\d.]+)rem/.exec(
+      tableStyle,
+    );
+    expect(
+      4 + Number(tabletSpanMatch?.[1]) * Number(shareMatch?.[1]),
+    ).toBeCloseTo(4.75, 5);
     const unclassifiedRow = container.querySelectorAll('tbody > tr')[1];
     expect(
       unclassifiedRow.querySelectorAll('td')[kindColumnIndex].textContent,

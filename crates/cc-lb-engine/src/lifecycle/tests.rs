@@ -9770,3 +9770,193 @@ async fn sign_websocket_connection_preserves_shaped_cf_access_headers() {
         "Shape-emitted CF-Access-Client-Secret must survive WebSocket signing"
     );
 }
+
+#[tokio::test]
+async fn openai_oauth_records_sent_service_tier_from_final_shaped_attempt_body() {
+    struct RewriteTierDialect {
+        replacement: Option<&'static str>,
+    }
+    impl UpstreamDialect for RewriteTierDialect {
+        fn shape(
+            &self,
+            context: &DialectShapeContext,
+            upstream: &Upstream,
+            principal: &Principal,
+            builder: &mut ShapedRequestBuilder,
+        ) -> Result<ShapedRequest, DialectError> {
+            let mut body: Value = serde_json::from_slice(&context.body_bytes).map_err(|e| {
+                DialectError::UnsupportedRequest {
+                    reason: e.to_string(),
+                }
+            })?;
+            if let Some(obj) = body.as_object_mut() {
+                match self.replacement {
+                    Some(tier) => {
+                        obj.insert("service_tier".to_owned(), Value::String(tier.to_owned()));
+                    }
+                    None => {
+                        obj.remove("service_tier");
+                    }
+                }
+            }
+            let rewritten = Bytes::from(serde_json::to_vec(&body).map_err(|e| {
+                DialectError::UnsupportedRequest {
+                    reason: e.to_string(),
+                }
+            })?);
+            let mut inner_ctx = context.clone();
+            inner_ctx.body_bytes = rewritten;
+            RawPassthroughDialect {
+                base_url: Url::parse("https://chatgpt.com/backend-api/codex")
+                    .expect("test URL parses"),
+                openai_oauth: true,
+            }
+            .shape(&inner_ctx, upstream, principal, builder)
+        }
+    }
+
+    struct NoopAffinityStore;
+    #[async_trait]
+    impl UpstreamAffinityStore for NoopAffinityStore {
+        async fn resolve_upstream_affinities(
+            &self,
+            _keys: &[UpstreamAffinityKey],
+            _now_unix_secs: u64,
+            _ttl_secs: u64,
+        ) -> cc_lb_storage_api::StorageResult<Vec<UpstreamAffinityBinding>> {
+            Ok(Vec::new())
+        }
+
+        async fn read_upstream_owner_epoch(
+            &self,
+            _upstream_id: cc_lb_storage_api::UpstreamRecordId,
+            _expected_spec_revision: u64,
+        ) -> cc_lb_storage_api::StorageResult<Option<u64>> {
+            Ok(Some(0))
+        }
+
+        async fn bind_upstream_affinities(
+            &self,
+            _bindings: &[UpstreamAffinityBinding],
+            _now_unix_secs: u64,
+            _ttl_secs: u64,
+        ) -> cc_lb_storage_api::StorageResult<()> {
+            Ok(())
+        }
+
+        async fn purge_expired_upstream_affinities(
+            &self,
+            _now_unix_secs: u64,
+            _ttl_secs: u64,
+            _batch_size: usize,
+        ) -> cc_lb_storage_api::StorageResult<u64> {
+            Ok(0)
+        }
+    }
+
+    for replacement in [Some("default"), None] {
+        let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+        let mut rx = subscribe_lifecycle(&bus);
+        let up_id = Uuid::new_v4();
+        let mut record = upstream_record_with_kind(StorageRecordKind::OpenaiOauth);
+        record.id = up_id;
+        let view = provenance_view(
+            failure_principal_view(
+                "principal-test",
+                (
+                    None,
+                    cc_lb_control::api_keys::principal_view::DialectCache::Explicit(
+                        cc_lb_control::api_keys::principal_view::ShapePluginCache {
+                            dialect: Arc::new(RewriteTierDialect { replacement }),
+                        },
+                    ),
+                ),
+            ),
+            Arc::new(TestSignerFactory),
+            vec![record],
+        );
+        let sse = "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_shaped_tier\",\"object\":\"response\",\"status\":\"in_progress\",\"service_tier\":\"auto\",\"output\":[]}}\n\n\
+event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"id\":\"resp_shaped_tier\",\"object\":\"response\",\"status\":\"completed\",\"service_tier\":\"default\",\"usage\":{\"input_tokens\":20,\"output_tokens\":5,\"total_tokens\":25},\"output\":[]}}\n\n";
+        let dispatcher = Arc::new(QueueDispatch::new(vec![Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(Body::from(sse))
+            .expect("response builds"))]));
+        let lifecycle = provenance_lifecycle(view, dispatcher, &bus)
+            .with_upstream_affinity_store(Arc::new(NoopAffinityStore));
+
+        let req = Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/responses")
+            .header("x-api-key", failure_key_fixture().plaintext.as_str())
+            .body(Bytes::from_static(
+                br#"{"model":"gpt-6.2-sol","input":"hi","stream":true,"store":false,"service_tier":"priority"}"#,
+            ))
+            .expect("request builds");
+        let auth = lifecycle
+            .authenticate(req.headers())
+            .await
+            .expect("request authenticates");
+        let response = lifecycle
+            .handle(req, &auth)
+            .await
+            .expect("lifecycle handles request");
+        let (status, body) = collect_response_body(response).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "body={}",
+            String::from_utf8_lossy(&body)
+        );
+
+        let events = drain_events(&mut rx);
+        let observed_tier = events.iter().rev().find_map(|event| match event {
+            cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
+                result: Ok(success),
+                ..
+            } => success.usage.service_tier.clone(),
+            cc_lb_lifecycle::LifecycleEvent::UsageObserved { usage, .. } => {
+                usage.service_tier.clone()
+            }
+            _ => None,
+        });
+        assert_eq!(
+            observed_tier.as_deref(),
+            Some("default"),
+            "shaped attempt body must drive recorded tier (replacement={replacement:?}); body={}, events={events:?}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+}
+
+#[test]
+fn fanout_usage_aggregation_is_order_independent_for_mixed_tiers() {
+    use super::types::aggregate_fanout_usage_counts;
+    let default_call = UsageCounts {
+        present: true,
+        billable_present: true,
+        input_tokens: 100,
+        output_tokens: 20,
+        service_tier: Some("default".to_owned()),
+        ..UsageCounts::default()
+    };
+    let priority_call = UsageCounts {
+        present: true,
+        billable_present: true,
+        input_tokens: 200,
+        output_tokens: 40,
+        service_tier: Some("priority".to_owned()),
+        ..UsageCounts::default()
+    };
+
+    let forward = aggregate_fanout_usage_counts(&[default_call.clone(), priority_call.clone()])
+        .expect("forward aggregation");
+    let reversed = aggregate_fanout_usage_counts(&[priority_call, default_call])
+        .expect("reversed aggregation");
+    assert_eq!(forward.input_tokens, 300);
+    assert_eq!(forward.output_tokens, 60);
+    assert_eq!(forward.service_tier.as_deref(), Some("priority"));
+    assert_eq!(forward.service_tier, reversed.service_tier);
+    assert_eq!(forward.pricing_slices.len(), 2);
+    assert_eq!(reversed.pricing_slices.len(), 2);
+}

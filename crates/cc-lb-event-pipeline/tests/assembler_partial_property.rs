@@ -206,6 +206,7 @@ fn usage(profile: Profile) -> UsageSnapshot {
         iterations: None,
         input_image_tokens: None,
         output_image_tokens: None,
+        pricing_slices: Vec::new(),
     }
 }
 

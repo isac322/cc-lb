@@ -1086,3 +1086,222 @@ event: response.completed\ndata: {completed_ev}\n\n"
     );
     assert_eq!(api_key_json_cost, Some(6_000));
 }
+
+#[tokio::test]
+async fn openai_oauth_chat_fanout_prices_each_choice_independently_regardless_of_order() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let catalog_guard = common::lock_custom_catalog().await;
+
+    let catalog = json!({
+        "gpt-6.2-sol": {
+            "litellm_provider": "openai",
+            "input_cost_per_token": 0.000002,
+            "output_cost_per_token": 0.000008,
+            "input_cost_per_token_priority": 0.000004,
+            "output_cost_per_token_priority": 0.000016
+        }
+    });
+    let catalog_dir = tempfile::tempdir().expect("catalog dir");
+    let catalog_path = catalog_dir.path().join("catalog.json");
+    let catalog_json = catalog.to_string();
+    std::fs::write(&catalog_path, &catalog_json).expect("write catalog");
+
+    #[derive(Clone)]
+    struct MixedFanoutFakeState {
+        seq: Arc<AtomicUsize>,
+        catalog: Value,
+    }
+
+    let state = MixedFanoutFakeState {
+        seq: Arc::new(AtomicUsize::new(0)),
+        catalog: catalog.clone(),
+    };
+    let app = Router::new()
+        .fallback(
+            move |State(st): State<MixedFanoutFakeState>, req: Request| async move {
+                let path = req.uri().path().to_owned();
+                if path == "/catalog.json" {
+                    return Json(st.catalog).into_response();
+                }
+                let _body = to_bytes(req.into_body(), 2_000_000).await.unwrap();
+                if path.ends_with("/models") {
+                    return Json(json!({
+                        "data": [{"id": "gpt-6.2-sol", "object": "model"}],
+                        "models": [{"slug": "gpt-6.2-sol", "display_name": "GPT 6.2", "description": "test", "capabilities": {}}]
+                    }))
+                    .into_response();
+                }
+                let call_idx = st.seq.fetch_add(1, Ordering::SeqCst);
+                let resp_id = format!("resp_fanout_mix_{call_idx}");
+                // Call sequence (n=2 twice):
+                // req 1: call 0 -> "default", call 1 -> "priority"
+                // req 2: call 2 -> "priority", call 3 -> "default"
+                let response_tier = match call_idx % 4 {
+                    1 | 2 => "priority",
+                    _ => "default",
+                };
+                let sse = format!(
+                    "event: response.created\ndata: {{\"type\":\"response.created\",\"sequence_number\":0,\"response\":{{\"id\":\"{resp_id}\",\"object\":\"response\",\"status\":\"in_progress\",\"service_tier\":\"auto\",\"output\":[]}}}}\n\n\
+event: response.output_item.added\ndata: {{\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}}}\n\n\
+event: response.output_text.delta\ndata: {{\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"ok\"}}\n\n\
+event: response.output_item.done\ndata: {{\"type\":\"response.output_item.done\",\"sequence_number\":3,\"output_index\":0,\"item\":{{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}}]}}}}\n\n\
+event: response.completed\ndata: {{\"type\":\"response.completed\",\"sequence_number\":4,\"response\":{{\"id\":\"{resp_id}\",\"object\":\"response\",\"status\":\"completed\",\"service_tier\":\"{response_tier}\",\"usage\":{{\"input_tokens\":1000,\"output_tokens\":500,\"total_tokens\":1500}},\"output\":[]}}}}\n\n"
+                );
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(sse))
+                    .unwrap()
+            },
+        )
+        .with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake_addr = listener.local_addr().unwrap();
+    let _fake_task = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let extra_toml = format!(
+        "[price_catalog]\nurl = \"http://{fake_addr}/catalog.json\"\ncache_path = \"{}\"\n",
+        catalog_path.display()
+    );
+    let server = common::spawn_inprocess_server_with_custom_catalog(
+        &extra_toml,
+        Vec::new(),
+        fake_anthropic::AppConfig::default(),
+        1 << 20,
+        &catalog_guard,
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if cc_lb_pricing::global_catalog().current().raw_json == catalog_json.as_bytes() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let client = reqwest::Client::new();
+    let ups: Value = client
+        .get(format!("http://{}/admin/v1/upstreams", server.admin_addr))
+        .bearer_auth(server.admin_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for u in ups["upstreams"].as_array().unwrap() {
+        let id = u["id"].as_str().unwrap();
+        let detail = client
+            .get(format!(
+                "http://{}/admin/v1/upstreams/{id}",
+                server.admin_addr
+            ))
+            .bearer_auth(server.admin_token)
+            .send()
+            .await
+            .unwrap();
+        let etag = detail
+            .headers()
+            .get("etag")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let res = client
+            .patch(format!(
+                "http://{}/admin/v1/upstreams/{id}",
+                server.admin_addr
+            ))
+            .bearer_auth(server.admin_token)
+            .header("if-match", etag)
+            .json(&json!({ "enabled": false }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+    }
+
+    let oauth_res = client
+        .post(format!("http://{}/admin/v1/upstreams", server.admin_addr))
+        .bearer_auth(server.admin_token)
+        .json(&json!({
+            "name": "oauth-mixed-fanout",
+            "kind": "openai_oauth",
+            "base_url": format!("http://{fake_addr}/codex"),
+            "oauth_tokens": {
+                "access_token": "test-access",
+                "refresh_token": "",
+                "expires_at_unix_secs": 4102444800u64,
+                "account_id": "acct-fanout",
+                "scopes": [],
+                "never_refresh": true
+            },
+            "skip_preflight": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oauth_res.status(), 201);
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("sqlite://{}", server.sqlite_path.display()))
+        .await
+        .unwrap();
+
+    for idx in 0..2_usize {
+        let res = client
+            .post(format!(
+                "http://{}/openai/v1/chat/completions",
+                server.proxy_addr
+            ))
+            .bearer_auth(&server.managed_key.plaintext)
+            .json(&json!({
+                "model": "gpt-6.2-sol",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": false,
+                "n": 2,
+                "service_tier": "default"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+
+        let wait_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let rows = sqlx::query(
+                "SELECT service_tier, list_cost_usd_micros \
+                 FROM request_events_v1 \
+                 WHERE model = 'gpt-6.2-sol' AND list_status = 200 \
+                 ORDER BY id ASC",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            if rows.len() > idx
+                && rows[idx]
+                    .get::<Option<i64>, _>("list_cost_usd_micros")
+                    .is_some()
+            {
+                let tier: Option<String> = rows[idx].get("service_tier");
+                let cost: Option<i64> = rows[idx].get("list_cost_usd_micros");
+                assert_eq!(
+                    tier.as_deref(),
+                    Some("priority"),
+                    "fanout request {idx} must report deterministic non-default tier"
+                );
+                // Choice default(1000,500) = 6000 + Choice priority(1000,500) = 12000 => 18000 micros
+                assert_eq!(
+                    cost,
+                    Some(18_000),
+                    "fanout request {idx} must price each call independently regardless of choice order"
+                );
+                break;
+            }
+            assert!(tokio::time::Instant::now() < wait_deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+}

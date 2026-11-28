@@ -78,16 +78,17 @@ pub(crate) use self::streaming::{
 pub(crate) use self::types::to_usage_snapshot;
 use self::types::{
     AttemptFailure, AttemptResponse, CompatBodyTimingGuard, ConcurrentAttemptFuture,
-    ConcurrentAttemptInputs, LimitRejectionErr, LimitRejectionInfo, MultiOwnerAffinityMatch,
-    RawPassthroughDialect, RequestAffinityFailure, RequestAffinityOutcome,
+    ConcurrentAttemptInputs, FanoutAttemptResponse, LimitRejectionErr, LimitRejectionInfo,
+    MultiOwnerAffinityMatch, RawPassthroughDialect, RequestAffinityFailure, RequestAffinityOutcome,
     RequestAffinityResolution, RequestBodyView, ResponseAffinityContext, ResponseBodyFuture,
-    apply_prompt_cache_timings, bind_upstream_affinity_keys, body_cap_for_path,
-    canonical_model_for_capability, db_principal_kind_as_str, duration_to_ms,
+    aggregate_fanout_usage_counts, apply_prompt_cache_timings, bind_upstream_affinity_keys,
+    body_cap_for_path, canonical_model_for_capability, db_principal_kind_as_str, duration_to_ms,
     gemini_model_from_path, header_snapshot_from, header_to_string, lifecycle_request_model,
     multipart_request_model, next_request_id, principal_kind_lite, push_buffered_data,
-    raw_passthrough_request, record_shape_internal_error, reduce_fanout, response_start_unix_secs,
-    responses_usage_value_to_counts, rewrite_json_request_body_headers, signer_error_kind,
-    store_setup_timings, system_time_to_unix_millis, unix_now_ms, unsupported_operation_response,
+    raw_passthrough_request, record_shape_internal_error, reduce_fanout, resolve_fanout_call_usage,
+    response_start_unix_secs, responses_usage_value_to_counts, rewrite_json_request_body_headers,
+    signer_error_kind, store_setup_timings, system_time_to_unix_millis, unix_now_ms,
+    unsupported_operation_response,
 };
 pub(crate) use self::types::{AttemptTimings, DEFAULT_MAX_INPUT_ESTIMATE, RequestEventContext};
 pub use self::types::{
@@ -3344,13 +3345,9 @@ impl Lifecycle {
             oauth_compat = public_shape;
             echo_metadata = normalized_echo_metadata;
         }
-        let sent_service_tier = if openai_oauth {
-            sonic_rs::get_from_slice(&frame, &["service_tier"])
-                .ok()
-                .and_then(|value| sonic_rs::JsonValueTrait::as_str(&value).map(str::to_owned))
-        } else {
-            None
-        };
+        let sent_service_tier = sonic_rs::get_from_slice(&frame, &["service_tier"])
+            .ok()
+            .and_then(|value| sonic_rs::JsonValueTrait::as_str(&value).map(str::to_owned));
         Ok(Some(WebSocketPluginRequest {
             echo_metadata,
             frame,
@@ -5022,7 +5019,8 @@ impl Lifecycle {
         let mut keepalive_shaped_body = None;
         let mut compat_response_plan: Option<CompatResponsePlan>;
         let keepalive_request_started = Arc::new(tokio::sync::OnceCell::new());
-        let mut fanout_responses: Option<Vec<Response<Body>>>;
+        let mut fanout_responses: Option<Vec<FanoutAttemptResponse>>;
+        let mut openai_oauth_sent_service_tier: Option<Option<String>>;
         let affinity_owner_epoch_required = request_capability
             == ProviderCapability::GeminiCachedContentsCreate
             || (request_capability.provider() == cc_lb_domain::Provider::Gemini
@@ -5368,8 +5366,10 @@ impl Lifecycle {
                 let AttemptResponse {
                     response: first_response,
                     compat_response_plan: first_plan,
+                    openai_oauth_sent_service_tier: first_sent_tier,
                 } = first;
                 compat_response_plan = first_plan;
+                openai_oauth_sent_service_tier = first_sent_tier;
                 fanout_responses = rest;
                 first_response
             } else {
@@ -5392,6 +5392,7 @@ impl Lifecycle {
                 {
                     Ok(attempt) => {
                         compat_response_plan = attempt.compat_response_plan;
+                        openai_oauth_sent_service_tier = attempt.openai_oauth_sent_service_tier;
                         attempt.response
                     }
                     Err(failure) => {
@@ -5553,8 +5554,10 @@ impl Lifecycle {
                     let AttemptResponse {
                         response: first_response,
                         compat_response_plan: first_plan,
+                        openai_oauth_sent_service_tier: first_sent_tier,
                     } = first;
                     compat_response_plan = first_plan;
+                    openai_oauth_sent_service_tier = first_sent_tier;
                     fanout_responses = rest;
                     first_response
                 } else {
@@ -5577,6 +5580,7 @@ impl Lifecycle {
                     {
                         Ok(attempt) => {
                             compat_response_plan = attempt.compat_response_plan;
+                            openai_oauth_sent_service_tier = attempt.openai_oauth_sent_service_tier;
                             attempt.response
                         }
                         Err(failure) => {
@@ -5763,29 +5767,6 @@ impl Lifecycle {
             }
             break (response, dispatch_started, dispatch_unix_secs, signer);
         };
-        let openai_oauth_sent_service_tier =
-            (routed.record.kind == StorageUpstreamKind::OpenaiOauth).then(|| {
-                if ctx.codex_backend {
-                    ctx.requested_service_tier.clone()
-                } else {
-                    compat_service_tier_for_upstream(
-                        request_capability,
-                        routed.record.kind,
-                        ctx.requested_service_tier.as_deref(),
-                        ctx.openai_oauth_compat.as_ref().is_some_and(|policy| {
-                            policy.service_tier == cc_lb_domain::CoerceOrReject::Coerce
-                        }),
-                    )
-                }
-            });
-        let resolve_chat_usage =
-            |observed: crate::openai_compat::chat::ResponsesSseUsage| -> UsageCounts {
-                let mut counts = responses_usage_value_to_counts(&observed);
-                if let Some(sent) = openai_oauth_sent_service_tier.as_ref() {
-                    usage_parser::apply_openai_oauth_service_tier(&mut counts, sent.as_deref());
-                }
-                counts
-            };
         let mut precomputed_usage: Option<UsageCounts> = None;
         let chat_fanout_plan = compat_response_plan.as_ref().and_then(|plan| {
             let CompatResponseKind::Chat { plan } = &plan.kind else {
@@ -5801,6 +5782,7 @@ impl Lifecycle {
             let (mut response_parts, response_body) =
                 std::mem::replace(&mut response, Response::new(Body::empty())).into_parts();
             let mut bodies = Vec::with_capacity(plan.n as usize);
+            let mut fanout_call_usages = Vec::with_capacity(plan.n as usize);
             match compat_response::collect_body(
                 response_body,
                 decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
@@ -5808,10 +5790,12 @@ impl Lifecycle {
             .await
             {
                 Ok(body) => {
-                    let body_refs = [body.as_ref()];
-                    precomputed_usage =
-                        crate::openai_compat::chat::responses_usage_from_sse_bodies(&body_refs)
-                            .map(resolve_chat_usage);
+                    if let Some(usage) =
+                        resolve_fanout_call_usage(&body, openai_oauth_sent_service_tier.as_ref())
+                    {
+                        fanout_call_usages.push(usage);
+                        precomputed_usage = aggregate_fanout_usage_counts(&fanout_call_usages);
+                    }
                     bodies.push(body);
                 }
                 Err(_) => {
@@ -5838,11 +5822,11 @@ impl Lifecycle {
                     None => None,
                 };
                 for _ in 1..plan.n {
-                    let (status, headers, body_result) =
+                    let (status, headers, body_result, call_sent_tier) =
                         if let Some(results) = fanout_body_results.as_mut() {
                             results.remove(0)
                         } else {
-                            let attempt_response = match self
+                            let (attempt_response, attempt_sent_tier) = match self
                                 .run_upstream_attempt(
                                     auth,
                                     reserved.as_ref(),
@@ -5859,7 +5843,9 @@ impl Lifecycle {
                                 )
                                 .await
                             {
-                                Ok(attempt) => attempt.response,
+                                Ok(attempt) => {
+                                    (attempt.response, attempt.openai_oauth_sent_service_tier)
+                                }
                                 Err(failure) => {
                                     if let Some(usage) = precomputed_usage.as_ref()
                                         && let Some(observer) = observer.as_ref()
@@ -5887,15 +5873,16 @@ impl Lifecycle {
                                     ),
                                 )
                                 .await,
+                                attempt_sent_tier,
                             )
                         };
                     let body_failed = body_result.is_err();
                     let body = body_result.unwrap_or_default();
+                    if let Some(usage) = resolve_fanout_call_usage(&body, call_sent_tier.as_ref()) {
+                        fanout_call_usages.push(usage);
+                        precomputed_usage = aggregate_fanout_usage_counts(&fanout_call_usages);
+                    }
                     bodies.push(body.clone());
-                    let body_refs = bodies.iter().map(|body| body.as_ref()).collect::<Vec<_>>();
-                    precomputed_usage =
-                        crate::openai_compat::chat::responses_usage_from_sse_bodies(&body_refs)
-                            .map(resolve_chat_usage);
                     if !status.is_success() {
                         let converted = match compat_response_plan.as_ref() {
                             Some(error_plan) => compat_response::convert_buffered_plan(
@@ -5934,11 +5921,6 @@ impl Lifecycle {
             }
             if compat_response_plan.is_some() {
                 let body_refs = bodies.iter().map(|body| body.as_ref()).collect::<Vec<_>>();
-                if let Some(raw_usage) =
-                    crate::openai_compat::chat::responses_usage_from_sse_bodies(&body_refs)
-                {
-                    precomputed_usage = Some(resolve_chat_usage(raw_usage));
-                }
                 match crate::openai_compat::chat::chat_completions_from_sse_bodies(
                     &plan, &body_refs,
                 ) {
@@ -6064,6 +6046,7 @@ impl Lifecycle {
                     Err(_) => break,
                 };
                 compat_response_plan = retry_attempt.compat_response_plan;
+                openai_oauth_sent_service_tier = retry_attempt.openai_oauth_sent_service_tier;
                 let retry_response = retry_attempt.response;
                 retry_body = Some(next);
                 (inspected, overflow) = match compat_response::inspect_truncation_response(
@@ -6915,9 +6898,10 @@ impl Lifecycle {
             .as_ref()
             .and_then(usage_parser::detect_abnormal_stop_non_stream);
         let mut usage = observation.usage;
-        if let Some(sent) = response_affinity_context
-            .openai_oauth_sent_service_tier
-            .as_ref()
+        if response_affinity_context.precomputed_usage.is_none()
+            && let Some(sent) = response_affinity_context
+                .openai_oauth_sent_service_tier
+                .as_ref()
         {
             usage_parser::apply_openai_oauth_service_tier(&mut usage, sent.as_deref());
         }
@@ -7622,19 +7606,21 @@ impl Lifecycle {
     }
 
     async fn collect_response_bodies_concurrently(
-        responses: Vec<Response<Body>>,
+        responses: Vec<FanoutAttemptResponse>,
         cap: usize,
     ) -> Vec<(
         StatusCode,
         HeaderMap,
         Result<Bytes, compat_response::CollectError>,
+        Option<Option<String>>,
     )> {
         let mut futures: Vec<ResponseBodyFuture<'_>> = Vec::with_capacity(responses.len());
-        for response in responses {
-            let (parts, body) = response.into_parts();
+        for attempt in responses {
+            let (parts, body) = attempt.response.into_parts();
+            let sent_service_tier = attempt.openai_oauth_sent_service_tier;
             futures.push(Box::pin(async move {
                 let result = compat_response::collect_body(body, cap).await;
-                (parts.status, parts.headers, result)
+                (parts.status, parts.headers, result, sent_service_tier)
             }));
         }
         Self::join_values(futures).await
@@ -8124,6 +8110,12 @@ impl Lifecycle {
             );
         }
         *shaped_body_out = Some(shaped.body().clone());
+        let openai_oauth_sent_service_tier = (upstream_kind == StorageUpstreamKind::OpenaiOauth)
+            .then(|| {
+                sonic_rs::get_from_slice(shaped.body(), &["service_tier"])
+                    .ok()
+                    .and_then(|value| sonic_rs::JsonValueTrait::as_str(&value).map(str::to_owned))
+            });
 
         let sign_start = Instant::now();
         let signed = attempt_scope
@@ -8267,6 +8259,7 @@ impl Lifecycle {
         Ok(AttemptResponse {
             response,
             compat_response_plan,
+            openai_oauth_sent_service_tier,
         })
     }
 
@@ -8517,9 +8510,10 @@ impl Lifecycle {
                 .precomputed_usage
                 .clone()
                 .unwrap_or_default();
-            if let Some(sent) = response_affinity_context
-                .openai_oauth_sent_service_tier
-                .as_ref()
+            if !precomputed_usage_present
+                && let Some(sent) = response_affinity_context
+                    .openai_oauth_sent_service_tier
+                    .as_ref()
             {
                 usage_parser::apply_openai_oauth_service_tier(&mut usage, sent.as_deref());
             }
@@ -8977,9 +8971,10 @@ impl Lifecycle {
                                             })
                                     },
                                 );
-                                if let Some(sent) = response_affinity_context
-                                    .openai_oauth_sent_service_tier
-                                    .as_ref()
+                                if !precomputed_usage_present
+                                    && let Some(sent) = response_affinity_context
+                                        .openai_oauth_sent_service_tier
+                                        .as_ref()
                                 {
                                     usage_parser::apply_openai_oauth_service_tier(
                                         &mut usage,
@@ -9952,9 +9947,10 @@ impl Lifecycle {
                                         })
                                 },
                             );
-                            if let Some(sent) = response_affinity_context
-                                .openai_oauth_sent_service_tier
-                                .as_ref()
+                            if !precomputed_usage_present
+                                && let Some(sent) = response_affinity_context
+                                    .openai_oauth_sent_service_tier
+                                    .as_ref()
                             {
                                 usage_parser::apply_openai_oauth_service_tier(
                                     &mut usage,

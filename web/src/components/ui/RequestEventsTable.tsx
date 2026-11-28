@@ -59,11 +59,11 @@ const RESERVED_ROW_REM = 2.5;
  *   bar. Cells keep their DOM order and are only placed on the grid.
  * - From 42rem (tablets in portrait or landscape, and desktops) it is a
  *   `table-fixed` table sized by its `<colgroup>`, so no column width depends
- *   on row content. Each column starts at its compact `rem` minimum (60.75rem
- *   with both entities, 52.75rem with one), ramps smoothly to its desktop
- *   baseline (`remDesktop`, 71rem with both entities and 63rem with one) where
+ *   on row content. Each column starts at its compact `rem` minimum (61rem
+ *   with both entities, 53rem with one), ramps smoothly to its desktop
+ *   baseline (`remDesktop`, 71.5rem with both entities and 63.5rem with one) where
  *   fixed metric and timestamp columns (`Tokens` 12rem, `Latency` 5.25rem,
- *   `Cost` 5.75rem, `Timestamp` 5rem, `Status` 3.5rem, `Kind` 4.25rem) cap,
+ *   `Cost` 5.75rem, `Timestamp` 5rem, `Status` 3.5rem, `Kind` 4.75rem) cap,
  *   and splits any width above the desktop baseline among `Session`,
  *   `Principal`, `Upstream` and `Model`. Between 42rem and 66rem cell
  *   horizontal padding tightens so all ten columns fit comfortably.
@@ -84,7 +84,7 @@ interface Column {
   label: string;
   /** Compact tablet minimum width in rem; null = Session, which takes the remainder. */
   rem: number | null;
-  /** Desktop baseline width in rem (reached at 71rem / 63rem). */
+  /** Desktop baseline width in rem (reached at 71.5rem / 63.5rem). */
   remDesktop: number;
   /**
    * Share of the width above the desktop baseline (`--events-desktop-w`).
@@ -141,8 +141,8 @@ const COLUMNS = {
   },
   kind: {
     label: 'Kind',
-    rem: 3.75,
-    remDesktop: 4.25,
+    rem: 4,
+    remDesktop: 4.75,
     card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-3 @max-[42rem]/events:justify-self-start @max-[42rem]/events:max-w-full',
   },
   model: {

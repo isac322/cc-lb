@@ -94,6 +94,7 @@ struct Partial {
     cache_write_30m: Option<u64>,
     cache_write_12h: Option<u64>,
     cache_write_evidence: Option<cc_lb_request_log::RequestCacheEvidence>,
+    pricing_slices: Vec<cc_lb_lifecycle::UsagePricingSlice>,
     usage_seen: bool,
 }
 
@@ -226,6 +227,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.cache_write_12h = usage.cache_write_input_tokens_12h;
             partial.cache_write_evidence = usage.cache_write_evidence;
             partial.service_tier = usage.service_tier;
+            partial.pricing_slices = usage.pricing_slices;
             partial.usage_seen = true;
         }
         LifecycleEvent::StreamCompleted {
@@ -245,6 +247,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.cache_write_12h = success.usage.cache_write_input_tokens_12h;
             partial.cache_write_evidence = success.usage.cache_write_evidence;
             partial.service_tier = success.usage.service_tier;
+            partial.pricing_slices = success.usage.pricing_slices;
             partial.usage_seen = true;
         }
         _ => {}
@@ -256,23 +259,30 @@ fn compute_cost(partial: &Partial) -> Option<CostBreakdown> {
         return None;
     }
     let model = partial.model.as_deref()?;
-    let breakdown = crate::compute_usage_fields_cost(
-        model,
-        partial.input_tokens,
-        partial.output_tokens,
-        partial.input_image_tokens,
-        partial.output_image_tokens,
-        partial.cache_creation_input_tokens,
-        partial.cache_creation_5m,
-        partial.cache_creation_1h,
-        partial.cache_read,
-        partial.cache_write,
-        partial.cache_write_30m,
-        partial.cache_write_12h,
-        partial.cache_write_evidence,
-        partial.service_tier.as_deref(),
-        partial.usage_seen,
-    );
+    let breakdown = if partial.cache_write_evidence
+        != Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+        && !partial.pricing_slices.is_empty()
+    {
+        crate::compute_usage_slices_cost(model, &partial.pricing_slices)
+    } else {
+        crate::compute_usage_fields_cost(
+            model,
+            partial.input_tokens,
+            partial.output_tokens,
+            partial.input_image_tokens,
+            partial.output_image_tokens,
+            partial.cache_creation_input_tokens,
+            partial.cache_creation_5m,
+            partial.cache_creation_1h,
+            partial.cache_read,
+            partial.cache_write,
+            partial.cache_write_30m,
+            partial.cache_write_12h,
+            partial.cache_write_evidence,
+            partial.service_tier.as_deref(),
+            partial.usage_seen,
+        )
+    };
     Some(breakdown.into())
 }
 
