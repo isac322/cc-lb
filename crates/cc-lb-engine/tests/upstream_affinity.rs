@@ -57,6 +57,9 @@ enum ResponseSpec {
         content_encoding: &'static str,
     },
     Status(StatusCode, Value),
+    StatusWithHeaders(StatusCode, Vec<(&'static str, &'static str)>, Value),
+    OpenBreaker,
+    HalfOpenFullBreaker,
     GzipStatus(StatusCode, Value),
 }
 
@@ -113,6 +116,7 @@ impl UpstreamDispatch for RecordingDispatch {
             .pop_front()
             .unwrap_or_else(|| ResponseSpec::Json(json!({"type":"message"})));
         let mut status = StatusCode::OK;
+        let mut extra_headers: Vec<(&'static str, &'static str)> = Vec::new();
         let (content_type, content_encoding, body) = match response {
             ResponseSpec::Json(value) => (
                 "application/json",
@@ -163,6 +167,27 @@ impl UpstreamDispatch for RecordingDispatch {
                     Body::from(Bytes::from(value.to_string())),
                 )
             }
+            ResponseSpec::StatusWithHeaders(response_status, headers, value) => {
+                status = response_status;
+                extra_headers = headers;
+                (
+                    "application/json",
+                    None,
+                    Body::from(Bytes::from(value.to_string())),
+                )
+            }
+            ResponseSpec::OpenBreaker => {
+                return Err(DispatchError::Transport {
+                    source: Box::new(cc_lb_engine::BreakerError::Open {
+                        retry_after: Duration::from_secs(30),
+                    }),
+                });
+            }
+            ResponseSpec::HalfOpenFullBreaker => {
+                return Err(DispatchError::Transport {
+                    source: Box::new(cc_lb_engine::BreakerError::HalfOpenFull),
+                });
+            }
             ResponseSpec::GzipStatus(response_status, value) => {
                 status = response_status;
                 let mut encoder =
@@ -179,6 +204,12 @@ impl UpstreamDispatch for RecordingDispatch {
         response
             .headers_mut()
             .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+        for (name, value) in extra_headers {
+            response.headers_mut().insert(
+                http::header::HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+        }
         if let Some(content_encoding) = content_encoding {
             response.headers_mut().insert(
                 http::header::CONTENT_ENCODING,
@@ -6019,4 +6050,1480 @@ async fn strip_and_failover_ws_rechecks_sole_replacement_quota_before_dispatch()
     assert_eq!(send_err.status, 503);
     assert_eq!(send_err.code, "route_no_upstream_after_filter");
     gw.close();
+}
+
+#[derive(Default)]
+struct QaSubscriptionQuotaCache {
+    snapshots: Mutex<HashMap<Uuid, Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot>>>,
+    ingested: Arc<tokio::sync::Notify>,
+}
+
+impl QaSubscriptionQuotaCache {
+    fn snapshot_with_utilization(
+        window: &str,
+        utilization: f64,
+        status: &str,
+        reset_delta_secs: u64,
+    ) -> cc_lb_domain::SubscriptionQuotaCandidateSnapshot {
+        cc_lb_domain::SubscriptionQuotaCandidateSnapshot {
+            window: window.to_owned(),
+            state: cc_lb_domain::SubscriptionQuotaDataState::Fresh,
+            source: Some("test".to_owned()),
+            utilization: Some(utilization),
+            status: Some(status.to_owned()),
+            resets_at_unix_secs: Some(TEST_NOW_UNIX_SECS + reset_delta_secs),
+            surpassed_threshold: None,
+            representative_claim: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            credits: None,
+            observed_at_unix_millis: Some(TEST_NOW_UNIX_SECS * 1000),
+            max_staleness_secs: 60,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+        }
+    }
+
+    fn set_exhausted(&self, upstream_id: Uuid) {
+        self.snapshots.lock().unwrap().insert(
+            upstream_id,
+            vec![
+                Self::snapshot_with_utilization("5h", 1.0, "rejected", 1800),
+                Self::snapshot_with_utilization("7d", 1.0, "rejected", 86400),
+            ],
+        );
+    }
+
+    fn set_healthy(&self, upstream_id: Uuid) {
+        self.snapshots.lock().unwrap().insert(
+            upstream_id,
+            vec![
+                Self::snapshot_with_utilization("5h", 0.1, "allowed", 1800),
+                Self::snapshot_with_utilization("7d", 0.1, "allowed", 86400),
+            ],
+        );
+    }
+
+    fn is_exhausted(&self, upstream_id: Uuid) -> bool {
+        self.snapshots
+            .lock()
+            .unwrap()
+            .get(&upstream_id)
+            .is_some_and(|snaps| {
+                snaps
+                    .iter()
+                    .any(|s| s.utilization.is_some_and(|u| u >= 1.0))
+            })
+    }
+}
+
+impl cc_lb_control::SubscriptionQuotaCacheLike for QaSubscriptionQuotaCache {
+    fn upsert_observation(&self, record: &cc_lb_storage_api::SubscriptionQuotaSample) {
+        let mut guard = self.snapshots.lock().unwrap();
+        let entry = guard.entry(record.upstream_id).or_default();
+        entry.retain(|s| s.window != record.window.as_str());
+        entry.push(cc_lb_domain::SubscriptionQuotaCandidateSnapshot {
+            window: record.window.as_str().to_owned(),
+            state: cc_lb_domain::SubscriptionQuotaDataState::Fresh,
+            source: Some(record.source.as_str().to_owned()),
+            utilization: record.utilization,
+            status: record.status.map(|s| s.as_str().to_owned()),
+            resets_at_unix_secs: record.resets_at_unix_secs,
+            surpassed_threshold: record.surpassed_threshold,
+            representative_claim: record.representative_claim.clone(),
+            disabled_reason: record.disabled_reason.clone(),
+            extra_usage_enabled: record.extra_usage_enabled,
+            extra_usage_monthly_limit: record.extra_usage_monthly_limit,
+            extra_usage_used_credits: record.extra_usage_used_credits,
+            credits: record.credits.clone(),
+            observed_at_unix_millis: Some(record.observed_at_unix_millis),
+            max_staleness_secs: 60,
+            fallback_available: record.fallback_available,
+            overage_in_use: record.overage_in_use,
+            overage_period_monthly_utilization: record.overage_period_monthly_utilization,
+            upgrade_paths: record.upgrade_paths.clone(),
+        });
+        self.ingested.notify_waiters();
+    }
+
+    fn snapshot_for_upstream(
+        &self,
+        upstream_id: Uuid,
+        _now_unix_millis: u64,
+        _max_staleness_secs: u64,
+    ) -> Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot> {
+        self.snapshots
+            .lock()
+            .unwrap()
+            .get(&upstream_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+fn sub_pref_principal_view() -> Arc<cc_lb_control::api_keys::principal_view::PrincipalView> {
+    use cc_lb_control::api_keys::principal_view::{
+        DialectCache, PrincipalView, RouterPipelineCache,
+    };
+    use cc_lb_domain::TerminalStrategy;
+    use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
+    use cc_lb_routing::FilterPlugin;
+
+    let filter: Arc<dyn FilterPlugin> = Arc::new(SubscriptionPreferenceFilter::with_clock(
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    ));
+    let pipeline = Arc::new(RouterPipelineCache {
+        user_filters: vec![filter],
+        terminal: TerminalStrategy::FirstPick,
+        instantiation_error: None,
+        provider_filters: None,
+    });
+    let chains = HashMap::from([(
+        "principal-test".to_owned(),
+        (Some(pipeline), DialectCache::Inherit),
+    )]);
+    Arc::new(PrincipalView::for_tests(
+        "principal-test",
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
+        chains,
+    ))
+}
+
+#[tokio::test]
+async fn strip_and_failover_http_quota_exhausted_owner_strips_and_routes_to_healthy_b() {
+    let owner_a = Uuid::parse_str("10000000-0000-0000-0000-000000000401").unwrap();
+    let fallback_b = Uuid::parse_str("10000000-0000-0000-0000-000000000402").unwrap();
+    let owned_a = "gAAAAAB_http_exhausted_a";
+    let new_b = "gAAAAAB_http_fresh_b";
+
+    let quota_cache = Arc::new(QaSubscriptionQuotaCache::default());
+    quota_cache.set_exhausted(owner_a);
+    quota_cache.set_healthy(fallback_b);
+
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(owned_a), owner_a);
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "id": "resp_b_ok",
+        "object": "response",
+        "status": "completed",
+        "output": [openai_reasoning_input(new_b)],
+        "usage": {"input_tokens": 5, "output_tokens": 3}
+    })));
+    let authn = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .subscription_quota_cache(quota_cache)
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(fallback_b, "oauth-b", true),
+        ])
+        .build();
+    let lc = Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
+        dispatch.clone(),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store.clone());
+
+    let resp = handle_authenticated(
+        &lc,
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+            "input": [openai_reasoning_input(owned_a), {"role": "user", "content": "hi"}]
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let captured = dispatch.captured_requests();
+    assert_eq!(captured.len(), 1);
+    assert!(captured[0].0.contains("oauth-b.local"), "{}", captured[0].0);
+    assert_eq!(captured[0].1["input"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key(new_b)),
+        Some(fallback_b)
+    );
+}
+
+#[tokio::test]
+async fn strip_and_failover_http_live_429_strips_ingests_quota_and_routes_to_healthy_b() {
+    let owner_a = Uuid::parse_str("10000000-0000-0000-0000-000000000411").unwrap();
+    let fallback_b = Uuid::parse_str("10000000-0000-0000-0000-000000000412").unwrap();
+    let owned_a = "gAAAAAB_http_live_429_a";
+    let new_b = "gAAAAAB_http_live_429_b";
+
+    let quota_cache = Arc::new(QaSubscriptionQuotaCache::default());
+    quota_cache.set_healthy(owner_a);
+    quota_cache.set_healthy(fallback_b);
+
+    let test_bus = TestLifecycleBus::new();
+    let quota_rx = test_bus.bus.attach_lifecycle_subscription_quota(64);
+    let _subscriber = cc_lb_event_pipeline::spawn_lifecycle_subscription_quota_subscriber(
+        quota_rx,
+        Some(quota_cache.clone() as Arc<dyn cc_lb_control::SubscriptionQuotaCacheLike>),
+        None,
+    );
+
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(owned_a), owner_a);
+
+    let dispatch = RecordingDispatch::with_responses(vec![
+        ResponseSpec::StatusWithHeaders(
+            StatusCode::TOO_MANY_REQUESTS,
+            vec![
+                ("x-codex-primary-used-percent", "100"),
+                ("x-codex-primary-window-minutes", "300"),
+                ("x-codex-secondary-used-percent", "100"),
+                ("x-codex-secondary-window-minutes", "10080"),
+            ],
+            json!({"error": {"type": "rate_limit_error", "code": "rate_limit_exceeded", "message": "429"}}),
+        ),
+        ResponseSpec::Json(json!({
+            "id": "resp_b_429_recover",
+            "object": "response",
+            "status": "completed",
+            "output": [openai_reasoning_input(new_b)],
+            "usage": {"input_tokens": 6, "output_tokens": 4}
+        })),
+        ResponseSpec::Json(json!({
+            "id": "resp_b_next_direct",
+            "object": "response",
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 5, "output_tokens": 2}
+        })),
+    ]);
+
+    let authn = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .subscription_quota_cache(quota_cache.clone())
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(fallback_b, "oauth-b", true),
+        ])
+        .build();
+    let lc = Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
+        dispatch.clone(),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store.clone())
+    .with_event_bus(test_bus.bus_arc());
+
+    let resp = handle_authenticated(
+        &lc,
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+            "input": [openai_reasoning_input(owned_a), {"role": "user", "content": "turn2"}]
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let captured = dispatch.captured_requests();
+    assert_eq!(captured.len(), 2);
+    assert!(captured[0].0.contains("oauth-a.local"));
+    assert!(captured[1].0.contains("oauth-b.local"));
+    assert_eq!(captured[1].1["input"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        store.upstream_for(&ws1296_openai_key(new_b)),
+        Some(fallback_b)
+    );
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let notified = quota_cache.ingested.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if quota_cache.is_exhausted(owner_a) {
+                break;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("429 quota headers ingested");
+
+    // Next request referencing `owned_a` must route directly to B without hitting A again.
+    let resp2 = handle_authenticated(
+        &lc,
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "input": [openai_reasoning_input(owned_a), {"role": "user", "content": "turn3"}]
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp2.status(), StatusCode::OK);
+    let captured = dispatch.captured_requests();
+    assert_eq!(captured.len(), 3);
+    assert!(captured[2].0.contains("oauth-b.local"));
+}
+
+#[tokio::test]
+async fn strip_and_failover_http_401_and_open_breaker_fail_over_to_b() {
+    let owner_a = Uuid::parse_str("10000000-0000-0000-0000-000000000421").unwrap();
+    let fallback_b = Uuid::parse_str("10000000-0000-0000-0000-000000000422").unwrap();
+    let owned_a = "gAAAAAB_http_401_breaker_a";
+
+    let quota_cache = Arc::new(QaSubscriptionQuotaCache::default());
+    quota_cache.set_healthy(owner_a);
+    quota_cache.set_healthy(fallback_b);
+
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(owned_a), owner_a);
+
+    // 1. Live 401 initial + refreshed 401 on A -> strips & fails over to B.
+    let dispatch_401 = RecordingDispatch::with_responses(vec![
+        ResponseSpec::Status(
+            StatusCode::UNAUTHORIZED,
+            json!({"error": {"type": "invalid_request_error", "message": "expired"}}),
+        ),
+        ResponseSpec::Status(
+            StatusCode::UNAUTHORIZED,
+            json!({"error": {"type": "invalid_request_error", "message": "still expired"}}),
+        ),
+        ResponseSpec::Json(
+            json!({"id": "resp_b_401", "object": "response", "status": "completed", "output": []}),
+        ),
+    ]);
+    let authn_401 = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view_401 = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn_401.clone()))
+        .principal_view(authn_401.principal_view.clone())
+        .subscription_quota_cache(quota_cache.clone())
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(fallback_b, "oauth-b", true),
+        ])
+        .build();
+    let lc_401 = Lifecycle::new_with_dynamic_view(
+        authn_401.authn,
+        Arc::new(DynamicViewHolder::new(view_401)),
+        dispatch_401.clone(),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store.clone());
+    let resp_401 = handle_authenticated(
+        &lc_401,
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "input": [openai_reasoning_input(owned_a), {"role": "user", "content": "hi"}]
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp_401.status(), StatusCode::OK);
+    let captured_401 = dispatch_401.captured_requests();
+    assert_eq!(captured_401.len(), 3);
+    assert!(captured_401[0].0.contains("oauth-a.local"));
+    assert!(captured_401[1].0.contains("oauth-a.local"));
+    assert!(captured_401[2].0.contains("oauth-b.local"));
+    assert_eq!(captured_401[2].1["input"].as_array().unwrap().len(), 1);
+
+    // 2. Open circuit breaker (`BreakerError::Open`) on A -> strips & fails over to B.
+    let dispatch_breaker = RecordingDispatch::with_responses(vec![
+        ResponseSpec::OpenBreaker,
+        ResponseSpec::Json(
+            json!({"id": "resp_b_breaker", "object": "response", "status": "completed", "output": []}),
+        ),
+    ]);
+    let authn_brk = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view_brk = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn_brk.clone()))
+        .principal_view(authn_brk.principal_view.clone())
+        .subscription_quota_cache(quota_cache)
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(fallback_b, "oauth-b", true),
+        ])
+        .build();
+    let lc_brk = Lifecycle::new_with_dynamic_view(
+        authn_brk.authn,
+        Arc::new(DynamicViewHolder::new(view_brk)),
+        dispatch_breaker.clone(),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store);
+    let resp_brk = handle_authenticated(
+        &lc_brk,
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "input": [openai_reasoning_input(owned_a), {"role": "user", "content": "hi"}]
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp_brk.status(), StatusCode::OK);
+    let captured_brk = dispatch_breaker.captured_requests();
+    assert_eq!(captured_brk.len(), 2);
+    assert!(captured_brk[0].0.contains("oauth-a.local"));
+    assert!(captured_brk[1].0.contains("oauth-b.local"));
+    assert_eq!(captured_brk[1].1["input"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn strip_and_failover_http_negative_controls_relay_429_never_409_or_downgrade() {
+    let owner_a = Uuid::parse_str("10000000-0000-0000-0000-000000000431").unwrap();
+    let exhausted_b = Uuid::parse_str("10000000-0000-0000-0000-000000000432").unwrap();
+    let api_key_a = Uuid::parse_str("10000000-0000-0000-0000-000000000433").unwrap();
+    let owned_a = "gAAAAAB_http_neg_a";
+    let owned_api = "gAAAAAB_http_neg_api";
+    let rate_limit_body = json!({"error": {"type": "rate_limit_error", "code": "rate_limit_exceeded", "message": "real 429"}});
+
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(owned_a), owner_a);
+    store.insert(ws1296_openai_key(owned_api), api_key_a);
+
+    // 1. Both A and B exhausted: must NOT strip, must NOT return 409, must dispatch A verbatim & relay 429.
+    let quota_cache = Arc::new(QaSubscriptionQuotaCache::default());
+    quota_cache.set_exhausted(owner_a);
+    quota_cache.set_exhausted(exhausted_b);
+    let dispatch_both_exhausted = RecordingDispatch::with_response(ResponseSpec::Status(
+        StatusCode::TOO_MANY_REQUESTS,
+        rate_limit_body.clone(),
+    ));
+    let authn_1 = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view_1 = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn_1.clone()))
+        .principal_view(authn_1.principal_view.clone())
+        .subscription_quota_cache(quota_cache.clone())
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(exhausted_b, "oauth-b", true),
+        ])
+        .build();
+    let lc_1 = Lifecycle::new_with_dynamic_view(
+        authn_1.authn,
+        Arc::new(DynamicViewHolder::new(view_1)),
+        dispatch_both_exhausted.clone(),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store.clone());
+    let resp_1 = handle_authenticated(
+        &lc_1,
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "input": [openai_reasoning_input(owned_a), {"role": "user", "content": "hi"}]
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp_1.status(), StatusCode::TOO_MANY_REQUESTS);
+    let cap_1 = dispatch_both_exhausted.captured_requests();
+    assert_eq!(cap_1.len(), 1);
+    assert!(cap_1[0].0.contains("oauth-a.local"));
+    assert_eq!(cap_1[0].1["input"].as_array().unwrap().len(), 2);
+
+    // 2. `unavailable_openai_reasoning_owner = FailClosed` with healthy B stays on A & relays 429.
+    quota_cache.set_healthy(owner_a);
+    quota_cache.set_healthy(exhausted_b);
+    let dispatch_fc = RecordingDispatch::with_response(ResponseSpec::Status(
+        StatusCode::TOO_MANY_REQUESTS,
+        rate_limit_body.clone(),
+    ));
+    let authn_2 = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view_2 = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn_2.clone()))
+        .principal_view(authn_2.principal_view.clone())
+        .subscription_quota_cache(quota_cache.clone())
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(exhausted_b, "oauth-b", true),
+        ])
+        .build();
+    let lc_fc = Lifecycle::new_with_dynamic_view(
+        authn_2.authn,
+        Arc::new(DynamicViewHolder::new(view_2)),
+        dispatch_fc.clone(),
+        LifecycleConfig {
+            unavailable_openai_reasoning_owner:
+                cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::FailClosed,
+            ..LifecycleConfig::default()
+        },
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store.clone());
+    let resp_fc = handle_authenticated(
+        &lc_fc,
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "input": [openai_reasoning_input(owned_a), {"role": "user", "content": "hi"}]
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp_fc.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(dispatch_fc.captured_requests().len(), 1);
+
+    // 3. Public `/v1/responses` with `code_interpreter`: API-key A returning 429 must never downgrade onto OAuth B.
+    let dispatch_ci = RecordingDispatch::with_response(ResponseSpec::Status(
+        StatusCode::TOO_MANY_REQUESTS,
+        rate_limit_body.clone(),
+    ));
+    let authn_3 = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view_3 = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn_3.clone()))
+        .principal_view(authn_3.principal_view.clone())
+        .subscription_quota_cache(quota_cache.clone())
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_upstream_record(api_key_a, "api-a", true),
+            openai_oauth_upstream_record(exhausted_b, "oauth-b", true),
+        ])
+        .build();
+    let lc_ci = Lifecycle::new_with_dynamic_view(
+        authn_3.authn,
+        Arc::new(DynamicViewHolder::new(view_3)),
+        dispatch_ci.clone(),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store.clone());
+    let resp_ci = handle_authenticated(
+        &lc_ci,
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}],
+            "input": [openai_reasoning_input(owned_api), {"role": "user", "content": "calc"}]
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp_ci.status(), StatusCode::TOO_MANY_REQUESTS);
+    let cap_ci = dispatch_ci.captured_requests();
+    assert_eq!(cap_ci.len(), 1);
+    assert!(cap_ci[0].0.contains("api-a.local"));
+
+    // 4. Account-owned state (`compaction`, `file_id`, `previous_response_id`) stays pinned to A on 429 / quota exhaustion.
+    for owned_payload in [
+        json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "input": [
+                {"type": "compaction", "id": "cmp_1", "encrypted_content": owned_a},
+                {"role": "user", "content": "hi"}
+            ]
+        }),
+        json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "input": [
+                openai_reasoning_input(owned_a),
+                {"role": "user", "content": [{"type": "input_file", "file_id": "file-123"}]}
+            ]
+        }),
+    ] {
+        let dispatch_owned = RecordingDispatch::with_response(ResponseSpec::Status(
+            StatusCode::TOO_MANY_REQUESTS,
+            rate_limit_body.clone(),
+        ));
+        let authn_4 =
+            TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+        let view_4 = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(authn_4.clone()))
+            .principal_view(authn_4.principal_view.clone())
+            .subscription_quota_cache(quota_cache.clone())
+            .subscription_quota_routing_max_staleness_secs(60)
+            .upstream_records(vec![
+                openai_oauth_upstream_record(owner_a, "oauth-a", true),
+                openai_oauth_upstream_record(exhausted_b, "oauth-b", true),
+            ])
+            .build();
+        let lc_4 = Lifecycle::new_with_dynamic_view(
+            authn_4.authn,
+            Arc::new(DynamicViewHolder::new(view_4)),
+            dispatch_owned.clone(),
+            LifecycleConfig::default(),
+            Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+        )
+        .with_upstream_affinity_store(store.clone());
+        let resp_owned = handle_authenticated(&lc_4, responses_request(owned_payload))
+            .await
+            .unwrap();
+        assert_eq!(resp_owned.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(dispatch_owned.captured_requests().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn multi_owner_openai_reasoning_reconciliation_http() {
+    let owner_a = Uuid::parse_str("10000000-0000-0000-0000-000000000601").unwrap();
+    let owner_b = Uuid::parse_str("10000000-0000-0000-0000-000000000602").unwrap();
+    let owner_c = Uuid::parse_str("10000000-0000-0000-0000-000000000603").unwrap();
+    let cipher_a = "gAAAAAB_multi_http_a";
+    let cipher_b = "gAAAAAB_multi_http_b";
+
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(cipher_a), owner_a);
+    store.insert(ws1296_openai_key(cipher_b), owner_b);
+
+    let multi_payload = || {
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "input": [
+                openai_reasoning_input(cipher_a),
+                {"role": "user", "content": "turn 1"},
+                openai_reasoning_input(cipher_b),
+                {"role": "user", "content": "turn 2"}
+            ]
+        }))
+    };
+
+    // 1. `[rs_A (exhausted), rs_B (healthy)]`: routes directly to B, strips ONLY rs_A, keeps rs_B verbatim.
+    let quota_1 = Arc::new(QaSubscriptionQuotaCache::default());
+    quota_1.set_exhausted(owner_a);
+    quota_1.set_healthy(owner_b);
+    let dispatch_1 = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "id": "resp_reconcile_1",
+        "object": "response",
+        "status": "completed",
+        "output": []
+    })));
+    let authn_1 = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view_1 = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn_1.clone()))
+        .principal_view(authn_1.principal_view.clone())
+        .subscription_quota_cache(quota_1)
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(owner_b, "oauth-b", true),
+        ])
+        .build();
+    let lc_1 = Lifecycle::new_with_dynamic_view(
+        authn_1.authn,
+        Arc::new(DynamicViewHolder::new(view_1)),
+        dispatch_1.clone(),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store.clone());
+    let resp_1 = handle_authenticated(&lc_1, multi_payload()).await.unwrap();
+    assert_eq!(resp_1.status(), StatusCode::OK);
+    let cap_1 = dispatch_1.captured_requests();
+    assert_eq!(cap_1.len(), 1);
+    assert!(cap_1[0].0.contains("oauth-b.local"));
+    let in_1 = cap_1[0].1["input"].as_array().unwrap();
+    assert_eq!(in_1.len(), 3);
+    assert_eq!(in_1[1]["encrypted_content"], cipher_b);
+
+    // 2. `[rs_A (healthy), rs_B (healthy)]`: picks later owner B, strips ONLY rs_A, keeps rs_B verbatim.
+    let quota_2 = Arc::new(QaSubscriptionQuotaCache::default());
+    quota_2.set_healthy(owner_a);
+    quota_2.set_healthy(owner_b);
+    let dispatch_2 = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "id": "resp_reconcile_2",
+        "object": "response",
+        "status": "completed",
+        "output": []
+    })));
+    let authn_2 = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view_2 = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn_2.clone()))
+        .principal_view(authn_2.principal_view.clone())
+        .subscription_quota_cache(quota_2)
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(owner_b, "oauth-b", true),
+        ])
+        .build();
+    let lc_2 = Lifecycle::new_with_dynamic_view(
+        authn_2.authn,
+        Arc::new(DynamicViewHolder::new(view_2)),
+        dispatch_2.clone(),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store.clone());
+    let resp_2 = handle_authenticated(&lc_2, multi_payload()).await.unwrap();
+    assert_eq!(resp_2.status(), StatusCode::OK);
+    let cap_2 = dispatch_2.captured_requests();
+    assert_eq!(cap_2.len(), 1);
+    assert!(cap_2[0].0.contains("oauth-b.local"));
+    let in_2 = cap_2[0].1["input"].as_array().unwrap();
+    assert_eq!(in_2.len(), 3);
+    assert_eq!(in_2[1]["encrypted_content"], cipher_b);
+
+    // 3. `[rs_A (exhausted), rs_B (exhausted)]` with healthy C: strips ALL and fails over cleanly to C.
+    let quota_3 = Arc::new(QaSubscriptionQuotaCache::default());
+    quota_3.set_exhausted(owner_a);
+    quota_3.set_exhausted(owner_b);
+    quota_3.set_healthy(owner_c);
+    let dispatch_3 = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "id": "resp_reconcile_3",
+        "object": "response",
+        "status": "completed",
+        "output": []
+    })));
+    let authn_3 = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view_3 = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn_3.clone()))
+        .principal_view(authn_3.principal_view.clone())
+        .subscription_quota_cache(quota_3)
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(owner_b, "oauth-b", true),
+            openai_oauth_upstream_record(owner_c, "oauth-c", true),
+        ])
+        .build();
+    let lc_3 = Lifecycle::new_with_dynamic_view(
+        authn_3.authn,
+        Arc::new(DynamicViewHolder::new(view_3)),
+        dispatch_3.clone(),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store.clone());
+    let resp_3 = handle_authenticated(&lc_3, multi_payload()).await.unwrap();
+    assert_eq!(resp_3.status(), StatusCode::OK);
+    let cap_3 = dispatch_3.captured_requests();
+    assert_eq!(cap_3.len(), 1);
+    assert!(cap_3[0].0.contains("oauth-c.local"));
+    let in_3 = cap_3[0].1["input"].as_array().unwrap();
+    assert_eq!(in_3.len(), 2);
+    assert_eq!(in_3[0]["content"], "turn 1");
+    assert_eq!(in_3[1]["content"], "turn 2");
+
+    // 4. `[rs_A (exhausted), rs_B (exhausted)]` with NO healthy replacement: keeps B (rs_A stripped, rs_B kept) and relays B's real 429.
+    let rate_limit_body = json!({"error": {"type": "rate_limit_error", "code": "rate_limit_exceeded", "message": "real 429"}});
+    let quota_4 = Arc::new(QaSubscriptionQuotaCache::default());
+    quota_4.set_exhausted(owner_a);
+    quota_4.set_exhausted(owner_b);
+    let dispatch_4 = RecordingDispatch::with_response(ResponseSpec::Status(
+        StatusCode::TOO_MANY_REQUESTS,
+        rate_limit_body.clone(),
+    ));
+    let authn_4 = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view_4 = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn_4.clone()))
+        .principal_view(authn_4.principal_view.clone())
+        .subscription_quota_cache(quota_4)
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(owner_b, "oauth-b", true),
+        ])
+        .build();
+    let lc_4 = Lifecycle::new_with_dynamic_view(
+        authn_4.authn,
+        Arc::new(DynamicViewHolder::new(view_4)),
+        dispatch_4.clone(),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store.clone());
+    let resp_4 = handle_authenticated(&lc_4, multi_payload()).await.unwrap();
+    assert_eq!(resp_4.status(), StatusCode::TOO_MANY_REQUESTS);
+    let cap_4 = dispatch_4.captured_requests();
+    assert_eq!(cap_4.len(), 1);
+    assert!(cap_4[0].0.contains("oauth-b.local"));
+    let in_4 = cap_4[0].1["input"].as_array().unwrap();
+    assert_eq!(in_4.len(), 3);
+    assert_eq!(in_4[1]["encrypted_content"], cipher_b);
+
+    // 5. Negative controls: `FailClosed` OR `compaction` / `previous_response_id` rejects 400 "opaque request content resolves to multiple upstreams".
+    let dispatch_neg_fc = RecordingDispatch::with_response(ResponseSpec::Json(json!({})));
+    let authn_fc = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view_fc = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn_fc.clone()))
+        .principal_view(authn_fc.principal_view.clone())
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(owner_b, "oauth-b", true),
+        ])
+        .build();
+    let lc_neg_fc = Lifecycle::new_with_dynamic_view(
+        authn_fc.authn,
+        Arc::new(DynamicViewHolder::new(view_fc)),
+        dispatch_neg_fc.clone(),
+        LifecycleConfig {
+            unavailable_openai_reasoning_owner:
+                cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::FailClosed,
+            ..LifecycleConfig::default()
+        },
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store.clone());
+    let neg_fc_resp = handle_authenticated(&lc_neg_fc, multi_payload())
+        .await
+        .unwrap();
+    assert_eq!(neg_fc_resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(dispatch_neg_fc.captured_requests().len(), 0);
+
+    for bad_payload in [
+        json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "previous_response_id": "resp_prev",
+            "input": [openai_reasoning_input(cipher_a), openai_reasoning_input(cipher_b)]
+        }),
+        json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "input": [
+                {"type": "compaction", "id": "cmp_1", "encrypted_content": cipher_a},
+                openai_reasoning_input(cipher_b)
+            ]
+        }),
+    ] {
+        let neg_bad = handle_authenticated(&lc_2, responses_request(bad_payload))
+            .await
+            .unwrap();
+        assert_eq!(neg_bad.status(), StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(dispatch_2.captured_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn chat_fanout_n_breaker_error_does_not_fail_over_to_b() {
+    let owner_a = Uuid::parse_str("10000000-0000-0000-0000-000000000611").unwrap();
+    let fallback_b = Uuid::parse_str("10000000-0000-0000-0000-000000000612").unwrap();
+
+    let quota = Arc::new(QaSubscriptionQuotaCache::default());
+    quota.snapshots.lock().unwrap().insert(
+        owner_a,
+        vec![
+            QaSubscriptionQuotaCache::snapshot_with_utilization("5h", 0.05, "allowed", 1800),
+            QaSubscriptionQuotaCache::snapshot_with_utilization("7d", 0.05, "allowed", 86400),
+        ],
+    );
+    quota.snapshots.lock().unwrap().insert(
+        fallback_b,
+        vec![
+            QaSubscriptionQuotaCache::snapshot_with_utilization("5h", 0.4, "allowed", 1800),
+            QaSubscriptionQuotaCache::snapshot_with_utilization("7d", 0.4, "allowed", 86400),
+        ],
+    );
+
+    let chat_req = || {
+        let mut req = Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/chat/completions")
+            .header("x-api-key", crate::common::managed_api_key())
+            .body(Bytes::from(
+                json!({
+                    "model": "gpt-5.4",
+                    "n": 2,
+                    "messages": [{"role": "user", "content": "hi"}]
+                })
+                .to_string(),
+            ))
+            .expect("chat request builds");
+        req.extensions_mut()
+            .insert(ProviderScope(cc_lb_domain::Provider::Openai));
+        req
+    };
+
+    // Case 1: Partially dispatched `n = 2` fan-out where one sibling succeeds and the other hits
+    // `BreakerError::HalfOpenFull` must not fail over to B (which would double-dispatch).
+    let sse_ok = Bytes::from_static(
+        b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_chat_partial\",\"object\":\"response\",\"status\":\"completed\",\"usage\":{\"input_tokens\":4,\"output_tokens\":2}}}\n\n",
+    );
+    let dispatch_partial = RecordingDispatch::with_responses(vec![
+        ResponseSpec::Sse(sse_ok),
+        ResponseSpec::HalfOpenFullBreaker,
+        ResponseSpec::Json(json!({"unexpected": "must not hit b"})),
+    ]);
+    let authn_1 = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view_1 = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn_1.clone()))
+        .principal_view(authn_1.principal_view.clone())
+        .subscription_quota_cache(quota.clone())
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(fallback_b, "oauth-b", true),
+        ])
+        .build();
+    let lc_1 = Lifecycle::new_with_dynamic_view(
+        authn_1.authn,
+        Arc::new(DynamicViewHolder::new(view_1)),
+        dispatch_partial.clone(),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    );
+    let resp_1 = handle_authenticated(&lc_1, chat_req()).await.unwrap();
+    assert!(!resp_1.status().is_success(), "{}", resp_1.status());
+    let cap_1 = dispatch_partial.captured_requests();
+    assert_eq!(cap_1.len(), 2, "{cap_1:?}");
+    assert!(
+        cap_1.iter().all(|(u, _)| u.contains("oauth-a.local")),
+        "{cap_1:?}"
+    );
+
+    // Case 2: Open breaker during `chat_fanout_n` also stays on A without failing over to B.
+    let dispatch_open = RecordingDispatch::with_responses(vec![
+        ResponseSpec::OpenBreaker,
+        ResponseSpec::OpenBreaker,
+        ResponseSpec::Json(json!({"unexpected": "must not hit b"})),
+    ]);
+    let authn_2 = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view_2 = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn_2.clone()))
+        .principal_view(authn_2.principal_view.clone())
+        .subscription_quota_cache(quota)
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(fallback_b, "oauth-b", true),
+        ])
+        .build();
+    let lc_2 = Lifecycle::new_with_dynamic_view(
+        authn_2.authn,
+        Arc::new(DynamicViewHolder::new(view_2)),
+        dispatch_open.clone(),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    );
+    let resp_2 = handle_authenticated(&lc_2, chat_req()).await.unwrap();
+    assert!(!resp_2.status().is_success(), "{}", resp_2.status());
+    let cap_2 = dispatch_open.captured_requests();
+    assert_eq!(cap_2.len(), 1, "{cap_2:?}");
+    assert!(
+        cap_2.iter().all(|(u, _)| u.contains("oauth-a.local")),
+        "{cap_2:?}"
+    );
+}
+
+#[tokio::test]
+async fn multi_owner_openai_reasoning_picks_last_occurrence_http() {
+    let owner_a = Uuid::parse_str("10000000-0000-0000-0000-000000000621").unwrap();
+    let owner_b = Uuid::parse_str("10000000-0000-0000-0000-000000000622").unwrap();
+    let cipher_a = "gAAAAAB_last_occ_http_a_repeat";
+    let cipher_b = "gAAAAAB_last_occ_http_b";
+
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(cipher_a), owner_a);
+    store.insert(ws1296_openai_key(cipher_b), owner_b);
+
+    let quota = Arc::new(QaSubscriptionQuotaCache::default());
+    quota.set_healthy(owner_a);
+    quota.set_healthy(owner_b);
+
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "id": "resp_last_occ",
+        "object": "response",
+        "status": "completed",
+        "output": []
+    })));
+    let authn = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .subscription_quota_cache(quota)
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(owner_b, "oauth-b", true),
+        ])
+        .build();
+    let lc = Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
+        dispatch.clone(),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store);
+
+    let resp = handle_authenticated(
+        &lc,
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "input": [
+                openai_reasoning_input(cipher_a),
+                {"role": "user", "content": "turn 1"},
+                openai_reasoning_input(cipher_b),
+                {"role": "user", "content": "turn 2"},
+                openai_reasoning_input(cipher_a),
+                {"role": "user", "content": "turn 3"}
+            ]
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let captured = dispatch.captured_requests();
+    assert_eq!(captured.len(), 1);
+    assert!(captured[0].0.contains("oauth-a.local"), "{}", captured[0].0);
+    let input = captured[0].1["input"].as_array().unwrap();
+    assert_eq!(input.len(), 5, "{input:?}");
+    assert_eq!(input[0]["encrypted_content"], cipher_a);
+    assert_eq!(input[3]["encrypted_content"], cipher_a);
+}
+
+#[tokio::test]
+async fn multi_owner_openai_reasoning_reconciles_to_filter_accepted_owner_http() {
+    use cc_lb_control::api_keys::principal_view::{
+        DialectCache, PrincipalView, RouterPipelineCache,
+    };
+    use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
+    use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
+    use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RoutingContext};
+
+    struct ExcludeUpstreamFilter {
+        id: Uuid,
+        excluded: Uuid,
+    }
+    impl FilterPlugin for ExcludeUpstreamFilter {
+        fn filter(
+            &self,
+            _ctx: &RoutingContext,
+            _principal: &Principal,
+            candidates: &[UpstreamCandidate],
+        ) -> Result<FilterOutput, FilterError> {
+            Ok(FilterOutput {
+                kept_upstream_ids: candidates
+                    .iter()
+                    .filter(|c| c.upstream_id != self.excluded)
+                    .map(|c| c.upstream_id)
+                    .collect(),
+                reason: "exclude-b".to_owned(),
+                per_candidate_reasons: Vec::new(),
+                subscription_preference: None,
+            })
+        }
+        fn plugin_id(&self) -> Uuid {
+            self.id
+        }
+        fn plugin_name(&self) -> &str {
+            "exclude-upstream"
+        }
+    }
+
+    let owner_a = Uuid::parse_str("10000000-0000-0000-0000-000000000631").unwrap();
+    let owner_b = Uuid::parse_str("10000000-0000-0000-0000-000000000632").unwrap();
+    let owner_c = Uuid::parse_str("10000000-0000-0000-0000-000000000633").unwrap();
+    let cipher_a = "gAAAAAB_filter_reconcile_a";
+    let cipher_b = "gAAAAAB_filter_reconcile_b";
+
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(cipher_a), owner_a);
+    store.insert(ws1296_openai_key(cipher_b), owner_b);
+
+    let quota = Arc::new(QaSubscriptionQuotaCache::default());
+    quota.snapshots.lock().unwrap().insert(
+        owner_a,
+        vec![
+            QaSubscriptionQuotaCache::snapshot_with_utilization("5h", 0.1, "allowed", 1800),
+            QaSubscriptionQuotaCache::snapshot_with_utilization("7d", 0.1, "allowed", 86400),
+        ],
+    );
+    quota.set_healthy(owner_b);
+    quota.snapshots.lock().unwrap().insert(
+        owner_c,
+        vec![
+            QaSubscriptionQuotaCache::snapshot_with_utilization("5h", 0.5, "allowed", 1800),
+            QaSubscriptionQuotaCache::snapshot_with_utilization("7d", 0.5, "allowed", 86400),
+        ],
+    );
+
+    let exclude_filter: Arc<dyn FilterPlugin> = Arc::new(ExcludeUpstreamFilter {
+        id: Uuid::from_u128(0xE1C10D),
+        excluded: owner_b,
+    });
+    let sub_filter: Arc<dyn FilterPlugin> = Arc::new(SubscriptionPreferenceFilter::with_clock(
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    ));
+    let pipeline = Arc::new(RouterPipelineCache {
+        user_filters: vec![exclude_filter, sub_filter],
+        terminal: TerminalStrategy::FirstPick,
+        instantiation_error: None,
+        provider_filters: None,
+    });
+    let principal_view = Arc::new(PrincipalView::for_tests(
+        "principal-test",
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
+        HashMap::from([(
+            "principal-test".to_owned(),
+            (Some(pipeline), DialectCache::Inherit),
+        )]),
+    ));
+
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "id": "resp_filter_accepted_a",
+        "object": "response",
+        "status": "completed",
+        "output": []
+    })));
+    let authn = TestAuthn::with_principal_view(TestState::default(), principal_view);
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .subscription_quota_cache(quota)
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(owner_b, "oauth-b", true),
+            openai_oauth_upstream_record(owner_c, "oauth-c", true),
+        ])
+        .build();
+    let lc = Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
+        dispatch.clone(),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store);
+
+    let resp = handle_authenticated(
+        &lc,
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "input": [
+                openai_reasoning_input(cipher_a),
+                {"role": "user", "content": "turn 1"},
+                openai_reasoning_input(cipher_b),
+                {"role": "user", "content": "turn 2"}
+            ]
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let captured = dispatch.captured_requests();
+    assert_eq!(captured.len(), 1);
+    assert!(captured[0].0.contains("oauth-a.local"), "{}", captured[0].0);
+    let input = captured[0].1["input"].as_array().unwrap();
+    assert_eq!(input.len(), 3, "{input:?}");
+    assert_eq!(input[0]["encrypted_content"], cipher_a);
+}
+
+#[tokio::test]
+async fn api_key_owner_explicit_store_true_never_downgrades_to_oauth_http() {
+    let api_key_a = Uuid::parse_str("10000000-0000-0000-0000-000000000641").unwrap();
+    let oauth_b = Uuid::parse_str("10000000-0000-0000-0000-000000000642").unwrap();
+    let api_key_c = Uuid::parse_str("10000000-0000-0000-0000-000000000643").unwrap();
+    let cipher_api = "gAAAAAB_api_store_true";
+    let rate_limit_body = json!({"error": {"type": "rate_limit_error", "code": "rate_limit_exceeded", "message": "429"}});
+
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(cipher_api), api_key_a);
+
+    let quota = Arc::new(QaSubscriptionQuotaCache::default());
+    quota.set_healthy(oauth_b);
+
+    let payload = || {
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": true,
+            "input": [
+                openai_reasoning_input(cipher_api),
+                {"role": "user", "content": "store true followup"}
+            ]
+        }))
+    };
+
+    // 1. Only OAuth alternative exists: `api_key_a` 429 must relay 429 directly, never downgrade to `oauth_b`.
+    let dispatch_1 = RecordingDispatch::with_response(ResponseSpec::Status(
+        StatusCode::TOO_MANY_REQUESTS,
+        rate_limit_body.clone(),
+    ));
+    let authn_1 = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view_1 = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn_1.clone()))
+        .principal_view(authn_1.principal_view.clone())
+        .subscription_quota_cache(quota.clone())
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_upstream_record(api_key_a, "api-a", true),
+            openai_oauth_upstream_record(oauth_b, "oauth-b", true),
+        ])
+        .build();
+    let lc_1 = Lifecycle::new_with_dynamic_view(
+        authn_1.authn,
+        Arc::new(DynamicViewHolder::new(view_1)),
+        dispatch_1.clone(),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store.clone());
+    let resp_1 = handle_authenticated(&lc_1, payload()).await.unwrap();
+    assert_eq!(resp_1.status(), StatusCode::TOO_MANY_REQUESTS);
+    let cap_1 = dispatch_1.captured_requests();
+    assert_eq!(cap_1.len(), 1);
+    assert!(cap_1[0].0.contains("api-a.local"), "{}", cap_1[0].0);
+
+    // 2. Another `OpenaiApiKey` upstream (`api_key_c`) exists alongside `oauth_b`: 429 on `api_key_a`
+    // strips `cipher_api` and fails over onto `api_key_c` while preserving `store: true`.
+    let dispatch_2 = RecordingDispatch::with_responses(vec![
+        ResponseSpec::Status(StatusCode::TOO_MANY_REQUESTS, rate_limit_body),
+        ResponseSpec::Json(json!({
+            "id": "resp_api_c",
+            "object": "response",
+            "status": "completed",
+            "output": []
+        })),
+    ]);
+    let authn_2 = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view_2 = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn_2.clone()))
+        .principal_view(authn_2.principal_view.clone())
+        .subscription_quota_cache(quota)
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_upstream_record(api_key_a, "api-a", true),
+            openai_oauth_upstream_record(oauth_b, "oauth-b", true),
+            openai_upstream_record(api_key_c, "api-c", true),
+        ])
+        .build();
+    let lc_2 = Lifecycle::new_with_dynamic_view(
+        authn_2.authn,
+        Arc::new(DynamicViewHolder::new(view_2)),
+        dispatch_2.clone(),
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store);
+    let resp_2 = handle_authenticated(&lc_2, payload()).await.unwrap();
+    assert_eq!(resp_2.status(), StatusCode::OK);
+    let cap_2 = dispatch_2.captured_requests();
+    assert_eq!(cap_2.len(), 2);
+    assert!(cap_2[0].0.contains("api-a.local"), "{}", cap_2[0].0);
+    assert!(cap_2[1].0.contains("api-c.local"), "{}", cap_2[1].0);
+    assert_eq!(cap_2[1].1["store"], json!(true));
+    assert_eq!(cap_2[1].1["input"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn hybrid_unknown_reasoning_400_retry_falls_through_to_429_failover_http() {
+    let owner_a = Uuid::parse_str("10000000-0000-0000-0000-000000000651").unwrap();
+    let fallback_b = Uuid::parse_str("10000000-0000-0000-0000-000000000652").unwrap();
+    let cipher_a = "gAAAAAB_hybrid_known_a";
+    let cipher_unknown = "gAAAAAB_hybrid_unknown";
+
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(cipher_a), owner_a);
+
+    let quota = Arc::new(QaSubscriptionQuotaCache::default());
+    quota.set_healthy(owner_a);
+    quota.set_healthy(fallback_b);
+
+    let dispatch = RecordingDispatch::with_responses(vec![
+        ResponseSpec::Status(
+            StatusCode::BAD_REQUEST,
+            json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_encrypted_content",
+                    "message": "The encrypted content could not be verified."
+                }
+            }),
+        ),
+        ResponseSpec::Status(
+            StatusCode::TOO_MANY_REQUESTS,
+            json!({"error": {"type": "rate_limit_error", "code": "rate_limit_exceeded", "message": "429"}}),
+        ),
+        ResponseSpec::Json(json!({
+            "id": "resp_hybrid_failover_b",
+            "object": "response",
+            "status": "completed",
+            "output": []
+        })),
+    ]);
+    let authn = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .subscription_quota_cache(quota)
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(fallback_b, "oauth-b", true),
+        ])
+        .build();
+    let lc = Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
+        dispatch.clone(),
+        LifecycleConfig {
+            unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy::Hybrid,
+            ..LifecycleConfig::default()
+        },
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store);
+
+    let resp = handle_authenticated(
+        &lc,
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "input": [
+                openai_reasoning_input(cipher_a),
+                openai_reasoning_input(cipher_unknown),
+                {"role": "user", "content": "continue"}
+            ]
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let captured = dispatch.captured_requests();
+    assert_eq!(captured.len(), 3, "{captured:?}");
+    assert!(captured[0].0.contains("oauth-a.local"));
+    assert_eq!(captured[0].1["input"].as_array().unwrap().len(), 3);
+    assert!(captured[1].0.contains("oauth-a.local"));
+    let retry_in = captured[1].1["input"].as_array().unwrap();
+    assert_eq!(retry_in.len(), 2, "{retry_in:?}");
+    assert_eq!(retry_in[0]["encrypted_content"], cipher_a);
+    assert!(captured[2].0.contains("oauth-b.local"));
+    assert_eq!(captured[2].1["input"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn multi_owner_fail_closed_unknown_reasoning_preserves_unbound_item_http() {
+    let owner_a = Uuid::parse_str("10000000-0000-0000-0000-000000000661").unwrap();
+    let owner_b = Uuid::parse_str("10000000-0000-0000-0000-000000000662").unwrap();
+    let owner_c = Uuid::parse_str("10000000-0000-0000-0000-000000000663").unwrap();
+    let cipher_a = "gAAAAAB_fc_multi_http_a";
+    let cipher_b = "gAAAAAB_fc_multi_http_b";
+    let cipher_unbound = "gAAAAAB_fc_multi_http_unbound";
+
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(ws1296_openai_key(cipher_a), owner_a);
+    store.insert(ws1296_openai_key(cipher_b), owner_b);
+
+    let quota = Arc::new(QaSubscriptionQuotaCache::default());
+    quota.set_exhausted(owner_a);
+    quota.set_exhausted(owner_b);
+    quota.set_healthy(owner_c);
+
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "id": "resp_fc_stays_b",
+        "object": "response",
+        "status": "completed",
+        "output": []
+    })));
+    let authn = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .subscription_quota_cache(quota.clone())
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", true),
+            openai_oauth_upstream_record(owner_b, "oauth-b", true),
+            openai_oauth_upstream_record(owner_c, "oauth-c", true),
+        ])
+        .build();
+    let lc = Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
+        dispatch.clone(),
+        LifecycleConfig {
+            unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy::FailClosed,
+            unavailable_openai_reasoning_owner:
+                cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover,
+            ..LifecycleConfig::default()
+        },
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store.clone());
+
+    let make_req = || {
+        responses_request(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "input": [
+                openai_reasoning_input(cipher_a),
+                {"role": "user", "content": "t1"},
+                openai_reasoning_input(cipher_b),
+                openai_reasoning_input(cipher_unbound),
+                {"role": "user", "content": "t2"}
+            ]
+        }))
+    };
+
+    let resp = handle_authenticated(&lc, make_req()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let captured = dispatch.captured_requests();
+    assert_eq!(captured.len(), 1);
+    assert!(captured[0].0.contains("oauth-b.local"), "{}", captured[0].0);
+    let input = captured[0].1["input"].as_array().unwrap();
+    assert_eq!(input.len(), 4, "{input:?}");
+    assert_eq!(input[1]["encrypted_content"], cipher_b);
+    assert_eq!(input[2]["encrypted_content"], cipher_unbound);
+
+    // When both bound owners A and B are disabled and C is healthy, FailClosed + unbound item
+    // must return 409 rather than stripping everything onto C.
+    let store_2 = Arc::new(MemoryAffinityStore::default());
+    store_2.insert(ws1296_openai_key(cipher_a), owner_a);
+    store_2.insert(ws1296_openai_key(cipher_b), owner_b);
+    let dispatch_2 = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "id": "resp_unused",
+        "object": "response",
+        "status": "completed",
+        "output": []
+    })));
+    let authn_2 = TestAuthn::with_principal_view(TestState::default(), sub_pref_principal_view());
+    let view_2 = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn_2.clone()))
+        .principal_view(authn_2.principal_view.clone())
+        .subscription_quota_cache(quota)
+        .subscription_quota_routing_max_staleness_secs(60)
+        .upstream_records(vec![
+            openai_oauth_upstream_record(owner_a, "oauth-a", false),
+            openai_oauth_upstream_record(owner_b, "oauth-b", false),
+            openai_oauth_upstream_record(owner_c, "oauth-c", true),
+        ])
+        .build();
+    let lc_2 = Lifecycle::new_with_dynamic_view(
+        authn_2.authn,
+        Arc::new(DynamicViewHolder::new(view_2)),
+        dispatch_2.clone(),
+        LifecycleConfig {
+            unknown_openai_reasoning: cc_lb_domain::UnknownOpenaiReasoningPolicy::FailClosed,
+            unavailable_openai_reasoning_owner:
+                cc_lb_domain::UnavailableOpenaiReasoningOwnerPolicy::StripAndFailover,
+            ..LifecycleConfig::default()
+        },
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+    .with_upstream_affinity_store(store_2);
+
+    let resp_2 = handle_authenticated(&lc_2, make_req()).await.unwrap();
+    assert_eq!(resp_2.status(), StatusCode::CONFLICT);
+    assert!(dispatch_2.captured_requests().is_empty());
 }

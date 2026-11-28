@@ -433,6 +433,7 @@ pub(super) const MAX_UPSTREAM_ATTEMPTS: u8 = 3;
 pub(super) enum FailoverReason {
     SignerBuild,
     Sign,
+    CircuitOpen,
     Unauthorized,
     RateLimited,
 }
@@ -442,6 +443,7 @@ impl FailoverReason {
         match self {
             Self::SignerBuild => "signer_build_failed",
             Self::Sign => "sign_failed",
+            Self::CircuitOpen => "circuit_open",
             Self::Unauthorized => "upstream_401",
             Self::RateLimited => "upstream_429",
         }
@@ -641,19 +643,16 @@ pub(super) struct FailoverRouter<'v, 'a> {
     pub(super) view: &'v DynamicView,
     pub(super) cached: &'a PrincipalSpecCached,
     pub(super) router_pipeline: &'a RouterPipelineCache,
-    pub(super) ctx: &'a RequestContext,
     pub(super) principal: &'a Principal,
     pub(super) warm_entries: &'a HashMap<Uuid, Vec<WarmCacheEntry>>,
     pub(super) cache_bundles: &'a PromptCacheBundles,
     pub(super) request_kind: RequestKind,
-    pub(super) compat_api_key_only_features:
-        &'a [crate::openai_compat::request::ApiKeyOnlyFeature],
     pub(super) feature_pinned_api_key: bool,
     pub(super) transcription_oauth_disabled: bool,
     pub(super) observer: Option<&'a LifecycleContext>,
     pub(super) handle_span: &'a tracing::Span,
-    /// False when request affinity pins the upstream (web-search continuity
-    /// is account-bound).
+    /// False when request affinity pins the upstream (unless eligible
+    /// encrypted-reasoning owner failover is enabled).
     pub(super) enabled: bool,
     pub(super) excluded: Vec<Uuid>,
     /// Vertex scope keys excluded after Vertex rate-limit observations.
@@ -668,6 +667,7 @@ impl<'v, 'a> FailoverRouter<'v, 'a> {
         &mut self,
         lifecycle: &Lifecycle,
         failed: &RoutedUpstream<'_>,
+        ctx: &RequestContext,
         reason: FailoverReason,
     ) -> Option<RoutedUpstream<'v>> {
         if !self.enabled || self.upstream_attempts >= MAX_UPSTREAM_ATTEMPTS {
@@ -683,13 +683,13 @@ impl<'v, 'a> FailoverRouter<'v, 'a> {
                 self.view,
                 &self.principal.id,
                 self.request_kind,
-                &self.ctx.cache_breakpoints,
+                &ctx.cache_breakpoints,
                 self.warm_entries,
                 Some(self.cache_bundles),
                 &*lifecycle.clock,
             );
         candidates.retain(|candidate| !self.excluded.contains(&candidate.upstream_id));
-        if self.ctx.codex_backend {
+        if ctx.codex_backend {
             candidates
                 .retain(|candidate| candidate.kind == cc_lb_domain::UpstreamKind::OpenaiOauth);
         }
@@ -718,7 +718,7 @@ impl<'v, 'a> FailoverRouter<'v, 'a> {
             candidates
                 .retain(|candidate| candidate.kind == cc_lb_domain::UpstreamKind::OpenaiApiKey);
         } else {
-            retain_api_key_candidates(&mut candidates, self.compat_api_key_only_features);
+            retain_api_key_candidates(&mut candidates, &ctx.compat_api_key_only_features);
         }
         if self.transcription_oauth_disabled {
             candidates
@@ -727,7 +727,7 @@ impl<'v, 'a> FailoverRouter<'v, 'a> {
         // The last allowed attempt goes to an API key when one remains, so the
         // attempt cap never strands a request on exhausted OAuth accounts.
         let last_attempt =
-            !self.ctx.codex_backend && self.upstream_attempts + 1 == MAX_UPSTREAM_ATTEMPTS;
+            !ctx.codex_backend && self.upstream_attempts + 1 == MAX_UPSTREAM_ATTEMPTS;
         if last_attempt
             && candidates
                 .iter()
@@ -742,8 +742,7 @@ impl<'v, 'a> FailoverRouter<'v, 'a> {
         let filters = self
             .router_pipeline
             .filters_for(self.request_kind.provider());
-        let mut pipeline_result =
-            execute_filter_pipeline(filters, self.ctx, self.principal, candidates);
+        let mut pipeline_result = execute_filter_pipeline(filters, ctx, self.principal, candidates);
         if let Some(o) = self.observer {
             for error in pipeline_result.internal_errors.drain(..) {
                 o.record_internal_error(error);
@@ -766,7 +765,7 @@ impl<'v, 'a> FailoverRouter<'v, 'a> {
             .iter()
             .any(|filter| filter.plugin_id() == BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
             && subscription_hard_blocked(
-                self.ctx.canonical_model_id.as_str(),
+                ctx.canonical_model_id.as_str(),
                 selected,
                 u64::try_from(cc_lb_clock::unix_millis(lifecycle.clock.now())).unwrap_or(u64::MAX),
             )

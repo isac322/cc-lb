@@ -718,6 +718,17 @@ pub(super) struct RequestAffinityResolution {
     pub(super) pending_keys: Vec<UpstreamAffinityKey>,
 }
 
+pub(super) struct MultiOwnerAffinityMatch {
+    pub(super) matched: Vec<(Uuid, UpstreamAffinityKey, u64, u64)>,
+    pub(super) pending_keys: Vec<UpstreamAffinityKey>,
+}
+
+pub(super) enum RequestAffinityOutcome {
+    None,
+    Single(RequestAffinityResolution),
+    MultipleOwners(MultiOwnerAffinityMatch),
+}
+
 pub(super) struct RequestAffinityFailure {
     pub(super) status: StatusCode,
     pub(super) error_type: &'static str,

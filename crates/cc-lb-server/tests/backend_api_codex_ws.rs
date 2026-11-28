@@ -2850,3 +2850,434 @@ async fn backend_codex_ws_disabled_reasoning_owner_strips_and_fails_over_across_
     );
     assert_eq!(state.recorded.lock().unwrap().len(), 3);
 }
+
+#[tokio::test]
+async fn backend_codex_ws_429_handshake_and_live_usage_limit_failover() {
+    use axum::http::{HeaderMap, StatusCode};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[derive(Clone, Default)]
+    struct QuotaWsFailoverState {
+        reject_first_handshake_once: Arc<AtomicBool>,
+        rejected_handshake_account: Arc<Mutex<Option<String>>>,
+        reject_prev_id: Arc<AtomicBool>,
+        seq: Arc<AtomicUsize>,
+        recorded: Arc<Mutex<Vec<(String, Value)>>>,
+    }
+
+    async fn quota_ws_handler(
+        State(state): State<QuotaWsFailoverState>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> impl IntoResponse {
+        let account_id = headers
+            .get("chatgpt-account-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("unknown")
+            .to_owned();
+        if state
+            .reject_first_handshake_once
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            *state.rejected_handshake_account.lock().unwrap() = Some(account_id);
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [
+                    ("x-codex-primary-used-percent", "100"),
+                    ("x-codex-primary-window-minutes", "300"),
+                    ("x-codex-primary-reset-at", "4102448400"),
+                    ("x-codex-secondary-used-percent", "100"),
+                    ("x-codex-secondary-window-minutes", "10080"),
+                    ("x-codex-secondary-reset-at", "4103000000"),
+                ],
+                "quota exhausted at handshake",
+            )
+                .into_response();
+        }
+        ws.on_upgrade(move |mut socket: AxumWebSocket| async move {
+            while let Some(Ok(AxumMessage::Text(text))) = socket.recv().await {
+                let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                    continue;
+                };
+                if value.get("type").and_then(Value::as_str) != Some("response.create") {
+                    continue;
+                }
+                let n = state.seq.fetch_add(1, Ordering::SeqCst);
+                state.recorded.lock().unwrap().push((account_id.clone(), value.clone()));
+                if state.reject_prev_id.load(Ordering::SeqCst)
+                    && value
+                        .get("previous_response_id")
+                        .and_then(Value::as_str)
+                        .is_some()
+                {
+                    let err_frame = json!({
+                        "type": "error",
+                        "status": 429,
+                        "error": {
+                            "type": "usage_limit_reached",
+                            "code": "usage_limit_reached",
+                            "message": "The usage limit has been reached"
+                        }
+                    });
+                    let _ = socket.send(AxumMessage::Text(err_frame.to_string().into())).await;
+                    continue;
+                }
+                let resp_id = format!("resp_ws_q_{account_id}_{n}");
+                let reasoning = json!({
+                    "type": "reasoning",
+                    "id": format!("rs_q_{n}"),
+                    "summary": [],
+                    "encrypted_content": format!("gAAAAAB_ws_q_{account_id}_{n}")
+                });
+                let completed = json!({
+                    "type": "response.completed",
+                    "sequence_number": 2,
+                    "response": {
+                        "id": resp_id,
+                        "object": "response",
+                        "status": "completed",
+                        "usage": {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60},
+                        "output": [reasoning]
+                    }
+                });
+                let created = json!({
+                    "type": "response.created",
+                    "sequence_number": 0,
+                    "response": {"id": resp_id, "object": "response", "status": "in_progress", "output": []}
+                });
+                let item_done = json!({
+                    "type": "response.output_item.done",
+                    "sequence_number": 1,
+                    "output_index": 0,
+                    "item": reasoning
+                });
+                for frame in [created, item_done, completed] {
+                    if socket
+                        .send(AxumMessage::Text(frame.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        })
+        .into_response()
+    }
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let state = QuotaWsFailoverState {
+        reject_first_handshake_once: Arc::new(AtomicBool::new(true)),
+        ..Default::default()
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router_state = state.clone();
+    let _upstream_task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route(
+                    "/backend-api/codex/responses",
+                    axum::routing::get(quota_ws_handler),
+                )
+                .with_state(router_state),
+        )
+        .await
+    });
+    let base = format!("http://{addr}/backend-api/codex");
+
+    let server = common::spawn_test_server_with_openai_budget("").await;
+    let client = Client::new();
+
+    // Disable seeded upstreams so only our two WS OAuth upstreams participate.
+    let (_, seeded, _) = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::GET,
+        "/admin/v1/upstreams",
+        None,
+        None,
+    )
+    .await;
+    for u in seeded["upstreams"].as_array().unwrap() {
+        let id = u["id"].as_str().unwrap();
+        let (_, _, etag) = crate::openai_oauth_public_compat::admin(
+            &client,
+            &server,
+            reqwest::Method::GET,
+            &format!("/admin/v1/upstreams/{id}"),
+            None,
+            None,
+        )
+        .await;
+        let (st, body, _) = crate::openai_oauth_public_compat::admin(
+            &client,
+            &server,
+            reqwest::Method::PATCH,
+            &format!("/admin/v1/upstreams/{id}"),
+            Some(json!({ "enabled": false })),
+            etag.as_deref(),
+        )
+        .await;
+        assert_eq!(st, 200, "{body}");
+    }
+
+    crate::backend_api_codex::add_oauth_upstream(
+        &client,
+        &server,
+        "oauth-hs-a",
+        &base,
+        "acct-hs-a",
+    )
+    .await;
+    crate::backend_api_codex::add_oauth_upstream(
+        &client,
+        &server,
+        "oauth-hs-b",
+        &base,
+        "acct-hs-b",
+    )
+    .await;
+
+    let key = &server.managed_key.plaintext;
+    let connect_ws = || {
+        let mut req = format!(
+            "ws://{}/openai/backend-api/codex/responses",
+            server.proxy_addr
+        )
+        .into_client_request()
+        .unwrap();
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {key}").parse().unwrap());
+        tokio_tungstenite::connect_async(req)
+    };
+
+    // 1. Handshake 429 on first upstream fails over transparently onto the other upstream.
+    let (mut ws_hs, _) = connect_ws().await.unwrap();
+    ws_hs
+        .send(Message::Text(
+            json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "store": false,
+                "include": ["reasoning.encrypted_content"],
+                "input": [{"role": "user", "content": "hs-failover"}]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let mut completed_hs = None;
+    for expected in [
+        "response.created",
+        "response.output_item.done",
+        "response.completed",
+    ] {
+        let frame: Value = serde_json::from_str(&recv_text(&mut ws_hs).await).unwrap();
+        assert_eq!(frame["type"], expected, "{frame}");
+        if expected == "response.completed" {
+            completed_hs = Some(frame);
+        }
+    }
+    let rejected_hs_acct = state
+        .rejected_handshake_account
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("handshake 429 fired");
+    let hs_rec_acct = state.recorded.lock().unwrap()[0].0.clone();
+    assert_ne!(
+        hs_rec_acct, rejected_hs_acct,
+        "handshake 429 must fail over onto the healthy replacement account"
+    );
+    let _ = completed_hs;
+    drop(ws_hs);
+
+    // 2. When only exhausted `rejected_hs_acct` exists as an alternative, chained `previous_response_id`
+    // hitting live 429 `usage_limit_reached` MUST relay the real 429 instead of emitting false `400 previous_response_not_found`.
+    state.recorded.lock().unwrap().clear();
+    state.seq.store(0, Ordering::SeqCst);
+    let (mut ws_chain, _) = connect_ws().await.unwrap();
+    ws_chain
+        .send(Message::Text(
+            json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "store": false,
+                "include": ["reasoning.encrypted_content"],
+                "input": [{"role": "user", "content": "chain-no-replacement-1"}]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let mut t1_resp_id = String::new();
+    for expected in [
+        "response.created",
+        "response.output_item.done",
+        "response.completed",
+    ] {
+        let frame: Value = serde_json::from_str(&recv_text(&mut ws_chain).await).unwrap();
+        assert_eq!(frame["type"], expected, "{frame}");
+        if expected == "response.completed" {
+            t1_resp_id = frame["response"]["id"].as_str().unwrap().to_owned();
+        }
+    }
+
+    state.reject_prev_id.store(true, Ordering::SeqCst);
+    ws_chain
+        .send(Message::Text(
+            json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "previous_response_id": t1_resp_id,
+                "store": false,
+                "include": ["reasoning.encrypted_content"],
+                "input": [{"type": "function_call_output", "call_id": "call_0", "output": "ok"}]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let err_429: Value = serde_json::from_str(&recv_text(&mut ws_chain).await).unwrap();
+    assert_eq!(err_429["type"], "error", "{err_429}");
+    assert_eq!(err_429["status"], 429, "{err_429}");
+    assert_eq!(err_429["error"]["code"], "usage_limit_reached", "{err_429}");
+    drop(ws_chain);
+
+    // 3. With two healthy replacements (`oauth-hs-c`, `oauth-hs-d`) registered (`oauth-hs-a` exhausted
+    // from part 1 and `oauth-hs-b` in WS cooldown from part 2), chained `previous_response_id` hitting
+    // live WS 429 `usage_limit_reached` returns 400 `previous_response_not_found`, and full-history
+    // replay on a FRESH WebSocket connection strips foreign reasoning and completes on the healthy replacement.
+    crate::backend_api_codex::add_oauth_upstream(
+        &client,
+        &server,
+        "oauth-hs-c",
+        &base,
+        "acct-hs-c",
+    )
+    .await;
+    crate::backend_api_codex::add_oauth_upstream(
+        &client,
+        &server,
+        "oauth-hs-d",
+        &base,
+        "acct-hs-d",
+    )
+    .await;
+    state.recorded.lock().unwrap().clear();
+    state.seq.store(0, Ordering::SeqCst);
+    state.reject_prev_id.store(false, Ordering::SeqCst);
+
+    let (mut ws_chain_ok, _) = connect_ws().await.unwrap();
+    ws_chain_ok
+        .send(Message::Text(
+            json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "store": false,
+                "include": ["reasoning.encrypted_content"],
+                "input": [{"role": "user", "content": "chain-turn-1"}]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let mut t2_resp_id = String::new();
+    let mut t2_cipher = String::new();
+    for expected in [
+        "response.created",
+        "response.output_item.done",
+        "response.completed",
+    ] {
+        let frame: Value = serde_json::from_str(&recv_text(&mut ws_chain_ok).await).unwrap();
+        assert_eq!(frame["type"], expected, "{frame}");
+        if expected == "response.completed" {
+            t2_resp_id = frame["response"]["id"].as_str().unwrap().to_owned();
+            t2_cipher = frame["response"]["output"][0]["encrypted_content"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        }
+    }
+    let owner_acct = state.recorded.lock().unwrap()[0].0.clone();
+
+    state.reject_prev_id.store(true, Ordering::SeqCst);
+    ws_chain_ok
+        .send(Message::Text(
+            json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "previous_response_id": t2_resp_id,
+                "store": false,
+                "include": ["reasoning.encrypted_content"],
+                "input": [{"type": "function_call_output", "call_id": "call_1", "output": "ok"}]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let err_frame: Value = serde_json::from_str(&recv_text(&mut ws_chain_ok).await).unwrap();
+    assert_eq!(err_frame["type"], "error", "{err_frame}");
+    assert_eq!(err_frame["status"], 400, "{err_frame}");
+    assert_eq!(
+        err_frame["error"]["code"], "previous_response_not_found",
+        "{err_frame}"
+    );
+
+    // Client closes and opens a fresh WebSocket (matching real codex-cli behavior) to replay full history.
+    drop(ws_chain_ok);
+    let (mut ws_reconnect, _) = connect_ws().await.unwrap();
+    ws_reconnect
+        .send(Message::Text(
+            json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "store": false,
+                "include": ["reasoning.encrypted_content"],
+                "input": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_q_0",
+                        "summary": [],
+                        "encrypted_content": t2_cipher
+                    },
+                    {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+                ]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    for expected in [
+        "response.created",
+        "response.output_item.done",
+        "response.completed",
+    ] {
+        let frame: Value = serde_json::from_str(&recv_text(&mut ws_reconnect).await).unwrap();
+        assert_eq!(frame["type"], expected, "{frame}");
+    }
+    let rec = state.recorded.lock().unwrap();
+    assert_eq!(rec.len(), 3, "{rec:?}");
+    assert_eq!(rec[0].0, owner_acct);
+    assert_eq!(rec[1].0, owner_acct);
+    assert_ne!(
+        rec[2].0, owner_acct,
+        "replay must move to healthy replacement"
+    );
+    assert_ne!(
+        rec[2].0, rejected_hs_acct,
+        "replay must not pick exhausted handshake upstream"
+    );
+    let replay_input = rec[2].1["input"].as_array().unwrap();
+    assert_eq!(replay_input.len(), 1);
+    assert_eq!(replay_input[0]["type"], "function_call_output");
+}
