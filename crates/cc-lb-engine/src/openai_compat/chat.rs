@@ -1156,6 +1156,7 @@ pub(crate) fn sse_data(frame: &[u8]) -> Option<Vec<u8>> {
 pub(crate) struct ResponsesSseUsage {
     pub(crate) usage: Value,
     pub(crate) service_tier: Option<String>,
+    pub(crate) service_tier_source: crate::usage_parser::ServiceTierSource,
 }
 
 /// Extracts and returns Responses-shaped usage (plus latest envelope
@@ -1225,6 +1226,7 @@ pub(crate) fn responses_usage_from_sse_with_policy(
     total.map(|usage| ResponsesSseUsage {
         usage,
         service_tier,
+        service_tier_source,
     })
 }
 

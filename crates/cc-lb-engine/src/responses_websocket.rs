@@ -37,7 +37,9 @@ use crate::upstream_affinity::{
     input_has_compaction_item, is_openai_invalid_encrypted_content_error_value,
     openai_responses_has_account_owned_reference, strip_openai_reasoning_encrypted_items,
 };
-use crate::usage_parser::{UsageCounts, observe_non_stream_json_value_for_shape};
+use crate::usage_parser::{
+    ServiceTierMergePolicy, UsageCounts, observe_non_stream_json_value_for_shape_with_policy,
+};
 use cc_lb_upstream::{Signer, SseEvent, TransformSseEventRequest, TransformSseEventResult};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -409,9 +411,12 @@ struct ResponseOwner {
     oauth_transport: bool,
     oauth_compat: bool,
     echo_metadata: Option<Value>,
-    sent_service_tier: Option<String>,
     terminal_delivery: TerminalDelivery,
     evicted_for_continuation: bool,
+}
+
+fn sent_service_tier_bytes(tier: Option<&str>) -> usize {
+    tier.map_or(0, str::len)
 }
 
 #[derive(Default)]
@@ -1250,6 +1255,11 @@ impl ResponsesWebSocketGateway {
                 body.get("model")
                     .and_then(Value::as_str)
                     .map_or(0, str::len),
+            )
+            .saturating_add(
+                body.get("service_tier")
+                    .and_then(Value::as_str)
+                    .map_or(0, str::len),
             );
         self.check_admission(&lane, charge)?;
 
@@ -1385,6 +1395,10 @@ impl ResponsesWebSocketGateway {
                 false,
             ),
         };
+        let initial_service_tier = body
+            .get("service_tier")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let actual_charge = frame
             .len()
             .saturating_add(json_owned_bytes(&body))
@@ -1397,7 +1411,8 @@ impl ResponsesWebSocketGateway {
                 body.get("model")
                     .and_then(Value::as_str)
                     .map_or(0, str::len),
-            );
+            )
+            .saturating_add(sent_service_tier_bytes(initial_service_tier.as_deref()));
         let charge = actual_charge;
         if let Some(stream_id) = lane.as_deref() {
             prepared.span.record("cc_lb.responses.stream_id", stream_id);
@@ -1431,10 +1446,6 @@ impl ResponsesWebSocketGateway {
                 .candidates
                 .iter()
                 .all(|candidate| candidate.socket_per_lane);
-        let initial_service_tier = body
-            .get("service_tier")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
         self.turns.insert(
             turn_id,
             Turn {
@@ -1611,13 +1622,18 @@ impl ResponsesWebSocketGateway {
             }));
         }
         let body = owner.body.clone();
+        let initial_service_tier = control
+            .get("service_tier")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let charge = frame
             .len()
             .saturating_add(std::mem::size_of::<Turn>())
             .saturating_add(parent.len().saturating_mul(3))
             .saturating_add(lane.as_ref().map_or(0, String::len))
             .saturating_add(auth.principal_id().len())
-            .saturating_add(auth.key_id().len());
+            .saturating_add(auth.key_id().len())
+            .saturating_add(sent_service_tier_bytes(initial_service_tier.as_deref()));
         self.check_admission(&lane, charge)?;
         let prepared = self
             .lifecycle
@@ -1669,7 +1685,6 @@ impl ResponsesWebSocketGateway {
                 .iter()
                 .all(|candidate| candidate.socket_per_lane);
         self.successors.insert(parent.clone(), turn_id);
-        let initial_service_tier = owner.sent_service_tier.clone();
         self.turns.insert(
             turn_id,
             Turn {
@@ -1812,7 +1827,14 @@ impl ResponsesWebSocketGateway {
         };
         if !pinned_to_single_owner {
             if !currently_stripped {
-                let (stripped_body, stripped_frame, stripped_bytes, old_plugin) = {
+                let (
+                    stripped_body,
+                    stripped_frame,
+                    stripped_bytes,
+                    next_tier,
+                    next_tier_bytes,
+                    old_plugin_and_tier,
+                ) = {
                     let Some(turn) = self.turns.get(&turn_id) else {
                         return Ok(None);
                     };
@@ -1827,22 +1849,35 @@ impl ResponsesWebSocketGateway {
                     let Ok(bytes) = serde_json::to_vec(&stripped) else {
                         return Ok(None);
                     };
+                    let next_tier = stripped
+                        .get("service_tier")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    let next_tier_bytes = sent_service_tier_bytes(next_tier.as_deref());
                     let stripped_body = Arc::new(stripped);
                     let stripped_frame = Bytes::from(bytes);
                     let stripped_bytes = stripped_frame
                         .len()
                         .saturating_add(json_owned_bytes(&stripped_body));
-                    let old_plugin = turn
+                    let old_plugin_and_tier = turn
                         .plugin_request
                         .as_ref()
-                        .map_or(0, |(_, req)| req.frame.len());
-                    (stripped_body, stripped_frame, stripped_bytes, old_plugin)
+                        .map_or(0, |(_, req)| req.frame.len())
+                        .saturating_add(sent_service_tier_bytes(turn.sent_service_tier.as_deref()));
+                    (
+                        stripped_body,
+                        stripped_frame,
+                        stripped_bytes,
+                        next_tier,
+                        next_tier_bytes,
+                        old_plugin_and_tier,
+                    )
                 };
-                if stripped_bytes
+                if stripped_bytes.saturating_add(next_tier_bytes)
                     > self
                         .byte_cap
                         .saturating_sub(self.used_bytes)
-                        .saturating_add(old_plugin)
+                        .saturating_add(old_plugin_and_tier)
                 {
                     return Err(WebSocketError::new(
                         503,
@@ -1854,20 +1889,20 @@ impl ResponsesWebSocketGateway {
                 let Some(turn) = self.turns.get_mut(&turn_id) else {
                     return Ok(None);
                 };
-                if let Some((_, req)) = turn.plugin_request.take() {
-                    let req_len = req.frame.len();
-                    self.used_bytes = self.used_bytes.saturating_sub(req_len);
-                    turn.charged_bytes = turn.charged_bytes.saturating_sub(req_len);
-                }
-                self.used_bytes = self.used_bytes.saturating_add(stripped_bytes);
-                turn.charged_bytes = turn.charged_bytes.saturating_add(stripped_bytes);
+                turn.plugin_request = None;
+                let added_charge = stripped_bytes.saturating_add(next_tier_bytes);
+                let released_charge = old_plugin_and_tier.min(turn.charged_bytes);
+                self.used_bytes = self
+                    .used_bytes
+                    .saturating_sub(released_charge)
+                    .saturating_add(added_charge);
+                turn.charged_bytes = turn
+                    .charged_bytes
+                    .saturating_sub(released_charge)
+                    .saturating_add(added_charge);
                 turn.body = stripped_body;
                 turn.frame = stripped_frame;
-                turn.sent_service_tier = turn
-                    .body
-                    .get("service_tier")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
+                turn.sent_service_tier = next_tier;
                 if let Some(deferred) = turn.deferred_unestablished.as_mut() {
                     deferred.currently_stripped = true;
                     deferred.stripped_extra_bytes = stripped_bytes;
@@ -1880,30 +1915,85 @@ impl ResponsesWebSocketGateway {
             turn.pending_affinity_keys.clear();
             return Ok(Some(turn.frame.clone()));
         }
+        if currently_stripped {
+            let (
+                old_plugin_and_tier,
+                stripped_extra,
+                restored_tier,
+                restored_tier_bytes,
+                turn_lane,
+            ) = {
+                let Some(turn) = self.turns.get(&turn_id) else {
+                    return Ok(None);
+                };
+                let old_plugin_and_tier = turn
+                    .plugin_request
+                    .as_ref()
+                    .map_or(0, |(_, req)| req.frame.len())
+                    .saturating_add(sent_service_tier_bytes(turn.sent_service_tier.as_deref()));
+                let (stripped_extra, restored_tier) = turn
+                    .deferred_unestablished
+                    .as_ref()
+                    .map(|deferred| {
+                        (
+                            deferred.stripped_extra_bytes,
+                            deferred
+                                .original_body
+                                .get("service_tier")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                        )
+                    })
+                    .unwrap_or((0, None));
+                let restored_tier_bytes = sent_service_tier_bytes(restored_tier.as_deref());
+                (
+                    old_plugin_and_tier,
+                    stripped_extra,
+                    restored_tier,
+                    restored_tier_bytes,
+                    turn.lane.clone(),
+                )
+            };
+            if restored_tier_bytes
+                > self
+                    .byte_cap
+                    .saturating_sub(self.used_bytes)
+                    .saturating_add(old_plugin_and_tier)
+                    .saturating_add(stripped_extra)
+            {
+                return Err(WebSocketError::new(
+                    503,
+                    "overloaded_error",
+                    "Restored WebSocket frame exceeds the session budget",
+                )
+                .with_stream(turn_lane));
+            }
+            let Some(turn) = self.turns.get_mut(&turn_id) else {
+                return Ok(None);
+            };
+            turn.plugin_request = None;
+            if let Some(deferred) = turn.deferred_unestablished.as_mut() {
+                deferred.stripped_extra_bytes = 0;
+                turn.body = Arc::clone(&deferred.original_body);
+                turn.frame = deferred.original_frame.clone();
+                deferred.currently_stripped = false;
+            }
+            turn.sent_service_tier = restored_tier;
+            let total_released = old_plugin_and_tier
+                .saturating_add(stripped_extra)
+                .min(turn.charged_bytes);
+            self.used_bytes = self
+                .used_bytes
+                .saturating_sub(total_released)
+                .saturating_add(restored_tier_bytes);
+            turn.charged_bytes = turn
+                .charged_bytes
+                .saturating_sub(total_released)
+                .saturating_add(restored_tier_bytes);
+        }
         let Some(turn) = self.turns.get_mut(&turn_id) else {
             return Ok(None);
         };
-        if currently_stripped {
-            let released_plugin = turn
-                .plugin_request
-                .take()
-                .map_or(0, |(_, req)| req.frame.len());
-            let mut stripped_extra = 0;
-            if let Some(deferred) = turn.deferred_unestablished.as_mut() {
-                stripped_extra = std::mem::take(&mut deferred.stripped_extra_bytes);
-                turn.body = Arc::clone(&deferred.original_body);
-                turn.frame = deferred.original_frame.clone();
-                turn.sent_service_tier = turn
-                    .body
-                    .get("service_tier")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                deferred.currently_stripped = false;
-            }
-            let total_released = released_plugin.saturating_add(stripped_extra);
-            self.used_bytes = self.used_bytes.saturating_sub(total_released);
-            turn.charged_bytes = turn.charged_bytes.saturating_sub(total_released);
-        }
         if let Some(deferred) = turn.deferred_unestablished.as_ref() {
             turn.unknown_reasoning_retry = Some(WsUnknownReasoningRetry::All);
             turn.pending_affinity_keys = deferred.unknown_keys.clone();
@@ -2317,7 +2407,7 @@ impl ResponsesWebSocketGateway {
         turn_id: u64,
         upstream_id: Uuid,
     ) -> Result<(), WebSocketError> {
-        let (auth, frame, request_id, observer, old_charge) = {
+        let (auth, frame, request_id, observer, turn_body_tier, old_charge) = {
             let turn = self.turns.get(&turn_id).ok_or_else(|| {
                 WebSocketError::new(
                     409,
@@ -2337,13 +2427,18 @@ impl ResponsesWebSocketGateway {
                 turn.frame.clone(),
                 turn.prepared.request_id.clone(),
                 turn.prepared.observer.clone(),
+                turn.body
+                    .get("service_tier")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
                 turn.plugin_request
                     .as_ref()
-                    .map_or(0, |(_, request)| request.frame.len()),
+                    .map_or(0, |(_, request)| request.frame.len())
+                    .saturating_add(sent_service_tier_bytes(turn.sent_service_tier.as_deref())),
             )
         };
         let shape_started = std::time::Instant::now();
-        let request = self.lifecycle.shape_websocket_frame_with_surface(
+        let mut request = self.lifecycle.shape_websocket_frame_with_surface(
             &auth,
             WebSocketIngress {
                 headers: &self.headers,
@@ -2356,7 +2451,14 @@ impl ResponsesWebSocketGateway {
             self.codex_backend,
         )?;
         let shape_ms = duration_to_ms(shape_started.elapsed());
-        let new_charge = request.as_ref().map_or(0, |request| request.frame.len());
+        let next_sent_service_tier = match request.as_mut() {
+            Some(request) => request.sent_service_tier.take(),
+            None => turn_body_tier,
+        };
+        let new_charge = request
+            .as_ref()
+            .map_or(0, |request| request.frame.len())
+            .saturating_add(sent_service_tier_bytes(next_sent_service_tier.as_deref()));
         if new_charge
             > self
                 .byte_cap
@@ -2369,28 +2471,22 @@ impl ResponsesWebSocketGateway {
                 "Shaped WebSocket frame exceeds the session budget",
             ));
         }
+        let turn = self.turns.get_mut(&turn_id).expect("turn remains admitted");
+        let released = old_charge.min(turn.charged_bytes);
         self.used_bytes = self
             .used_bytes
-            .saturating_sub(old_charge)
+            .saturating_sub(released)
             .saturating_add(new_charge);
-        let turn = self.turns.get_mut(&turn_id).expect("turn remains admitted");
         turn.metrics.shape_ms = Some(shape_ms);
         turn.charged_bytes = turn
             .charged_bytes
-            .saturating_sub(old_charge)
+            .saturating_sub(released)
             .saturating_add(new_charge);
         turn.prepared.oauth_compat = request.as_ref().is_some_and(|request| request.oauth_compat);
         turn.echo_metadata = request
             .as_ref()
             .and_then(|request| request.echo_metadata.clone());
-        turn.sent_service_tier = match request.as_ref() {
-            Some(request) => request.sent_service_tier.clone(),
-            None => turn
-                .body
-                .get("service_tier")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        };
+        turn.sent_service_tier = next_sent_service_tier;
         turn.plugin_request = request.map(|request| (upstream_id, request));
         Ok(())
     }
@@ -3636,8 +3732,18 @@ impl ResponsesWebSocketGateway {
             {
                 // Keep the parked turn registered until affinity binding resolves so
                 // cancellation or drain during storage I/O still settles measured usage.
-                let usage_update = response.and_then(observed_response_usage);
                 let is_oauth = self.connection_oauth.get(&connection_id).copied();
+                let pending_oauth = self
+                    .pending_error_terminals
+                    .get(id)
+                    .is_some_and(|pending| pending.turn.prepared.oauth_transport);
+                let tier_policy = if is_oauth.unwrap_or(pending_oauth) {
+                    ServiceTierMergePolicy::OpenaiOauth
+                } else {
+                    ServiceTierMergePolicy::Standard
+                };
+                let usage_update =
+                    response.and_then(|resp| observed_response_usage(resp, tier_policy));
                 let upstream_result = {
                     let pending = self
                         .pending_error_terminals
@@ -3805,6 +3911,10 @@ impl ResponsesWebSocketGateway {
             {
                 let stripped_frame = Bytes::from(stripped_bytes);
                 let stripped_body = Arc::new(stripped_body);
+                let next_tier = stripped_body
+                    .get("service_tier")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
                 let old_dynamic = turn
                     .frame
                     .len()
@@ -3813,10 +3923,12 @@ impl ResponsesWebSocketGateway {
                         turn.plugin_request
                             .as_ref()
                             .map_or(0, |(_, req)| req.frame.len()),
-                    );
+                    )
+                    .saturating_add(sent_service_tier_bytes(turn.sent_service_tier.as_deref()));
                 let new_dynamic = stripped_frame
                     .len()
-                    .saturating_add(json_owned_bytes(&stripped_body));
+                    .saturating_add(json_owned_bytes(&stripped_body))
+                    .saturating_add(sent_service_tier_bytes(next_tier.as_deref()));
                 if new_dynamic
                     <= self
                         .byte_cap
@@ -3824,22 +3936,19 @@ impl ResponsesWebSocketGateway {
                         .saturating_add(old_dynamic)
                 {
                     let turn = self.turns.get_mut(&turn_id).expect("turn exists");
+                    let released = old_dynamic.min(turn.charged_bytes);
                     self.used_bytes = self
                         .used_bytes
-                        .saturating_sub(old_dynamic)
+                        .saturating_sub(released)
                         .saturating_add(new_dynamic);
                     turn.charged_bytes = turn
                         .charged_bytes
-                        .saturating_sub(old_dynamic)
+                        .saturating_sub(released)
                         .saturating_add(new_dynamic);
                     turn.body = stripped_body;
                     turn.frame = stripped_frame.clone();
                     turn.plugin_request = None;
-                    turn.sent_service_tier = turn
-                        .body
-                        .get("service_tier")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
+                    turn.sent_service_tier = next_tier;
                     turn.echo_metadata = None;
                     turn.sent = false;
                     turn.attempted = false;
@@ -4022,7 +4131,6 @@ impl ResponsesWebSocketGateway {
                 let oauth_transport = turn.prepared.oauth_transport;
                 let oauth_compat = turn.prepared.oauth_compat;
                 let echo_metadata = turn.echo_metadata.clone();
-                let sent_service_tier = turn.sent_service_tier.clone();
                 let previous = turn.previous_response_id.clone();
                 if let Some(turn) = self.turns.get_mut(&turn_id) {
                     turn.previous_response_id = None;
@@ -4040,7 +4148,6 @@ impl ResponsesWebSocketGateway {
                         oauth_transport,
                         oauth_compat,
                         echo_metadata,
-                        sent_service_tier,
                         terminal_delivery: TerminalDelivery::None,
                         evicted_for_continuation: false,
                     },
@@ -4065,10 +4172,19 @@ impl ResponsesWebSocketGateway {
                 }
             }
         }
+        let is_oauth = self.connection_oauth.get(&connection_id).copied();
+        let turn_oauth = self
+            .turns
+            .get(&turn_id)
+            .is_some_and(|turn| is_oauth.unwrap_or(turn.prepared.oauth_transport));
+        let tier_policy = if turn_oauth {
+            ServiceTierMergePolicy::OpenaiOauth
+        } else {
+            ServiceTierMergePolicy::Standard
+        };
         if let Some(response) = response
-            && let Some((mut usage, complete)) = observed_response_usage(response)
+            && let Some((mut usage, complete)) = observed_response_usage(response, tier_policy)
         {
-            let is_oauth = self.connection_oauth.get(&connection_id).copied();
             let turn = self.turns.get_mut(&turn_id).expect("bound turn exists");
             if is_oauth.unwrap_or(turn.prepared.oauth_transport) {
                 crate::usage_parser::preserve_prior_openai_oauth_service_tier(
@@ -5024,6 +5140,7 @@ impl ResponsesWebSocketGateway {
             fallback,
             stripped_body,
             stripped_frame,
+            next_tier,
             old_dynamic,
             released_deferred_original,
             lane,
@@ -5034,6 +5151,10 @@ impl ResponsesWebSocketGateway {
             let bytes = serde_json::to_vec(&stripped).ok()?;
             let stripped_body = Arc::new(stripped);
             let stripped_frame = Bytes::from(bytes);
+            let next_tier = stripped_body
+                .get("service_tier")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             let old_dynamic = turn
                 .frame
                 .len()
@@ -5042,7 +5163,8 @@ impl ResponsesWebSocketGateway {
                     turn.plugin_request
                         .as_ref()
                         .map_or(0, |(_, req)| req.frame.len()),
-                );
+                )
+                .saturating_add(sent_service_tier_bytes(turn.sent_service_tier.as_deref()));
             let released_deferred_original = turn
                 .deferred_unestablished
                 .as_ref()
@@ -5057,6 +5179,7 @@ impl ResponsesWebSocketGateway {
                 },
                 stripped_body,
                 stripped_frame,
+                next_tier,
                 old_dynamic,
                 released_deferred_original,
                 turn.lane.clone(),
@@ -5064,7 +5187,8 @@ impl ResponsesWebSocketGateway {
         };
         let new_dynamic = stripped_frame
             .len()
-            .saturating_add(json_owned_bytes(&stripped_body));
+            .saturating_add(json_owned_bytes(&stripped_body))
+            .saturating_add(sent_service_tier_bytes(next_tier.as_deref()));
         let headroom = self
             .byte_cap
             .saturating_sub(self.used_bytes)
@@ -5104,7 +5228,9 @@ impl ResponsesWebSocketGateway {
         ) {
             return None;
         }
-        let released = old_dynamic.saturating_add(released_deferred_original);
+        let released = old_dynamic
+            .saturating_add(released_deferred_original)
+            .min(self.turns.get(&turn_id)?.charged_bytes);
         let turn = self.turns.get_mut(&turn_id)?;
         turn.owner_failover_fallback = None;
         let model = turn.prepared.model.clone();
@@ -5120,11 +5246,7 @@ impl ResponsesWebSocketGateway {
         turn.body = stripped_body;
         turn.frame = stripped_frame.clone();
         turn.plugin_request = None;
-        turn.sent_service_tier = turn
-            .body
-            .get("service_tier")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
+        turn.sent_service_tier = next_tier;
         turn.echo_metadata = None;
         turn.unknown_reasoning_retry = None;
         turn.pending_affinity_keys.clear();
@@ -5271,21 +5393,45 @@ impl ResponsesWebSocketGateway {
         ) {
             return None;
         }
+        let (old_released, next_tier, new_tier_bytes) = {
+            let turn = self.turns.get(&turn_id)?;
+            let next_tier = turn
+                .body
+                .get("service_tier")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let old_released = turn
+                .plugin_request
+                .as_ref()
+                .map_or(0, |(_, req)| req.frame.len())
+                .saturating_add(sent_service_tier_bytes(turn.sent_service_tier.as_deref()));
+            let new_tier_bytes = sent_service_tier_bytes(next_tier.as_deref());
+            (old_released, next_tier, new_tier_bytes)
+        };
+        if new_tier_bytes
+            > self
+                .byte_cap
+                .saturating_sub(self.used_bytes)
+                .saturating_add(old_released)
+        {
+            return None;
+        }
         let turn = self.turns.get_mut(&turn_id)?;
         turn.connection_id = None;
         turn.upstream_id = None;
         turn.sent = false;
         turn.attempted = false;
-        if let Some((_, req)) = turn.plugin_request.take() {
-            let req_len = req.frame.len().min(turn.charged_bytes);
-            self.used_bytes = self.used_bytes.saturating_sub(req_len);
-            turn.charged_bytes = turn.charged_bytes.saturating_sub(req_len);
-        }
-        turn.sent_service_tier = turn
-            .body
-            .get("service_tier")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
+        turn.plugin_request = None;
+        let released = old_released.min(turn.charged_bytes);
+        self.used_bytes = self
+            .used_bytes
+            .saturating_sub(released)
+            .saturating_add(new_tier_bytes);
+        turn.charged_bytes = turn
+            .charged_bytes
+            .saturating_sub(released)
+            .saturating_add(new_tier_bytes);
+        turn.sent_service_tier = next_tier;
         turn.echo_metadata = None;
         turn.metrics.reset_for_retry();
         turn.admitted_session_upstream = None;
@@ -5500,6 +5646,7 @@ impl ResponsesWebSocketGateway {
         turn.body = Arc::new(Value::Null);
         if let Some((_, ref mut request)) = turn.plugin_request {
             request.frame = Bytes::new();
+            request.sent_service_tier = None;
         }
         let new_payload = json_owned_bytes(&turn.body);
         let freed = old_payload
@@ -6039,7 +6186,6 @@ fn owner_bytes(id: &str, owner: &ResponseOwner) -> usize {
         .saturating_add(owner.lane.as_ref().map_or(0, String::len).saturating_mul(2))
         .saturating_add(json_owned_bytes(&owner.body))
         .saturating_add(owner.echo_metadata.as_ref().map_or(0, json_owned_bytes))
-        .saturating_add(owner.sent_service_tier.as_ref().map_or(0, String::len))
 }
 
 fn parse_client_frame(
@@ -6097,7 +6243,10 @@ fn sanitize_client_event_type(kind: &str) -> String {
     out
 }
 
-fn observed_response_usage(response: &Value) -> Option<(UsageCounts, bool)> {
+fn observed_response_usage(
+    response: &Value,
+    policy: ServiceTierMergePolicy,
+) -> Option<(UsageCounts, bool)> {
     let reported = response
         .get("usage")
         .or_else(|| {
@@ -6111,9 +6260,10 @@ fn observed_response_usage(response: &Value) -> Option<(UsageCounts, bool)> {
     if input.is_none() && output.is_none() {
         return None;
     }
-    let usage = observe_non_stream_json_value_for_shape(
+    let usage = observe_non_stream_json_value_for_shape_with_policy(
         response,
         crate::provider_capability::UsageShape::OpenaiResponses,
+        policy,
     )
     .usage;
     Some((usage, input.is_some() && output.is_some()))
@@ -6907,7 +7057,8 @@ pub(crate) mod tests {
             let fixture = DirectAccountingFixture::new().await;
             let reservation = fixture.reserve(model);
             let reservation_id = reservation.id().to_owned();
-            let (usage, usage_complete) = observed_response_usage(&response).unwrap();
+            let (usage, usage_complete) =
+                observed_response_usage(&response, ServiceTierMergePolicy::Standard).unwrap();
             let mut gateway = ResponsesWebSocketGateway::new(
                 fixture.lifecycle.clone(),
                 &fixture.auth,
@@ -7009,18 +7160,21 @@ pub(crate) mod tests {
 
     #[test]
     fn native_cache_write_response_usage_preserves_provider_fields() {
-        let (usage, complete) = observed_response_usage(&serde_json::json!({
-            "usage": {
-                "input_tokens": 1200, "output_tokens": 1,
-                "input_tokens_details": {
-                    "cached_tokens": 0,
-                    "cache_write_tokens": 300,
-                    "cache_write_tokens_details": {
-                        "ttl_30m_tokens": 200, "ttl_12h_tokens": 100
+        let (usage, complete) = observed_response_usage(
+            &serde_json::json!({
+                "usage": {
+                    "input_tokens": 1200, "output_tokens": 1,
+                    "input_tokens_details": {
+                        "cached_tokens": 0,
+                        "cache_write_tokens": 300,
+                        "cache_write_tokens_details": {
+                            "ttl_30m_tokens": 200, "ttl_12h_tokens": 100
+                        }
                     }
                 }
-            }
-        }))
+            }),
+            ServiceTierMergePolicy::Standard,
+        )
         .expect("complete provider usage");
         assert!(complete);
         assert_eq!(usage.cache_creation_input_tokens, 0);
@@ -7038,17 +7192,20 @@ pub(crate) mod tests {
             serde_json::json!({"usage": {}}),
             serde_json::json!({"usage": {"input_tokens": null, "output_tokens": null}}),
         ] {
-            assert!(observed_response_usage(&value).is_none());
+            assert!(observed_response_usage(&value, ServiceTierMergePolicy::Standard).is_none());
         }
         let (zero, complete) = observed_response_usage(
             &serde_json::json!({"usage": {"input_tokens": 0, "output_tokens": 0}}),
+            ServiceTierMergePolicy::Standard,
         )
         .expect("explicit numeric zero is a real observation");
         assert!(zero.present && complete);
         assert_eq!((zero.input_tokens, zero.output_tokens), (0, 0));
-        let (partial, complete) =
-            observed_response_usage(&serde_json::json!({"usage": {"input_tokens": 7}}))
-                .expect("measured input is retained on interruption");
+        let (partial, complete) = observed_response_usage(
+            &serde_json::json!({"usage": {"input_tokens": 7}}),
+            ServiceTierMergePolicy::Standard,
+        )
+        .expect("measured input is retained on interruption");
         assert_eq!(partial.input_tokens, 7);
         assert!(
             !complete,
@@ -7056,7 +7213,9 @@ pub(crate) mod tests {
         );
         let (tiered, _) = observed_response_usage(
             &serde_json::json!({"service_tier": "priority", "usage": {"input_tokens": 7, "output_tokens": 11}}),
-        ).unwrap();
+            ServiceTierMergePolicy::Standard,
+        )
+        .unwrap();
         assert_eq!(
             tiered.service_tier.as_deref(),
             Some("priority"),
@@ -7927,8 +8086,11 @@ pub(crate) mod tests {
         sent: bool,
         oauth_transport: bool,
         explicit_store: Option<bool>,
-        plugin_request: Option<(Uuid, WebSocketPluginRequest)>,
+        mut plugin_request: Option<(Uuid, WebSocketPluginRequest)>,
     ) -> Turn {
+        let sent_service_tier = plugin_request
+            .as_mut()
+            .and_then(|(_, req)| req.sent_service_tier.take());
         Turn {
             auth: fixture.auth.clone(),
             prepared_signers: HashMap::new(),
@@ -7980,9 +8142,7 @@ pub(crate) mod tests {
             usage: None,
             usage_complete: false,
             incomplete_reason: None,
-            sent_service_tier: plugin_request
-                .as_ref()
-                .and_then(|(_, req)| req.sent_service_tier.clone()),
+            sent_service_tier,
             plugin_request,
             echo_metadata: None,
             metrics: ResponsesStreamMetrics::new(),
@@ -16095,7 +16255,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn oauth_ws_steer_successor_uses_parent_dispatched_tier_not_unshaped_ingress() {
+    async fn oauth_ws_steer_successor_leaves_sent_tier_unset_unless_control_specifies_one() {
         use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
         use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
         use cc_lb_control::api_keys::principal_view::{
@@ -16160,9 +16320,28 @@ pub(crate) mod tests {
             }
         }
 
-        for (case, replacement, expected_child_tier) in [
-            ("omitted_by_hook", None, "default"),
-            ("preserved_priority", Some("priority"), "priority"),
+        for (case, parent_replacement, steer_tier, child_upstream_tier, expected_child_tier) in [
+            (
+                "no_steer_tier_child_default",
+                Some("priority"),
+                None,
+                "default",
+                "default",
+            ),
+            (
+                "no_steer_tier_child_measured_priority",
+                Some("priority"),
+                None,
+                "priority",
+                "priority",
+            ),
+            (
+                "explicit_steer_tier_priority_child_default",
+                Some("default"),
+                Some("priority"),
+                "default",
+                "priority",
+            ),
         ] {
             let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
             let storage = Arc::new(
@@ -16203,7 +16382,9 @@ pub(crate) mod tests {
                 (
                     None,
                     DialectCache::Explicit(ShapePluginCache {
-                        dialect: Arc::new(SteerTierDialect { replacement }),
+                        dialect: Arc::new(SteerTierDialect {
+                            replacement: parent_replacement,
+                        }),
                     }),
                 ),
             );
@@ -16262,7 +16443,7 @@ pub(crate) mod tests {
                 body: Arc::new(serde_json::json!({
                     "type": "response.create",
                     "model": "gpt-test",
-                    "service_tier": "priority"
+                    "service_tier": parent_replacement.unwrap_or("default")
                 })),
                 frame: Bytes::from_static(
                     br#"{"type":"response.create","model":"gpt-test","service_tier":"priority"}"#,
@@ -16272,7 +16453,7 @@ pub(crate) mod tests {
                 sent: true,
                 attempted: true,
                 attempt_num: 1,
-                sent_service_tier: Some("priority".to_owned()),
+                sent_service_tier: parent_replacement.map(str::to_owned),
                 ..make_synthetic_turn(
                     &DirectAccountingFixture::new().await,
                     Some(parent_obs),
@@ -16309,14 +16490,18 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let steer_frame = Bytes::from(
-                serde_json::json!({
-                    "type": "response.steer",
-                    "previous_response_id": parent_id,
-                    "input": "steer update"
-                })
-                .to_string(),
-            );
+            let mut steer_json = serde_json::json!({
+                "type": "response.steer",
+                "previous_response_id": parent_id,
+                "input": "steer update"
+            });
+            if let Some(tier) = steer_tier {
+                steer_json
+                    .as_object_mut()
+                    .expect("steer json object")
+                    .insert("service_tier".to_owned(), serde_json::json!(tier));
+            }
+            let steer_frame = Bytes::from(steer_json.to_string());
             let steer_dispatch = gw
                 .client_message(auth.clone(), steer_frame)
                 .await
@@ -16371,7 +16556,7 @@ pub(crate) mod tests {
                         "object": "response",
                         "status": "completed",
                         "store": false,
-                        "service_tier": "default",
+                        "service_tier": child_upstream_tier,
                         "usage": { "input_tokens": 10, "output_tokens": 5, "total_tokens": 15 }
                     }
                 })
@@ -16397,7 +16582,7 @@ pub(crate) mod tests {
             assert_eq!(
                 observed_tier.as_deref(),
                 Some(expected_child_tier),
-                "case={case}: steering successor must inherit parent dispatched tier rather than unshaped ingress body"
+                "case={case}: steering successor must not fabricate parent tier when steer control omits service_tier"
             );
         }
     }
@@ -16505,5 +16690,392 @@ pub(crate) mod tests {
             Some("priority"),
             "earlier measured priority tier must survive later OAuth default placeholder frame"
         );
+    }
+
+    #[tokio::test]
+    async fn oauth_ws_envelope_priority_overrides_nested_default_in_same_frame() {
+        use cc_lb_control::RequestEventBus;
+
+        let fixture = DirectAccountingFixture::new().await;
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let mut events = bus.subscribe_lifecycle();
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+
+        for (label, is_oauth, expected_tier) in [
+            ("oauth-same-frame", true, "priority"),
+            ("apikey-same-frame", false, "default"),
+        ] {
+            let upstream_id = Uuid::new_v4();
+            let mut gw = ResponsesWebSocketGateway::new(
+                fixture.lifecycle.clone(),
+                &fixture.auth,
+                HeaderMap::new(),
+                65_536,
+                8,
+            );
+            gw.connection_oauth.insert(1, is_oauth);
+            gw.connections.insert(1, upstream_id);
+            gw.connection_lanes.insert(1, None);
+            let obs = LifecycleContext::new(label.to_owned(), bus.clone(), &clock);
+            obs.mark_authn_reached();
+            let event_id = obs.event_id().to_owned();
+            let mut turn = Turn {
+                body: Arc::new(serde_json::json!({
+                    "type": "response.create",
+                    "model": "gpt-test"
+                })),
+                frame: Bytes::from_static(br#"{"type":"response.create","model":"gpt-test"}"#),
+                upstream_id: Some(upstream_id),
+                connection_id: Some(1),
+                sent: true,
+                attempted: true,
+                attempt_num: 1,
+                sent_service_tier: None,
+                ..make_synthetic_turn(&fixture, Some(obs), None, true, is_oauth, Some(false), None)
+            };
+            turn.candidate_oauth.insert(upstream_id, is_oauth);
+            gw.turns.insert(1, turn);
+            gw.next_turn_id = 1;
+            gw.lanes.insert(
+                None,
+                Lane {
+                    active: Some(1),
+                    ..Default::default()
+                },
+            );
+
+            let pool = WsRelayPoolSnapshot::default();
+            let resp_id = format!("resp_same_{label}");
+            let created = Bytes::from(
+                serde_json::json!({
+                    "type": "response.created",
+                    "response": { "id": resp_id, "object": "response", "status": "in_progress", "store": false }
+                })
+                .to_string(),
+            );
+            let completed = Bytes::from(
+                serde_json::json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": resp_id,
+                        "object": "response",
+                        "status": "completed",
+                        "store": false,
+                        "service_tier": "priority",
+                        "usage": { "input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "service_tier": "default" }
+                    }
+                })
+                .to_string(),
+            );
+            gw.provider_message_with_pool_and_opcode(1, &created, false, &pool)
+                .await
+                .unwrap();
+            gw.provider_message_with_pool_and_opcode(1, &completed, false, &pool)
+                .await
+                .unwrap();
+            gw.close();
+
+            let mut observed_tier = None;
+            while let Ok(ev) = events.try_recv() {
+                if let LifecycleEvent::UsageObserved {
+                    event_id: ev_id,
+                    usage,
+                    ..
+                } = ev
+                    && ev_id == event_id
+                {
+                    observed_tier = usage.service_tier;
+                }
+            }
+            assert_eq!(
+                observed_tier.as_deref(),
+                Some(expected_tier),
+                "case={label}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_ws_sent_service_tier_is_bounded_and_charged_through_parked_settlement() {
+        use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+        use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+        use cc_lb_control::api_keys::principal_view::{
+            DialectCache, PrincipalView, ShapePluginCache,
+        };
+        use cc_lb_control::dynamic_view::{DynamicViewBuilder, DynamicViewHolder};
+        use cc_lb_control::event_bus::{InMemoryBus, RequestEventBus};
+        use cc_lb_domain::{Principal, Upstream};
+        use cc_lb_upstream::{
+            DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
+        };
+
+        struct OversizedTierDialect {
+            tier: String,
+        }
+        impl UpstreamDialect for OversizedTierDialect {
+            fn shape(
+                &self,
+                context: &DialectShapeContext,
+                _upstream: &Upstream,
+                _principal: &Principal,
+                builder: &mut ShapedRequestBuilder,
+            ) -> Result<ShapedRequest, DialectError> {
+                let shaped = Bytes::from(
+                    serde_json::json!({
+                        "type": "response.create",
+                        "model": "gpt-test",
+                        "service_tier": self.tier,
+                    })
+                    .to_string(),
+                );
+                let url = url::Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("valid test URL");
+                Ok(builder.shaped_request(
+                    url,
+                    context.method.clone(),
+                    context.downstream_headers.clone(),
+                    shaped,
+                ))
+            }
+        }
+        struct UnusedWsDispatcher;
+        #[async_trait::async_trait]
+        impl crate::UpstreamDispatch for UnusedWsDispatcher {
+            async fn dispatch(
+                &self,
+                _request: cc_lb_upstream::SignedRequest,
+            ) -> Result<http::Response<crate::Body>, crate::DispatchError> {
+                unreachable!("websocket test does not dispatch HTTP")
+            }
+        }
+
+        let long_tier = "p".repeat(64);
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let storage = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite("sqlite::memory:", clock.clone())
+                .await
+                .expect("open in-memory db"),
+        );
+        storage.initialize().await.expect("migrate db");
+        let keys = Arc::new(KeyStore::new(storage.clone()));
+        let (_rec, secret) = keys
+            .create(
+                DIRECT_PRINCIPAL,
+                CreateParams {
+                    label: "ws-tier-budget".to_owned(),
+                    description: None,
+                    expires_at_unix_secs: None,
+                    limit_overrides: Vec::new(),
+                },
+            )
+            .await
+            .expect("create test key");
+        let upstream_id = Uuid::new_v4();
+        let record = cc_lb_storage_api::upstream::UpstreamRecord {
+            id: upstream_id,
+            name: "oauth-tier-budget".to_owned(),
+            kind: cc_lb_storage_api::upstream::UpstreamKind::OpenaiOauth,
+            enabled: true,
+            base_url: Some(
+                url::Url::parse("https://chatgpt.com/backend-api/codex").expect("valid test URL"),
+            ),
+            ..Default::default()
+        };
+
+        let mut chains = HashMap::new();
+        chains.insert(
+            DIRECT_PRINCIPAL.to_owned(),
+            (
+                None,
+                DialectCache::Explicit(ShapePluginCache {
+                    dialect: Arc::new(OversizedTierDialect {
+                        tier: long_tier.clone(),
+                    }),
+                }),
+            ),
+        );
+        let pview = Arc::new(PrincipalView::for_tests(
+            DIRECT_PRINCIPAL,
+            true,
+            vec!["*".to_owned()],
+            Vec::new(),
+            chains,
+        ));
+        let authn = Arc::new(BuiltinAuthn::new(keys, clock.clone()));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            secret.expose().parse().expect("valid auth header"),
+        );
+        let auth = crate::authenticate_first(&authn, &headers, &pview)
+            .await
+            .expect("authenticate");
+        let bus = Arc::new(InMemoryBus::new());
+        let mut events = bus.subscribe_lifecycle();
+        let dynamic = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(UnusedSignerFactory))
+            .principal_view(pview)
+            .upstream_records(vec![record])
+            .build();
+        let lifecycle_bus: Arc<dyn RequestEventBus> = bus.clone();
+        let lifecycle = Arc::new(
+            Lifecycle::new_with_dynamic_view(
+                authn,
+                Arc::new(DynamicViewHolder::new(dynamic)),
+                Arc::new(UnusedWsDispatcher),
+                crate::LifecycleConfig::default(),
+                clock.clone(),
+            )
+            .with_event_bus(lifecycle_bus.clone()),
+        );
+
+        let create_frame = Bytes::from_static(
+            br#"{"type":"response.create","model":"gpt-test","input":"hi","store":false}"#,
+        );
+
+        // Full gateway first: measure actual shaped frame bytes + retained tier charge, then
+        // verify a tight cap allowing the shaped frame alone rejects the extra tier string.
+        let mut gw =
+            ResponsesWebSocketGateway::new(lifecycle.clone(), &auth, HeaderMap::new(), 65_536, 8);
+        gw.connection_oauth.insert(1, true);
+        gw.connections.insert(1, upstream_id);
+        gw.connection_lanes.insert(1, None);
+        let dispatch = gw
+            .client_message(auth.clone(), create_frame.clone())
+            .await
+            .expect("admit")
+            .expect("dispatch");
+        let event_id = gw.turns[&dispatch.turn_id]
+            .prepared
+            .observer
+            .as_ref()
+            .expect("turn has observer")
+            .event_id()
+            .to_owned();
+        let pre_shape_used = gw.used_bytes;
+        gw.prepare_plugin_request(dispatch.turn_id, upstream_id)
+            .expect("shape with generous cap");
+        let shaped_req = &gw.turns[&dispatch.turn_id]
+            .plugin_request
+            .as_ref()
+            .expect("plugin request recorded")
+            .1;
+        let shaped_frame_len = shaped_req.frame.len();
+        assert!(
+            shaped_req.sent_service_tier.is_none(),
+            "plugin_request must not retain a second uncharged tier copy"
+        );
+        assert_eq!(
+            gw.turns[&dispatch.turn_id].sent_service_tier(),
+            Some(long_tier.as_str())
+        );
+        assert_eq!(
+            gw.used_bytes,
+            pre_shape_used + shaped_frame_len + long_tier.len(),
+            "shaped frame and retained tier string must both be charged"
+        );
+
+        // Tight cap allows initial frame + shaped frame bytes, but NOT the extra 64-byte tier string.
+        let mut tight_gw = ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &auth,
+            HeaderMap::new(),
+            pre_shape_used + shaped_frame_len + 10,
+            8,
+        );
+        let tight_dispatch = tight_gw
+            .client_message(auth.clone(), create_frame)
+            .await
+            .expect("admit tight")
+            .expect("dispatch");
+        assert_eq!(tight_gw.used_bytes, pre_shape_used);
+        let err = tight_gw
+            .prepare_plugin_request(tight_dispatch.turn_id, upstream_id)
+            .expect_err("shaped tier string must enforce session byte budget");
+        assert_eq!(err.status, 503);
+        assert_eq!(err.code, "overloaded_error");
+        assert_eq!(
+            tight_gw.used_bytes, pre_shape_used,
+            "budget rejection must not alter used_bytes"
+        );
+        tight_gw.close();
+
+        {
+            let turn = gw.turns.get_mut(&dispatch.turn_id).unwrap();
+            turn.connection_id = Some(1);
+            turn.upstream_id = Some(upstream_id);
+        }
+        let _ = gw.frame_for_send(&dispatch).expect("send frame");
+        gw.turns.get_mut(&dispatch.turn_id).unwrap().sent = true;
+        gw.lanes.insert(
+            None,
+            Lane {
+                active: Some(dispatch.turn_id),
+                ..Default::default()
+            },
+        );
+
+        let pool = WsRelayPoolSnapshot::default();
+        let created = Bytes::from_static(
+            br#"{"type":"response.created","response":{"id":"resp_parked_budget","object":"response","status":"in_progress","store":false,"service_tier":"auto"}}"#,
+        );
+        gw.provider_message_with_pool_and_opcode(1, &created, false, &pool)
+            .await
+            .unwrap();
+        let pre_park_turn_charged = gw.turns[&dispatch.turn_id].charged_bytes;
+        let non_turn_used = gw.used_bytes - pre_park_turn_charged;
+        let error_frame = Bytes::from_static(
+            br#"{"type":"error","response":{"id":"resp_parked_budget","object":"response","status":"failed","store":false},"error":{"code":"upstream_error","message":"boom"}}"#,
+        );
+        gw.provider_message_with_pool_and_opcode(1, &error_frame, false, &pool)
+            .await
+            .unwrap();
+        assert!(
+            gw.pending_error_terminals
+                .contains_key("resp_parked_budget")
+        );
+        let parked_charged = gw.pending_error_terminals["resp_parked_budget"]
+            .turn
+            .charged_bytes;
+        assert!(
+            parked_charged < pre_park_turn_charged && parked_charged >= long_tier.len(),
+            "retained tier string must remain charged while frame/body payload is freed on park (pre={pre_park_turn_charged}, parked={parked_charged})"
+        );
+        assert_eq!(
+            gw.used_bytes,
+            parked_charged + non_turn_used,
+            "gateway used_bytes must keep tracking parked turn + tier string plus bound session state"
+        );
+
+        let delayed_failed = Bytes::from_static(
+            br#"{"type":"response.failed","response":{"id":"resp_parked_budget","object":"response","status":"failed","store":false,"service_tier":"default","error":{"code":"upstream_error","message":"boom"},"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}"#,
+        );
+        gw.provider_message_with_pool_and_opcode(1, &delayed_failed, false, &pool)
+            .await
+            .unwrap();
+        assert!(
+            !gw.pending_error_terminals
+                .contains_key("resp_parked_budget")
+        );
+        assert_eq!(
+            gw.used_bytes, non_turn_used,
+            "settling parked terminal must release parked turn and charged tier bytes completely"
+        );
+        gw.close();
+        assert_eq!(gw.used_bytes, 0);
+
+        let mut observed_tier = None;
+        while let Ok(ev) = events.try_recv() {
+            if let LifecycleEvent::UsageObserved {
+                event_id: ev_id,
+                usage,
+                ..
+            } = ev
+                && ev_id == event_id
+            {
+                observed_tier = usage.service_tier;
+            }
+        }
+        assert_eq!(observed_tier.as_deref(), Some(long_tier.as_str()));
     }
 }

@@ -712,13 +712,13 @@ async fn openai_oauth_resolves_sent_service_tier_and_pricing_across_http_and_cha
     };
     let app = Router::new()
         .fallback(move |State(st): State<TierTestFakeState>, req: Request| async move {
+            let method = req.method().clone();
             let path = req.uri().path().to_owned();
             if path == "/catalog.json" {
                 return Json(st.catalog).into_response();
             }
             let body = to_bytes(req.into_body(), 2_000_000).await.unwrap();
             let json_body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-            let is_client_call = !path.ends_with("/models");
             if path.ends_with("/models") {
                 return Json(json!({
                     "data": [{"id": "gpt-6.2-sol", "object": "model"}],
@@ -726,9 +726,12 @@ async fn openai_oauth_resolves_sent_service_tier_and_pricing_across_http_and_cha
                 }))
                 .into_response();
             }
-            if is_client_call {
-                st.rec.lock().unwrap().push((path.clone(), json_body.clone()));
+            if method != Method::POST
+                || (!path.ends_with("/codex/responses") && !path.ends_with("/v1/responses"))
+            {
+                return StatusCode::NOT_FOUND.into_response();
             }
+            st.rec.lock().unwrap().push((path.clone(), json_body.clone()));
             let resp_id = format!("resp_tier_test_{}", st.seq.fetch_add(1, Ordering::SeqCst));
             if path.ends_with("/v1/responses")
                 && json_body.get("stream").and_then(Value::as_bool) != Some(true)
@@ -1119,6 +1122,7 @@ async fn openai_oauth_chat_fanout_prices_each_choice_independently_regardless_of
     let app = Router::new()
         .fallback(
             move |State(st): State<MixedFanoutFakeState>, req: Request| async move {
+                let method = req.method().clone();
                 let path = req.uri().path().to_owned();
                 if path == "/catalog.json" {
                     return Json(st.catalog).into_response();
@@ -1130,6 +1134,9 @@ async fn openai_oauth_chat_fanout_prices_each_choice_independently_regardless_of
                         "models": [{"slug": "gpt-6.2-sol", "display_name": "GPT 6.2", "description": "test", "capabilities": {}}]
                     }))
                     .into_response();
+                }
+                if method != Method::POST || path != "/codex/responses" {
+                    return StatusCode::NOT_FOUND.into_response();
                 }
                 let call_idx = st.seq.fetch_add(1, Ordering::SeqCst);
                 let resp_id = format!("resp_fanout_mix_{call_idx}");

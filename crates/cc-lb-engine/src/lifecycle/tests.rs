@@ -10129,3 +10129,25 @@ event: response.failed\ndata: {\"type\":\"response.failed\",\"sequence_number\":
         "failed truncation retry inspection must retain prior attempt's dispatched tier; events={events:?}"
     );
 }
+
+#[test]
+fn responses_usage_value_to_counts_preserves_oauth_priority_over_first_event_nested_default() {
+    let body = concat!(
+        "data: {\"type\":\"response.in_progress\",\"response\":{\"service_tier\":\"auto\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"service_tier\":\"default\"}}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"service_tier\":\"priority\",\"usage\":{\"input_tokens\":5,\"output_tokens\":4}}}\n\n",
+    );
+    let observed = crate::openai_compat::chat::responses_usage_from_sse_with_policy(
+        body.as_bytes(),
+        usage_parser::ServiceTierMergePolicy::OpenaiOauth,
+    )
+    .expect("observed usage");
+    assert_eq!(observed.service_tier.as_deref(), Some("priority"));
+
+    let counts = responses_usage_value_to_counts(
+        &observed,
+        usage_parser::ServiceTierMergePolicy::OpenaiOauth,
+    );
+    assert_eq!(counts.service_tier.as_deref(), Some("priority"));
+    assert_eq!(counts.input_tokens, 15);
+    assert_eq!(counts.output_tokens, 6);
+}

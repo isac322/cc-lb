@@ -6470,7 +6470,7 @@ impl Lifecycle {
         transform_ctx: ResponseTransformContext,
         compat_response_plan: Option<CompatResponsePlan>,
         prompt_cache_observation_context: Option<PromptCacheObservationContext>,
-        response_affinity_context: ResponseAffinityContext,
+        mut response_affinity_context: ResponseAffinityContext,
         observer: Option<LifecycleContext>,
         keepalive_completion: Option<crate::cache_keepalive::LifecycleKeepaliveContext>,
         dispatch_started: Instant,
@@ -6478,6 +6478,14 @@ impl Lifecycle {
     ) -> Response<Body> {
         let mut compat_compact_pending = false;
         let mut compat_body_timing: Option<CompatBodyTimingGuard> = None;
+        let compat_tier_policy = if response_affinity_context
+            .openai_oauth_sent_service_tier
+            .is_some()
+        {
+            usage_parser::ServiceTierMergePolicy::OpenaiOauth
+        } else {
+            usage_parser::ServiceTierMergePolicy::Standard
+        };
         if let Some(plan) = compat_response_plan.as_ref() {
             match &plan.kind {
                 CompatResponseKind::ResponsesAggregate { echo_metadata } => {
@@ -6487,11 +6495,31 @@ impl Lifecycle {
                         echo_metadata.clone(),
                         decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
                         guard.as_mut().map(|g| &mut g.timing),
+                        compat_tier_policy,
                     )
                     .await;
                     compat_body_timing = guard;
                     response = match aggregated {
-                        Ok(response) => response,
+                        Ok(compat_response::AggregatedResponse {
+                            response,
+                            observed_usage,
+                        }) => {
+                            if response_affinity_context.precomputed_usage.is_none()
+                                && let Some(mut observed_usage) = observed_usage
+                            {
+                                if let Some(sent) = response_affinity_context
+                                    .openai_oauth_sent_service_tier
+                                    .as_ref()
+                                {
+                                    usage_parser::apply_openai_oauth_service_tier(
+                                        &mut observed_usage,
+                                        sent.as_deref(),
+                                    );
+                                }
+                                response_affinity_context.precomputed_usage = Some(observed_usage);
+                            }
+                            response
+                        }
                         Err(error) => provider_error_response(
                             response_affinity_context.capability,
                             StatusCode::BAD_GATEWAY,
@@ -6508,11 +6536,29 @@ impl Lifecycle {
                         None,
                         decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
                         guard.as_mut().map(|g| &mut g.timing),
+                        compat_tier_policy,
                     )
                     .await;
                     compat_body_timing = guard;
                     response = match aggregated {
-                        Ok(response) => {
+                        Ok(compat_response::AggregatedResponse {
+                            response,
+                            observed_usage,
+                        }) => {
+                            if response_affinity_context.precomputed_usage.is_none()
+                                && let Some(mut observed_usage) = observed_usage
+                            {
+                                if let Some(sent) = response_affinity_context
+                                    .openai_oauth_sent_service_tier
+                                    .as_ref()
+                                {
+                                    usage_parser::apply_openai_oauth_service_tier(
+                                        &mut observed_usage,
+                                        sent.as_deref(),
+                                    );
+                                }
+                                response_affinity_context.precomputed_usage = Some(observed_usage);
+                            }
                             compat_compact_pending = true;
                             response
                         }
@@ -6873,11 +6919,6 @@ impl Lifecycle {
             .filter(|plan| matches!(plan.kind, CompatResponseKind::Chat { .. }))
             .map(|_| crate::provider_capability::UsageShape::OpenaiResponses)
             .unwrap_or_else(|| response_affinity_context.capability.usage_shape());
-        let observation = response_body_json
-            .as_ref()
-            .map_or_else(usage_parser::NonStreamObservation::default, |value| {
-                usage_parser::observe_non_stream_json_value_for_shape(value, usage_shape)
-            });
         let tier_policy = if response_affinity_context
             .openai_oauth_sent_service_tier
             .is_some()
@@ -6886,6 +6927,16 @@ impl Lifecycle {
         } else {
             usage_parser::ServiceTierMergePolicy::Standard
         };
+        let observation = response_body_json.as_ref().map_or_else(
+            usage_parser::NonStreamObservation::default,
+            |value| {
+                usage_parser::observe_non_stream_json_value_for_shape_with_policy(
+                    value,
+                    usage_shape,
+                    tier_policy,
+                )
+            },
+        );
         let chat_raw_usage = response_affinity_context
             .precomputed_usage
             .clone()
@@ -6898,7 +6949,7 @@ impl Lifecycle {
                             &body,
                             tier_policy,
                         )
-                        .map(|usage| responses_usage_value_to_counts(&usage))
+                        .map(|usage| responses_usage_value_to_counts(&usage, tier_policy))
                     })
             });
         let observation = match chat_raw_usage {

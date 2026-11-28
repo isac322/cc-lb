@@ -487,6 +487,18 @@ pub(crate) fn accumulate_sse_usage_for_shape_with_policy(
     accumulate_sse_usage_inner(event, usage, Some(shape), policy)
 }
 
+pub(crate) fn accumulate_sse_usage_value_for_shape_with_policy(
+    value: &Value,
+    event_name: Option<&[u8]>,
+    usage: &mut UsageCounts,
+    shape: UsageShape,
+    policy: ServiceTierMergePolicy,
+) -> SseUsageUpdate {
+    let mut update = SseUsageUpdate::default();
+    accumulate_sse_usage_value(value, event_name, usage, &mut update, Some(shape), policy);
+    update
+}
+
 fn accumulate_sse_usage_inner(
     event: &ParsedSseEvent<'_>,
     usage: &mut UsageCounts,
@@ -527,6 +539,15 @@ fn accumulate_sse_usage_value(
     }
     let Some(reported) = usage_value_for_shape(value, shape).filter(|value| !value.is_null())
     else {
+        // Capture explicit non-placeholder envelope tiers (e.g., usage-less `response.in_progress`
+        // carrying `"priority"`) without marking `usage.present` or storing `"auto"`/`"default"`
+        // placeholders ahead of real usage frames.
+        if shape != Some(UsageShape::None)
+            && let Some(tier) = service_tier_from_envelope(value)
+            && !is_placeholder_service_tier_for_merge(tier, policy)
+        {
+            apply_service_tier_with_source(usage, tier, ServiceTierSource::Envelope, policy);
+        }
         return;
     };
     if event_type == Some("message_start") {
@@ -616,17 +637,38 @@ pub(crate) fn observe_non_stream_json_value_for_shape(
     value: &Value,
     shape: UsageShape,
 ) -> NonStreamObservation {
+    observe_non_stream_json_value_for_shape_with_policy(
+        value,
+        shape,
+        ServiceTierMergePolicy::Standard,
+    )
+}
+
+pub(crate) fn observe_non_stream_json_value_for_shape_with_policy(
+    value: &Value,
+    shape: UsageShape,
+    policy: ServiceTierMergePolicy,
+) -> NonStreamObservation {
     NonStreamObservation {
-        usage: usage_from_value_for_shape(value, Some(shape)),
+        usage: usage_from_value_for_shape_with_policy(value, Some(shape), policy),
         canonical_error: canonical_upstream_error_from_value(value),
     }
 }
 
 fn usage_from_value(value: &Value) -> UsageCounts {
-    usage_from_value_for_shape(value, None)
+    usage_from_value_for_shape_with_policy(value, None, ServiceTierMergePolicy::Standard)
 }
 
+#[cfg(test)]
 fn usage_from_value_for_shape(value: &Value, shape: Option<UsageShape>) -> UsageCounts {
+    usage_from_value_for_shape_with_policy(value, shape, ServiceTierMergePolicy::Standard)
+}
+
+fn usage_from_value_for_shape_with_policy(
+    value: &Value,
+    shape: Option<UsageShape>,
+    policy: ServiceTierMergePolicy,
+) -> UsageCounts {
     if matches!(shape, Some(UsageShape::GeminiGenerateContent))
         && let Value::Array(elements) = value
     {
@@ -638,18 +680,13 @@ fn usage_from_value_for_shape(value: &Value, shape: Option<UsageShape>) -> Usage
                 continue;
             };
             usage.present = true;
-            merge_usage_value_for_shape_with_policy(
-                &mut usage,
-                usage_value,
-                shape,
-                ServiceTierMergePolicy::Standard,
-            );
+            merge_usage_value_for_shape_with_policy(&mut usage, usage_value, shape, policy);
             if let Some(tier) = service_tier_from_envelope(element) {
                 apply_service_tier_with_source(
                     &mut usage,
                     tier,
                     ServiceTierSource::Envelope,
-                    ServiceTierMergePolicy::Standard,
+                    policy,
                 );
             }
         }
@@ -665,19 +702,9 @@ fn usage_from_value_for_shape(value: &Value, shape: Option<UsageShape>) -> Usage
         billable_present: true,
         ..UsageCounts::default()
     };
-    merge_usage_value_for_shape_with_policy(
-        &mut usage,
-        usage_value,
-        shape,
-        ServiceTierMergePolicy::Standard,
-    );
+    merge_usage_value_for_shape_with_policy(&mut usage, usage_value, shape, policy);
     if let Some(tier) = service_tier_from_envelope(value) {
-        apply_service_tier_with_source(
-            &mut usage,
-            tier,
-            ServiceTierSource::Envelope,
-            ServiceTierMergePolicy::Standard,
-        );
+        apply_service_tier_with_source(&mut usage, tier, ServiceTierSource::Envelope, policy);
     }
     usage
 }
@@ -4493,5 +4520,32 @@ mod tests {
             ServiceTierMergePolicy::OpenaiOauth,
         );
         assert_eq!(fallback_usage.service_tier.as_deref(), Some("ultrafast"));
+    }
+
+    #[test]
+    fn observe_non_stream_oauth_envelope_priority_overrides_nested_default_placeholder() {
+        let value = serde_json::json!({
+            "response": {
+                "service_tier": "priority",
+                "usage": {
+                    "input_tokens": 12,
+                    "output_tokens": 6,
+                    "service_tier": "default"
+                }
+            }
+        });
+        let oauth = observe_non_stream_json_value_for_shape_with_policy(
+            &value,
+            UsageShape::OpenaiResponses,
+            ServiceTierMergePolicy::OpenaiOauth,
+        );
+        assert_eq!(oauth.usage.service_tier.as_deref(), Some("priority"));
+
+        let standard = observe_non_stream_json_value_for_shape_with_policy(
+            &value,
+            UsageShape::OpenaiResponses,
+            ServiceTierMergePolicy::Standard,
+        );
+        assert_eq!(standard.usage.service_tier.as_deref(), Some("default"));
     }
 }

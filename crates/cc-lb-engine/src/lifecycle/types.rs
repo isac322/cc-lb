@@ -936,7 +936,7 @@ pub(super) fn resolve_fanout_call_usage(
         usage_parser::ServiceTierMergePolicy::Standard
     };
     let observed = crate::openai_compat::chat::responses_usage_from_sse_with_policy(body, policy)?;
-    let mut counts = responses_usage_value_to_counts(&observed);
+    let mut counts = responses_usage_value_to_counts(&observed, policy);
     if let Some(sent) = openai_oauth_sent_service_tier {
         usage_parser::apply_openai_oauth_service_tier(&mut counts, sent.as_deref());
     }
@@ -1078,19 +1078,29 @@ pub(super) fn aggregate_fanout_usage_counts(calls: &[UsageCounts]) -> Option<Usa
 
 pub(super) fn responses_usage_value_to_counts(
     observed: &crate::openai_compat::chat::ResponsesSseUsage,
+    policy: usage_parser::ServiceTierMergePolicy,
 ) -> UsageCounts {
+    let mut clean_usage = observed.usage.clone();
+    if let Some(obj) = clean_usage.as_object_mut() {
+        obj.remove("service_tier");
+        obj.remove("serviceTier");
+    }
     let mut envelope = Map::new();
     let mut response = Map::new();
-    response.insert("usage".to_owned(), observed.usage.clone());
+    response.insert("usage".to_owned(), clean_usage);
     if let Some(tier) = observed.service_tier.as_deref() {
         response.insert("service_tier".to_owned(), Value::String(tier.to_owned()));
     }
     envelope.insert("response".to_owned(), Value::Object(response));
-    usage_parser::observe_non_stream_json_value_for_shape(
+    let mut counts = usage_parser::observe_non_stream_json_value_for_shape_with_policy(
         &Value::Object(envelope),
         crate::provider_capability::UsageShape::OpenaiResponses,
+        policy,
     )
-    .usage
+    .usage;
+    counts.service_tier = observed.service_tier.clone();
+    counts.service_tier_source = observed.service_tier_source;
+    counts
 }
 
 pub(super) fn body_cap_for_path(config: &LifecycleConfig, path: &str) -> usize {
