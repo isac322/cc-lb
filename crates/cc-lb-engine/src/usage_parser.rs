@@ -780,7 +780,7 @@ fn apply_service_tier_with_source(
     );
 }
 
-pub(crate) fn is_openai_oauth_placeholder_service_tier(tier: &str) -> bool {
+fn is_openai_oauth_placeholder_service_tier(tier: &str) -> bool {
     let trimmed = tier.trim();
     trimmed.is_empty()
         || trimmed.eq_ignore_ascii_case("default")

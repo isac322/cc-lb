@@ -2328,8 +2328,9 @@ async fn handle_ws_provider_event(
                             let mut suppress_lane_duplicate = preserve_lane_error;
                             for closed_error in result.errors {
                                 if suppress_lane_duplicate
-                                    && closed_error.stream_id == error.stream_id
-                                    && closed_error.response_id() == error.response_id()
+                                    && let (Some(err_turn_id), Some(closed_turn_id)) =
+                                        (error.turn_id(), closed_error.turn_id())
+                                    && err_turn_id == closed_turn_id
                                 {
                                     suppress_lane_duplicate = false;
                                     continue;
@@ -6733,6 +6734,154 @@ mod tests {
         assert_eq!(
             received["lane-b"]["error"]["code"],
             "upstream_connection_closed"
+        );
+
+        sink_server.abort();
+        task_a.abort();
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_steering_successor_idless_overflow_preserves_parent_close_error() {
+        use futures_util::StreamExt as _;
+
+        let (addr_a, _acc_a, _rx_a, task_a) = spawn_ws_recorder_server().await;
+        let up_a = crate::app::tests::websocket_upstream(
+            78,
+            "api-shared",
+            url::Url::parse(&format!("http://{addr_a}/")).unwrap(),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_str(crate::app::tests::TEST_KEY.plaintext.as_str()).unwrap(),
+        );
+        let state = crate::app::tests::websocket_test_state(
+            vec![up_a.clone()],
+            cc_lb_domain::TerminalStrategy::FirstPick,
+            DrainController::new(),
+            Arc::new(crate::app::tests::WebSocketTestSignerFactory),
+            Arc::new(crate::app::tests::FixtureKeyStore),
+            vec!["*".to_owned()],
+        )
+        .await;
+        let auth = state.lifecycle.authenticate(&headers).await.unwrap();
+        let mut gateway =
+            ResponsesWebSocketGateway::new(state.lifecycle.clone(), &auth, headers, 32_768, 8);
+        let mut connections = HashMap::new();
+        connections.insert(
+            1,
+            connect_existing_ws(&state, up_a.id, "api-shared", addr_a).await,
+        );
+
+        let parent_frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "stream_id": "lane-a",
+                "store": false,
+                "input": [{"role": "user", "content": "p".repeat(2_500)}],
+            }))
+            .unwrap(),
+        );
+        let parent_turn = gateway
+            .client_message(auth.clone(), parent_frame)
+            .await
+            .unwrap()
+            .unwrap();
+        gateway.assign_connection(parent_turn.turn_id, 1, up_a.id, "api-shared");
+        gateway.commit_send_attempt(parent_turn.turn_id);
+        gateway.sent(parent_turn.turn_id);
+
+        let created_frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.created",
+                "stream_id": "lane-a",
+                "response": {
+                    "id": "resp_parent_steer_overflow",
+                    "object": "response",
+                    "status": "in_progress",
+                    "store": false,
+                }
+            }))
+            .unwrap(),
+        );
+        gateway.provider_message(1, &created_frame).await.unwrap();
+
+        let steer_frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.steer",
+                "stream_id": "lane-a",
+                "previous_response_id": "resp_parent_steer_overflow",
+                "input": "s".repeat(1_000),
+            }))
+            .unwrap(),
+        );
+        let steer_turn = gateway
+            .client_message(auth.clone(), steer_frame)
+            .await
+            .unwrap()
+            .unwrap();
+        gateway.commit_send_attempt(steer_turn.turn_id);
+        gateway.sent(steer_turn.turn_id);
+
+        let oversized_tier = format!("oversized_{}", "x".repeat(26_000));
+        let overflow_frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.in_progress",
+                "stream_id": "lane-a",
+                "response": {
+                    "object": "response",
+                    "status": "in_progress",
+                    "previous_response_id": "resp_parent_steer_overflow",
+                    "service_tier": oversized_tier,
+                    "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
+                }
+            }))
+            .unwrap(),
+        );
+
+        let (mut downstream_sink, mut client_ws, sink_server) = spawn_test_downstream_sink().await;
+        let pending_connects = HashMap::new();
+        let deferred = VecDeque::new();
+        let mut dispatches = VecDeque::new();
+        let keep_open = handle_ws_provider_event(
+            WsProviderEvent::Frame {
+                connection_id: 1,
+                bytes: overflow_frame,
+                text: true,
+            },
+            &mut gateway,
+            &mut connections,
+            &pending_connects,
+            &deferred,
+            &mut dispatches,
+            &mut downstream_sink,
+        )
+        .await;
+        assert!(keep_open);
+        assert!(connections.is_empty());
+
+        let mut codes = Vec::new();
+        for _ in 0..2 {
+            let msg = tokio::time::timeout(Duration::from_secs(2), client_ws.next())
+                .await
+                .expect("terminal error frame for same-lane turn")
+                .unwrap()
+                .unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+            assert_eq!(parsed["stream_id"], "lane-a");
+            assert!(parsed.get("response_id").is_none());
+            codes.push((
+                parsed["status"].as_u64().unwrap(),
+                parsed["error"]["code"].as_str().unwrap().to_owned(),
+            ));
+        }
+        assert_eq!(
+            codes,
+            vec![
+                (503, "overloaded_error".to_owned()),
+                (502, "upstream_connection_closed".to_owned()),
+            ]
         );
 
         sink_server.abort();

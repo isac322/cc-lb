@@ -51,6 +51,7 @@ pub struct WebSocketWireFrame {
 #[derive(Clone, Debug, Default)]
 struct WebSocketErrorExtra {
     response_id: Option<Box<str>>,
+    turn_id: Option<u64>,
     provider_headers: Box<[(String, String)]>,
     raw_provider_frames: Option<Box<[WebSocketWireFrame]>>,
 }
@@ -105,6 +106,15 @@ impl WebSocketError {
         self.extra
             .as_deref()
             .and_then(|extra| extra.response_id.as_deref())
+    }
+
+    pub fn with_turn_id(mut self, turn_id: u64) -> Self {
+        self.extra.get_or_insert_with(Default::default).turn_id = Some(turn_id);
+        self
+    }
+
+    pub fn turn_id(&self) -> Option<u64> {
+        self.extra.as_deref().and_then(|extra| extra.turn_id)
     }
 
     pub(crate) fn provider_headers(&self) -> &[(String, String)] {
@@ -427,31 +437,15 @@ fn update_turn_usage_budget(
     used_bytes: &mut usize,
     byte_cap: usize,
     turn: &mut Turn,
-    mut usage: UsageCounts,
+    usage: UsageCounts,
     complete: bool,
-) -> Result<(), ()> {
+) -> Result<(), Box<UsageCounts>> {
     let old_tier_bytes = usage_service_tier_bytes(turn.usage.as_ref());
     let new_tier_bytes = usage_service_tier_bytes(Some(&usage));
     if new_tier_bytes > old_tier_bytes {
         let delta = new_tier_bytes - old_tier_bytes;
         if delta > byte_cap.saturating_sub(*used_bytes) {
-            let released_old = old_tier_bytes.min(turn.charged_bytes);
-            *used_bytes = (*used_bytes).saturating_sub(released_old);
-            turn.charged_bytes = turn.charged_bytes.saturating_sub(released_old);
-            if usage.service_tier.as_deref().is_some_and(|tier| {
-                !crate::usage_parser::is_openai_oauth_placeholder_service_tier(tier)
-            }) && let Some(stale_sent_tier) = turn.sent_service_tier.take()
-            {
-                let released_sent =
-                    sent_service_tier_bytes(Some(&stale_sent_tier)).min(turn.charged_bytes);
-                *used_bytes = (*used_bytes).saturating_sub(released_sent);
-                turn.charged_bytes = turn.charged_bytes.saturating_sub(released_sent);
-            }
-            usage.service_tier = None;
-            usage.service_tier_source = crate::usage_parser::ServiceTierSource::None;
-            turn.usage = Some(usage);
-            turn.usage_complete = complete;
-            return Err(());
+            return Err(Box::new(usage));
         }
         *used_bytes = (*used_bytes).saturating_add(delta);
         turn.charged_bytes = turn.charged_bytes.saturating_add(delta);
@@ -2731,7 +2725,8 @@ impl ResponsesWebSocketGateway {
                 "upstream_affinity_unavailable",
                 "The selected provider connection is no longer owned by this upstream",
             )
-            .with_stream(turn.lane.clone()));
+            .with_stream(turn.lane.clone())
+            .with_turn_id(turn_id));
         }
         if turn.pinned.is_some_and(|(connection, upstream)| {
             existing_connection_id.is_some_and(|conn| conn != connection) || upstream_id != upstream
@@ -2741,7 +2736,8 @@ impl ResponsesWebSocketGateway {
                 "upstream_affinity_unavailable",
                 "A continuation cannot move to another provider connection",
             )
-            .with_stream(turn.lane.clone()));
+            .with_stream(turn.lane.clone())
+            .with_turn_id(turn_id));
         }
         let is_candidate_oauth = turn
             .candidate_oauth
@@ -2779,7 +2775,8 @@ impl ResponsesWebSocketGateway {
                         "upstream_affinity_unavailable",
                         "The session is pinned to another OAuth account",
                     )
-                    .with_stream(turn.lane.clone()));
+                    .with_stream(turn.lane.clone())
+                    .with_turn_id(turn_id));
                 }
             } else {
                 return Err(WebSocketError::new(
@@ -2787,7 +2784,8 @@ impl ResponsesWebSocketGateway {
                     "upstream_affinity_unavailable",
                     "The session is pinned to another OAuth account",
                 )
-                .with_stream(turn.lane.clone()));
+                .with_stream(turn.lane.clone())
+                .with_turn_id(turn_id));
             }
         }
         let reject_exhausted = Self::reject_exhausted_fallback(turn, upstream_id)
@@ -3017,6 +3015,7 @@ impl ResponsesWebSocketGateway {
                 "The selected provider connection is no longer owned by this upstream",
             )
             .with_stream(turn.lane.clone())
+            .with_turn_id(turn_id)
         })?;
         self.validate_candidate_for_send(turn_id, upstream_id, Some(connection_id), false)
             .await?;
@@ -3800,7 +3799,7 @@ impl ResponsesWebSocketGateway {
                 let usage_update =
                     response.and_then(|resp| observed_response_usage(resp, tier_policy));
                 let byte_cap = self.byte_cap;
-                let mut usage_overflow = false;
+                let mut usage_overflow: Option<(Box<UsageCounts>, bool)> = None;
                 let upstream_result = {
                     let pending = self
                         .pending_error_terminals
@@ -3816,16 +3815,14 @@ impl ResponsesWebSocketGateway {
                                 &mut usage,
                             );
                         }
-                        if update_turn_usage_budget(
+                        if let Err(overflow_usage) = update_turn_usage_budget(
                             &mut self.used_bytes,
                             byte_cap,
                             &mut pending.turn,
                             usage,
                             complete,
-                        )
-                        .is_err()
-                        {
-                            usage_overflow = true;
+                        ) {
+                            usage_overflow = Some((overflow_usage, complete));
                         }
                     }
                     pending.turn.upstream_id.map(|upstream_id| {
@@ -3837,8 +3834,8 @@ impl ResponsesWebSocketGateway {
                         (pending.turn.auth.clone(), upstream_id, stored)
                     })
                 };
-                if usage_overflow {
-                    let err = WebSocketError::new(
+                if let Some((overflow_usage, overflow_complete)) = usage_overflow {
+                    let mut err = WebSocketError::new(
                         503,
                         "overloaded_error",
                         "WebSocket session buffer capacity exceeded",
@@ -3848,7 +3845,10 @@ impl ResponsesWebSocketGateway {
                     if let Some(owner) = self.owners.get_mut(id) {
                         owner.terminal_delivery = TerminalDelivery::ResponseTerminalDelivered;
                     }
-                    if let Some(pending) = self.pending_error_terminals.remove(id) {
+                    if let Some(mut pending) = self.pending_error_terminals.remove(id) {
+                        err = err.with_turn_id(pending.turn_id);
+                        pending.turn.usage = Some(*overflow_usage);
+                        pending.turn.usage_complete = overflow_complete;
                         self.settle_turn(pending.turn, Some(&err));
                     }
                     return Err(err);
@@ -3859,17 +3859,19 @@ impl ResponsesWebSocketGateway {
                     let (auth, upstream_id, stored) = match upstream_result {
                         Some(tuple) => tuple,
                         None => {
-                            let err = WebSocketError::new(
+                            let mut err = WebSocketError::new(
                                 502,
                                 "upstream_unavailable",
                                 "Response upstream is unavailable",
                             )
-                            .with_stream(lane);
+                            .with_stream(lane)
+                            .with_response_id(id);
                             if let Some(owner) = self.owners.get_mut(id) {
                                 owner.terminal_delivery =
                                     TerminalDelivery::ResponseTerminalDelivered;
                             }
                             if let Some(pending) = self.pending_error_terminals.remove(id) {
+                                err = err.with_turn_id(pending.turn_id);
                                 self.settle_turn(pending.turn, Some(&err));
                             }
                             return Err(err);
@@ -3887,11 +3889,12 @@ impl ResponsesWebSocketGateway {
                         )
                         .await
                     {
-                        let err = err.with_stream(lane);
+                        let mut err = err.with_stream(lane).with_response_id(id);
                         if let Some(owner) = self.owners.get_mut(id) {
                             owner.terminal_delivery = TerminalDelivery::ResponseTerminalDelivered;
                         }
                         if let Some(pending) = self.pending_error_terminals.remove(id) {
+                            err = err.with_turn_id(pending.turn_id);
                             self.settle_turn(pending.turn, Some(&err));
                         }
                         return Err(err);
@@ -4285,20 +4288,25 @@ impl ResponsesWebSocketGateway {
                     usage,
                     terminal && complete,
                 )
-                .is_err();
+                .err();
                 (overflow, turn.lane.clone(), turn.response_id.clone())
             };
-            if usage_overflow {
+            if let Some(overflow_usage) = usage_overflow {
                 let mut err = WebSocketError::new(
                     503,
                     "overloaded_error",
                     "WebSocket session buffer capacity exceeded",
                 )
-                .with_stream(usage_lane);
+                .with_stream(usage_lane)
+                .with_turn_id(turn_id);
                 if let Some(id) = usage_response_id {
                     err = err.with_response_id(id);
                 }
-                self.finish_turn(turn_id, Some(&err));
+                if let Some(mut turn) = self.detach_turn(turn_id) {
+                    turn.usage = Some(*overflow_usage);
+                    turn.usage_complete = terminal && complete;
+                    self.settle_turn(turn, Some(&err));
+                }
                 return Err(err);
             }
         }
@@ -4349,7 +4357,7 @@ impl ResponsesWebSocketGateway {
                     &pending_keys,
                 )
                 .await
-                .map_err(|error| error.with_stream(lane.clone()))?;
+                .map_err(|error| error.with_stream(lane.clone()).with_turn_id(turn_id))?;
         }
         if kind == "response.created"
             && let Some(turn) = self.turns.get_mut(&turn_id)
@@ -4497,7 +4505,8 @@ impl ResponsesWebSocketGateway {
                     "overloaded_error",
                     "WebSocket response ownership budget is full",
                 )
-                .with_stream(lane.clone()));
+                .with_stream(lane.clone())
+                .with_turn_id(owner.turn_id));
             }
             while self.owners.len() >= self.slot_cap
                 || cost > self.byte_cap.saturating_sub(self.used_bytes)
@@ -4518,7 +4527,8 @@ impl ResponsesWebSocketGateway {
                 "overloaded_error",
                 "WebSocket response ownership budget is full",
             )
-            .with_stream(lane.clone()));
+            .with_stream(lane.clone())
+            .with_turn_id(owner.turn_id));
         }
         self.used_bytes = self.used_bytes.saturating_add(cost);
         self.recent.insert(recent_key, id.to_owned());
@@ -4597,7 +4607,8 @@ impl ResponsesWebSocketGateway {
                             "overloaded_error",
                             "WebSocket steering ownership budget is full",
                         )
-                        .with_stream(lane.clone()));
+                        .with_stream(lane.clone())
+                        .with_turn_id(turn_id));
                     }
                     turn.accepted_steers.insert(id.to_owned());
                     self.control_slots += 1;
@@ -5860,7 +5871,8 @@ impl ResponsesWebSocketGateway {
         for id in turn_ids {
             let lane = self.turns.get(&id).map(|turn| turn.lane.clone());
             let error = WebSocketError::new(502, "upstream_connection_closed", reason)
-                .with_stream(lane.clone().flatten());
+                .with_stream(lane.clone().flatten())
+                .with_turn_id(id);
             self.finish_turn(id, Some(&error));
             result.errors.push(error);
         }
@@ -5873,12 +5885,13 @@ impl ResponsesWebSocketGateway {
                     id.clone(),
                     owner.lane.clone(),
                     owner.terminal_delivery,
+                    owner.turn_id,
                 ))
             })
             .collect();
         self.recent
             .retain(|(connection, _), _| *connection != connection_id);
-        for (id, lane, terminal_delivery) in dead_owners {
+        for (id, lane, terminal_delivery, owner_turn_id) in dead_owners {
             if matches!(
                 terminal_delivery,
                 TerminalDelivery::ErrorAwaitingResponseFailed {
@@ -5888,7 +5901,8 @@ impl ResponsesWebSocketGateway {
                 result.errors.push(
                     WebSocketError::new(502, "upstream_connection_closed", reason)
                         .with_stream(lane)
-                        .with_response_id(&id),
+                        .with_response_id(&id)
+                        .with_turn_id(owner_turn_id),
                 );
             }
             self.collect_owner(Some(&id));
@@ -6872,8 +6886,9 @@ pub(crate) mod tests {
     pub(crate) fn install_direct_pricing() {
         use cc_lb_pricing::{
             CatalogSnapshot, CatalogStatus, NativePricingProvider, NativePricingRate, Pricing,
-            ProviderNativePricing, UsdPerMillion,
+            ProviderNativePricing, TierRate, UsdPerMillion,
         };
+        use std::collections::BTreeMap;
 
         let mut snapshot = CatalogSnapshot::empty_cost_disabled();
         snapshot.status = CatalogStatus::Ok;
@@ -6909,6 +6924,24 @@ pub(crate) mod tests {
                 },
             );
         }
+        snapshot.models.insert(
+            "ws-openai-priority-known".to_owned(),
+            Pricing {
+                model: "ws-openai-priority-known".to_owned(),
+                input_per_million_usd: UsdPerMillion::from_whole_usd(2),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(10),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
+                by_tier: BTreeMap::from([(
+                    "priority".to_owned(),
+                    TierRate {
+                        input_per_million_usd: UsdPerMillion::from_whole_usd(4),
+                        output_per_million_usd: UsdPerMillion::from_whole_usd(20),
+                    },
+                )]),
+                native: None,
+            },
+        );
         cc_lb_pricing::global_catalog().install_snapshot(snapshot);
     }
 
@@ -17952,6 +17985,351 @@ pub(crate) mod tests {
             assert_eq!(gw.used_bytes, 0);
             fixture
                 .assert_settled(&reservation_id, "ws-openai-known", expected_cost, 800, 400)
+                .await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ws_usage_budget_overflow_preserves_observed_priority_tier_for_immediate_settlement() {
+        let _guard = DIRECT_PRICING_LOCK.lock().await;
+        install_direct_pricing();
+
+        let expected_base_cost =
+            cc_lb_pricing::virtual_cost_micros_full_with_context_and_provider_writes(
+                "ws-openai-priority-known",
+                500,
+                200,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+            .total_micros;
+        let expected_priority_cost =
+            cc_lb_pricing::virtual_cost_micros_full_with_context_and_provider_writes(
+                "ws-openai-priority-known",
+                500,
+                200,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                Some("priority"),
+            )
+            .unwrap()
+            .total_micros;
+        assert!(expected_priority_cost > expected_base_cost);
+
+        let pool = WsRelayPoolSnapshot::default();
+
+        // Case A: Embedded live turn settles with observed `"priority"` multiplier when headroom is < 7 bytes.
+        {
+            let fixture = DirectAccountingFixture::new().await;
+            let reservation = fixture.reserve("ws-openai-priority-known");
+            let reservation_id = reservation.id().to_owned();
+            let mut gw = ResponsesWebSocketGateway::new(
+                fixture.lifecycle.clone(),
+                &fixture.auth,
+                HeaderMap::new(),
+                65_536,
+                8,
+            );
+            let mut turn =
+                make_synthetic_turn(&fixture, None, None, true, false, Some(false), None);
+            let padded_body = serde_json::json!({
+                "type": "response.create",
+                "model": "ws-openai-priority-known",
+                "store": false,
+                "input": "x".repeat(600),
+            });
+            turn.frame = Bytes::from(serde_json::to_vec(&padded_body).unwrap());
+            turn.body = Arc::new(padded_body);
+            turn.prepared.model = "ws-openai-priority-known".to_owned();
+            turn.prepared.reservation = Some(reservation);
+            turn.prepared.limit_engine = Some(fixture.engine.clone());
+            turn.upstream_id = Some(Uuid::nil());
+            turn.connection_id = Some(1);
+            let frame_charge = turn
+                .frame
+                .len()
+                .saturating_add(json_owned_bytes(&turn.body));
+            turn.charged_bytes = frame_charge;
+            gw.turns.insert(1, turn);
+            gw.next_turn_id = 1;
+            gw.used_bytes = frame_charge;
+            gw.lanes.insert(
+                None,
+                Lane {
+                    active: Some(1),
+                    ..Default::default()
+                },
+            );
+            gw.connections.insert(1, Uuid::nil());
+            gw.connection_oauth.insert(1, false);
+
+            let created = Bytes::from_static(
+                br#"{"type":"response.created","response":{"id":"resp_live_priority_overflow","object":"response","status":"in_progress","store":false}}"#,
+            );
+            gw.provider_message_with_pool_and_opcode(1, &created, false, &pool)
+                .await
+                .unwrap();
+            gw.byte_cap = gw.used_bytes + 4;
+
+            let completed = Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_live_priority_overflow",
+                        "object": "response",
+                        "status": "completed",
+                        "store": false,
+                        "service_tier": "priority",
+                        "usage": {"input_tokens": 500, "output_tokens": 200, "total_tokens": 700}
+                    }
+                }))
+                .unwrap(),
+            );
+            let Err(err) = gw
+                .provider_message_with_pool_and_opcode(1, &completed, false, &pool)
+                .await
+            else {
+                panic!("priority tier exceeding 4B remaining headroom must overflow");
+            };
+            assert_eq!(err.code, "overloaded_error");
+            assert_eq!(err.turn_id(), Some(1));
+            assert_eq!(err.response_id(), Some("resp_live_priority_overflow"));
+            let non_turn_used = owner_bytes(
+                "resp_live_priority_overflow",
+                gw.owners
+                    .get("resp_live_priority_overflow")
+                    .expect("owner retained for continuation"),
+            );
+            assert_eq!(gw.used_bytes, non_turn_used);
+            gw.connection_closed(1, "cleanup");
+            assert_eq!(gw.used_bytes, 0);
+            fixture
+                .assert_settled(
+                    &reservation_id,
+                    "ws-openai-priority-known",
+                    expected_priority_cost,
+                    500,
+                    200,
+                )
+                .await;
+        }
+
+        // Case B: Event-based OAuth turn preserves `sent_service_tier` fallback when placeholder `"default"` overflows 4B headroom.
+        {
+            use cc_lb_control::RequestEventBus as _;
+
+            let fixture = DirectAccountingFixture::new().await;
+            let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+            let mut events = bus.subscribe_lifecycle();
+            let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+            let observer =
+                LifecycleContext::new("turn-oauth-priority-overflow".to_owned(), bus, &clock);
+            observer.mark_authn_reached();
+            let mut turn = make_synthetic_turn(
+                &fixture,
+                Some(observer),
+                None,
+                true,
+                true,
+                Some(false),
+                None,
+            );
+            let padded_body = serde_json::json!({
+                "type": "response.create",
+                "model": "ws-openai-priority-known",
+                "store": false,
+                "service_tier": "priority",
+                "input": "x".repeat(600),
+            });
+            turn.frame = Bytes::from(serde_json::to_vec(&padded_body).unwrap());
+            turn.body = Arc::new(padded_body);
+            turn.sent_service_tier = Some("priority".to_owned());
+            turn.prepared.model = "ws-openai-priority-known".to_owned();
+            turn.upstream_id = Some(Uuid::nil());
+            turn.connection_id = Some(1);
+            let frame_charge = turn
+                .frame
+                .len()
+                .saturating_add(json_owned_bytes(&turn.body))
+                .saturating_add(sent_service_tier_bytes(turn.sent_service_tier.as_deref()));
+            turn.charged_bytes = frame_charge;
+            let mut gw = ResponsesWebSocketGateway::new(
+                fixture.lifecycle.clone(),
+                &fixture.auth,
+                HeaderMap::new(),
+                65_536,
+                8,
+            );
+            gw.turns.insert(1, turn);
+            gw.next_turn_id = 1;
+            gw.used_bytes = frame_charge;
+            gw.lanes.insert(
+                None,
+                Lane {
+                    active: Some(1),
+                    ..Default::default()
+                },
+            );
+            gw.connections.insert(1, Uuid::nil());
+            gw.connection_oauth.insert(1, true);
+            let created = Bytes::from_static(
+                br#"{"type":"response.created","response":{"id":"resp_obs_priority_overflow","object":"response","status":"in_progress","store":false,"service_tier":"auto"}}"#,
+            );
+            gw.provider_message_with_pool_and_opcode(1, &created, false, &pool)
+                .await
+                .unwrap();
+            gw.byte_cap = gw.used_bytes + 4;
+
+            let completed = Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_obs_priority_overflow",
+                        "object": "response",
+                        "status": "completed",
+                        "store": false,
+                        "service_tier": "default",
+                        "usage": {"input_tokens": 500, "output_tokens": 200, "total_tokens": 700}
+                    }
+                }))
+                .unwrap(),
+            );
+            let Err(err) = gw
+                .provider_message_with_pool_and_opcode(1, &completed, false, &pool)
+                .await
+            else {
+                panic!("placeholder default exceeding 4B headroom must overflow");
+            };
+            assert_eq!(err.code, "overloaded_error");
+            assert_eq!(err.turn_id(), Some(1));
+            gw.connection_closed(1, "cleanup");
+            assert_eq!(gw.used_bytes, 0);
+
+            let mut observed_tier = None;
+            while let Ok(event) = events.try_recv() {
+                if let LifecycleEvent::UsageObserved { usage, .. } = event {
+                    observed_tier = usage.service_tier;
+                }
+            }
+            assert_eq!(observed_tier.as_deref(), Some("priority"));
+        }
+
+        // Case C: Parked `PendingErrorTerminal` settles with observed `"priority"` multiplier when headroom is < 7 bytes.
+        {
+            let fixture = DirectAccountingFixture::new().await;
+            let reservation = fixture.reserve("ws-openai-priority-known");
+            let reservation_id = reservation.id().to_owned();
+            let mut gw = ResponsesWebSocketGateway::new(
+                fixture.lifecycle.clone(),
+                &fixture.auth,
+                HeaderMap::new(),
+                65_536,
+                8,
+            );
+            let mut turn =
+                make_synthetic_turn(&fixture, None, None, true, false, Some(false), None);
+            let padded_body = serde_json::json!({
+                "type": "response.create",
+                "model": "ws-openai-priority-known",
+                "store": false,
+                "input": "x".repeat(600),
+            });
+            turn.frame = Bytes::from(serde_json::to_vec(&padded_body).unwrap());
+            turn.body = Arc::new(padded_body);
+            turn.prepared.model = "ws-openai-priority-known".to_owned();
+            turn.prepared.reservation = Some(reservation);
+            turn.prepared.limit_engine = Some(fixture.engine.clone());
+            turn.upstream_id = Some(Uuid::nil());
+            turn.connection_id = Some(1);
+            let frame_charge = turn
+                .frame
+                .len()
+                .saturating_add(json_owned_bytes(&turn.body));
+            turn.charged_bytes = frame_charge;
+            gw.turns.insert(1, turn);
+            gw.next_turn_id = 1;
+            gw.used_bytes = frame_charge;
+            gw.lanes.insert(
+                None,
+                Lane {
+                    active: Some(1),
+                    ..Default::default()
+                },
+            );
+            gw.connections.insert(1, Uuid::nil());
+            gw.connection_oauth.insert(1, false);
+
+            let created = Bytes::from_static(
+                br#"{"type":"response.created","response":{"id":"resp_parked_priority_overflow","object":"response","status":"in_progress","store":false}}"#,
+            );
+            gw.provider_message_with_pool_and_opcode(1, &created, false, &pool)
+                .await
+                .unwrap();
+            let park_error = Bytes::from_static(
+                br#"{"type":"error","response":{"id":"resp_parked_priority_overflow","object":"response","status":"failed","store":false},"error":{"code":"upstream_error","message":"boom"}}"#,
+            );
+            gw.provider_message_with_pool_and_opcode(1, &park_error, false, &pool)
+                .await
+                .unwrap();
+            gw.byte_cap = gw.used_bytes + 4;
+
+            let delayed_failed = Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_parked_priority_overflow",
+                        "object": "response",
+                        "status": "failed",
+                        "store": false,
+                        "service_tier": "priority",
+                        "error": {"code": "upstream_error", "message": "boom"},
+                        "usage": {"input_tokens": 500, "output_tokens": 200, "total_tokens": 700}
+                    }
+                }))
+                .unwrap(),
+            );
+            let Err(err) = gw
+                .provider_message_with_pool_and_opcode(1, &delayed_failed, false, &pool)
+                .await
+            else {
+                panic!("parked priority overflow must fail closed");
+            };
+            assert_eq!(err.code, "overloaded_error");
+            assert_eq!(err.turn_id(), Some(1));
+            assert_eq!(err.response_id(), Some("resp_parked_priority_overflow"));
+            let non_turn_used = owner_bytes(
+                "resp_parked_priority_overflow",
+                gw.owners
+                    .get("resp_parked_priority_overflow")
+                    .expect("owner retained"),
+            );
+            assert_eq!(gw.used_bytes, non_turn_used);
+            gw.connection_closed(1, "cleanup");
+            assert_eq!(gw.used_bytes, 0);
+            fixture
+                .assert_settled(
+                    &reservation_id,
+                    "ws-openai-priority-known",
+                    expected_priority_cost,
+                    500,
+                    200,
+                )
                 .await;
         }
     }
