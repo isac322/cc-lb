@@ -415,7 +415,7 @@ pub(crate) async fn setup(s: &common::TestServer, base: &str, c: &reqwest::Clien
         .await;
         assert!(d.is_object());
     }
-    let body = json!({"name":"oauth-test","kind":"openai_oauth","base_url":base,"oauth_tokens":{"access_token":"test-access","refresh_token":"","expires_at_unix_secs":4102444800u64,"account_id":"acct-test","scopes":[],"never_refresh":true},"skip_preflight":true});
+    let body = json!({"name":"oauth-test","kind":"openai_oauth","base_url":base,"oauth_tokens":{"access_token":"test-access","refresh_token":"","expires_at_unix_secs":4102444800u64,"account_id":"acct-test","scopes":[],"never_refresh":true},"warmup_enabled":false,"skip_preflight":true});
     let (st, v, _) = admin(c, s, Method::POST, "/admin/v1/upstreams", Some(body), None).await;
     assert_eq!(st, 201, "{v}");
     v["id"].as_str().unwrap().to_owned()
@@ -566,6 +566,7 @@ async fn openai_oauth_chat_fanout_retries_all_choices_after_rate_limit() {
             "kind":"openai_oauth",
             "base_url":f.base,
             "oauth_tokens":{"access_token":"test-access-2","refresh_token":"","expires_at_unix_secs":4102444800u64,"account_id":"acct-test-2","scopes":[],"never_refresh":true},
+            "warmup_enabled":false,
             "skip_preflight":true
         })),
         None,
@@ -675,5 +676,646 @@ async fn openai_oauth_chat_completions_usage_contract() {
         let (input, output) = rows.last().copied().expect("chat usage row");
         assert_eq!(input, Some(expected_input), "{name}: {rows:?}");
         assert_eq!(output, Some(expected_output), "{name}: {rows:?}");
+    }
+}
+
+#[tokio::test]
+async fn openai_oauth_resolves_sent_service_tier_and_pricing_across_http_and_chat_and_preserves_api_key_tier()
+ {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let catalog_guard = common::lock_custom_catalog().await;
+
+    let catalog = json!({
+        "gpt-6.2-sol": {
+            "litellm_provider": "openai",
+            "input_cost_per_token": 0.000002,
+            "output_cost_per_token": 0.000008,
+            "input_cost_per_token_priority": 0.000004,
+            "output_cost_per_token_priority": 0.000016
+        }
+    });
+    let catalog_dir = tempfile::tempdir().expect("catalog dir");
+    let catalog_path = catalog_dir.path().join("catalog.json");
+    let catalog_json = catalog.to_string();
+    std::fs::write(&catalog_path, &catalog_json).expect("write catalog");
+
+    #[derive(Clone)]
+    struct TierTestFakeState {
+        rec: Arc<Mutex<Vec<(String, Value)>>>,
+        seq: Arc<AtomicUsize>,
+        catalog: Value,
+    }
+
+    let state_for_fake = TierTestFakeState {
+        rec: Arc::new(Mutex::new(Vec::new())),
+        seq: Arc::new(AtomicUsize::new(0)),
+        catalog: catalog.clone(),
+    };
+    let app = Router::new()
+        .fallback(move |State(st): State<TierTestFakeState>, req: Request| async move {
+            let method = req.method().clone();
+            let path = req.uri().path().to_owned();
+            if path == "/catalog.json" {
+                return Json(st.catalog).into_response();
+            }
+            let body = to_bytes(req.into_body(), 2_000_000).await.unwrap();
+            let json_body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            if path.ends_with("/models") {
+                return Json(json!({
+                    "data": [{"id": "gpt-6.2-sol", "object": "model"}],
+                    "models": [{"slug": "gpt-6.2-sol", "display_name": "GPT 6.2", "description": "test", "capabilities": {}}]
+                }))
+                .into_response();
+            }
+            if method != Method::POST
+                || (!path.ends_with("/codex/responses") && !path.ends_with("/v1/responses"))
+            {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            st.rec.lock().unwrap().push((path.clone(), json_body.clone()));
+            let resp_id = format!("resp_tier_test_{}", st.seq.fetch_add(1, Ordering::SeqCst));
+            if path.ends_with("/v1/responses")
+                && json_body.get("stream").and_then(Value::as_bool) != Some(true)
+            {
+                return Json(json!({
+                    "id": resp_id,
+                    "object": "response",
+                    "status": "completed",
+                    "service_tier": "default",
+                    "usage": {"input_tokens": 1000, "output_tokens": 500, "total_tokens": 1500},
+                    "output": [{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}]
+                }))
+                .into_response();
+            }
+            let created_ev = json!({
+                "type": "response.created",
+                "sequence_number": 0,
+                "response": {
+                    "id": resp_id,
+                    "object": "response",
+                    "status": "in_progress",
+                    "service_tier": "auto",
+                    "output": []
+                }
+            });
+            let completed_ev = json!({
+                "type": "response.completed",
+                "sequence_number": 4,
+                "response": {
+                    "id": resp_id,
+                    "object": "response",
+                    "status": "completed",
+                    "service_tier": "default",
+                    "usage": {"input_tokens": 1000, "output_tokens": 500, "total_tokens": 1500},
+                    "output": []
+                }
+            });
+            let sse = format!(
+                "event: response.created\ndata: {created_ev}\n\n\
+event: response.output_item.added\ndata: {{\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}}}\n\n\
+event: response.output_text.delta\ndata: {{\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"ok\"}}\n\n\
+event: response.output_item.done\ndata: {{\"type\":\"response.output_item.done\",\"sequence_number\":3,\"output_index\":0,\"item\":{{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}}]}}}}\n\n\
+event: response.completed\ndata: {completed_ev}\n\n"
+            );
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(Body::from(sse))
+                .unwrap()
+        })
+        .with_state(state_for_fake);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake_addr = listener.local_addr().unwrap();
+    let _fake_task = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let extra_toml = format!(
+        "[price_catalog]\nurl = \"http://{fake_addr}/catalog.json\"\ncache_path = \"{}\"\n",
+        catalog_path.display()
+    );
+    let server = common::spawn_inprocess_server_with_custom_catalog(
+        &extra_toml,
+        Vec::new(),
+        fake_anthropic::AppConfig::default(),
+        1 << 20,
+        &catalog_guard,
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if cc_lb_pricing::global_catalog().current().raw_json == catalog_json.as_bytes() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "custom catalog installation timed out"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let client = reqwest::Client::new();
+    let admin_get = |path: String| {
+        let client = &client;
+        let addr = server.admin_addr;
+        let token = server.admin_token;
+        async move {
+            let res = client
+                .get(format!("http://{addr}{path}"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap();
+            let status = res.status();
+            let etag = res
+                .headers()
+                .get("etag")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            let json: Value = res.json().await.unwrap();
+            (status, json, etag)
+        }
+    };
+
+    // Disable seeded default upstreams first.
+    let (st, ups, _) = admin_get("/admin/v1/upstreams".to_owned()).await;
+    assert_eq!(st, 200);
+    for u in ups["upstreams"].as_array().unwrap() {
+        let id = u["id"].as_str().unwrap();
+        let (_, _, etag) = admin_get(format!("/admin/v1/upstreams/{id}")).await;
+        let res = client
+            .patch(format!(
+                "http://{}/admin/v1/upstreams/{id}",
+                server.admin_addr
+            ))
+            .bearer_auth(server.admin_token)
+            .header("if-match", etag.unwrap())
+            .json(&json!({ "enabled": false }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+    }
+
+    // Create OAuth upstream pointing at /codex.
+    let oauth_res = client
+        .post(format!("http://{}/admin/v1/upstreams", server.admin_addr))
+        .bearer_auth(server.admin_token)
+        .json(&json!({
+            "name": "oauth-tier-test",
+            "kind": "openai_oauth",
+            "base_url": format!("http://{fake_addr}/codex"),
+            "oauth_tokens": {
+                "access_token": "test-access",
+                "refresh_token": "",
+                "expires_at_unix_secs": 4102444800u64,
+                "account_id": "acct-tier-test",
+                "scopes": [],
+                "never_refresh": true
+            },
+            "warmup_enabled": false,
+            "skip_preflight": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    let oauth_status = oauth_res.status();
+    let oauth_body: Value = oauth_res.json().await.unwrap();
+    assert_eq!(oauth_status, 201, "{oauth_body}");
+    let oauth_id = oauth_body["id"].as_str().unwrap().to_owned();
+
+    let key = &server.managed_key.plaintext;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("sqlite://{}", server.sqlite_path.display()))
+        .await
+        .unwrap();
+
+    let send_and_wait = |idx: usize, path: &str, payload: Value| {
+        let client = client.clone();
+        let proxy_addr = server.proxy_addr;
+        let pool = pool.clone();
+        let key = key.clone();
+        let path = path.to_owned();
+        async move {
+            let res = client
+                .post(format!("http://{proxy_addr}{path}"))
+                .bearer_auth(&key)
+                .json(&payload)
+                .send()
+                .await
+                .unwrap();
+            let status = res.status();
+            let body = res.text().await.unwrap();
+            assert_eq!(status, 200, "case {idx} {path}: {body}");
+
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let rows = sqlx::query(
+                    "SELECT event_id, service_tier, list_cost_usd_micros \
+                     FROM request_events_v1 \
+                     WHERE model = 'gpt-6.2-sol' AND list_status = 200 \
+                     ORDER BY id ASC",
+                )
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+                if rows.len() > idx {
+                    let row = &rows[idx];
+                    return (
+                        row.get::<String, _>("event_id"),
+                        row.get::<Option<String>, _>("service_tier"),
+                        row.get::<Option<i64>, _>("list_cost_usd_micros"),
+                    );
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "timed out waiting for row {idx}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    };
+
+    let cases: [(&str, Value, &str); 10] = [
+        (
+            "/openai/v1/responses",
+            json!({"model":"gpt-6.2-sol","input":"hi","stream":true,"service_tier":"priority"}),
+            "priority",
+        ),
+        (
+            "/openai/v1/responses",
+            json!({"model":"gpt-6.2-sol","input":"hi","stream":true,"service_tier":"ultrafast"}),
+            "ultrafast",
+        ),
+        (
+            "/openai/v1/responses",
+            json!({"model":"gpt-6.2-sol","input":"hi","stream":true,"service_tier":"default"}),
+            "default",
+        ),
+        (
+            "/openai/v1/responses",
+            json!({"model":"gpt-6.2-sol","input":"hi","stream":false,"service_tier":"priority"}),
+            "priority",
+        ),
+        (
+            "/openai/v1/responses",
+            json!({"model":"gpt-6.2-sol","input":"hi","stream":false,"service_tier":"flex"}),
+            "default",
+        ),
+        (
+            "/openai/v1/responses",
+            json!({"model":"gpt-6.2-sol","input":"hi","stream":true}),
+            "default",
+        ),
+        (
+            "/openai/v1/chat/completions",
+            json!({"model":"gpt-6.2-sol","messages":[{"role":"user","content":"hi"}],"stream":false,"service_tier":"priority"}),
+            "priority",
+        ),
+        (
+            "/openai/v1/chat/completions",
+            json!({"model":"gpt-6.2-sol","messages":[{"role":"user","content":"hi"}],"stream":true,"service_tier":"priority"}),
+            "priority",
+        ),
+        (
+            "/openai/v1/chat/completions",
+            json!({"model":"gpt-6.2-sol","messages":[{"role":"user","content":"hi"}],"stream":false,"n":2,"service_tier":"priority"}),
+            "priority",
+        ),
+        (
+            "/openai/v1/chat/completions",
+            json!({"model":"gpt-6.2-sol","messages":[{"role":"user","content":"hi"}],"stream":false,"service_tier":"flex"}),
+            "default",
+        ),
+    ];
+
+    let mut costs_by_idx = Vec::new();
+    let mut event_ids = Vec::new();
+    for (idx, (path, payload, expected_tier)) in cases.iter().enumerate() {
+        let (event_id, db_tier, cost) = send_and_wait(idx, path, payload.clone()).await;
+        assert_eq!(
+            db_tier.as_deref(),
+            Some(*expected_tier),
+            "SQLite case {idx} {path}"
+        );
+
+        // Also verify Admin detail API reflects the exact resolved service_tier and cost.
+        let (detail_st, detail, _) =
+            admin_get(format!("/admin/v1/events/detail?id={event_id}")).await;
+        assert_eq!(detail_st, 200);
+        assert_eq!(
+            detail["service_tier"].as_str(),
+            Some(*expected_tier),
+            "Admin detail case {idx} {path}: {detail}"
+        );
+        costs_by_idx.push(cost);
+        event_ids.push((event_id, *expected_tier));
+    }
+
+    // Check Admin recent API exposes the non-default and default service_tier values accurately.
+    let (recent_st, recent, _) = admin_get("/admin/v1/events/recent?limit=50".to_owned()).await;
+    assert_eq!(recent_st, 200);
+    let recent_items = recent["events"].as_array().unwrap();
+    for (event_id, expected_tier) in &event_ids {
+        let found = recent_items
+            .iter()
+            .find(|item| item["event_id"].as_str() == Some(event_id.as_str()))
+            .unwrap_or_else(|| panic!("missing {event_id} in recent events: {recent}"));
+        assert_eq!(found["service_tier"].as_str(), Some(*expected_tier));
+    }
+
+    // 1000 input + 500 output:
+    // default cost = 1000 * $2/M + 500 * $8/M = 2000 + 4000 = 6000 micros
+    // priority cost = 1000 * $4/M + 500 * $16/M = 4000 + 8000 = 12000 micros
+    assert_eq!(costs_by_idx[2], Some(6_000), "default base cost");
+    assert_eq!(costs_by_idx[0], Some(12_000), "priority cost");
+    assert!(
+        costs_by_idx[0].unwrap() > costs_by_idx[2].unwrap(),
+        "priority pricing must exceed default pricing: {:?}",
+        costs_by_idx
+    );
+
+    // Control check: switch to an openai_api_key upstream that returns service_tier:"default"
+    // even when client requests "priority". Upstream response MUST remain authoritative!
+    let (_, _, oauth_etag) = admin_get(format!("/admin/v1/upstreams/{oauth_id}")).await;
+    let disable_res = client
+        .patch(format!(
+            "http://{}/admin/v1/upstreams/{oauth_id}",
+            server.admin_addr
+        ))
+        .bearer_auth(server.admin_token)
+        .header("if-match", oauth_etag.unwrap())
+        .json(&json!({ "enabled": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(disable_res.status(), 200);
+
+    let apikey_res = client
+        .post(format!("http://{}/admin/v1/upstreams", server.admin_addr))
+        .bearer_auth(server.admin_token)
+        .json(&json!({
+            "name": "apikey-tier-control",
+            "kind": "openai_api_key",
+            "base_url": format!("http://{fake_addr}"),
+            "api_key_value": "sk-test-control",
+            "skip_preflight": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(apikey_res.status(), 201);
+
+    let (api_stream_id, api_key_stream_tier, api_key_stream_cost) = send_and_wait(
+        cases.len(),
+        "/openai/v1/responses",
+        json!({"model":"gpt-6.2-sol","input":"hi","stream":true,"store":false,"service_tier":"priority"}),
+    )
+    .await;
+    assert_eq!(
+        api_key_stream_tier.as_deref(),
+        Some("default"),
+        "openai_api_key streaming upstream response must not be overridden by sent tier (id={api_stream_id})"
+    );
+    assert_eq!(api_key_stream_cost, Some(6_000));
+
+    let (api_json_id, api_key_json_tier, api_key_json_cost) = send_and_wait(
+        cases.len() + 1,
+        "/openai/v1/responses",
+        json!({"model":"gpt-6.2-sol","input":"hi","stream":false,"store":false,"service_tier":"priority"}),
+    )
+    .await;
+    assert_eq!(
+        api_key_json_tier.as_deref(),
+        Some("default"),
+        "openai_api_key non-stream upstream response must not be overridden by sent tier (id={api_json_id})"
+    );
+    assert_eq!(api_key_json_cost, Some(6_000));
+}
+
+#[tokio::test]
+async fn openai_oauth_chat_fanout_prices_each_choice_independently_regardless_of_order() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let catalog_guard = common::lock_custom_catalog().await;
+
+    let catalog = json!({
+        "gpt-6.2-sol": {
+            "litellm_provider": "openai",
+            "input_cost_per_token": 0.000002,
+            "output_cost_per_token": 0.000008,
+            "input_cost_per_token_priority": 0.000004,
+            "output_cost_per_token_priority": 0.000016
+        }
+    });
+    let catalog_dir = tempfile::tempdir().expect("catalog dir");
+    let catalog_path = catalog_dir.path().join("catalog.json");
+    let catalog_json = catalog.to_string();
+    std::fs::write(&catalog_path, &catalog_json).expect("write catalog");
+
+    #[derive(Clone)]
+    struct MixedFanoutFakeState {
+        seq: Arc<AtomicUsize>,
+        catalog: Value,
+    }
+
+    let state = MixedFanoutFakeState {
+        seq: Arc::new(AtomicUsize::new(0)),
+        catalog: catalog.clone(),
+    };
+    let app = Router::new()
+        .fallback(
+            move |State(st): State<MixedFanoutFakeState>, req: Request| async move {
+                let method = req.method().clone();
+                let path = req.uri().path().to_owned();
+                if path == "/catalog.json" {
+                    return Json(st.catalog).into_response();
+                }
+                let body = to_bytes(req.into_body(), 2_000_000).await.unwrap();
+                if path.ends_with("/models") {
+                    return Json(json!({
+                        "data": [{"id": "gpt-6.2-sol", "object": "model"}],
+                        "models": [{"slug": "gpt-6.2-sol", "display_name": "GPT 6.2", "description": "test", "capabilities": {}}]
+                    }))
+                    .into_response();
+                }
+                if method != Method::POST || path != "/codex/responses" {
+                    return StatusCode::NOT_FOUND.into_response();
+                }
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                if parsed.get("model").and_then(Value::as_str) != Some("gpt-6.2-sol") {
+                    return StatusCode::NOT_FOUND.into_response();
+                }
+                let call_idx = st.seq.fetch_add(1, Ordering::SeqCst);
+                let resp_id = format!("resp_fanout_mix_{call_idx}");
+                // Call sequence (n=2 twice):
+                // req 1: call 0 -> "default", call 1 -> "priority"
+                // req 2: call 2 -> "priority", call 3 -> "default"
+                let response_tier = match call_idx % 4 {
+                    1 | 2 => "priority",
+                    _ => "default",
+                };
+                let sse = format!(
+                    "event: response.created\ndata: {{\"type\":\"response.created\",\"sequence_number\":0,\"response\":{{\"id\":\"{resp_id}\",\"object\":\"response\",\"status\":\"in_progress\",\"service_tier\":\"auto\",\"output\":[]}}}}\n\n\
+event: response.output_item.added\ndata: {{\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}}}\n\n\
+event: response.output_text.delta\ndata: {{\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"ok\"}}\n\n\
+event: response.output_item.done\ndata: {{\"type\":\"response.output_item.done\",\"sequence_number\":3,\"output_index\":0,\"item\":{{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}}]}}}}\n\n\
+event: response.completed\ndata: {{\"type\":\"response.completed\",\"sequence_number\":4,\"response\":{{\"id\":\"{resp_id}\",\"object\":\"response\",\"status\":\"completed\",\"service_tier\":\"{response_tier}\",\"usage\":{{\"input_tokens\":1000,\"output_tokens\":500,\"total_tokens\":1500}},\"output\":[]}}}}\n\n"
+                );
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(sse))
+                    .unwrap()
+            },
+        )
+        .with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake_addr = listener.local_addr().unwrap();
+    let _fake_task = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let extra_toml = format!(
+        "[price_catalog]\nurl = \"http://{fake_addr}/catalog.json\"\ncache_path = \"{}\"\n",
+        catalog_path.display()
+    );
+    let server = common::spawn_inprocess_server_with_custom_catalog(
+        &extra_toml,
+        Vec::new(),
+        fake_anthropic::AppConfig::default(),
+        1 << 20,
+        &catalog_guard,
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if cc_lb_pricing::global_catalog().current().raw_json == catalog_json.as_bytes() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let client = reqwest::Client::new();
+    let ups: Value = client
+        .get(format!("http://{}/admin/v1/upstreams", server.admin_addr))
+        .bearer_auth(server.admin_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for u in ups["upstreams"].as_array().unwrap() {
+        let id = u["id"].as_str().unwrap();
+        let detail = client
+            .get(format!(
+                "http://{}/admin/v1/upstreams/{id}",
+                server.admin_addr
+            ))
+            .bearer_auth(server.admin_token)
+            .send()
+            .await
+            .unwrap();
+        let etag = detail
+            .headers()
+            .get("etag")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let res = client
+            .patch(format!(
+                "http://{}/admin/v1/upstreams/{id}",
+                server.admin_addr
+            ))
+            .bearer_auth(server.admin_token)
+            .header("if-match", etag)
+            .json(&json!({ "enabled": false }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+    }
+
+    let oauth_res = client
+        .post(format!("http://{}/admin/v1/upstreams", server.admin_addr))
+        .bearer_auth(server.admin_token)
+        .json(&json!({
+            "name": "oauth-mixed-fanout",
+            "kind": "openai_oauth",
+            "base_url": format!("http://{fake_addr}/codex"),
+            "oauth_tokens": {
+                "access_token": "test-access",
+                "refresh_token": "",
+                "expires_at_unix_secs": 4102444800u64,
+                "account_id": "acct-fanout",
+                "scopes": [],
+                "never_refresh": true
+            },
+            "warmup_enabled": false,
+            "skip_preflight": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oauth_res.status(), 201);
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("sqlite://{}", server.sqlite_path.display()))
+        .await
+        .unwrap();
+
+    for idx in 0..2_usize {
+        let res = client
+            .post(format!(
+                "http://{}/openai/v1/chat/completions",
+                server.proxy_addr
+            ))
+            .bearer_auth(&server.managed_key.plaintext)
+            .json(&json!({
+                "model": "gpt-6.2-sol",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": false,
+                "n": 2,
+                "service_tier": "default"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+
+        let wait_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let rows = sqlx::query(
+                "SELECT service_tier, list_cost_usd_micros \
+                 FROM request_events_v1 \
+                 WHERE model = 'gpt-6.2-sol' AND list_status = 200 \
+                 ORDER BY id ASC",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            if rows.len() > idx
+                && rows[idx]
+                    .get::<Option<i64>, _>("list_cost_usd_micros")
+                    .is_some()
+            {
+                let tier: Option<String> = rows[idx].get("service_tier");
+                let cost: Option<i64> = rows[idx].get("list_cost_usd_micros");
+                assert_eq!(
+                    tier.as_deref(),
+                    Some("priority"),
+                    "fanout request {idx} must report deterministic non-default tier"
+                );
+                // Choice default(1000,500) = 6000 + Choice priority(1000,500) = 12000 => 18000 micros
+                assert_eq!(
+                    cost,
+                    Some(18_000),
+                    "fanout request {idx} must price each call independently regardless of choice order"
+                );
+                break;
+            }
+            assert!(tokio::time::Instant::now() < wait_deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }

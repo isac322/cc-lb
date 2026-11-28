@@ -134,6 +134,11 @@ pub(crate) async fn collect_body(body: Body, cap: usize) -> Result<Bytes, Collec
     collect_body_with_timing(body, cap, None).await
 }
 
+pub(crate) struct AggregatedResponse {
+    pub(crate) response: Response<Body>,
+    pub(crate) observed_usage: Option<crate::usage_parser::UsageCounts>,
+}
+
 /// Aggregate a Responses SSE body into one public Response JSON body.
 ///
 /// The upstream status is retained for non-SSE error bodies; an SSE terminal
@@ -144,14 +149,15 @@ pub(crate) async fn aggregate_response(
     echo_metadata: Option<Value>,
     cap: usize,
     mut timing: Option<&mut CompatBodyTiming>,
-) -> Result<Response<Body>, CollectError> {
+    tier_policy: crate::usage_parser::ServiceTierMergePolicy,
+) -> Result<AggregatedResponse, CollectError> {
     let (parts, body) = response.into_parts();
     let status = parts.status;
     let headers = parts.headers;
     let body = collect_body_with_timing(body, cap, timing.as_deref_mut()).await?;
 
     let process_started_at = timing.as_ref().map(|_| std::time::Instant::now());
-    let aggregated = finish_aggregate_response(status, &headers, &body, echo_metadata);
+    let aggregated = finish_aggregate_response(status, &headers, &body, echo_metadata, tier_policy);
     if let (Some(stats), Some(started_at)) = (timing, process_started_at) {
         stats.process_started = true;
         stats.process_elapsed = stats.process_elapsed.saturating_add(started_at.elapsed());
@@ -164,18 +170,26 @@ fn finish_aggregate_response(
     headers: &HeaderMap,
     body: &Bytes,
     echo_metadata: Option<Value>,
-) -> Result<Response<Body>, CollectError> {
+    tier_policy: crate::usage_parser::ServiceTierMergePolicy,
+) -> Result<AggregatedResponse, CollectError> {
     if !is_sse_content_type(headers) {
         if !status.is_success()
             && let Some(public) =
                 openai_compat::response::public_error_from_detail(status.as_u16(), body)
         {
-            return Ok(json_response(status, public));
+            return Ok(AggregatedResponse {
+                response: json_response(status, public),
+                observed_usage: None,
+            });
         }
-        return Ok(json_response(status, body.to_vec()));
+        return Ok(AggregatedResponse {
+            response: json_response(status, body.to_vec()),
+            observed_usage: None,
+        });
     }
 
     let mut aggregator = openai_compat::response::SseAggregator::new(echo_metadata);
+    let mut pre_terminal_tier = crate::usage_parser::UsageCounts::default();
     for payload in sse_payloads(body) {
         if payload == b"[DONE]" {
             continue;
@@ -183,17 +197,59 @@ fn finish_aggregate_response(
         let Ok(event) = sonic_rs::from_slice::<Value>(&payload) else {
             continue;
         };
+        if event
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|event_type| !openai_compat::response::drop_sse_event(event_type))
+        {
+            crate::usage_parser::accumulate_sse_usage_value_for_shape_with_policy(
+                &event,
+                None,
+                &mut pre_terminal_tier,
+                crate::provider_capability::UsageShape::OpenaiResponses,
+                tier_policy,
+            );
+        }
         aggregator.push(&event);
+        if aggregator.has_terminal() {
+            break;
+        }
     }
     match aggregator.finish() {
         openai_compat::response::AggregateOutcome::Response(value) => {
             let body = serde_json::to_vec(&value).map_err(|_| CollectError::BodyRead)?;
-            Ok(json_response(StatusCode::OK, body))
+            let mut observed =
+                crate::usage_parser::observe_non_stream_json_value_for_shape_with_policy(
+                    &value,
+                    crate::provider_capability::UsageShape::OpenaiResponses,
+                    tier_policy,
+                )
+                .usage;
+            if observed.present {
+                if tier_policy == crate::usage_parser::ServiceTierMergePolicy::OpenaiOauth {
+                    crate::usage_parser::preserve_prior_openai_oauth_service_tier(
+                        Some(&pre_terminal_tier),
+                        &mut observed,
+                    );
+                } else if observed.service_tier.is_none() {
+                    observed.service_tier = pre_terminal_tier.service_tier;
+                    observed.service_tier_source = pre_terminal_tier.service_tier_source;
+                }
+            }
+            Ok(AggregatedResponse {
+                response: json_response(StatusCode::OK, body),
+                observed_usage: observed.present.then_some(observed),
+            })
         }
-        openai_compat::response::AggregateOutcome::Error { status, body } => Ok(json_response(
-            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-            body,
-        )),
+        openai_compat::response::AggregateOutcome::Error { status, body } => {
+            Ok(AggregatedResponse {
+                response: json_response(
+                    StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+                    body,
+                ),
+                observed_usage: None,
+            })
+        }
         openai_compat::response::AggregateOutcome::Truncated => Err(CollectError::IncompleteStream),
     }
 }
@@ -916,5 +972,117 @@ data: [DONE]\r\n\r\n";
             .to_bytes();
         let value: Value = sonic_rs::from_slice(&body).expect("error JSON");
         assert_eq!(value["error"]["code"], "model_not_found");
+    }
+
+    #[tokio::test]
+    async fn aggregate_response_preserves_earlier_oauth_priority_when_terminal_event_is_default_without_mutating_body()
+     {
+        use crate::usage_parser::ServiceTierMergePolicy;
+
+        let sse = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_agg_prio\",\"object\":\"response\",\"status\":\"in_progress\",\"service_tier\":\"auto\"}}\n\n",
+            "data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_agg_prio\",\"object\":\"response\",\"status\":\"in_progress\",\"service_tier\":\"priority\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_agg_prio\",\"object\":\"response\",\"status\":\"completed\",\"service_tier\":\"default\",\"usage\":{\"input_tokens\":10,\"output_tokens\":8,\"total_tokens\":18}}}\n\n",
+        );
+        let response = Response::builder()
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(Body::from(sse))
+            .expect("response");
+        let AggregatedResponse {
+            response: aggregated,
+            observed_usage,
+        } = aggregate_response(
+            response,
+            None,
+            65_536,
+            None,
+            ServiceTierMergePolicy::OpenaiOauth,
+        )
+        .await
+        .expect("aggregates");
+        let usage = observed_usage.expect("observed usage");
+        assert_eq!(usage.service_tier.as_deref(), Some("priority"));
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 8);
+
+        let body = aggregated
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let client_json: Value = sonic_rs::from_slice(&body).expect("client JSON");
+        assert_eq!(
+            client_json["service_tier"].as_str(),
+            Some("default"),
+            "client-visible aggregated response body must remain untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregate_response_stops_accounting_at_first_terminal_frame_matching_client_body() {
+        use crate::usage_parser::ServiceTierMergePolicy;
+
+        let sse = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_two_terminals\",\"object\":\"response\",\"status\":\"in_progress\",\"service_tier\":\"priority\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_two_terminals\",\"object\":\"response\",\"status\":\"completed\",\"service_tier\":\"default\",\"usage\":{\"input_tokens\":10,\"output_tokens\":8,\"total_tokens\":18}}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_two_terminals\",\"object\":\"response\",\"status\":\"completed\",\"service_tier\":\"flex\",\"usage\":{\"input_tokens\":10,\"output_tokens\":30,\"total_tokens\":40}}}\n\n",
+        );
+        let response = Response::builder()
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(Body::from(sse))
+            .expect("response");
+        let AggregatedResponse {
+            response: aggregated,
+            observed_usage,
+        } = aggregate_response(
+            response,
+            None,
+            65_536,
+            None,
+            ServiceTierMergePolicy::OpenaiOauth,
+        )
+        .await
+        .expect("aggregates");
+        let usage = observed_usage.expect("observed usage");
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 8);
+        assert_eq!(usage.service_tier.as_deref(), Some("priority"));
+
+        let body = aggregated
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let client_json: Value = sonic_rs::from_slice(&body).expect("client JSON");
+        assert_eq!(client_json["usage"]["output_tokens"].as_u64(), Some(8));
+    }
+
+    #[tokio::test]
+    async fn aggregate_response_preserves_unknown_usage_when_terminal_usage_is_malformed() {
+        use crate::usage_parser::ServiceTierMergePolicy;
+
+        let sse = concat!(
+            "data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_bad_usage\",\"object\":\"response\",\"status\":\"in_progress\",\"service_tier\":\"priority\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_bad_usage\",\"object\":\"response\",\"status\":\"completed\",\"service_tier\":\"default\",\"usage\":\"unavailable\"}}\n\n",
+        );
+        let response = Response::builder()
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(Body::from(sse))
+            .expect("response");
+        let AggregatedResponse { observed_usage, .. } = aggregate_response(
+            response,
+            None,
+            65_536,
+            None,
+            ServiceTierMergePolicy::OpenaiOauth,
+        )
+        .await
+        .expect("aggregates");
+        assert!(
+            observed_usage.is_none(),
+            "malformed scalar usage in terminal response must remain unbillable/unknown"
+        );
     }
 }

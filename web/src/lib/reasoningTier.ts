@@ -38,18 +38,22 @@ export function budgetToTier(budget: number | null | undefined): ReasoningTier {
   return 'max';
 }
 
-/** Service-tier badge text: the raw tier verbatim, or null when it should be hidden (standard / unspecified / absent). */
+const HIDDEN_SERVICE_TIERS = new Set([
+  'standard',
+  'standard_only',
+  'unspecified',
+  'default',
+  'auto',
+]);
+
+/** Service-tier badge text: the trimmed tier verbatim, or null when it is a default/base/absent tier. */
 export function serviceTierBadgeText(
   tier: string | null | undefined,
 ): string | null {
-  if (
-    tier == null ||
-    tier === '' ||
-    tier === 'standard' ||
-    tier === 'unspecified'
-  )
-    return null;
-  return tier;
+  const trimmed = tier?.trim();
+  if (!trimmed) return null;
+  if (HIDDEN_SERVICE_TIERS.has(trimmed.toLowerCase())) return null;
+  return trimmed;
 }
 
 /** Badge text combining requested reasoning effort/tier with actual thinking tokens used. */

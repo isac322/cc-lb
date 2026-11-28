@@ -1151,12 +1151,35 @@ pub(crate) fn sse_data(frame: &[u8]) -> Option<Vec<u8>> {
     (!data.is_empty()).then_some(data)
 }
 
-/// Extracts and returns Responses-shaped usage from a complete SSE body.
+/// Responses usage and service tier extracted from Responses SSE events.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ResponsesSseUsage {
+    pub(crate) usage: Value,
+    pub(crate) service_tier: Option<String>,
+    pub(crate) service_tier_source: crate::usage_parser::ServiceTierSource,
+}
+
+/// Extracts and returns Responses-shaped usage (plus latest envelope
+/// `service_tier`) from a complete SSE body.
 ///
 /// This preserves the provider usage shape so lifecycle accounting can parse it
 /// with the Responses usage parser before chat-shape conversion.
-pub(crate) fn responses_usage_from_sse(body: &[u8]) -> Option<Value> {
+#[cfg(test)]
+pub(crate) fn responses_usage_from_sse(body: &[u8]) -> Option<ResponsesSseUsage> {
+    responses_usage_from_sse_with_policy(
+        body,
+        crate::usage_parser::ServiceTierMergePolicy::OpenaiOauth,
+    )
+}
+
+/// Extracts Responses usage and resolved `service_tier` from SSE under the requested merge policy.
+pub(crate) fn responses_usage_from_sse_with_policy(
+    body: &[u8],
+    policy: crate::usage_parser::ServiceTierMergePolicy,
+) -> Option<ResponsesSseUsage> {
     let mut total = None;
+    let mut service_tier: Option<String> = None;
+    let mut service_tier_source = crate::usage_parser::ServiceTierSource::None;
     for payload in sse_payloads(body) {
         if payload == b"[DONE]" {
             continue;
@@ -1164,32 +1187,47 @@ pub(crate) fn responses_usage_from_sse(body: &[u8]) -> Option<Value> {
         let Ok(event) = sonic_rs::from_slice::<Value>(&payload) else {
             continue;
         };
-        let Some(usage) = event
+        if let Some(usage) = event
             .get("response")
             .and_then(|response| response.get("usage"))
-        else {
-            continue;
-        };
-        match total.as_mut() {
-            Some(existing) => add_responses_usage(existing, usage),
-            None => total = Some(usage.clone()),
+        {
+            if let Some(tier) = crate::usage_parser::service_tier_from_object(usage) {
+                crate::usage_parser::merge_service_tier_slot(
+                    &mut service_tier,
+                    &mut service_tier_source,
+                    tier,
+                    crate::usage_parser::ServiceTierSource::Usage,
+                    policy,
+                );
+            }
+            if let Some(tier) = crate::usage_parser::service_tier_from_envelope(&event) {
+                crate::usage_parser::merge_service_tier_slot(
+                    &mut service_tier,
+                    &mut service_tier_source,
+                    tier,
+                    crate::usage_parser::ServiceTierSource::Envelope,
+                    policy,
+                );
+            }
+            match total.as_mut() {
+                Some(existing) => add_responses_usage(existing, usage),
+                None => total = Some(usage.clone()),
+            }
+        } else if let Some(tier) = crate::usage_parser::service_tier_from_envelope(&event) {
+            crate::usage_parser::merge_service_tier_slot(
+                &mut service_tier,
+                &mut service_tier_source,
+                tier,
+                crate::usage_parser::ServiceTierSource::Envelope,
+                policy,
+            );
         }
     }
-    total
-}
-/// Sums raw Responses usage across fan-out SSE bodies.
-pub(crate) fn responses_usage_from_sse_bodies(bodies: &[&[u8]]) -> Option<Value> {
-    let mut total = None;
-    for body in bodies {
-        let Some(usage) = responses_usage_from_sse(body) else {
-            continue;
-        };
-        match total.as_mut() {
-            Some(existing) => add_responses_usage(existing, &usage),
-            None => total = Some(usage),
-        }
-    }
-    total
+    total.map(|usage| ResponsesSseUsage {
+        usage,
+        service_tier,
+        service_tier_source,
+    })
 }
 
 fn add_responses_usage(total: &mut Value, usage: &Value) {
@@ -1578,21 +1616,28 @@ data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\"
 
     #[test]
     fn responses_usage_extracts_provider_shape() {
-        let body = b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":4,\"output_tokens\":3,\"total_tokens\":7,\"input_tokens_details\":{\"cached_tokens\":2},\"output_tokens_details\":{\"reasoning_tokens\":1}}}}\n\n";
-        let usage = responses_usage_from_sse(body).expect("usage");
-        assert_eq!(usage["input_tokens"], 4);
-        assert_eq!(usage["output_tokens"], 3);
-        assert_eq!(usage["input_tokens_details"]["cached_tokens"], 2);
+        let body = b"data: {\"type\":\"response.created\",\"response\":{\"service_tier\":\"auto\",\"usage\":null}}\n\n\
+data: {\"type\":\"response.completed\",\"response\":{\"service_tier\":\"priority\",\"usage\":{\"input_tokens\":4,\"output_tokens\":3,\"total_tokens\":7,\"input_tokens_details\":{\"cached_tokens\":2},\"output_tokens_details\":{\"reasoning_tokens\":1}}}}\n\n";
+        let observed = responses_usage_from_sse(body).expect("usage");
+        assert_eq!(observed.usage["input_tokens"], 4);
+        assert_eq!(observed.usage["output_tokens"], 3);
+        assert_eq!(observed.usage["input_tokens_details"]["cached_tokens"], 2);
+        assert_eq!(observed.service_tier.as_deref(), Some("priority"));
     }
+
     #[test]
-    fn responses_usage_sums_fanout_bodies() {
-        let first = b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"total_tokens\":3}}}\n\n";
-        let second = b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n";
-        let usage =
-            responses_usage_from_sse_bodies(&[first.as_slice(), second.as_slice()]).expect("usage");
-        assert_eq!(usage["input_tokens"], 5);
-        assert_eq!(usage["output_tokens"], 3);
-        assert_eq!(usage["total_tokens"], 8);
+    fn responses_usage_from_sse_preserves_measured_priority_over_later_oauth_default_placeholder() {
+        use crate::usage_parser::ServiceTierMergePolicy;
+
+        let body = b"data: {\"type\":\"response.in_progress\",\"response\":{\"service_tier\":\"priority\",\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n\
+data: {\"type\":\"response.completed\",\"response\":{\"service_tier\":\"default\",\"usage\":{\"input_tokens\":4,\"output_tokens\":3,\"total_tokens\":7}}}\n\n";
+        let oauth = responses_usage_from_sse_with_policy(body, ServiceTierMergePolicy::OpenaiOauth)
+            .expect("oauth usage");
+        assert_eq!(oauth.service_tier.as_deref(), Some("priority"));
+
+        let standard = responses_usage_from_sse_with_policy(body, ServiceTierMergePolicy::Standard)
+            .expect("standard usage");
+        assert_eq!(standard.service_tier.as_deref(), Some("default"));
     }
 
     #[test]

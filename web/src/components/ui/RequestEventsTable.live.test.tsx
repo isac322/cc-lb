@@ -365,5 +365,59 @@ describe('RequestEventsTable - Live & Outcomes', () => {
       expect(screen.getByText('low')).toBeDefined();
       expect(screen.queryByText('high · 8.2k')).toBeNull();
     });
+
+    it('updates live row to omit OpenAI default tier while showing ultrafast', () => {
+      cleanup();
+      const baseEvent = {
+        event_id: 'evt_openai_live',
+        request_id: 'req_openai_live',
+        ts: 1718553120,
+        ts_ms: 1718553120000,
+        status: 0,
+        duration_ms: 0,
+        model: 'gpt-6.2-sol',
+        _phase: 'partial',
+      } satisfies RequestEventWithPhase;
+
+      const { rerender } = render(
+        <RequestEventsTable
+          events={[baseEvent]}
+          principalNameMap={principalNameMap}
+        />,
+      );
+
+      rerender(
+        <RequestEventsTable
+          events={[
+            {
+              ...baseEvent,
+              status: 200,
+              duration_ms: 900,
+              service_tier: 'default',
+              _phase: 'final',
+            },
+          ]}
+          principalNameMap={principalNameMap}
+        />,
+      );
+      expect(screen.queryByText('default')).toBeNull();
+
+      rerender(
+        <RequestEventsTable
+          events={[
+            {
+              ...baseEvent,
+              event_id: 'evt_openai_live_ultra',
+              status: 200,
+              duration_ms: 400,
+              service_tier: 'ultrafast',
+              _phase: 'final',
+            },
+          ]}
+          principalNameMap={principalNameMap}
+        />,
+      );
+      expect(screen.getByText('ultrafast')).toBeDefined();
+    });
   });
 });

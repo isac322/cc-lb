@@ -243,14 +243,28 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
                         ));
                     }
                 };
+                let sent_service_tier = (upstream.kind == UpstreamKind::OpenaiOauth
+                    && snapshot.surface.as_deref() == Some("responses"))
+                .then(|| {
+                    sonic_rs::get_from_slice(&keepalive_body, &["service_tier"])
+                        .ok()
+                        .and_then(|value| {
+                            sonic_rs::JsonValueTrait::as_str(&value).map(str::to_owned)
+                        })
+                });
                 let outcome = classify_success_body_with_surface(
                     decoded_body.as_ref(),
                     cache_anchor_age,
                     dispatch_started.elapsed(),
                     dispatch_start_ms,
                     accounting_guard,
-                    snapshot.surface.as_deref(),
-                    mode,
+                    RenewalSurface {
+                        surface: snapshot.surface.as_deref(),
+                        mode,
+                        openai_oauth_sent_service_tier: sent_service_tier
+                            .as_ref()
+                            .map(|tier| tier.as_deref()),
+                    },
                 );
                 if let DispatchOutcome::CacheHit { .. } = &outcome
                     && let Some(plan) = observation_plan.as_ref()
@@ -625,20 +639,28 @@ fn decode_responses_renewal_usage(
     terminal_usage.ok_or("OpenAI Responses SSE ended before a terminal event")
 }
 
+struct RenewalSurface<'a> {
+    surface: Option<&'a str>,
+    mode: RenewalMode,
+    openai_oauth_sent_service_tier: Option<Option<&'a str>>,
+}
+
 fn classify_success_body_with_surface(
     body: &[u8],
     cache_anchor_age: Duration,
     duration: Duration,
     request_start_ms: u64,
     accounting_guard: ResponseAccountingGuard,
-    surface: Option<&str>,
-    mode: RenewalMode,
+    target: RenewalSurface<'_>,
 ) -> DispatchOutcome {
-    if surface == Some("responses") {
-        let usage = match decode_responses_renewal_usage(body, mode) {
+    if target.surface == Some("responses") {
+        let mut usage = match decode_responses_renewal_usage(body, target.mode) {
             Ok(usage) => usage,
             Err(error) => return DispatchOutcome::Error(error.to_owned()),
         };
+        if let Some(sent) = target.openai_oauth_sent_service_tier {
+            crate::usage_parser::apply_openai_oauth_service_tier(&mut usage, sent);
+        }
         let usage_present = usage.has_billable_usage();
         let evidence = |value| match value {
             crate::usage_parser::CacheTokenEvidence::Unreported => {
@@ -767,8 +789,11 @@ fn classify_success_body(
         duration,
         request_start_ms,
         accounting_guard,
-        None,
-        RenewalMode::Json,
+        RenewalSurface {
+            surface: None,
+            mode: RenewalMode::Json,
+            openai_oauth_sent_service_tier: None,
+        },
     )
 }
 

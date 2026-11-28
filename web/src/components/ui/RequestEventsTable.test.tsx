@@ -340,7 +340,7 @@ describe('RequestEventsTable', () => {
     expect(screen.getByText('500')).toBeDefined();
   });
 
-  it('renders explicit request-kind badges in a dedicated column', () => {
+  it('renders explicit request-kind badges in a dedicated column including review labels', () => {
     const events: RequestEventWithPhase[] = [
       {
         event_id: 'evt_advisor',
@@ -362,6 +362,17 @@ describe('RequestEventsTable', () => {
         model: 'claude-sonnet',
         _phase: 'final',
       },
+      {
+        event_id: 'evt_review',
+        request_id: 'req_review',
+        ts: 1718553122,
+        status: 200,
+        duration_ms: 100,
+        model: 'gpt-6.2-sol',
+        request_kind: 'review',
+        service_tier: 'priority',
+        _phase: 'final',
+      },
     ];
 
     const { container } = render(
@@ -377,10 +388,24 @@ describe('RequestEventsTable', () => {
     expect(screen.getByRole('columnheader', { name: 'Kind' })).toBeDefined();
     expect(screen.queryByText('advisor')).toBeNull();
     expect(screen.queryByText('main')).toBeNull();
+    expect(screen.getByText('review')).toBeDefined();
 
     const kindColumnIndex = [
       ...container.querySelectorAll('thead th'),
     ].findIndex((th) => th.textContent === 'Kind');
+    const kindCol = container.querySelectorAll('colgroup col')[kindColumnIndex];
+    const kindWidth = kindCol?.getAttribute('style') ?? '';
+    expect(kindWidth).toContain('4rem');
+    const shareMatch = /\* (0\.\d+)/.exec(kindWidth);
+    const tableStyle =
+      container.querySelector('table')?.getAttribute('style') ?? '';
+    expect(tableStyle).toContain('--events-desktop-w: 71.5rem');
+    const tabletSpanMatch = /--events-tablet-span:\s*([\d.]+)rem/.exec(
+      tableStyle,
+    );
+    expect(
+      4 + Number(tabletSpanMatch?.[1]) * Number(shareMatch?.[1]),
+    ).toBeCloseTo(4.75, 5);
     const unclassifiedRow = container.querySelectorAll('tbody > tr')[1];
     expect(
       unclassifiedRow.querySelectorAll('td')[kindColumnIndex].textContent,
@@ -989,12 +1014,18 @@ describe('RequestEventsTable', () => {
         principalNameMap={principalNameMap}
       />,
     );
+    const table = container.querySelector('table');
+    expect(table?.className).toContain('table-fixed');
     const modelText = container.querySelector(`span[title="${model}"]`);
     expect(modelText?.className).toContain('min-w-0');
     expect(modelText?.className).toContain('truncate');
     const modelCell = modelText?.closest('td');
-    expect(modelCell?.className).toContain('@min-[60rem]/events:max-w-28!');
-    expect(modelCell?.querySelector('svg')).not.toBeNull();
+    expect(modelCell?.className).toContain('overflow-hidden');
+    expect(modelCell?.className).not.toContain('@min-[60rem]/events:max-w-28!');
+    const logo = modelCell?.querySelector('[role="img"]');
+    expect(logo).not.toBeNull();
+    expect(logo?.getAttribute('class')).toContain('shrink-0');
+    expect(logo?.querySelector('svg')).not.toBeNull();
   });
 
   describe('Cost Tooltip', () => {
@@ -1428,6 +1459,68 @@ describe('RequestEventsTable', () => {
       );
 
       expect(screen.queryByText('unspecified')).toBeNull();
+    });
+
+    it('hides base OpenAI default and auto service tier badges', () => {
+      const events: RequestEventWithPhase[] = [
+        {
+          event_id: 'evt_openai_default',
+          request_id: 'req_openai_default',
+          ts: 1718553120,
+          ts_ms: 1718553120000,
+          status: 200,
+          duration_ms: 100,
+          model: 'gpt-6.2-sol',
+          service_tier: 'default',
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+        {
+          event_id: 'evt_openai_auto',
+          request_id: 'req_openai_auto',
+          ts: 1718553121,
+          ts_ms: 1718553121000,
+          status: 200,
+          duration_ms: 100,
+          model: 'gpt-6.2-sol',
+          service_tier: 'auto',
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+      ];
+
+      render(
+        <RequestEventsTable
+          events={events}
+          principalNameMap={principalNameMap}
+        />,
+      );
+
+      expect(screen.queryByText('default')).toBeNull();
+      expect(screen.queryByText('auto')).toBeNull();
+    });
+
+    it('renders ultrafast badge when service_tier is ultrafast', () => {
+      const events: RequestEventWithPhase[] = [
+        {
+          event_id: 'evt_openai_ultrafast',
+          request_id: 'req_openai_ultrafast',
+          ts: 1718553120,
+          ts_ms: 1718553120000,
+          status: 200,
+          duration_ms: 100,
+          model: 'gpt-6.2-sol',
+          service_tier: 'ultrafast',
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+      ];
+
+      render(
+        <RequestEventsTable
+          events={events}
+          principalNameMap={principalNameMap}
+        />,
+      );
+
+      expect(screen.getByText('ultrafast')).toBeDefined();
     });
 
     it('renders no priority badge when service_tier is omitted', () => {

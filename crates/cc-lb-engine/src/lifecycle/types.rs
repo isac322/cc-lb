@@ -369,6 +369,11 @@ pub(super) enum AttemptFailure {
 pub(super) struct AttemptResponse {
     pub(super) response: Response<Body>,
     pub(super) compat_response_plan: Option<CompatResponsePlan>,
+    pub(super) openai_oauth_sent_service_tier: Option<Option<String>>,
+}
+pub(super) struct FanoutAttemptResponse {
+    pub(super) response: Response<Body>,
+    pub(super) openai_oauth_sent_service_tier: Option<Option<String>>,
 }
 pub(super) type ConcurrentAttemptFuture<'a> =
     Pin<Box<dyn Future<Output = Result<AttemptResponse, AttemptFailure>> + Send + 'a>>;
@@ -379,6 +384,7 @@ pub(super) type ResponseBodyFuture<'a> = Pin<
                     StatusCode,
                     HeaderMap,
                     Result<Bytes, compat_response::CollectError>,
+                    Option<Option<String>>,
                 ),
             > + Send
             + 'a,
@@ -400,7 +406,7 @@ pub(super) struct ConcurrentAttemptInputs<'a, 'r> {
 }
 pub(super) fn reduce_fanout(
     mut attempts: Vec<AttemptResponse>,
-) -> (AttemptResponse, Option<Vec<Response<Body>>>) {
+) -> (AttemptResponse, Option<Vec<FanoutAttemptResponse>>) {
     let retry_index = attempts.iter().position(|attempt| {
         matches!(
             attempt.response.status(),
@@ -414,9 +420,14 @@ pub(super) fn reduce_fanout(
     let first = attempts
         .next()
         .expect("fan-out produced at least one response");
-    let rest = retry_index
-        .is_none()
-        .then(|| attempts.map(|attempt| attempt.response).collect());
+    let rest = retry_index.is_none().then(|| {
+        attempts
+            .map(|attempt| FanoutAttemptResponse {
+                response: attempt.response,
+                openai_oauth_sent_service_tier: attempt.openai_oauth_sent_service_tier,
+            })
+            .collect()
+    });
     (first, rest)
 }
 
@@ -748,6 +759,8 @@ pub(super) struct ResponseAffinityContext {
     pub(super) capability: ProviderCapability,
     pub(super) usage_shape: Option<crate::provider_capability::UsageShape>,
     pub(super) precomputed_usage: Option<UsageCounts>,
+    /// Present (`Some(sent_tier)`) only when the routed upstream is `StorageUpstreamKind::OpenaiOauth`.
+    pub(super) openai_oauth_sent_service_tier: Option<Option<String>>,
     pub(super) store: Option<Arc<dyn UpstreamAffinityStore>>,
     pub(super) principal_id: String,
     pub(super) upstream_id: Uuid,
@@ -913,16 +926,181 @@ impl UpstreamDialect for RawPassthroughDialect {
     }
 }
 
-pub(super) fn responses_usage_value_to_counts(usage: &Value) -> UsageCounts {
+pub(super) fn resolve_fanout_call_usage(
+    body: &[u8],
+    openai_oauth_sent_service_tier: Option<&Option<String>>,
+) -> Option<UsageCounts> {
+    let policy = if openai_oauth_sent_service_tier.is_some() {
+        usage_parser::ServiceTierMergePolicy::OpenaiOauth
+    } else {
+        usage_parser::ServiceTierMergePolicy::Standard
+    };
+    let observed = crate::openai_compat::chat::responses_usage_from_sse_with_policy(body, policy)?;
+    let mut counts = responses_usage_value_to_counts(&observed, policy);
+    if let Some(sent) = openai_oauth_sent_service_tier {
+        usage_parser::apply_openai_oauth_service_tier(&mut counts, sent.as_deref());
+    }
+    Some(counts)
+}
+
+fn merge_fanout_evidence(
+    current: usage_parser::CacheTokenEvidence,
+    incoming: usage_parser::CacheTokenEvidence,
+) -> usage_parser::CacheTokenEvidence {
+    use usage_parser::CacheTokenEvidence;
+    match (current, incoming) {
+        (CacheTokenEvidence::Invalid, _) | (_, CacheTokenEvidence::Invalid) => {
+            CacheTokenEvidence::Invalid
+        }
+        (CacheTokenEvidence::Positive, _) | (_, CacheTokenEvidence::Positive) => {
+            CacheTokenEvidence::Positive
+        }
+        (CacheTokenEvidence::Zero, _) | (_, CacheTokenEvidence::Zero) => CacheTokenEvidence::Zero,
+        (CacheTokenEvidence::Unreported, CacheTokenEvidence::Unreported) => {
+            CacheTokenEvidence::Unreported
+        }
+    }
+}
+
+fn select_fanout_service_tier(calls: &[UsageCounts]) -> Option<String> {
+    let tier_rank = |tier: &str| -> u8 {
+        let lower = tier.trim().to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "auto" | "default" | "standard" | "standard_only" | "unspecified" | ""
+        ) {
+            1
+        } else {
+            0
+        }
+    };
+    calls
+        .iter()
+        .filter_map(|call| call.service_tier.as_deref())
+        .map(str::trim)
+        .filter(|tier| !tier.is_empty())
+        .min_by(|a, b| {
+            tier_rank(a)
+                .cmp(&tier_rank(b))
+                .then_with(|| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()))
+        })
+        .map(str::to_owned)
+}
+
+pub(super) fn usage_counts_to_pricing_slice(u: &UsageCounts) -> cc_lb_lifecycle::UsagePricingSlice {
+    cc_lb_lifecycle::UsagePricingSlice {
+        input_tokens: u.input_tokens,
+        output_tokens: u.output_tokens,
+        input_image_tokens: u.input_image_tokens,
+        output_image_tokens: u.output_image_tokens,
+        cache_creation_input_tokens: u.cache_creation_input_tokens,
+        cache_creation_input_tokens_5m: u.cache_creation_input_tokens_5m,
+        cache_creation_input_tokens_1h: u.cache_creation_input_tokens_1h,
+        cache_read_input_tokens: u.cache_read_input_tokens,
+        cache_write_input_tokens: u.cache_write_input_tokens,
+        cache_write_evidence: match u.cache_write_evidence {
+            usage_parser::CacheTokenEvidence::Unreported => None,
+            evidence => Some(request_cache_evidence(evidence)),
+        },
+        cache_write_input_tokens_30m: u.cache_write_input_tokens_30m,
+        cache_write_input_tokens_12h: u.cache_write_input_tokens_12h,
+        service_tier: u.service_tier.clone(),
+    }
+}
+
+pub(super) fn aggregate_fanout_usage_counts(calls: &[UsageCounts]) -> Option<UsageCounts> {
+    let first = calls.first()?;
+    if calls.len() == 1 {
+        return Some(first.clone());
+    }
+    let add_opt_u64 = |acc: &mut Option<u64>, add: Option<u64>| {
+        if let Some(value) = add {
+            *acc = Some(acc.unwrap_or_default().saturating_add(value));
+        }
+    };
+    let mut combined = UsageCounts {
+        present: calls.iter().any(|c| c.present),
+        billable_present: calls.iter().any(|c| c.billable_present),
+        thinking_progress_present: calls.iter().all(|c| c.thinking_progress_present),
+        input_includes_cached: first.input_includes_cached,
+        service_tier: select_fanout_service_tier(calls),
+        pricing_slices: calls.iter().map(usage_counts_to_pricing_slice).collect(),
+        ..UsageCounts::default()
+    };
+    for call in calls {
+        combined.input_tokens = combined.input_tokens.saturating_add(call.input_tokens);
+        combined.output_tokens = combined.output_tokens.saturating_add(call.output_tokens);
+        combined.cache_creation_input_tokens = combined
+            .cache_creation_input_tokens
+            .saturating_add(call.cache_creation_input_tokens);
+        combined.cache_creation_input_tokens_5m = combined
+            .cache_creation_input_tokens_5m
+            .saturating_add(call.cache_creation_input_tokens_5m);
+        combined.cache_creation_input_tokens_1h = combined
+            .cache_creation_input_tokens_1h
+            .saturating_add(call.cache_creation_input_tokens_1h);
+        combined.cache_read_input_tokens = combined
+            .cache_read_input_tokens
+            .saturating_add(call.cache_read_input_tokens);
+        combined.thinking_tokens = combined
+            .thinking_tokens
+            .saturating_add(call.thinking_tokens);
+        add_opt_u64(&mut combined.gross_input_tokens, call.gross_input_tokens);
+        add_opt_u64(&mut combined.input_image_tokens, call.input_image_tokens);
+        add_opt_u64(&mut combined.output_image_tokens, call.output_image_tokens);
+        add_opt_u64(
+            &mut combined.tool_use_prompt_tokens,
+            call.tool_use_prompt_tokens,
+        );
+        add_opt_u64(
+            &mut combined.cache_write_input_tokens,
+            call.cache_write_input_tokens,
+        );
+        add_opt_u64(
+            &mut combined.cache_write_input_tokens_30m,
+            call.cache_write_input_tokens_30m,
+        );
+        add_opt_u64(
+            &mut combined.cache_write_input_tokens_12h,
+            call.cache_write_input_tokens_12h,
+        );
+        combined.cache_creation_evidence = merge_fanout_evidence(
+            combined.cache_creation_evidence,
+            call.cache_creation_evidence,
+        );
+        combined.cache_read_evidence =
+            merge_fanout_evidence(combined.cache_read_evidence, call.cache_read_evidence);
+        combined.cache_write_evidence =
+            merge_fanout_evidence(combined.cache_write_evidence, call.cache_write_evidence);
+    }
+    Some(combined)
+}
+
+pub(super) fn responses_usage_value_to_counts(
+    observed: &crate::openai_compat::chat::ResponsesSseUsage,
+    policy: usage_parser::ServiceTierMergePolicy,
+) -> UsageCounts {
+    let mut clean_usage = observed.usage.clone();
+    if let Some(obj) = clean_usage.as_object_mut() {
+        obj.remove("service_tier");
+        obj.remove("serviceTier");
+    }
     let mut envelope = Map::new();
     let mut response = Map::new();
-    response.insert("usage".to_owned(), usage.clone());
+    response.insert("usage".to_owned(), clean_usage);
+    if let Some(tier) = observed.service_tier.as_deref() {
+        response.insert("service_tier".to_owned(), Value::String(tier.to_owned()));
+    }
     envelope.insert("response".to_owned(), Value::Object(response));
-    usage_parser::observe_non_stream_json_value_for_shape(
+    let mut counts = usage_parser::observe_non_stream_json_value_for_shape_with_policy(
         &Value::Object(envelope),
         crate::provider_capability::UsageShape::OpenaiResponses,
+        policy,
     )
-    .usage
+    .usage;
+    counts.service_tier = observed.service_tier.clone();
+    counts.service_tier_source = observed.service_tier_source;
+    counts
 }
 
 pub(super) fn body_cap_for_path(config: &LifecycleConfig, path: &str) -> usize {
@@ -1270,6 +1448,7 @@ pub(crate) fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapsh
         thinking_tokens: u.thinking_tokens,
         service_tier: u.service_tier.clone(),
         iterations: u.iterations.clone(),
+        pricing_slices: u.pricing_slices.clone(),
     }
 }
 

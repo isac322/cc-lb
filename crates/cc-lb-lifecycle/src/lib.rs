@@ -17,7 +17,9 @@ pub use stage_parse_auth::{AuthFailure, AuthInfo, ParseFailure, ParseInfo};
 pub use stage_route_limit::{
     LimitDecisionKind, LimitRequestSummary, LimitSubject, RouteFailure, RouteInfo, RouteSummary,
 };
-pub use stage_usage_stream::{StreamError, StreamSuccess, UsageSnapshot, UsageSource};
+pub use stage_usage_stream::{
+    StreamError, StreamSuccess, UsagePricingSlice, UsageSnapshot, UsageSource,
+};
 pub use termination::TerminationReason;
 
 #[cfg(test)]

@@ -2288,7 +2288,10 @@ async fn handle_ws_provider_event(
                         error.code,
                         "websocket_connection_limit_reached" | "unattributed_upstream_error"
                     );
-                    let affinity_error = error.code == "upstream_affinity_unavailable";
+                    let preserve_lane_error = matches!(
+                        error.code,
+                        "upstream_affinity_unavailable" | "overloaded_error"
+                    );
                     if native_connection_error {
                         let message = if text {
                             Message::Text(bytes.try_into().expect("provider text is UTF-8"))
@@ -2299,7 +2302,7 @@ async fn handle_ws_provider_event(
                             return false;
                         }
                     }
-                    if affinity_error
+                    if preserve_lane_error
                         && downstream_sink
                             .send(websocket_error_message(&error))
                             .await
@@ -2313,7 +2316,7 @@ async fn handle_ws_provider_event(
                     // represents all affected turns on the wire.
                     if !native_connection_error {
                         if result.errors.is_empty() {
-                            if !affinity_error
+                            if !preserve_lane_error
                                 && downstream_sink
                                     .send(websocket_error_message(&error))
                                     .await
@@ -2322,12 +2325,14 @@ async fn handle_ws_provider_event(
                                 return false;
                             }
                         } else {
-                            let mut suppress_affinity_duplicate = affinity_error;
+                            let mut suppress_lane_duplicate = preserve_lane_error;
                             for closed_error in result.errors {
-                                if suppress_affinity_duplicate
-                                    && closed_error.stream_id == error.stream_id
+                                if suppress_lane_duplicate
+                                    && let (Some(err_turn_id), Some(closed_turn_id)) =
+                                        (error.turn_id(), closed_error.turn_id())
+                                    && err_turn_id == closed_turn_id
                                 {
-                                    suppress_affinity_duplicate = false;
+                                    suppress_lane_duplicate = false;
                                     continue;
                                 }
                                 if downstream_sink
@@ -6582,5 +6587,304 @@ mod tests {
             assert_eq!(first.to_text().unwrap(), "sentinel");
             sink_server.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_shared_api_key_usage_overflow_delivers_terminal_errors_to_all_lanes()
+     {
+        use futures_util::StreamExt as _;
+
+        let (addr_a, _acc_a, _rx_a, task_a) = spawn_ws_recorder_server().await;
+        let up_a = crate::app::tests::websocket_upstream(
+            77,
+            "api-shared",
+            url::Url::parse(&format!("http://{addr_a}/")).unwrap(),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_str(crate::app::tests::TEST_KEY.plaintext.as_str()).unwrap(),
+        );
+        let state = crate::app::tests::websocket_test_state(
+            vec![up_a.clone()],
+            cc_lb_domain::TerminalStrategy::FirstPick,
+            DrainController::new(),
+            Arc::new(crate::app::tests::WebSocketTestSignerFactory),
+            Arc::new(crate::app::tests::FixtureKeyStore),
+            vec!["*".to_owned()],
+        )
+        .await;
+        let auth = state.lifecycle.authenticate(&headers).await.unwrap();
+        let mut gateway =
+            ResponsesWebSocketGateway::new(state.lifecycle.clone(), &auth, headers, 32_768, 8);
+        let mut connections = HashMap::new();
+        connections.insert(
+            1,
+            connect_existing_ws(&state, up_a.id, "api-shared", addr_a).await,
+        );
+
+        let frame_a = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "stream_id": "lane-a",
+                "store": false,
+                "input": [{"role": "user", "content": "a".repeat(2_500)}],
+            }))
+            .unwrap(),
+        );
+        let turn_a = gateway
+            .client_message(auth.clone(), frame_a)
+            .await
+            .unwrap()
+            .unwrap();
+        gateway.assign_connection(turn_a.turn_id, 1, up_a.id, "api-shared");
+        gateway.commit_send_attempt(turn_a.turn_id);
+        gateway.sent(turn_a.turn_id);
+
+        let frame_b = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "stream_id": "lane-b",
+                "store": false,
+                "input": [{"role": "user", "content": "b".repeat(1_000)}],
+            }))
+            .unwrap(),
+        );
+        let turn_b = gateway
+            .client_message(auth.clone(), frame_b)
+            .await
+            .unwrap()
+            .unwrap();
+        gateway.assign_connection(turn_b.turn_id, 1, up_a.id, "api-shared");
+        gateway.commit_send_attempt(turn_b.turn_id);
+        gateway.sent(turn_b.turn_id);
+
+        let created_frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.created",
+                "stream_id": "lane-a",
+                "response": {
+                    "id": "resp_shared_overflow_a",
+                    "object": "response",
+                    "status": "in_progress",
+                    "store": false,
+                }
+            }))
+            .unwrap(),
+        );
+        gateway.provider_message(1, &created_frame).await.unwrap();
+
+        let oversized_tier = format!("oversized_{}", "x".repeat(26_000));
+        let overflow_frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.completed",
+                "stream_id": "lane-a",
+                "response": {
+                    "id": "resp_shared_overflow_a",
+                    "object": "response",
+                    "status": "completed",
+                    "store": false,
+                    "service_tier": oversized_tier,
+                    "usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
+                }
+            }))
+            .unwrap(),
+        );
+
+        let (mut downstream_sink, mut client_ws, sink_server) = spawn_test_downstream_sink().await;
+        let pending_connects = HashMap::new();
+        let deferred = VecDeque::new();
+        let mut dispatches = VecDeque::new();
+        let keep_open = handle_ws_provider_event(
+            WsProviderEvent::Frame {
+                connection_id: 1,
+                bytes: overflow_frame,
+                text: true,
+            },
+            &mut gateway,
+            &mut connections,
+            &pending_connects,
+            &deferred,
+            &mut dispatches,
+            &mut downstream_sink,
+        )
+        .await;
+        assert!(keep_open);
+        assert!(connections.is_empty());
+
+        let mut received = HashMap::new();
+        for _ in 0..2 {
+            let msg = tokio::time::timeout(Duration::from_secs(2), client_ws.next())
+                .await
+                .expect("terminal error frame for shared lane")
+                .unwrap()
+                .unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+            let stream_id = parsed["stream_id"].as_str().unwrap().to_owned();
+            assert!(
+                received.insert(stream_id, parsed).is_none(),
+                "must not emit duplicate terminal error for same lane"
+            );
+        }
+        assert_eq!(received["lane-a"]["status"], 503);
+        assert_eq!(received["lane-a"]["error"]["code"], "overloaded_error");
+        assert_eq!(received["lane-b"]["status"], 502);
+        assert_eq!(
+            received["lane-b"]["error"]["code"],
+            "upstream_connection_closed"
+        );
+
+        sink_server.abort();
+        task_a.abort();
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_steering_successor_idless_overflow_preserves_parent_close_error() {
+        use futures_util::StreamExt as _;
+
+        let (addr_a, _acc_a, _rx_a, task_a) = spawn_ws_recorder_server().await;
+        let up_a = crate::app::tests::websocket_upstream(
+            78,
+            "api-shared",
+            url::Url::parse(&format!("http://{addr_a}/")).unwrap(),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_str(crate::app::tests::TEST_KEY.plaintext.as_str()).unwrap(),
+        );
+        let state = crate::app::tests::websocket_test_state(
+            vec![up_a.clone()],
+            cc_lb_domain::TerminalStrategy::FirstPick,
+            DrainController::new(),
+            Arc::new(crate::app::tests::WebSocketTestSignerFactory),
+            Arc::new(crate::app::tests::FixtureKeyStore),
+            vec!["*".to_owned()],
+        )
+        .await;
+        let auth = state.lifecycle.authenticate(&headers).await.unwrap();
+        let mut gateway =
+            ResponsesWebSocketGateway::new(state.lifecycle.clone(), &auth, headers, 32_768, 8);
+        let mut connections = HashMap::new();
+        connections.insert(
+            1,
+            connect_existing_ws(&state, up_a.id, "api-shared", addr_a).await,
+        );
+
+        let parent_frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "stream_id": "lane-a",
+                "store": false,
+                "input": [{"role": "user", "content": "p".repeat(2_500)}],
+            }))
+            .unwrap(),
+        );
+        let parent_turn = gateway
+            .client_message(auth.clone(), parent_frame)
+            .await
+            .unwrap()
+            .unwrap();
+        gateway.assign_connection(parent_turn.turn_id, 1, up_a.id, "api-shared");
+        gateway.commit_send_attempt(parent_turn.turn_id);
+        gateway.sent(parent_turn.turn_id);
+
+        let created_frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.created",
+                "stream_id": "lane-a",
+                "response": {
+                    "id": "resp_parent_steer_overflow",
+                    "object": "response",
+                    "status": "in_progress",
+                    "store": false,
+                }
+            }))
+            .unwrap(),
+        );
+        gateway.provider_message(1, &created_frame).await.unwrap();
+
+        let steer_frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.steer",
+                "stream_id": "lane-a",
+                "previous_response_id": "resp_parent_steer_overflow",
+                "input": "s".repeat(1_000),
+            }))
+            .unwrap(),
+        );
+        let steer_turn = gateway
+            .client_message(auth.clone(), steer_frame)
+            .await
+            .unwrap()
+            .unwrap();
+        gateway.commit_send_attempt(steer_turn.turn_id);
+        gateway.sent(steer_turn.turn_id);
+
+        let oversized_tier = format!("oversized_{}", "x".repeat(26_000));
+        let overflow_frame = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.in_progress",
+                "stream_id": "lane-a",
+                "response": {
+                    "object": "response",
+                    "status": "in_progress",
+                    "previous_response_id": "resp_parent_steer_overflow",
+                    "service_tier": oversized_tier,
+                    "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
+                }
+            }))
+            .unwrap(),
+        );
+
+        let (mut downstream_sink, mut client_ws, sink_server) = spawn_test_downstream_sink().await;
+        let pending_connects = HashMap::new();
+        let deferred = VecDeque::new();
+        let mut dispatches = VecDeque::new();
+        let keep_open = handle_ws_provider_event(
+            WsProviderEvent::Frame {
+                connection_id: 1,
+                bytes: overflow_frame,
+                text: true,
+            },
+            &mut gateway,
+            &mut connections,
+            &pending_connects,
+            &deferred,
+            &mut dispatches,
+            &mut downstream_sink,
+        )
+        .await;
+        assert!(keep_open);
+        assert!(connections.is_empty());
+
+        let mut codes = Vec::new();
+        for _ in 0..2 {
+            let msg = tokio::time::timeout(Duration::from_secs(2), client_ws.next())
+                .await
+                .expect("terminal error frame for same-lane turn")
+                .unwrap()
+                .unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+            assert_eq!(parsed["stream_id"], "lane-a");
+            assert!(parsed.get("response_id").is_none());
+            codes.push((
+                parsed["status"].as_u64().unwrap(),
+                parsed["error"]["code"].as_str().unwrap().to_owned(),
+            ));
+        }
+        assert_eq!(
+            codes,
+            vec![
+                (503, "overloaded_error".to_owned()),
+                (502, "upstream_connection_closed".to_owned()),
+            ]
+        );
+
+        sink_server.abort();
+        task_a.abort();
     }
 }
