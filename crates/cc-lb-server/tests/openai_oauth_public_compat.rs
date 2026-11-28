@@ -415,7 +415,7 @@ pub(crate) async fn setup(s: &common::TestServer, base: &str, c: &reqwest::Clien
         .await;
         assert!(d.is_object());
     }
-    let body = json!({"name":"oauth-test","kind":"openai_oauth","base_url":base,"oauth_tokens":{"access_token":"test-access","refresh_token":"","expires_at_unix_secs":4102444800u64,"account_id":"acct-test","scopes":[],"never_refresh":true},"skip_preflight":true});
+    let body = json!({"name":"oauth-test","kind":"openai_oauth","base_url":base,"oauth_tokens":{"access_token":"test-access","refresh_token":"","expires_at_unix_secs":4102444800u64,"account_id":"acct-test","scopes":[],"never_refresh":true},"warmup_enabled":false,"skip_preflight":true});
     let (st, v, _) = admin(c, s, Method::POST, "/admin/v1/upstreams", Some(body), None).await;
     assert_eq!(st, 201, "{v}");
     v["id"].as_str().unwrap().to_owned()
@@ -566,6 +566,7 @@ async fn openai_oauth_chat_fanout_retries_all_choices_after_rate_limit() {
             "kind":"openai_oauth",
             "base_url":f.base,
             "oauth_tokens":{"access_token":"test-access-2","refresh_token":"","expires_at_unix_secs":4102444800u64,"account_id":"acct-test-2","scopes":[],"never_refresh":true},
+            "warmup_enabled":false,
             "skip_preflight":true
         })),
         None,
@@ -870,6 +871,7 @@ event: response.completed\ndata: {completed_ev}\n\n"
                 "scopes": [],
                 "never_refresh": true
             },
+            "warmup_enabled": false,
             "skip_preflight": true
         }))
         .send()
@@ -1127,7 +1129,7 @@ async fn openai_oauth_chat_fanout_prices_each_choice_independently_regardless_of
                 if path == "/catalog.json" {
                     return Json(st.catalog).into_response();
                 }
-                let _body = to_bytes(req.into_body(), 2_000_000).await.unwrap();
+                let body = to_bytes(req.into_body(), 2_000_000).await.unwrap();
                 if path.ends_with("/models") {
                     return Json(json!({
                         "data": [{"id": "gpt-6.2-sol", "object": "model"}],
@@ -1136,6 +1138,10 @@ async fn openai_oauth_chat_fanout_prices_each_choice_independently_regardless_of
                     .into_response();
                 }
                 if method != Method::POST || path != "/codex/responses" {
+                    return StatusCode::NOT_FOUND.into_response();
+                }
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                if parsed.get("model").and_then(Value::as_str) != Some("gpt-6.2-sol") {
                     return StatusCode::NOT_FOUND.into_response();
                 }
                 let call_idx = st.seq.fetch_add(1, Ordering::SeqCst);
@@ -1244,6 +1250,7 @@ event: response.completed\ndata: {{\"type\":\"response.completed\",\"sequence_nu
                 "scopes": [],
                 "never_refresh": true
             },
+            "warmup_enabled": false,
             "skip_preflight": true
         }))
         .send()

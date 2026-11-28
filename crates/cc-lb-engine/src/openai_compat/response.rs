@@ -33,6 +33,11 @@ impl SseAggregator {
         }
     }
 
+    /// Returns whether a terminal response or error frame has been accepted.
+    pub fn has_terminal(&self) -> bool {
+        self.terminal.is_some()
+    }
+
     /// Feeds one parsed SSE event JSON (the `data:` payload).
     pub fn push(&mut self, event: &Value) {
         if self.terminal.is_some() {
