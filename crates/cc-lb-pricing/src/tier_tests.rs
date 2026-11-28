@@ -668,3 +668,44 @@ fn keepalive_cache_rates_for_prompt_tokens_checks_selected_ttl_sensitivity() {
         ))
     );
 }
+
+#[test]
+fn canonical_service_tier_treats_base_and_provider_default_labels_as_none() {
+    for base in [
+        "",
+        " ",
+        "standard",
+        "STANDARD",
+        "standard_only",
+        "auto",
+        "default",
+        "Default",
+        "unspecified",
+    ] {
+        assert_eq!(canonical_service_tier(Some(base)), None, "base={base:?}");
+    }
+    assert_eq!(canonical_service_tier(None), None);
+    assert_eq!(
+        canonical_service_tier(Some(" priority ")).as_deref(),
+        Some("priority")
+    );
+    assert_eq!(
+        canonical_service_tier(Some("ultrafast")).as_deref(),
+        Some("ultrafast")
+    );
+    assert_eq!(
+        canonical_service_tier(Some("batches")).as_deref(),
+        Some("batch")
+    );
+}
+
+#[test]
+fn default_tier_uses_base_pricing_while_priority_applies_priority_rates() {
+    let base_total = total_for(None, true);
+    assert_eq!(total_for(Some("default"), true), base_total);
+    assert_eq!(total_for(Some("auto"), true), base_total);
+    assert_eq!(total_for(Some("unspecified"), true), base_total);
+    assert!(total_for(Some("priority"), true) > base_total);
+    // An uncataloged tier such as `ultrafast` falls back gracefully to base pricing.
+    assert_eq!(total_for(Some("ultrafast"), true), base_total);
+}

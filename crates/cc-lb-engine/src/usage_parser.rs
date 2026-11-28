@@ -499,7 +499,7 @@ fn accumulate_sse_usage_value(
     usage.billable_present = true;
     usage.thinking_progress_present = false;
     merge_usage_value_for_shape(usage, reported, shape);
-    if usage.service_tier.is_none()
+    if !reported_has_service_tier(reported)
         && let Some(tier) = service_tier_from_envelope(value)
     {
         usage.service_tier = Some(tier.to_owned());
@@ -604,7 +604,7 @@ fn usage_from_value_for_shape(value: &Value, shape: Option<UsageShape>) -> Usage
             };
             usage.present = true;
             merge_usage_value_for_shape(&mut usage, usage_value, shape);
-            if usage.service_tier.is_none()
+            if !reported_has_service_tier(usage_value)
                 && let Some(tier) = service_tier_from_envelope(element)
             {
                 usage.service_tier = Some(tier.to_owned());
@@ -623,12 +623,61 @@ fn usage_from_value_for_shape(value: &Value, shape: Option<UsageShape>) -> Usage
         ..UsageCounts::default()
     };
     merge_usage_value_for_shape(&mut usage, usage_value, shape);
-    if usage.service_tier.is_none()
+    if !reported_has_service_tier(usage_value)
         && let Some(tier) = service_tier_from_envelope(value)
     {
         usage.service_tier = Some(tier.to_owned());
     }
     usage
+}
+
+fn reported_has_service_tier(reported: &Value) -> bool {
+    reported
+        .get("service_tier")
+        .and_then(Value::as_str)
+        .is_some()
+        || reported
+            .get("serviceTier")
+            .and_then(Value::as_str)
+            .is_some()
+}
+
+fn is_openai_oauth_placeholder_service_tier(tier: &str) -> bool {
+    let trimmed = tier.trim();
+    trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("default")
+        || trimmed.eq_ignore_ascii_case("auto")
+}
+
+/// Resolve the effective `service_tier` for `openai_oauth` accounting without
+/// modifying raw upstream response frames.
+///
+/// The ChatGPT Codex backend emits placeholder `"auto"` / `"default"` values in
+/// responses regardless of the tier executed server-side. Preserve any explicit
+/// non-placeholder upstream tier, and otherwise prefer the non-`"auto"` tier sent
+/// to upstream.
+pub(crate) fn resolve_openai_oauth_service_tier(
+    observed: Option<&str>,
+    sent: Option<&str>,
+) -> Option<String> {
+    let clean_sent = sent.map(str::trim).filter(|s| !s.is_empty());
+    match observed.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(obs) if !is_openai_oauth_placeholder_service_tier(obs) => Some(obs.to_owned()),
+        Some(obs) => match clean_sent {
+            Some(req) if !req.eq_ignore_ascii_case("auto") => Some(req.to_owned()),
+            _ => Some(obs.to_owned()),
+        },
+        None => clean_sent.map(str::to_owned),
+    }
+}
+
+pub(crate) fn apply_openai_oauth_service_tier(usage: &mut UsageCounts, sent: Option<&str>) {
+    if !usage.present {
+        return;
+    }
+    if let Some(resolved) = resolve_openai_oauth_service_tier(usage.service_tier.as_deref(), sent) {
+        usage.service_tier = Some(resolved);
+    }
 }
 
 fn service_tier_from_envelope(value: &Value) -> Option<&str> {
@@ -4003,5 +4052,60 @@ mod tests {
         );
         assert!(!finished.is_done());
         assert!(finished.has_finished_choices());
+    }
+
+    #[test]
+    fn resolve_openai_oauth_service_tier_follows_truth_table() {
+        for (observed, sent, expected) in [
+            (Some("priority"), Some("default"), Some("priority")),
+            (Some("ultrafast"), Some("priority"), Some("ultrafast")),
+            (Some("default"), Some("priority"), Some("priority")),
+            (Some("default"), Some("ultrafast"), Some("ultrafast")),
+            (Some("auto"), Some("priority"), Some("priority")),
+            (Some("auto"), Some("default"), Some("default")),
+            (Some("default"), Some("default"), Some("default")),
+            (Some("default"), Some("auto"), Some("default")),
+            (Some("default"), None, Some("default")),
+            (Some("auto"), None, Some("auto")),
+            (None, Some("priority"), Some("priority")),
+            (None, Some("default"), Some("default")),
+            (None, None, None),
+        ] {
+            assert_eq!(
+                resolve_openai_oauth_service_tier(observed, sent).as_deref(),
+                expected,
+                "observed={observed:?}, sent={sent:?}"
+            );
+        }
+
+        let mut absent = UsageCounts::default();
+        apply_openai_oauth_service_tier(&mut absent, Some("priority"));
+        assert_eq!(absent.service_tier, None);
+    }
+
+    #[test]
+    fn sse_envelope_service_tier_updates_across_events_until_terminal_and_ignores_null() {
+        let mut usage = UsageCounts::default();
+        let early = parse_sse_event(
+            br#"data: {"type":"response.in_progress","response":{"service_tier":"auto","usage":{"input_tokens":5,"output_tokens":0}}}
+
+"#,
+        );
+        let terminal = parse_sse_event(
+            br#"data: {"type":"response.completed","response":{"service_tier":"priority","usage":{"input_tokens":5,"output_tokens":3}}}
+
+"#,
+        );
+        let trailing_null = parse_sse_event(
+            br#"data: {"type":"response.completed","response":{"service_tier":null,"usage":{"input_tokens":5,"output_tokens":3}}}
+
+"#,
+        );
+        accumulate_sse_usage_for_shape(&early, &mut usage, UsageShape::OpenaiResponses);
+        assert_eq!(usage.service_tier.as_deref(), Some("auto"));
+        accumulate_sse_usage_for_shape(&terminal, &mut usage, UsageShape::OpenaiResponses);
+        assert_eq!(usage.service_tier.as_deref(), Some("priority"));
+        accumulate_sse_usage_for_shape(&trailing_null, &mut usage, UsageShape::OpenaiResponses);
+        assert_eq!(usage.service_tier.as_deref(), Some("priority"));
     }
 }

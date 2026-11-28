@@ -69,6 +69,14 @@ describe('serviceTierBadgeText', () => {
     expect(serviceTierBadgeText('priority')).toBe('priority');
   });
 
+  it('trims surrounding whitespace on non-default tiers', () => {
+    expect(serviceTierBadgeText('  priority  ')).toBe('priority');
+  });
+
+  it('returns ultrafast for ultrafast', () => {
+    expect(serviceTierBadgeText('ultrafast')).toBe('ultrafast');
+  });
+
   it('returns batch for batch', () => {
     expect(serviceTierBadgeText('batch')).toBe('batch');
   });
@@ -77,23 +85,22 @@ describe('serviceTierBadgeText', () => {
     expect(serviceTierBadgeText('flex')).toBe('flex');
   });
 
-  it('returns null for standard', () => {
-    expect(serviceTierBadgeText('standard')).toBeNull();
-  });
-  it('returns null for Gemini unspecified', () => {
-    expect(serviceTierBadgeText('unspecified')).toBeNull();
-  });
-
-  it('returns null for empty string', () => {
-    expect(serviceTierBadgeText('')).toBeNull();
-  });
-
-  it('returns null for null', () => {
-    expect(serviceTierBadgeText(null)).toBeNull();
-  });
-
-  it('returns null for undefined', () => {
-    expect(serviceTierBadgeText(undefined)).toBeNull();
+  it('returns null for base and auto-default provider tiers', () => {
+    for (const hidden of [
+      'standard',
+      'standard_only',
+      'unspecified',
+      'default',
+      'Default',
+      'auto',
+      'AUTO',
+      '   ',
+      '',
+      null,
+      undefined,
+    ]) {
+      expect(serviceTierBadgeText(hidden)).toBeNull();
+    }
   });
 });
 

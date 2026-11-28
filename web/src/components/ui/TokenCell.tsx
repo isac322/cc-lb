@@ -53,7 +53,7 @@ function TokenFigure({
       )}
     >
       <span className="text-text">{value}</span>
-      <span className="w-[1.5ch] shrink-0 text-left text-text-muted @max-[42rem]/events:w-auto @min-[42rem]/events:@max-[59rem]/events:w-[1ch]">
+      <span className="w-[1.5ch] shrink-0 text-left text-text-muted @max-[42rem]/events:w-auto @min-[42rem]/events:@max-[66rem]/events:w-[1ch]">
         {unit}
       </span>
     </span>
@@ -131,18 +131,18 @@ export function TokenCell({
         <TokenFigure
           tokens={prompt}
           slot="in"
-          className="@min-[42rem]/events:@max-[59rem]/events:w-[4.75ch]"
+          className="@min-[42rem]/events:@max-[66rem]/events:w-[4.75ch]"
         />
         <span
           aria-hidden="true"
-          className="w-[2ch] shrink-0 text-center text-text-faint @min-[42rem]/events:@max-[59rem]/events:w-[1.5ch]"
+          className="w-[2ch] shrink-0 text-center text-text-faint @min-[42rem]/events:@max-[66rem]/events:w-[1.5ch]"
         >
           →
         </span>
         <TokenFigure
           tokens={b.output}
           slot="out"
-          className="@min-[42rem]/events:@max-[59rem]/events:w-[4.25ch]"
+          className="@min-[42rem]/events:@max-[66rem]/events:w-[4.25ch]"
         />
         <span
           aria-hidden="true"
@@ -153,7 +153,7 @@ export function TokenCell({
         <span
           data-slot="hit"
           className={cx(
-            'ml-2 w-[4.5ch] shrink-0 text-right @max-[42rem]/events:ml-auto @max-[42rem]/events:w-auto @min-[42rem]/events:@max-[59rem]/events:ml-1 @min-[42rem]/events:@max-[59rem]/events:w-[3.5ch]',
+            'ml-2 w-[4.5ch] shrink-0 text-right @max-[42rem]/events:ml-auto @max-[42rem]/events:w-auto @min-[42rem]/events:@max-[66rem]/events:ml-1 @min-[42rem]/events:@max-[66rem]/events:w-[3.5ch]',
             hit == null
               ? 'text-text-faint'
               : hit < 30
@@ -167,7 +167,7 @@ export function TokenCell({
         </span>
         <span
           className={cx(
-            'ml-1 text-caption text-text-faint @min-[42rem]/events:@max-[59rem]/events:hidden',
+            'ml-1 text-caption text-text-faint @min-[42rem]/events:@max-[66rem]/events:hidden',
             hit == null ? 'invisible' : '',
             hit != null && hit < 30
               ? '@max-[42rem]/events:text-danger-text'

@@ -1200,6 +1200,60 @@ describe('RequestEventDrawer', () => {
       expect(screen.queryByText('priority')).toBeNull();
     });
 
+    it('omits Service tier row when service_tier is OpenAI default or auto', () => {
+      for (const tier of ['default', 'auto']) {
+        const event = {
+          event_id: `evt_${tier}`,
+          request_id: `req_${tier}`,
+          ts: 1718553120,
+          ts_ms: 1718553120000,
+          status: 200,
+          duration_ms: 100,
+          model: 'gpt-6.2-sol',
+          service_tier: tier,
+          _phase: 'final',
+        } satisfies RequestEventWithPhase;
+
+        const { unmount } = render(
+          <RequestEventDrawer
+            event={event}
+            principalName={null}
+            onClose={() => {}}
+          />,
+        );
+
+        expect(screen.queryByText('Service tier')).toBeNull();
+        expect(screen.queryByText(tier)).toBeNull();
+        unmount();
+      }
+    });
+
+    it('renders Service tier row when service_tier is ultrafast', () => {
+      const event = {
+        event_id: 'evt_ultrafast',
+        request_id: 'req_ultrafast',
+        ts: 1718553120,
+        ts_ms: 1718553120000,
+        status: 200,
+        duration_ms: 100,
+        model: 'gpt-6.2-sol',
+        service_tier: 'ultrafast',
+        _phase: 'final',
+      } satisfies RequestEventWithPhase;
+
+      render(
+        <RequestEventDrawer
+          event={event}
+          principalName={null}
+          onClose={() => {}}
+        />,
+      );
+
+      expect(
+        screen.getByText('Service tier').parentElement?.textContent,
+      ).toContain('ultrafast');
+    });
+
     it('renders no priority badge when service_tier is omitted', () => {
       const event = {
         event_id: 'evt_no_tier',

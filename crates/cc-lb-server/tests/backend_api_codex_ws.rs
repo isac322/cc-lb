@@ -3281,3 +3281,179 @@ async fn backend_codex_ws_429_handshake_and_live_usage_limit_failover() {
     assert_eq!(replay_input.len(), 1);
     assert_eq!(replay_input[0]["type"], "function_call_output");
 }
+
+#[tokio::test]
+async fn backend_codex_websocket_persists_sent_service_tier_without_mutating_frames() {
+    use sqlx::{Row, sqlite::SqlitePoolOptions};
+    use std::time::Duration;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let app = Router::new().route(
+        "/backend-api/codex/responses",
+        axum::routing::get(|ws: WebSocketUpgrade| async move {
+            ws.on_upgrade(|mut socket: AxumWebSocket| async move {
+                let mut turn = 0usize;
+                while let Some(Ok(AxumMessage::Text(_))) = socket.next().await {
+                    turn += 1;
+                    let created = json!({
+                        "type": "response.created",
+                        "response": {
+                            "id": format!("resp_ws_tier_{turn}"),
+                            "object": "response",
+                            "status": "in_progress",
+                            "store": false,
+                            "service_tier": "auto"
+                        }
+                    });
+                    let completed = json!({
+                        "type": "response.completed",
+                        "response": {
+                            "id": format!("resp_ws_tier_{turn}"),
+                            "object": "response",
+                            "status": "completed",
+                            "store": false,
+                            "service_tier": "default",
+                            "usage": {"input_tokens": 20, "output_tokens": 4, "total_tokens": 24}
+                        }
+                    });
+                    if socket
+                        .send(AxumMessage::Text(created.to_string().into()))
+                        .await
+                        .is_err()
+                        || socket
+                            .send(AxumMessage::Text(completed.to_string().into()))
+                            .await
+                            .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _task = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let server = common::spawn_test_server_with_openai_budget("").await;
+    let client = Client::new();
+    let (_, ups, _) = crate::openai_oauth_public_compat::admin(
+        &client,
+        &server,
+        reqwest::Method::GET,
+        "/admin/v1/upstreams",
+        None,
+        None,
+    )
+    .await;
+    for u in ups["upstreams"].as_array().unwrap() {
+        let id = u["id"].as_str().unwrap();
+        let (_, _, etag) = crate::openai_oauth_public_compat::admin(
+            &client,
+            &server,
+            reqwest::Method::GET,
+            &format!("/admin/v1/upstreams/{id}"),
+            None,
+            None,
+        )
+        .await;
+        crate::openai_oauth_public_compat::admin(
+            &client,
+            &server,
+            reqwest::Method::PATCH,
+            &format!("/admin/v1/upstreams/{id}"),
+            Some(json!({ "enabled": false })),
+            etag.as_deref(),
+        )
+        .await;
+    }
+    crate::backend_api_codex::add_oauth_upstream(
+        &client,
+        &server,
+        "oauth-ws-tier",
+        &format!("http://{addr}/backend-api/codex"),
+        "acct-ws-tier",
+    )
+    .await;
+
+    let mut request = format!(
+        "ws://{}/openai/backend-api/codex/responses",
+        server.proxy_addr
+    )
+    .into_client_request()
+    .unwrap();
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", server.managed_key.plaintext)
+            .parse()
+            .unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("sqlite://{}", server.sqlite_path.display()))
+        .await
+        .unwrap();
+
+    for (idx, sent_tier) in ["priority", "ultrafast", "default"].iter().enumerate() {
+        socket
+            .send(Message::Text(
+                json!({
+                    "type": "response.create",
+                    "model": "gpt-6.2-sol",
+                    "store": false,
+                    "service_tier": sent_tier,
+                    "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let created_text = match socket.next().await.unwrap().unwrap() {
+            Message::Text(text) => text.to_string(),
+            other => panic!("expected response.created text frame, got {other:?}"),
+        };
+        let completed_text = match socket.next().await.unwrap().unwrap() {
+            Message::Text(text) => text.to_string(),
+            other => panic!("expected response.completed text frame, got {other:?}"),
+        };
+        let created_json: Value = serde_json::from_str(&created_text).unwrap();
+        let completed_json: Value = serde_json::from_str(&completed_text).unwrap();
+        assert_eq!(created_json["response"]["service_tier"], "auto");
+        assert_eq!(completed_json["response"]["service_tier"], "default");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let rows = sqlx::query(
+                "SELECT event_id, service_tier FROM request_events_v1 \
+                 WHERE upstream_name = 'oauth-ws-tier' AND model = 'gpt-6.2-sol' AND event_kind = 'openai_responses' \
+                 ORDER BY id ASC",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            if rows.len() > idx {
+                let event_id = rows[idx].get::<String, _>("event_id");
+                let persisted = rows[idx].get::<Option<String>, _>("service_tier");
+                assert_eq!(persisted.as_deref(), Some(*sent_tier));
+                let (_, detail, _) = crate::openai_oauth_public_compat::admin(
+                    &client,
+                    &server,
+                    reqwest::Method::GET,
+                    &format!("/admin/v1/events/detail?id={event_id}"),
+                    None,
+                    None,
+                )
+                .await;
+                assert_eq!(detail["service_tier"].as_str(), Some(*sent_tier));
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for ws event row {idx}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+}

@@ -2833,6 +2833,7 @@ async fn issue_1002_sse_relay_expires_from_dispatch_not_message_start()
         capability: ProviderCapability::AnthropicMessages,
         usage_shape: None,
         precomputed_usage: None,
+        openai_oauth_sent_service_tier: None,
         store: None,
         principal_id: "principal-test".to_owned(),
         upstream_id,

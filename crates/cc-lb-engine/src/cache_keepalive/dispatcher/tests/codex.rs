@@ -537,3 +537,27 @@ async fn codex_compressed_responses_decode_before_classification_and_errors() {
         "expected status and allowlisted error codes without body text: {msg}"
     );
 }
+
+#[tokio::test]
+async fn codex_oauth_renewal_preserves_sent_priority_tier_when_response_reports_default() {
+    let mut priority_req: Value = serde_json::from_slice(REQUEST).unwrap();
+    priority_req["service_tier"] = json!("priority");
+    let priority_bytes = serde_json::to_vec(&priority_req).unwrap();
+    let (outcome, requests) = dispatch_wire(
+        UpstreamKind::OpenaiOauth,
+        &priority_bytes,
+        StatusCode::OK,
+        Bytes::from_static(SSE),
+        false,
+    )
+    .await;
+    let [sent_req] = requests.as_slice() else {
+        panic!("renewal request missing")
+    };
+    let sent_json: Value = serde_json::from_slice(sent_req.body().as_ref()).unwrap();
+    assert_eq!(sent_json["service_tier"], "priority");
+    let DispatchOutcome::CacheMiss { finalization } = outcome else {
+        panic!("captured zero-cache SSE must finalize a measured miss");
+    };
+    assert_eq!(finalization.usage.service_tier.as_deref(), Some("priority"));
+}

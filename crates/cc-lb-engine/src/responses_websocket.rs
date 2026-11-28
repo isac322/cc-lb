@@ -347,6 +347,7 @@ pub(crate) struct WebSocketPluginRequest {
     pub context: ResponseTransformContext,
     pub oauth_compat: bool,
     pub echo_metadata: Option<Value>,
+    pub sent_service_tier: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -781,6 +782,7 @@ struct Turn {
     usage_complete: bool,
     incomplete_reason: Option<Option<String>>,
     plugin_request: Option<(Uuid, WebSocketPluginRequest)>,
+    sent_service_tier: Option<String>,
     metrics: ResponsesStreamMetrics,
     echo_metadata: Option<Value>,
     funding_ambiguous: bool,
@@ -801,6 +803,18 @@ struct Turn {
 }
 
 impl Turn {
+    fn sent_service_tier(&self) -> Option<&str> {
+        if let Some((uid, req)) = self.plugin_request.as_ref()
+            && Some(*uid) == self.upstream_id
+            && !req.frame.is_empty()
+        {
+            return req.sent_service_tier.as_deref();
+        }
+        self.sent_service_tier
+            .as_deref()
+            .or_else(|| self.body.get("service_tier").and_then(Value::as_str))
+    }
+
     fn ensure_credential_eligible(&self, is_api_key: bool) -> Result<(), WebSocketError> {
         if self.owner_failover_requires_api_key && !is_api_key {
             return Err(WebSocketError::new(
@@ -1424,6 +1438,10 @@ impl ResponsesWebSocketGateway {
                 .candidates
                 .iter()
                 .all(|candidate| candidate.socket_per_lane);
+        let initial_service_tier = body
+            .get("service_tier")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         self.turns.insert(
             turn_id,
             Turn {
@@ -1454,6 +1472,7 @@ impl ResponsesWebSocketGateway {
                 usage_complete: false,
                 incomplete_reason: None,
                 plugin_request: None,
+                sent_service_tier: initial_service_tier,
                 echo_metadata: None,
                 metrics,
                 funding_ambiguous: false,
@@ -1657,6 +1676,10 @@ impl ResponsesWebSocketGateway {
                 .iter()
                 .all(|candidate| candidate.socket_per_lane);
         self.successors.insert(parent.clone(), turn_id);
+        let initial_service_tier = body
+            .get("service_tier")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         self.turns.insert(
             turn_id,
             Turn {
@@ -1685,6 +1708,7 @@ impl ResponsesWebSocketGateway {
                 usage_complete: false,
                 incomplete_reason: None,
                 plugin_request: None,
+                sent_service_tier: initial_service_tier,
                 echo_metadata: None,
                 metrics,
                 funding_ambiguous: false,
@@ -2359,6 +2383,15 @@ impl ResponsesWebSocketGateway {
         turn.echo_metadata = request
             .as_ref()
             .and_then(|request| request.echo_metadata.clone());
+        turn.sent_service_tier = request
+            .as_ref()
+            .and_then(|request| request.sent_service_tier.clone())
+            .or_else(|| {
+                turn.body
+                    .get("service_tier")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            });
         turn.plugin_request = request.map(|request| (upstream_id, request));
         Ok(())
     }
@@ -3605,12 +3638,19 @@ impl ResponsesWebSocketGateway {
                 // Keep the parked turn registered until affinity binding resolves so
                 // cancellation or drain during storage I/O still settles measured usage.
                 let usage_update = response.and_then(observed_response_usage);
+                let is_oauth = self.connection_oauth.get(&connection_id).copied();
                 let upstream_result = {
                     let pending = self
                         .pending_error_terminals
                         .get_mut(id)
                         .expect("pending error terminal exists");
-                    if let Some((usage, complete)) = usage_update {
+                    if let Some((mut usage, complete)) = usage_update {
+                        if is_oauth.unwrap_or(pending.turn.prepared.oauth_transport) {
+                            crate::usage_parser::apply_openai_oauth_service_tier(
+                                &mut usage,
+                                pending.turn.sent_service_tier(),
+                            );
+                        }
                         pending.turn.usage = Some(usage);
                         pending.turn.usage_complete = complete;
                     }
@@ -4016,9 +4056,16 @@ impl ResponsesWebSocketGateway {
             }
         }
         if let Some(response) = response
-            && let Some((usage, complete)) = observed_response_usage(response)
+            && let Some((mut usage, complete)) = observed_response_usage(response)
         {
+            let is_oauth = self.connection_oauth.get(&connection_id).copied();
             let turn = self.turns.get_mut(&turn_id).expect("bound turn exists");
+            if is_oauth.unwrap_or(turn.prepared.oauth_transport) {
+                crate::usage_parser::apply_openai_oauth_service_tier(
+                    &mut usage,
+                    turn.sent_service_tier(),
+                );
+            }
             turn.usage = Some(usage);
             turn.usage_complete = terminal && complete;
         }
@@ -6222,6 +6269,7 @@ pub(crate) mod tests {
                 usage_complete: false,
                 incomplete_reason: None,
                 plugin_request: None,
+                sent_service_tier: None,
                 echo_metadata: None,
                 metrics: ResponsesStreamMetrics::new(),
                 funding_ambiguous: false,
@@ -6909,6 +6957,7 @@ pub(crate) mod tests {
                     usage_complete,
                     incomplete_reason: None,
                     plugin_request: None,
+                    sent_service_tier: None,
                     echo_metadata: None,
                     metrics: ResponsesStreamMetrics::new(),
                     funding_ambiguous: false,
@@ -7918,6 +7967,7 @@ pub(crate) mod tests {
             usage_complete: false,
             incomplete_reason: None,
             plugin_request,
+            sent_service_tier: None,
             echo_metadata: None,
             metrics: ResponsesStreamMetrics::new(),
             funding_ambiguous: false,
@@ -8173,6 +8223,7 @@ pub(crate) mod tests {
                     },
                     oauth_compat: false,
                     echo_metadata: None,
+                    sent_service_tier: None,
                 },
             ))
         };
@@ -8369,6 +8420,7 @@ pub(crate) mod tests {
                 },
                 oauth_compat: false,
                 echo_metadata: None,
+                sent_service_tier: None,
             },
         ));
         gateway.turns.insert(
@@ -15619,6 +15671,7 @@ pub(crate) mod tests {
                     },
                     oauth_compat: false,
                     echo_metadata: None,
+                    sent_service_tier: None,
                 },
             ));
         }
@@ -15656,5 +15709,141 @@ pub(crate) mod tests {
         assert_eq!(gw_drop.used_bytes, 0);
         gw_drop.close();
         gw.close();
+    }
+
+    #[tokio::test]
+    async fn oauth_ws_resolves_sent_service_tier_while_api_key_keeps_upstream_tier() {
+        use cc_lb_control::RequestEventBus;
+
+        let fixture = DirectAccountingFixture::new().await;
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let mut events = bus.subscribe_lifecycle();
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+
+        for (label, is_oauth, req_tier, upstream_tier, expected_tier) in [
+            (
+                "oauth-priority",
+                true,
+                Some("priority"),
+                "default",
+                "priority",
+            ),
+            (
+                "oauth-ultrafast",
+                true,
+                Some("ultrafast"),
+                "default",
+                "ultrafast",
+            ),
+            ("oauth-default", true, Some("default"), "default", "default"),
+            (
+                "oauth-coerced-flex",
+                true,
+                Some("flex"),
+                "default",
+                "default",
+            ),
+            (
+                "apikey-upstream-wins",
+                false,
+                Some("priority"),
+                "default",
+                "default",
+            ),
+        ] {
+            let obs = LifecycleContext::new(label.to_owned(), bus.clone(), &clock);
+            obs.mark_authn_reached();
+            let event_id = obs.event_id().to_owned();
+
+            let mut gw = ResponsesWebSocketGateway::new(
+                fixture.lifecycle.clone(),
+                &fixture.auth,
+                HeaderMap::new(),
+                65_536,
+                8,
+            );
+            let upstream_id = Uuid::new_v4();
+            gw.connection_oauth.insert(1, is_oauth);
+            gw.connections.insert(1, upstream_id);
+            gw.connection_lanes.insert(1, None);
+            let mut turn =
+                make_synthetic_turn(&fixture, Some(obs), None, true, is_oauth, Some(false), None);
+            turn.upstream_id = Some(upstream_id);
+            let sent_for_turn = if is_oauth && req_tier == Some("flex") {
+                Some("default".to_owned())
+            } else {
+                req_tier.map(str::to_owned)
+            };
+            turn.body = Arc::new(match req_tier {
+                Some(tier) => {
+                    serde_json::json!({ "type": "response.create", "model": "gpt-test", "service_tier": tier })
+                }
+                None => serde_json::json!({ "type": "response.create", "model": "gpt-test" }),
+            });
+            turn.sent_service_tier = sent_for_turn;
+            turn.candidate_oauth.insert(upstream_id, is_oauth);
+            gw.turns.insert(1, turn);
+            gw.lanes.insert(
+                None,
+                Lane {
+                    active: Some(1),
+                    ..Default::default()
+                },
+            );
+
+            let created = Bytes::from(
+                serde_json::json!({
+                    "type": "response.created",
+                    "response": { "id": format!("resp_{label}"), "object": "response", "status": "in_progress", "store": false, "service_tier": "auto" }
+                })
+                .to_string(),
+            );
+            let completed = Bytes::from(
+                serde_json::json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": format!("resp_{label}"),
+                        "object": "response",
+                        "status": "completed",
+                        "store": false,
+                        "service_tier": upstream_tier,
+                        "usage": { "input_tokens": 10, "output_tokens": 5, "total_tokens": 15 }
+                    }
+                })
+                .to_string(),
+            );
+            let pool = WsRelayPoolSnapshot::default();
+            let r1 = gw
+                .provider_message_with_pool_and_opcode(1, &created, false, &pool)
+                .await
+                .unwrap();
+            assert!(r1.forward);
+            let r2 = gw
+                .provider_message_with_pool_and_opcode(1, &completed, false, &pool)
+                .await
+                .unwrap();
+            assert!(r2.forward);
+            // Forwarded payload to the client remains untouched (`frames: None` retains raw frame).
+            assert!(r2.frames.is_none(), "case={label}");
+            gw.close();
+
+            let mut observed_tier = None;
+            while let Ok(ev) = events.try_recv() {
+                if let LifecycleEvent::UsageObserved {
+                    event_id: ev_id,
+                    usage,
+                    ..
+                } = ev
+                    && ev_id == event_id
+                {
+                    observed_tier = usage.service_tier;
+                }
+            }
+            assert_eq!(
+                observed_tier.as_deref(),
+                Some(expected_tier),
+                "case={label}"
+            );
+        }
     }
 }

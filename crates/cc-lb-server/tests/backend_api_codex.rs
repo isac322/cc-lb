@@ -2081,3 +2081,101 @@ async fn backend_codex_disabled_reasoning_owner_strips_and_fails_over_within_oau
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+#[tokio::test]
+async fn backend_codex_alias_persists_sent_service_tier_without_mutating_response_stream() {
+    use axum::{Router, body::Body, extract::Request, response::Response};
+    use sqlx::{Row, sqlite::SqlitePoolOptions};
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let app = Router::new().fallback(|_req: Request| async move {
+        let sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_codex_raw\",\"object\":\"response\",\"status\":\"in_progress\",\"service_tier\":\"auto\",\"output\":[]}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"ok\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"id\":\"resp_codex_raw\",\"object\":\"response\",\"status\":\"completed\",\"service_tier\":\"default\",\"usage\":{\"input_tokens\":50,\"output_tokens\":10,\"total_tokens\":60},\"output\":[]}}\n\n"
+        );
+        Response::builder()
+            .status(axum::http::StatusCode::OK)
+            .body(Body::from(sse))
+            .unwrap()
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _task = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let server = common::spawn_test_server_with_openai_budget("").await;
+    let client = Client::new();
+    openai_oauth_public_compat::setup(&server, &format!("http://{addr}/codex"), &client).await;
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("sqlite://{}", server.sqlite_path.display()))
+        .await
+        .unwrap();
+
+    for (idx, sent_tier) in ["priority", "ultrafast", "default"].iter().enumerate() {
+        let response = client
+            .post(format!(
+                "http://{}/openai/backend-api/codex/responses",
+                server.proxy_addr
+            ))
+            .bearer_auth(&server.managed_key.plaintext)
+            .json(&json!({
+                "model": "gpt-6.2-sol",
+                "instructions": "Reply OK",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+                "store": false,
+                "stream": true,
+                "service_tier": sent_tier
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let raw_sse = response.text().await.unwrap();
+        // Downstream Codex SSE stream must NOT be mutated from upstream's raw payload.
+        assert!(
+            raw_sse.contains("\"service_tier\":\"auto\"")
+                && raw_sse.contains("\"service_tier\":\"default\""),
+            "downstream SSE payload must remain untouched for {sent_tier}: {raw_sse}"
+        );
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let rows = sqlx::query(
+                "SELECT event_id, service_tier FROM request_events_v1 \
+                 WHERE upstream_name = 'oauth-test' AND model = 'gpt-6.2-sol' AND list_status = 200 \
+                 ORDER BY id ASC",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            if rows.len() > idx {
+                let event_id = rows[idx].get::<String, _>("event_id");
+                let persisted = rows[idx].get::<Option<String>, _>("service_tier");
+                assert_eq!(persisted.as_deref(), Some(*sent_tier));
+                let (_, detail, _) = openai_oauth_public_compat::admin(
+                    &client,
+                    &server,
+                    reqwest::Method::GET,
+                    &format!("/admin/v1/events/detail?id={event_id}"),
+                    None,
+                    None,
+                )
+                .await;
+                assert_eq!(detail["service_tier"].as_str(), Some(*sent_tier));
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for codex SSE event row {idx}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+}

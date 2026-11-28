@@ -92,8 +92,11 @@ fn responses_renewal_uses_normalized_usage_and_preserves_native_write_presence()
             Duration::from_millis(7),
             42,
             accounting_guard(),
-            Some("responses"),
-            RenewalMode::Json,
+            RenewalSurface {
+                surface: Some("responses"),
+                mode: RenewalMode::Json,
+                openai_oauth_sent_service_tier: None,
+            },
         );
         let (hit, finalization) = match outcome {
             DispatchOutcome::CacheHit { finalization, .. } => (true, finalization),
@@ -153,8 +156,11 @@ fn responses_renewal_absent_or_nonobject_usage_is_not_a_measured_zero() {
             Duration::ZERO,
             0,
             accounting_guard(),
-            Some("responses"),
-            RenewalMode::Json,
+            RenewalSurface {
+                surface: Some("responses"),
+                mode: RenewalMode::Json,
+                openai_oauth_sent_service_tier: None,
+            },
         );
         let DispatchOutcome::CacheMiss { finalization } = outcome else {
             panic!("absent usage must remain a miss");
@@ -165,8 +171,16 @@ fn responses_renewal_absent_or_nonobject_usage_is_not_a_measured_zero() {
     }
     assert!(matches!(
         classify_success_body_with_surface(
-            b"{", Duration::ZERO, Duration::ZERO, 0, accounting_guard(), Some("responses"),
-            RenewalMode::Json,
+            b"{",
+            Duration::ZERO,
+            Duration::ZERO,
+            0,
+            accounting_guard(),
+            RenewalSurface {
+                surface: Some("responses"),
+                mode: RenewalMode::Json,
+                openai_oauth_sent_service_tier: None,
+            },
         ),
         DispatchOutcome::Error(message) if message == "invalid OpenAI Responses JSON"
     ));
@@ -193,8 +207,11 @@ fn responses_renewal_explicit_zero_usage_is_measured() {
         Duration::ZERO,
         0,
         accounting_guard(),
-        Some("responses"),
-        RenewalMode::Json,
+        RenewalSurface {
+            surface: Some("responses"),
+            mode: RenewalMode::Json,
+            openai_oauth_sent_service_tier: None,
+        },
     );
     let DispatchOutcome::CacheMiss { finalization } = outcome else {
         panic!("zero usage must remain a miss");

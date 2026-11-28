@@ -958,7 +958,7 @@ pub fn normalize_model_id(model: &str) -> String {
 pub fn canonical_service_tier(raw: Option<&str>) -> Option<String> {
     let normalized = raw?.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "" | "standard" | "standard_only" | "auto" => None,
+        "" | "standard" | "standard_only" | "auto" | "default" | "unspecified" => None,
         "batch" | "batches" => Some("batch".to_owned()),
         _ => Some(normalized),
     }

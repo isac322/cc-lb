@@ -59,15 +59,14 @@ const RESERVED_ROW_REM = 2.5;
  *   bar. Cells keep their DOM order and are only placed on the grid.
  * - From 42rem (tablets in portrait or landscape, and desktops) it is a
  *   `table-fixed` table sized by its `<colgroup>`, so no column width depends
- *   on row content. Each column starts at its compact `rem` minimum (43.75rem
- *   with both entities so a 768px portrait tablet fits without horizontal
- *   scroll, 39.6875rem with one), ramps smoothly to its desktop baseline
- *   (`remDesktop`, 65.5rem with both entities and 59rem with one) where fixed
- *   metric and timestamp columns (`Tokens` 12rem, `Latency` 5.75rem, `Cost`
- *   6.25rem, `Timestamp` 5.75rem, `Status` 4rem, `Kind` 4.75rem) cap, and
- *   splits any width above the desktop baseline among `Session`, `Principal`,
- *   `Upstream` and `Model`. Between 42rem and 59rem cell horizontal padding
- *   tightens so all ten columns fit comfortably.
+ *   on row content. Each column starts at its compact `rem` minimum (60.75rem
+ *   with both entities, 52.75rem with one), ramps smoothly to its desktop
+ *   baseline (`remDesktop`, 71rem with both entities and 63rem with one) where
+ *   fixed metric and timestamp columns (`Tokens` 12rem, `Latency` 5.25rem,
+ *   `Cost` 5.75rem, `Timestamp` 5rem, `Status` 3.5rem, `Kind` 4.25rem) cap,
+ *   and splits any width above the desktop baseline among `Session`,
+ *   `Principal`, `Upstream` and `Model`. Between 42rem and 66rem cell
+ *   horizontal padding tightens so all ten columns fit comfortably.
  */
 type ColumnKey =
   | 'time'
@@ -85,7 +84,7 @@ interface Column {
   label: string;
   /** Compact tablet minimum width in rem; null = Session, which takes the remainder. */
   rem: number | null;
-  /** Desktop baseline width in rem (reached at 65.5rem / 59rem). */
+  /** Desktop baseline width in rem (reached at 71rem / 63rem). */
   remDesktop: number;
   /**
    * Share of the width above the desktop baseline (`--events-desktop-w`).
@@ -102,7 +101,7 @@ interface Column {
 /** Session never shrinks below this in the compact tablet table. */
 const SESSION_FLOOR_REM = 4.125;
 /** Session baseline width at the desktop threshold before desktop slack. */
-const SESSION_DESKTOP_REM = 7;
+const SESSION_DESKTOP_REM = 6.5;
 
 // Tablet tables keep readable identity columns and scroll within their panel
 // when all columns cannot fit. Numeric columns retain their compact budgets.
@@ -110,15 +109,15 @@ const SESSION_DESKTOP_REM = 7;
 const COLUMNS = {
   time: {
     label: 'Timestamp',
-    rem: 4.625,
-    remDesktop: 5.75,
+    rem: 4.5,
+    remDesktop: 5,
     card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-6 @max-[42rem]/events:justify-self-end @max-[42rem]/events:text-caption @max-[42rem]/events:text-text-faint',
   },
   principal: {
     label: 'Principal',
     rem: 8,
     remDesktop: 8,
-    grow: 1.75,
+    grow: 1.5,
     card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-4 @max-[42rem]/events:font-medium @max-[42rem]/events:text-text',
     cardBoth:
       '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-1 @max-[42rem]/events:max-w-[42cqw] @max-[42rem]/events:font-medium @max-[42rem]/events:text-text',
@@ -127,7 +126,7 @@ const COLUMNS = {
     label: 'Upstream',
     rem: 8,
     remDesktop: 8,
-    grow: 1.45,
+    grow: 1.3,
     card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-4 @max-[42rem]/events:font-medium @max-[42rem]/events:text-text',
     // Reads "principal → upstream" when both cells are shown.
     cardBoth:
@@ -137,47 +136,47 @@ const COLUMNS = {
     label: 'Session',
     rem: null,
     remDesktop: SESSION_DESKTOP_REM,
-    grow: 3.8,
-    card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-2 @max-[42rem]/events:max-w-32',
+    grow: 3.2,
+    card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-2 @max-[42rem]/events:max-w-24',
   },
   kind: {
     label: 'Kind',
-    rem: 3.25,
-    remDesktop: 4.75,
+    rem: 3.75,
+    remDesktop: 4.25,
     card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-3 @max-[42rem]/events:justify-self-start @max-[42rem]/events:max-w-full',
   },
   model: {
     label: 'Model',
-    rem: 8.5,
-    remDesktop: 8.5,
-    grow: 1,
+    rem: 11.75,
+    remDesktop: 12.75,
+    grow: 2,
     card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-4 @max-[42rem]/events:col-span-2 @max-[42rem]/events:text-left @max-[42rem]/events:text-caption',
   },
   status: {
     label: 'Status',
     rem: 2.75,
-    remDesktop: 4,
+    remDesktop: 3.5,
     numeric: true,
     card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-7 @max-[42rem]/events:justify-self-end @max-[42rem]/events:text-caption',
   },
   latency: {
     label: 'Latency',
     rem: 4.125,
-    remDesktop: 5.75,
+    remDesktop: 5.25,
     numeric: true,
     card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-5 @max-[42rem]/events:justify-self-end @max-[42rem]/events:[&_[data-cell-bar]]:hidden',
   },
   tokens: {
     label: 'Tokens',
-    rem: 8,
+    rem: 9.25,
     remDesktop: 12,
     numeric: true,
     card: '@max-[42rem]/events:row-start-3 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-7 @max-[42rem]/events:w-full @max-[42rem]/events:text-left',
   },
   cost: {
     label: 'Cost',
-    rem: 4.125,
-    remDesktop: 6.25,
+    rem: 4.5,
+    remDesktop: 5.75,
     numeric: true,
     card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-6 @max-[42rem]/events:col-span-2 @max-[42rem]/events:justify-self-end @max-[42rem]/events:font-semibold @max-[42rem]/events:text-text @max-[42rem]/events:[&_[data-cell-bar]]:hidden',
   },
@@ -201,17 +200,17 @@ const CARD_ROW =
 // `p-0!` must beat `Table`'s `[&_td:first-child]:pl-4` / `last-child:pr-4`,
 // descendant selectors with higher specificity than a plain utility.
 const CARD_CELL = '@max-[42rem]/events:p-0! @max-[42rem]/events:min-w-0';
-// Between 42rem and 59rem (tablet portrait and landscape) tighten horizontal
-// cell padding while keeping the first cell's 16px leading inset for the
-// status dot / spinner.
+// Between 42rem and 66rem (tablet portrait/landscape and compact laptop)
+// tighten horizontal cell padding while keeping the first cell's 16px leading
+// inset for the status dot / spinner.
 const COMPACT_CELL =
-  '@min-[42rem]/events:@max-[59rem]/events:px-1.5! @min-[42rem]/events:@max-[59rem]/events:first:pl-4! @min-[42rem]/events:@max-[59rem]/events:last:pr-2.5!';
+  '@min-[42rem]/events:@max-[66rem]/events:px-1.5! @min-[42rem]/events:@max-[66rem]/events:first:pl-4! @min-[42rem]/events:@max-[66rem]/events:last:pr-2.5!';
 // `MetricCell` puts its horizontal padding and `min-w-18` (72px) on the inner
 // `<button>` / `<span>` while keeping `p-0` on the `<td>`. Target the child in
-// the 42rem–59rem tablet band and keep `p-0!` on the `<td>` so `Table`'s
+// the 42rem–66rem band and keep `p-0!` on the `<td>` so `Table`'s
 // `[&_td:last-child]:pr-4` does not double-pad the Cost column.
 const COMPACT_METRIC =
-  '@min-[42rem]/events:@max-[59rem]/events:p-0! @min-[42rem]/events:@max-[59rem]/events:*:min-w-0 @min-[42rem]/events:@max-[59rem]/events:*:px-1.5 @min-[42rem]/events:@max-[59rem]/events:last:*:pr-2.5';
+  '@min-[42rem]/events:@max-[66rem]/events:p-0! @min-[42rem]/events:@max-[66rem]/events:*:min-w-0 @min-[42rem]/events:@max-[66rem]/events:*:px-1.5 @min-[42rem]/events:@max-[66rem]/events:last:*:pr-2.5';
 /*
  * A card's metric button is only its figure and bar; `*:min-w-0` drops the
  * button's 72px floor, and padding pulled back by a negative margin makes the
@@ -578,9 +577,6 @@ const RequestEventRow = memo(function RequestEventRow({
           CARD_CELL,
           COMPACT_CELL,
           COLUMNS.model.card,
-          showProviderLogo &&
-            provider != null &&
-            '@min-[60rem]/events:max-w-28!',
         )}
       >
         <span className="flex min-w-0 items-center gap-2">

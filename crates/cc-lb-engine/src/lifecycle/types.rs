@@ -748,6 +748,8 @@ pub(super) struct ResponseAffinityContext {
     pub(super) capability: ProviderCapability,
     pub(super) usage_shape: Option<crate::provider_capability::UsageShape>,
     pub(super) precomputed_usage: Option<UsageCounts>,
+    /// Present (`Some(sent_tier)`) only when the routed upstream is `StorageUpstreamKind::OpenaiOauth`.
+    pub(super) openai_oauth_sent_service_tier: Option<Option<String>>,
     pub(super) store: Option<Arc<dyn UpstreamAffinityStore>>,
     pub(super) principal_id: String,
     pub(super) upstream_id: Uuid,
@@ -913,10 +915,15 @@ impl UpstreamDialect for RawPassthroughDialect {
     }
 }
 
-pub(super) fn responses_usage_value_to_counts(usage: &Value) -> UsageCounts {
+pub(super) fn responses_usage_value_to_counts(
+    observed: &crate::openai_compat::chat::ResponsesSseUsage,
+) -> UsageCounts {
     let mut envelope = Map::new();
     let mut response = Map::new();
-    response.insert("usage".to_owned(), usage.clone());
+    response.insert("usage".to_owned(), observed.usage.clone());
+    if let Some(tier) = observed.service_tier.as_deref() {
+        response.insert("service_tier".to_owned(), Value::String(tier.to_owned()));
+    }
     envelope.insert("response".to_owned(), Value::Object(response));
     usage_parser::observe_non_stream_json_value_for_shape(
         &Value::Object(envelope),
